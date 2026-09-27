@@ -771,5 +771,239 @@ int main()
     }
   }
 
+  // --- cb-INTERNAL timeline: WHERE INSIDE a command buffer does its window go? ---------------------
+  //
+  // WHY (dev doc 6.129(5)). There are three rulers today - buffer level (GPUStartTime -> GPUEndTime,
+  // the Q9-F3 per-label table), queue level (commit -> start) and fence level (Q24) - and none of them
+  // looks INSIDE a buffer, while "which segment of that one buffer spends the ~450us" is the only
+  // question left in the air line (p77: one buffer per hop eats ~450us and which one moves with the
+  // structure, while the same four dispatches split over two buffers cost 70us).
+  //
+  // Metal has no per-dispatch timestamps on this device (6.75), but `encodeSignalEvent:` is a
+  // COMMAND-BUFFER-level call that must run with NO encoder open (the DFT engine's own comment says so)
+  // - which is exactly the shape the air path already uses for its stage fences (Q9-C counts two
+  // signals a hop). So a signal between dispatches plus a host poller of `signaledValue` gives the
+  // completion instants INSIDE the buffer.
+  //
+  // WHAT THIS ARM PROVES BEFORE ANY LEG IS FLOWN. (a) that the shape (one encoder per dispatch, a signal
+  // between them) does not itself change the window; (b) that the poller's per-segment deltas match the
+  // dispatch price the arms above measure (~41us a dispatch offline); (c) the poller's own resolution -
+  // if it is coarser than the segments, the reading must say so instead of inventing a timeline.
+  std::printf("\n--- cb-INTERNAL timeline: one signal per dispatch, timestamped by a host poller ---\n");
+  {
+    id<MTLSharedEvent> timeline_event = [device newSharedEvent];
+    std::atomic<bool>  poll_stop{false};
+    std::atomic<uint64_t> poll_seen{0};
+    std::vector<double>   stamps;
+    const auto now_s = []() {
+      return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    std::thread poller([&]() {
+      uint64_t seen = 0;
+      while (!poll_stop.load(std::memory_order_relaxed)) {
+        const uint64_t v = timeline_event.signaledValue;
+        while (seen != v) {
+          stamps.push_back(now_s());
+          ++seen;
+        }
+        std::this_thread::yield();
+      }
+      poll_seen.store(seen, std::memory_order_relaxed);
+    });
+
+    constexpr unsigned nof_seg = 5;
+    std::vector<double> seg_us[nof_seg];      // per-segment deltas, one entry per measured run
+    std::vector<double> window_us;
+    uint64_t            signals_expected = 0;
+    uint64_t            signals_missed   = 0;
+
+    fill_tables(14, true, true);
+    uint64_t generation = 0; // MONOTONE across runs: a shared event's value never goes down, so a run that
+                             // re-signalled 1..5 would be invisible to the poller after the first one
+                             // (measured: generations observed in total = 5 for 25 runs, i.e. every later
+                             // run collapsed to nothing and the segments came out empty).
+    for (unsigned run = 0; run != nof_runs + nof_warmup; ++run) {
+      stamps.clear();
+      id<MTLCommandBuffer> cb = [queue commandBuffer];
+      for (unsigned d = 0; d != nof_seg; ++d) {
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:in offset:0 atIndex:0];
+        [enc setBuffer:out offset:0 atIndex:1];
+        [enc setBuffer:twiddle offset:0 atIndex:2];
+        [enc setBuffer:perm offset:0 atIndex:3];
+        const uint32_t radix2 = 8, radix3 = 1, inverse = 0, base = 0;
+        [enc setBytes:&radix2 length:sizeof(uint32_t) atIndex:4];
+        [enc setBytes:&radix3 length:sizeof(uint32_t) atIndex:5];
+        [enc setBytes:&inverse length:sizeof(uint32_t) atIndex:6];
+        [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
+        [enc setBuffer:grid offset:0 atIndex:8];
+        [enc setBuffer:window offset:0 atIndex:9];
+        [enc setBuffer:gw offset:0 atIndex:10];
+        [enc setBuffer:in16 offset:0 atIndex:11];
+        [enc setBuffer:ip offset:0 atIndex:12];
+        [enc dispatchThreadgroups:MTLSizeMake(14, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(std::min<unsigned>(fft_n, 1024u), 1, 1)];
+        [enc endEncoding];
+        [cb encodeSignalEvent:timeline_event value:++generation];
+      }
+      [cb commit];
+      [cb waitUntilCompleted];
+      const double start = cb.GPUStartTime;
+      const double end   = cb.GPUEndTime;
+      if (run >= nof_warmup) {
+        window_us.push_back((end - start) * 1e6);
+        signals_expected += nof_seg;
+        // The poller may observe several bumps at once: those segments collapse into one sample and are
+        // counted as missed rather than silently attributed to the wrong dispatch.
+        size_t at = 0;
+        double prev = start;
+        for (unsigned d = 0; d != nof_seg; ++d) {
+          const double target = ((d + 1) == nof_seg) ? end : 0.0;
+          (void)target;
+          if (at < stamps.size()) {
+            seg_us[d].push_back((stamps[at] - prev) * 1e6);
+            prev = stamps[at];
+            ++at;
+          }
+        }
+        if (stamps.size() < nof_seg) {
+          signals_missed += nof_seg - stamps.size();
+        }
+      }
+    }
+    poll_stop.store(true, std::memory_order_relaxed);
+    poller.join();
+
+    const auto median_of = [](std::vector<double> v) {
+      if (v.empty()) {
+        return 0.0;
+      }
+      std::sort(v.begin(), v.end());
+      return v[v.size() / 2];
+    };
+    std::printf("%-52s window=%9.1fus\n", "5 dispatches, 1 cb, a signal after each", median_of(window_us));
+    for (unsigned d = 0; d != nof_seg; ++d) {
+      char label[64];
+      std::snprintf(label, sizeof(label), "   segment %u (previous signal -> this one)", d + 1);
+      std::printf("%-52s %9.1fus  (n=%zu)\n", label, median_of(seg_us[d]), seg_us[d].size());
+    }
+    std::printf("poller: signals expected=%llu missed=%llu (a count above 0 means the poller collapsed "
+                "segments - the deltas above are then an UPPER bound on each segment)\n",
+                static_cast<unsigned long long>(signals_expected),
+                static_cast<unsigned long long>(signals_missed));
+    std::printf("poller: generations observed in total=%llu\n",
+                static_cast<unsigned long long>(poll_seen.load(std::memory_order_relaxed)));
+  }
+
+  // --- the same timeline, but stamped ON THE DEVICE by marker command buffers ----------------------
+  //
+  // The host poller above is not enough, and this arm is where that was found (before any leg was flown):
+  // it observed the five signals of a 51.6us buffer within ~2us of EACH OTHER, ~30us after the buffer's
+  // own GPUEndTime - i.e. a shared event's value reaches the CPU in one batch at the buffer's completion,
+  // so a host-polled timeline cannot see inside a buffer at all (segment 1 read 83.1us for a whole 51.6us
+  // buffer, and segments 2-5 read 1.9/0.4/0.3/0.4us).
+  //
+  // WHAT DOES WORK: a marker command buffer on ANOTHER queue that only WAITS on the event, and whose own
+  // GPUStartTime/GPUEndTime (device clock) then says WHEN the signal fired. The markers are committed
+  // BEFORE the measured buffer (they wait on future generations), so nothing is coalesced. This is the
+  // ruler the air leg needs: buffer level, queue level, fence level, and now the inside of a buffer.
+  //
+  // HOW TO READ IT. The marker's start deltas should resolve the five dispatches (offline: a few us each
+  // in the warm state, ~41us each in the cold one) and the sum should land inside the buffer's own
+  // window; markers whose deltas collapse again mean this platform batches even device-side wakes.
+  std::printf("\n--- cb-INTERNAL timeline, device-stamped: a marker buffer per signal ---\n");
+  {
+    id<MTLSharedEvent> timeline_event = [device newSharedEvent];
+    std::atomic<bool>  poll_stop{false};
+    std::thread        poller([&]() {
+      uint64_t seen = 0;
+      while (!poll_stop.load(std::memory_order_relaxed)) {
+        const uint64_t v = timeline_event.signaledValue;
+        while (seen != v) {
+          ++seen;
+        }
+        std::this_thread::yield();
+      }
+    });
+
+    constexpr unsigned nof_seg = 5;
+    std::vector<double> marker_start_us[nof_seg];
+    std::vector<double> window_us;
+    fill_tables(14, true, true);
+    uint64_t generation = 0;
+    for (unsigned run = 0; run != nof_runs + nof_warmup; ++run) {
+      const uint64_t base = generation;
+      // (a) the markers first: each waits for one of the generations the measured buffer will signal.
+      id<MTLCommandBuffer> markers[nof_seg];
+      for (unsigned d = 0; d != nof_seg; ++d) {
+        markers[d] = [other commandBuffer];
+        [markers[d] encodeWaitForEvent:timeline_event value:base + d + 1];
+        [markers[d] commit];
+      }
+      // (b) the measured buffer: five dispatches, a signal between them.
+      id<MTLCommandBuffer> cb = [queue commandBuffer];
+      for (unsigned d = 0; d != nof_seg; ++d) {
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:in offset:0 atIndex:0];
+        [enc setBuffer:out offset:0 atIndex:1];
+        [enc setBuffer:twiddle offset:0 atIndex:2];
+        [enc setBuffer:perm offset:0 atIndex:3];
+        const uint32_t radix2 = 8, radix3 = 1, inverse = 0, base_param = 0;
+        [enc setBytes:&radix2 length:sizeof(uint32_t) atIndex:4];
+        [enc setBytes:&radix3 length:sizeof(uint32_t) atIndex:5];
+        [enc setBytes:&inverse length:sizeof(uint32_t) atIndex:6];
+        [enc setBytes:&base_param length:sizeof(uint32_t) atIndex:7];
+        [enc setBuffer:grid offset:0 atIndex:8];
+        [enc setBuffer:window offset:0 atIndex:9];
+        [enc setBuffer:gw offset:0 atIndex:10];
+        [enc setBuffer:in16 offset:0 atIndex:11];
+        [enc setBuffer:ip offset:0 atIndex:12];
+        [enc dispatchThreadgroups:MTLSizeMake(14, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(std::min<unsigned>(fft_n, 1024u), 1, 1)];
+        [enc endEncoding];
+        [cb encodeSignalEvent:timeline_event value:++generation];
+      }
+      [cb commit];
+      [cb waitUntilCompleted];
+      for (unsigned d = 0; d != nof_seg; ++d) {
+        [markers[d] waitUntilCompleted];
+      }
+      if (run >= nof_warmup) {
+        const double start = cb.GPUStartTime;
+        window_us.push_back((cb.GPUEndTime - start) * 1e6);
+        for (unsigned d = 0; d != nof_seg; ++d) {
+          const double ms = markers[d].GPUStartTime;
+          // The FIRST marker is measured from the buffer's own start; the rest from the previous marker.
+          const double from = (d == 0) ? start : markers[d - 1].GPUStartTime;
+          if (ms > 0.0) {
+            marker_start_us[d].push_back((ms - from) * 1e6);
+          }
+        }
+      }
+    }
+    poll_stop.store(true, std::memory_order_relaxed);
+    poller.join();
+
+    const auto median_of = [](std::vector<double> v) {
+      if (v.empty()) {
+        return 0.0;
+      }
+      std::sort(v.begin(), v.end());
+      return v[v.size() / 2];
+    };
+    std::printf("%-52s window=%9.1fus\n", "5 dispatches, 1 cb, device-stamped markers", median_of(window_us));
+    double sum = 0.0;
+    for (unsigned d = 0; d != nof_seg; ++d) {
+      char label[64];
+      std::snprintf(label, sizeof(label), "   marker %u (buffer start / previous marker -> here)", d + 1);
+      const double m = median_of(marker_start_us[d]);
+      sum += m;
+      std::printf("%-52s %9.1fus  (n=%zu)\n", label, m, marker_start_us[d].size());
+    }
+    std::printf("%-52s %9.1fus\n", "sum of the five marker deltas", sum);
+  }
+
   return 0;
 }

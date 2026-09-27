@@ -8158,6 +8158,68 @@ cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n
 * **纪律**：先在 `wip/dft_dispatch_cost.mm` 里对这个形状**离线自证**（同一条 cb 里 5 条派发、逐段打点，与已知的 47 µs 对拍），再上空口；否则又是一条读不出东西的腿。
 
 
+### 6.130 ★★ "cb 内部的时间线"在本平台**不可得**：三种办法全部被实测否掉（离线，2026-09-27）
+
+> 用户裁决"做 cb 内部时间线这把尺子"。按纪律**先离线自证**（§6.129⑤），结果**三种候选全部被否**，**因此没有飞腿**——这正是"先离线自证"要挡掉的东西。
+
+#### ① 办法 A：宿主轮询 `MTLSharedEvent`（每条派发之间 `encodeSignalEvent`）
+
+`wip/dft_dispatch_cost.mm` 里新增臂：**一条 cb 里 5 条 14 组派发**，每条派发之间 `encodeSignalEvent`（必须无 encoder 打开，正是空口 stage fence 的形状），宿主忙等线程轮询 `signaledValue` 并读自己的时钟。
+
+| 读数 | 值 |
+|---|---|
+| 该 cb 自己的 GPU 窗口 | **51.6 µs** |
+| "段 1"（GPUStart → 第一次观测到信号）| **83.1 µs**（比整条 cb 还长！）|
+| "段 2…5" | 1.9 / 0.4 / 0.3 / 0.4 µs |
+| 信号数 | expected 75 / missed 0 / observed 125（**一次性全到**）|
+
+⇒ ★ **event 的 `signaledValue` 是"命令缓冲结束时一次性刷给 CPU"的**（5 个信号在彼此 ~2 µs 内、且在 `GPUEndTime` 之后 ~30 µs 才被看见）⇒ **宿主轮询看不见 cb 内部**。
+（顺带记一个坑：`signaledValue` **只增不减**，跨 run 必须用**单调递增**的 generation；第一版每条 run 都从 1 数到 5，结果 25 条 run 只观测到 5 次信号、五段全是 0。）
+
+#### ② 办法 B：**设备侧打点**（每条信号配一条只等该事件的"marker cb"，读它自己的 `GPUStartTime`）
+
+不用宿主时钟，而是让**另一条队列上的一条空 cb 等事件**，它自己的 GPU 时间戳就是"信号发生的设备时刻"；marker 在测量 cb **之前**提交（等未来的 generation），所以不会被合并。
+
+| 读数 | 值 |
+|---|---|
+| 该 cb 窗口 | 51.8 µs |
+| marker 1（buffer 起点 → 此）| **82.0 µs** |
+| marker 2…5 | 1.6 / 1.0 / 1.0 / 0.8 µs |
+
+⇒ ★ **一样被合并**（5 个 marker 在 ~1 µs 内一起解等待）⇒ **本平台的 event 可见性是 cb 粒度**，设备侧打点同样看不见内部。
+
+#### ③ 办法 C：`MTLCounterSampleBuffer` 的逐派发采样 —— **硬件不支持**（现有探针复核）
+
+`wip/metal_counter_caps.mm` 今天重跑：
+
+```
+supportsCounterSampling:AtStageBoundary    = YES
+supportsCounterSampling:AtDrawBoundary     = no
+supportsCounterSampling:AtBlitBoundary     = no
+supportsCounterSampling:AtDispatchBoundary = no
+```
+
+且 compute encoder 上调用 `sampleCountersInBuffer:` **会断言并 SIGABRT**（`wip/metal_counter_caps.mm` 头部记着 2026-09-20 那次实测）⇒ **纯 compute 链没有可放采样点的位置**（§6.75 的结论今天被独立复核）。
+
+#### ④ 于是：**唯一还能"看进 cb 内部"的办法是"拿掉一段再看窗口"**（消去法，§6.46 的旧标尺）
+
+* 可用的**消去法**（都要一个**只用于测量**的 env 旋钮，默认关，打开即破坏正确性、但保留数据路径）：
+  1. **去掉 eq + demap 两条派发**（只留下 CE 与 FE 派发）；
+  2. **去掉 2 条 CE 派发**（只留 eq/demap）；
+  3. **把某条派发换成"空 dispatch"**（保留提交结构，去掉它的执行）。
+* **判据**：若拿掉 eq/demap 让那条 cb 从 ~517 掉到 ~40–80 ⇒ 那 ~450 就落在被拿掉的那段里（再二分）；若窗口**不动**（仍 ~450）⇒ 那笔钱与 cb 的*内容*无关，属于**结构/调度**（这条与 `p75` 的"拆分只搬不降"一致）。
+* ⚠ **红线**：这类臂**必然**让 CRC/RF/吞吐变红（拿掉的是真活），**只能当测量**；登记时要把"红的是预期的"写清楚，避免被下一位读成回归。
+
+#### ⑤ 顺便收窄的一条候选（本轮新增，尚未测）
+
+把五条腿并排看，"贵的那一条 cb"似乎是**接触资源网格的那一条**：
+* `p72`（融合）`merged_hop`（**读**网格的 CE 在里面，lane 提交）= 473.1；
+* `p75`（拆分）`dft`（**写**网格的前端，lane 提交）= 445.8，而两条各 2 条派发的 lane cb 只有 45.5 / 24.4；
+* `p77`（关 D1）**写**网格的前端 cb（**引擎**提交、前端队列）= 46.9（便宜），而**读**网格的 burst（lane 提交）= 516.7。
+⇒ **"谁提交"与"写还是读"两者都不能单独解释**（p77 的前端写而便宜、p75 的前端写而贵），但"**lane 提交 × 触及网格**"这个组合目前没有被反例。
+这与**消去法**合起来是下一轮的两个抓手。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
