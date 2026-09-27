@@ -49,7 +49,11 @@ constexpr unsigned nof_runs   = 15;
 constexpr unsigned nof_warmup = 10;
 constexpr unsigned fft_n      = 768;  ///< 23.04 MHz at 30 kHz, the delivered cell's transform
 constexpr unsigned nof_subc   = 612;  ///< 51 PRB: what the grid write covers on air
-constexpr unsigned max_batch  = 14;   ///< one slot's symbols
+constexpr unsigned max_batch  = 14;   ///< one slot's symbols (what the engine batches by default)
+/// The buffers are sized for MORE than one slot so the parallelism sweep can push the grid past the
+/// device's core count and find where the transforms stop fitting (each transform is one threadgroup of
+/// 32 KiB of threadgroup memory, so the cliff is a hardware number, not a software one).
+constexpr unsigned alloc_batch = 32;
 
 /// The engine's blocks, field for field (see ocudu_dft_metal_engine.mm's dft_grid_write_block).
 struct grid_write_params {
@@ -314,21 +318,21 @@ int main()
   // Buffers. The VALUES do not matter for a timing probe (twiddles are filled with the real roots, the
   // permutation with the identity: the kernel's memory traffic is the same either way).
   const size_t n = fft_n;
-  id<MTLBuffer> in = [device newBufferWithLength:max_batch * n * sizeof(float) * 2
+  id<MTLBuffer> in = [device newBufferWithLength:alloc_batch * n * sizeof(float) * 2
                                          options:MTLResourceStorageModeShared];
-  id<MTLBuffer> out = [device newBufferWithLength:max_batch * n * sizeof(float) * 2
+  id<MTLBuffer> out = [device newBufferWithLength:alloc_batch * n * sizeof(float) * 2
                                           options:MTLResourceStorageModeShared];
   id<MTLBuffer> twiddle = [device newBufferWithLength:(n / 2) * sizeof(float) * 2
                                               options:MTLResourceStorageModeShared];
   id<MTLBuffer> perm = [device newBufferWithLength:n * sizeof(uint32_t) options:MTLResourceStorageModeShared];
-  id<MTLBuffer> grid = [device newBufferWithLength:(max_batch * nof_subc) * 2 * sizeof(uint16_t)
+  id<MTLBuffer> grid = [device newBufferWithLength:(alloc_batch * nof_subc) * 2 * sizeof(uint16_t)
                                            options:MTLResourceStorageModeShared];
   id<MTLBuffer> window = [device newBufferWithLength:n * sizeof(float) * 2 options:MTLResourceStorageModeShared];
-  id<MTLBuffer> in16 = [device newBufferWithLength:max_batch * n * 2 * sizeof(int16_t)
+  id<MTLBuffer> in16 = [device newBufferWithLength:alloc_batch * n * 2 * sizeof(int16_t)
                                            options:MTLResourceStorageModeShared];
-  id<MTLBuffer> gw = [device newBufferWithLength:max_batch * sizeof(grid_write_params)
+  id<MTLBuffer> gw = [device newBufferWithLength:alloc_batch * sizeof(grid_write_params)
                                          options:MTLResourceStorageModeShared];
-  id<MTLBuffer> ip = [device newBufferWithLength:max_batch * sizeof(input_params)
+  id<MTLBuffer> ip = [device newBufferWithLength:alloc_batch * sizeof(input_params)
                                          options:MTLResourceStorageModeShared];
 
   {
@@ -343,7 +347,7 @@ int main()
       pm[k] = static_cast<uint32_t>(k);
     }
     auto* samples = static_cast<int16_t*>(in16.contents);
-    for (size_t k = 0; k != max_batch * n * 2; ++k) {
+    for (size_t k = 0; k != alloc_batch * n * 2; ++k) {
       samples[k] = static_cast<int16_t>((k % 251) - 125);
     }
   }
@@ -416,6 +420,20 @@ int main()
   report("1 transform,  1 dispatch  (int16 + grid write)", 1, 1, true, true);
   report("14 transforms, 1 dispatch  (int16 + grid write)", 14, 1, true, true);
   report("14 transforms, 14 dispatches (int16 + grid)", 1, 14, true, true);
+  // --- PARALLELISM: how many transforms does the device run AT ONCE? --------------------------------
+  //
+  // The front end's whole point is that a slot's transforms are independent, so the engine encodes them as
+  // ONE dispatch of N threadgroups (one transform each) and the batch cap is the slot's symbol count. What
+  // that buys depends on how many of those threadgroups the device actually holds at once: the window stays
+  // FLAT while they all fit and steps up once they do not. Each threadgroup needs 32 KiB of threadgroup
+  // memory (the kernel's `threadgroup float2 buf[4096]`), so the cliff is where the cores run out.
+  std::printf("\n--- how many transforms run CONCURRENTLY (one dispatch, one threadgroup each) ---\n");
+  for (unsigned g : { 1u, 2u, 4u, 7u, 10u, 14u, 16u, 20u, 24u, 28u, 32u }) {
+    char label[80];
+    std::snprintf(label, sizeof(label), "%2u transforms in ONE dispatch (int16 + grid)", g);
+    report(label, g, 1, true, true);
+  }
+
   std::printf("\n--- dispatch count, int16 + grid (the shape a command buffer's window follows) ---\n");
   for (unsigned d : { 2u, 4u, 7u }) {
     char label[64];
