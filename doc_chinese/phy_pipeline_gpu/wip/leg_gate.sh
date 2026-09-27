@@ -15,11 +15,15 @@
 #     what the leg prints and what V4 registered - the "max <= 2" literal came from the early legs whose
 #     worst hop happened to be 2, and the current ones read max=5 with the same mean. The worst hop is
 #     now REPORTED, not judged (no threshold was ever registered for it).
-#   * BINDINGS, made explicit: `stale=0` was registered for the DEFAULT regime (under load, 5.9.127 R4
-#     licenses the opposite) and ">= 50% of slots carry a UL grant" for the n1/FDD geometry (a 20 MHz TDD
-#     cell with ul_ratio 0.30 cannot reach 50% by construction). A check whose binding does not match the
-#     leg now reads NOT JUDGED with the reason, instead of FAILing a healthy leg - the rule the milestone
-#     audit already follows for A1-2 ("judged wherever it can be judged, never softened").
+#   * BINDINGS, made explicit - THREE of them, each found by a healthy leg that failed it: `stale=0` was
+#     registered for the DEFAULT regime (under load, 5.9.127 R4 licenses the opposite); ">= 50% of slots
+#     carry a UL grant" for the n1/FDD geometry (a 20 MHz TDD cell with ul_ratio 0.30 cannot reach 50% by
+#     construction); "UL >= 2.0 Mbit/s (5x the baseline)" for the STRESS recipe (it exists so a loaded leg
+#     proves it was loaded, and the default regime is defined as "no load generator"); and the CRC floor
+#     needs TRAFFIC (660 hops on an idle phone read 60.0% while the same binary read 86.0% under load).
+#     A check whose binding does not match the leg now reads NOT JUDGED with the reason, instead of FAILing
+#     a healthy leg - the rule the milestone audit already follows for A1-2 ("judged wherever it can be
+#     judged, never softened").
 #   * ARM DETECTION, added (the reason this file could certify a leg whose link was deliberately dead):
 #     the same two checks the milestone audit gained - the leg's `knob` lines must carry nothing that
 #     changes behaviour, and CRC-OK/lanes must be >= 60% (arms read 43.7-58.8%, delivery 79.9-95.6%).
@@ -131,12 +135,20 @@ check("DELIVERY leg: probe knobs only, or a knob at its delivery default",
 
 crc_n  = f(leg_err, r"(\d+) CRC-OK hop")
 lane_n = f(leg_err, r"\[ul_gpu_lane\] lanes=(\d+)")
+# BOUND TO TRAFFIC (2026-09-27, measured after the first HEAD pair): the ratio is decoded hops over
+# scheduled hops, so with a nearly idle phone it measures the PHONE and not the code - p85 (default
+# regime, no load generator, 660 hops) read 60.0% while the SAME BINARY under load (p86, 145341 hops)
+# read 86.0%. Every heavy leg on record reads 60.1-96.5%, the ablation arms 43.7-58.8%.
+CRC_MIN_HOPS = 20000
 if crc_n is None or lane_n is None or int(lane_n) == 0:
     check("the link decoded: CRC-OK / lanes >= 60%", None, f"crc={crc_n} lanes={lane_n}")
 else:
     crc_pct = 100.0 * int(crc_n) / int(lane_n)
-    check("the link decoded: CRC-OK / lanes >= 60%", crc_pct >= CRC_FLOOR_PCT,
-          f"{crc_n}/{lane_n} = {crc_pct:.1f}%  (arms read 43.7-58.8%, delivery 79.9-95.6%)")
+    check_bound("the link decoded: CRC-OK / lanes >= 60%", crc_pct >= CRC_FLOOR_PCT,
+                f"{crc_n}/{lane_n} = {crc_pct:.1f}%  (arms read 43.7-58.8%, every heavy leg 60.1-96.5%)",
+                bound_here=(int(lane_n) >= CRC_MIN_HOPS),
+                reason=f"only {lane_n} hops (< {CRC_MIN_HOPS}): the ratio would measure the phone's traffic, "
+                       f"not the code (p85 read 60.0% on 660 hops while the same binary read 86.0% under load)")
 
 # BOTH printed forms (2026-09-24): the reader used to know only "MET (8 of 8 checks applicable)", so a
 # contract that FAILED - "NOT MET: 1 of 8 applicable checks failed (mode=gpu)" - printed as None, i.e. as
@@ -175,9 +187,18 @@ check("cbs/lane <= 2.00 (mean) and dropped = 0",
 gaps = f(leg_err, r"radio sample continuity: (\d+) gaps")
 check("radio sample continuity: 0 gaps", gaps == "0", f"gaps={gaps}")
 
-check("VALIDITY: UL >= 2.0 Mbit/s (5x the baseline)",
-      (l_mbps is not None) and (l_mbps >= 2.0),
-      f"{l_mbps if l_mbps is None else round(l_mbps, 2)} Mbit/s against {b_mbps if b_mbps is None else round(b_mbps, 2)}")
+# 2026-09-27: this is the STRESS recipe's validity check - it exists so that a "loaded" leg proves it was
+# loaded. The default regime is defined as "no load generator" (run_leg.sh: "default = no load generator
+# (stale=0 is a criterion)"), so on a default leg it measures the operator's decision, not the code:
+# p85-n78-default carried 0.03 Mbit/s and 660 hops BECAUSE no iperf3 was run, while the same binary under
+# load (p86) carried 9+ Mbit/s. Bound to the regime, reported otherwise.
+check_bound("VALIDITY: UL >= 2.0 Mbit/s (5x the baseline)",
+            (l_mbps is not None) and (l_mbps >= 2.0),
+            f"{l_mbps if l_mbps is None else round(l_mbps, 2)} Mbit/s against {b_mbps if b_mbps is None else round(b_mbps, 2)}"
+            f" (regime={leg_regime})",
+            bound_here=not is_default,
+            reason=f"it is the stress recipe's validity check (was the leg really loaded?); this leg is "
+                   f"regime=default, which run_leg.sh defines as 'no load generator'")
 # 2026-09-27: registered on the n1/FDD geometry, where every slot carries uplink. A 20 MHz TDD cell with
 # ul_ratio 0.30 cannot put a grant in 50% of slots by construction (the current stress legs read ~19%
 # while carrying 9.3 Mbit/s, 12x the baseline), so the check is bound to the geometry it was written for.

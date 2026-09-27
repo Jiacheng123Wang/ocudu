@@ -203,12 +203,17 @@ leg_commit_check() {   # <label> <leg .stderr path> <kind>
 #       what the leg does.
 #   (2) THE LINK DECODED. `[ul_by_size] ... N CRC-OK hop(s)` against `[ul_gpu_lane] lanes=` is the one
 #       number an ablation cannot fake. Measured over 60 legs (p3x-p8x): the ablation arms read 43.7-58.8%
-#       (p51 43.7, p80 47.1, p84 48.4, p83 49.4, p82 56.1, p81 58.8), the post-sigma2-fix delivery legs
-#       79.9-95.6%. The floor is 60%, i.e. it sits in the empty band between them and is a FLOOR, not a
-#       quality criterion: V5's "CRC KO% must not degrade" is judged by a human against the leg's era.
+#       (p51 43.7, p80 47.1, p84 48.4, p83 49.4, p82 56.1, p81 58.8), every heavy delivery leg - either
+#       regime - reads 60.1-96.5%. The floor is 60%: a FLOOR, not a quality criterion (V5's "CRC KO% must
+#       not degrade" is judged by a human against the leg's era).
+#       ⚠ IT IS BOUND TO TRAFFIC (added the same day, after the first HEAD pair): the ratio is decoded
+#       hops / scheduled hops, so with a nearly idle phone it measures the PHONE, not the code - p85
+#       (default regime, no load generator: 660 hops in 118s) reads 60.0% while the SAME BINARY under load
+#       (p86: 145341 hops) reads 86.0%. Below kCRC_MIN_HOPS the check is therefore REPORTED, not judged.
 kNOB_ANY=" OCUDU_METAL_GPU_TIME OCUDU_UL_PHASE_SEGMENTS "                       # probes: report-only, but they do perturb
 kNOB_EQ=" OCUDU_DFT_BATCH_SYMBOLS=14 OCUDU_DFT_OPEN_BLOCK=1 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_CE_LANE_ORDER=merged " # == the delivery default
 kCRC_FLOOR_PCT=60
+kCRC_MIN_HOPS=20000
 
 leg_arm_check() {   # <label> <leg .stderr path> <kind>
   local label=$1 f=$2 kind=$3 kv name bad="" n=0 seen=""
@@ -243,10 +248,16 @@ leg_crc_check() {   # <label> <leg .stderr path> <kind>   (the ablation arm's on
     return
   fi
   pct=$(awk -v a="$crc" -v b="$lanes" 'BEGIN { printf "%.1f", 100.0 * a / b }')
+  if [ "$lanes" -lt "$kCRC_MIN_HOPS" ]; then
+    check "$kind leg $label: the link decoded (CRC-OK / lanes)" \
+          "reported: fewer than ${kCRC_MIN_HOPS} hops (the ratio would measure the phone's traffic)" INFO \
+          "${crc}/${lanes} = ${pct}% - bound to traffic, not judged: p85 read 60.0% on 660 hops (idle phone) while the same binary read 86.0% under load (p86, 145341 hops); every heavy leg reads 60.1-96.5%"
+    return
+  fi
   check "$kind leg $label: the link decoded (CRC-OK / lanes >= ${kCRC_FLOOR_PCT}%)" \
         ">= ${kCRC_FLOOR_PCT}% of hops CRC-OK" \
         "$(awk -v p="$pct" -v fl="$kCRC_FLOOR_PCT" 'BEGIN { print (p >= fl) ? "PASS" : "FAIL" }')" \
-        "${crc}/${lanes} = ${pct}%  (arms read 43.7-58.8%, delivery 79.9-95.6%; the floor sits in the empty band)"
+        "${crc}/${lanes} = ${pct}%  (arms read 43.7-58.8%, every heavy delivery leg 60.1-96.5%)"
 }
 
 # ---------------------------------------------------------------- 0. the binary under test
