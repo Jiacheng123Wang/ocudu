@@ -8379,6 +8379,79 @@ cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n
 * **判据不变**（同腿两总体）：`merged_hop_ablated` 的 exec p50 **20–80 µs** ⇒ 那 ~450 µs 是**这些 kernel 的执行**；仍 **~450 µs** ⇒ 与"活"无关、本平台无杠杆。
 
 
+### 6.138 ★★ label 的**前序**从"语句次序"改成"单一表达式"（这一类缺陷不能再悄悄回来）＋ per-label 表加 **min/p5**（第二个读数）；离线三臂自证已过（2026-09-27）
+
+> 承接 §6.137 的一行修。**没有直接照抄那一行**，理由是：这个缺陷的本质是"**三个赋值按次序写，最后写的人赢**"，
+> 而"把其中一段挪到另一段之后"**仍然是同一个形状** —— 下一次编辑只要在末尾再追加一行 label 赋值，同样的三腿代价会**原样重演**。
+> 所以修法是**把次序变成值**。
+
+#### ① 修法：前序写成一个表达式（`lib/phy/metal/ocudu_metal_burst.mm` 的 `commit()`）
+
+```cpp
+const bool ablated = ablation_for_cb(cb, /*create=*/false);
+bool       merged  = false;
+#if defined(OCUDU_METAL_STATS)
+  merged = (s.commit_label == gpu_lane_probe::stage::merged_hop);
+#endif
+// 最具体的赢：ablated > merged_hop > lane_burst。嵌套而不是三段赋值 —— 次序就是值本身。
+const char* burst_label = ablated ? "merged_hop_ablated" : (merged ? "merged_hop" : "lane_burst");
+```
+
+* 交付语义逐项不变（三个字符串与各自的判据都没动）；变的只是**没有任何一条语句能"后写覆盖先写"**。
+* `forget_ablation_for_cb(cb)` 仍在读之后立刻调用（表以 cb 指针为键，不清会在地址复用后串味）。
+
+#### ② 第二个读数：per-label 表加 `min` / `p5`（`lib/phy/metal/ocudu_metal_queue.mm`）
+
+* 动机（§6.135 的备用方案）：**即使 label 再出问题**，1/N 的消去样本也会落在**同一 label 的低尾**（12.5% 的快样本撼不动 p50，但一定改写 `min`/`p5`）。
+  现在 per-label 一行给 **wait 与 exec 各自的 `p50/p95/min/p5`** ⇒ 这条腿有**两个互相独立的读数**，不再是"label 对了才有答案"。
+* 实现细节：同一向量现在要读四次，所以**排序只做一次**（`pct_sorted`，调用点显式 `std::sort`），而不是每次读数排一遍（一条腿 14 万条记录 × 8 次排序是白烧的）。
+
+#### ③ 离线自证：三臂（`pusch_demodulator_deferred_chain_test`，两个文件重建之后）
+
+| 臂 | gtest | per-label 表（`OCUDU_METAL_GPU_TIME=1`）|
+|---|---|---|
+| 不设旋钮（交付路径）| **5 PASSED / 0 FAILED** | `lane_burst n=69 wait p50=58.4 p95=87.2 min=16.9 p5=28.8 \| exec p50=23.5 p95=66.5 min=22.6 p5=22.9` —— **没有** `merged_hop_ablated` |
+| `OCUDU_LANE_ABLATE=1 EVERY=1` | `[metal_ablate] ABLATION ON` + **2 FAILED**（metal≠CPU，空链路）| **`merged_hop_ablated n=69 … exec p50=20.5 p95=58.6 min=16.1 p5=19.9`** |
+
+* ★ 两行合起来证明了三件事：**(a)** 消去决策在 `encoder()` 建、在 `commit()` **读得到**（§6.135/§6.136 的跨线程那条彻底闭环，label 不再被丢）；
+  **(b)** 新 label 真的进了 Q9-F3 报告（不只是"代码在那儿"）；**(c)** 空 kernel 的那条 cb 在**离线**就是 **~20 µs**，与 §6.134 那 1 个空口样本（**18.1**）同量级 —— 方向一致。
+* ⚠ **保留一句**：离线臂里 `commit_label` 是默认的 `equalizer_demapper`（不是 `merged_hop`），所以这条自证覆盖的是"**消去 label 不被丢**"，
+  **不覆盖**"与 `merged_hop` 那一行的次序"。后一条由 ① 的表达式形状保证（次序不再是可追加的语句序列），且 ② 让**即使它再失败也能读出答案**。
+* `ctest -L phy`（串行，不设旋钮）：见 §6.139 的登记（本条只登记离线三臂）。
+
+#### ④ 腿预登记 `p83-n78-ablate8`（与 `p80`–`p82` 同命令，只换腿名）
+
+```bash
+cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
+  doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p83-n78-ablate8 \
+  --regime=stress \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2 \
+  OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_DFT_BATCH_SYMBOLS=14 \
+  OCUDU_LANE_ABLATE=1 OCUDU_LANE_ABLATE_EVERY=8
+```
+
+**接手机之前**核三行（各一秒）：① stderr 顶部 `knob : OCUDU_LANE_ABLATE=1` **与** `knob : OCUDU_LANE_ABLATE_EVERY=8` 都在；
+② `[metal_ablate] ABLATION ON …`；③ `commit` 行 = `build/hashes.h` = `gnb` 内嵌戳（`run_leg.sh` 自己会拒，不用人看）。
+
+| 判据（**同腿两总体**，对照 = 同腿的 `merged_hop`，历史 467.5–470.0）| 若 | 则 |
+|---|---|---|
+| **主读数**：per-label 表里 `merged_hop_ablated`（预期 **n ≈ 1.8 万** = 145943/8）| **exec p50 ~20–80 µs** | ★ 那 ~450 µs **就是这些 kernel 的执行** ⇒ 下一轮用 `OCUDU_LANE_ABLATE_STAGE=…` 二分 eq / CE / demap（`p80` 的 18.1 与本节离线的 20.5 都已经指向这里）|
+| 同上 | **仍 ~450 µs（几乎不动）** | ★ 与"活"无关 ⇒ 平台给这条 cb 记的账，**本平台无杠杆** ⇒ 这一线以"已定价、不可动"收口（把 §6.124–§6.138 的全部否证整理成一页）|
+| **备用读数**（label 若再失败）：`merged_hop` 的 **`min`/`p5`** | 从 470 掉到 **~20** | 与主读数同义（消去样本藏在低尾）；两者一起读，互相交叉验证 |
+| 红线 | `ch_wt`（41.1）/ 契约 / `gaps=0` / `rx_overflows=0` / 池 `starved_events=0` **不许变**；`cbs/lane` 预期 **2.00** | 变了 ⇒ 说明某段因失败退出 burst，先读原因再解读窗口 |
+| CRC / 吞吐 | **预期显著变差**（1/8 跳的 LLR 是垃圾，靠 HARQ 兜）—— `p82` 已给出基线：**81892 CRC-OK / 145943 跳（56%）** | 登记为**预期**，不作判据 |
+
+
+### 6.139 重建与全绿复核（本节 = p83 之前的那次；`ctest -L phy` **193/193**）（2026-09-27）
+
+* 两个文件重建（`ocudu_metal_burst.mm`、`ocudu_metal_queue.mm`）+ `gnb` 重建：**零警告零错误**。
+* **交付路径复核**：`ctest -L phy`（**串行**）⇒ **193/193 passed**（194 条里 1 条 `Disabled`：`dft_processor_ci16_test`），
+  与 2026-09-26 收口审计的 193/193 一致 ⇒ **不发旋钮时，这次的改动不改变任何交付行为**（改的是 label 的取值形状与报告的两列，不是派发、不是屏障、不是提交结构）。
+* **腿的身份纪律（飞之前必做，`run_leg.sh` 自己也会拒）**：`git log -1 --format=%h` == `build/hashes.h` 的 `build_hash` == `gnb` 内嵌戳。
+  ⚠ 本条要在**所有提交做完之后**再 `touch build/hashes.h && cmake --build build --target gnb` —— 先重建后提交会把戳落在旧提交上（§6.44 (5) 记过这个坑）。
+* ▲ 本节**不含** `p83` 的读数：腿还没飞（需要 sudo + 手机）。读数与判据登记在 §6.138④，结果写在 §6.140。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

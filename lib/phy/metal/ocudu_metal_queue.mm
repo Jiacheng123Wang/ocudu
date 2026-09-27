@@ -794,11 +794,13 @@ void shared_queue_stats_report()
           ls.wait_ns.push_back((r.start_ns > r.commit_ns) ? (r.start_ns - r.commit_ns) : 0);
           ls.exec_ns.push_back(r.end_ns - r.start_ns);
         }
-        const auto pct = [](std::vector<uint64_t>& v, double p) {
+        // Reads a percentile of an ALREADY sorted vector: the low tail is printed too (see below), so the same
+        // vector is read four times and re-sorting it per reading would be pointless work on a leg's worth of
+        // records. Callers sort once, explicitly, right before printing.
+        const auto pct_sorted = [](const std::vector<uint64_t>& v, double p) {
           if (v.empty()) {
             return 0.0;
           }
-          std::sort(v.begin(), v.end());
           return static_cast<double>(v[static_cast<size_t>((v.size() - 1) * p)]) / 1e3;
         };
         // Most commits first: the labels that carry the pipeline's volume are the ones a budget is about.
@@ -820,15 +822,28 @@ void shared_queue_stats_report()
             break;
           }
           label_split& ls = by_label[kv.second];
+          std::sort(ls.wait_ns.begin(), ls.wait_ns.end());
+          std::sort(ls.exec_ns.begin(), ls.exec_ns.end());
+          // The LOW tail is printed as well as the two upper readings, because a label can carry two
+          // populations that no median separates: a hop in which ONE command buffer eats ~450us of device
+          // execution and the ABLATION arm (OCUDU_LANE_ABLATE) turns that buffer's kernels into a no-op
+          // leaves the ablated samples sitting at the BOTTOM of the same label whenever the ablation label
+          // itself is not visible (dev doc 6.137: three legs were flown for exactly this reading before the
+          // label defect was found). min/p5 makes that population readable from the label it hid in, and it
+          // costs one line per label on every leg.
           std::fprintf(stderr,
-                       "[metal_stats]   %-16s n=%7zu wait p50=%9.1fus p95=%9.1fus | exec p50=%9.1fus "
-                       "p95=%9.1fus%s\n",
+                       "[metal_stats]   %-16s n=%7zu wait p50=%9.1fus p95=%9.1fus min=%8.1fus p5=%8.1fus | "
+                       "exec p50=%9.1fus p95=%9.1fus min=%8.1fus p5=%8.1fus%s\n",
                        kv.second.c_str(),
                        kv.first,
-                       pct(ls.wait_ns, 0.5),
-                       pct(ls.wait_ns, 0.95),
-                       pct(ls.exec_ns, 0.5),
-                       pct(ls.exec_ns, 0.95),
+                       pct_sorted(ls.wait_ns, 0.5),
+                       pct_sorted(ls.wait_ns, 0.95),
+                       pct_sorted(ls.wait_ns, 0.0),
+                       pct_sorted(ls.wait_ns, 0.05),
+                       pct_sorted(ls.exec_ns, 0.5),
+                       pct_sorted(ls.exec_ns, 0.95),
+                       pct_sorted(ls.exec_ns, 0.0),
+                       pct_sorted(ls.exec_ns, 0.05),
                        (ls.open == 0) ? "" : " (some windows never closed)");
         }
       }

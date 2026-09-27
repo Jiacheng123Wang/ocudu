@@ -676,20 +676,29 @@ bool shared_burst::commit()
   // The GPU-time probe must be armed before commit (Metal asserts otherwise), and the commit ticket (Q9-F) is
   // taken immediately before it: this buffer can carry the stage fence's wait and the grid-production wait, so
   // the order between its commit and its signaller's is the reading that says whether the wait can resolve.
-  const char* burst_label = "lane_burst";
-  if (ablation_for_cb(cb, /*create=*/false)) {
-    // The ABLATION arm's buffers must be readable on their own: this label is what the Q9-F3 per-label
-    // table prints them under, so an ablated hop never contaminates the delivery numbers (dev doc 6.133).
-    burst_label = "merged_hop_ablated";
-  }
+  // WHICH LABEL: the precedence is written in ONE expression, and that is the point of its shape.
+  //
+  // The label names what the buffer CARRIES, and Q9-F3's occupancy report reads it against the slots:
+  //   * `lane_burst`         - the lane's own burst, the ordinary case;
+  //   * `merged_hop`         - the merged route's adopted block, which brings the front end's transforms
+  //                            with it, so "the lane's burst" is the WHOLE hop (the distinction the lane
+  //                            probe's busy split exists for);
+  //   * `merged_hop_ablated` - the ABLATION arm's buffers (OCUDU_LANE_ABLATE), which must be readable on
+  //                            their own so an ablated hop never contaminates the delivery numbers
+  //                            (dev doc 6.133);
+  // most specific wins, i.e. ablated > merged_hop > lane_burst.
+  //
+  // WHY AN EXPRESSION INSTEAD OF THREE ASSIGNMENTS: the first version assigned them in sequence and the
+  // LAST assignment won, so the delivery label silently overwrote the ablation one. That is a bug no
+  // compiler and no reviewer caught, and it cost three legs (p80-p82) flown specifically to read samples
+  // that were being relabelled out of the report (dev doc 6.137). As nesting, the order is not a sequence
+  // that a later edit can append to - it is the value itself.
+  const bool ablated = ablation_for_cb(cb, /*create=*/false);
+  bool       merged  = false;
 #if defined(OCUDU_METAL_STATS)
-  if (s.commit_label == gpu_lane_probe::stage::merged_hop) {
-    // The label names what the buffer CARRIES (Q9-F3's occupancy report reads it against the slots): on the
-    // merged route the adopted block brings the front end's transforms with it, so "the lane's burst" is the
-    // whole hop - the distinction the lane probe's busy split exists for.
-    burst_label = "merged_hop";
-  }
+  merged = (s.commit_label == gpu_lane_probe::stage::merged_hop);
 #endif
+  const char* burst_label = ablated ? "merged_hop_ablated" : (merged ? "merged_hop" : "lane_burst");
   forget_ablation_for_cb(cb);
   metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end, burst_label);
   metal::shared_queue::note_commit_order(cb);
