@@ -40,6 +40,9 @@ import statistics
 import sys
 
 BUSY_WINDOW_S = 240.0   # the iperf3 test length used by every arm; override with --window=<s>
+TCP_MBPS = None         # iperf3's receiver Mbit/s, passed with --tcp=<n>: prints the MAC -> TCP survival
+                        # (2026-09-27: that ratio is what separated a +10.6% arm from a +34% one - the MAC
+                        # side cannot see TBs that are dropped below TCP, so it needs the TCP number)
 
 SCHED_RX = re.compile(
     r"^(\S+) .*?Slot decisions pci=\d+ .*?UL: ue=\S+ rnti=\S+ h_id=(\d+) ss_id=(\d+) "
@@ -137,12 +140,14 @@ def summarise(path):
 
 
 def main(argv):
-    global BUSY_WINDOW_S
+    global BUSY_WINDOW_S, TCP_MBPS
     argv = list(argv)
     args = [a for a in argv[1:] if not a.startswith("--")]
     for a in argv[1:]:
         if a.startswith("--window="):
             BUSY_WINDOW_S = float(a.split("=", 1)[1])
+        elif a.startswith("--tcp="):
+            TCP_MBPS = float(a.split("=", 1)[1])
     argv = [argv[0]] + args
     if len(argv) < 2:
         print(__doc__ or "usage: ul_grant_stats.py <gnb log> [more logs...]", file=sys.stderr)
@@ -156,6 +161,10 @@ def main(argv):
         print(f"    full window {r['dur']:.1f} s, {r['grants']} UL grants = {r['rate']:.1f} grants/s")
         print(f"      granted {r['granted_mbps']:.2f} Mbit/s | new data {r['newdata_mbps']:.2f} Mbit/s | "
               f"retransmissions {r['retx_pct']:.1f}%  (diluted if the window is longer than the test)")
+        if TCP_MBPS is not None and "busy" in r and r["busy"]["newdata_mbps"]:
+            surv = 100.0 * TCP_MBPS / r["busy"]["newdata_mbps"]
+            print(f"    ★ MAC new data -> TCP survival: {surv:.0f}%  ({TCP_MBPS} Mbit/s received / "
+                  f"{r['busy']['newdata_mbps']:.2f} Mbit/s of MAC new data; the rest was dropped under TCP)")
         if "busy" in r:
             b = r["busy"]
             print(f"    ★ busiest {b['span']:.0f} s (the test): {b['rate']:.1f} grants/s | "

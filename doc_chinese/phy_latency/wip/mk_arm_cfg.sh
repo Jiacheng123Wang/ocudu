@@ -54,7 +54,7 @@
 #        default output: doc_chinese/work_tmp/arm_<name>.yml   (git-ignored, like the other dev products)
 set -eu
 
-ARM=${1:?arm name: sc8, rv, mcs19, qam64, p0up, p0up_rv_mcs19, ulheavy}
+ARM=${1:?arm name: sc8, rv, mcs19, qam64, p0up, p0up_rv_mcs19, ulheavy, rv_p0up, rv_ulheavy, rv_p0up_ulheavy}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../../.." && pwd)
 # WHERE THE ARM'S SOURCE IS. The transport arms move a line of the DELIVERY config; the UL arms move one of
@@ -63,7 +63,7 @@ ROOT=$(cd "$HERE/../../.." && pwd)
 # below caught it, which is why the guard exists. ARM_SRC overrides either default (that is how the n1
 # mirror is generated from the n1 template).
 case "$ARM" in
-  rv|mcs19|qam64|p0up|p0up_rv_mcs19|ulheavy) DEF_SRC="$ROOT/configs/gnb_rf_b200_tdd_n78_20mhz_ul_ab.yml" ;;
+  rv|mcs19|qam64|p0up|p0up_rv_mcs19|ulheavy|rv_p0up|rv_ulheavy|rv_p0up_ulheavy) DEF_SRC="$ROOT/configs/gnb_rf_b200_tdd_n78_20mhz_ul_ab.yml" ;;
   *)                                 DEF_SRC="$ROOT/configs/gnb_rf_b200_tdd_n78_20mhz.yml" ;;
 esac
 SRC=${ARM_SRC:-$DEF_SRC}
@@ -110,6 +110,43 @@ case "$ARM" in
     uncomment 'p0_nominal_with_grant: -70'
     WANT=("p0_nominal_with_grant: -70")
     ;;
+  rv_p0up)
+    # The two link-level winners together (2026-09-27: rv +34%, p0up +23% on their own).
+    sed -E \
+      -e 's/^#(    rv_sequence: \[0, 2, 3, 1\])/\1/' \
+      -e 's/^#(    p0_nominal_with_grant: -70)/\1/' "$SRC" > "$OUT"
+    WANT=("rv_sequence: [0, 2, 3, 1]" "p0_nominal_with_grant: -70")
+    EXPECT_CHANGED=4
+    ;;
+  rv_ulheavy)
+    # The best link-level arm ON TOP of the structural one (rv +45%, ulheavy +34% on their own; this pair is
+    # the one the arithmetic says should recover the survival ulheavy loses: it read 69% against rv's 92%).
+    sed -E \
+      -e 's/^#(    rv_sequence: \[0, 2, 3, 1\])/\1/' \
+      -e 's/^#(  tdd_ul_dl_cfg:)/\1/' \
+      -e 's/^#(    dl_ul_tx_period: 10)/\1/' \
+      -e 's/^#(    nof_dl_slots: 4)/\1/' \
+      -e 's/^#(    nof_dl_symbols: 8)/\1/' \
+      -e 's/^#(    nof_ul_slots: 5)/\1/' \
+      -e 's/^#(    nof_ul_symbols: 0)/\1/' "$SRC" > "$OUT"
+    WANT=("rv_sequence: [0, 2, 3, 1]" "tdd_ul_dl_cfg:" "nof_ul_slots: 5")
+    EXPECT_CHANGED=14
+    ;;
+  rv_p0up_ulheavy)
+    # Everything the singles showed a gain from. Use it last: it moves three variables, so it can confirm a
+    # ceiling but it cannot attribute anything.
+    sed -E \
+      -e 's/^#(    rv_sequence: \[0, 2, 3, 1\])/\1/' \
+      -e 's/^#(    p0_nominal_with_grant: -70)/\1/' \
+      -e 's/^#(  tdd_ul_dl_cfg:)/\1/' \
+      -e 's/^#(    dl_ul_tx_period: 10)/\1/' \
+      -e 's/^#(    nof_dl_slots: 4)/\1/' \
+      -e 's/^#(    nof_dl_symbols: 8)/\1/' \
+      -e 's/^#(    nof_ul_slots: 5)/\1/' \
+      -e 's/^#(    nof_ul_symbols: 0)/\1/' "$SRC" > "$OUT"
+    WANT=("rv_sequence: [0, 2, 3, 1]" "p0_nominal_with_grant: -70" "nof_ul_slots: 5")
+    EXPECT_CHANGED=16
+    ;;
   ulheavy)
     # The STRUCTURAL arm: moves the TDD pattern's UL/DL split (4D+8S+5U against the cell default 6D+8S+3U),
     # i.e. 600 -> 1000 UL slots/s. Unlike the others it does not tune the link, it changes the cell's shape,
@@ -133,7 +170,7 @@ case "$ARM" in
     EXPECT_CHANGED=6
     ;;
   *)
-    echo "unknown arm '$ARM': expected sc8 | rv | mcs19 | qam64 | p0up | p0up_rv_mcs19 | ulheavy" >&2
+    echo "unknown arm '$ARM': expected sc8 | rv | mcs19 | qam64 | p0up | p0up_rv_mcs19 | ulheavy | rv_p0up | rv_ulheavy | rv_p0up_ulheavy" >&2
     exit 2
     ;;
 esac
