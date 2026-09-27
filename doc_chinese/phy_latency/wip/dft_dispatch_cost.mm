@@ -110,6 +110,32 @@ bool load_kernel_source(const std::string& dir, std::string& out)
       "                   uint gid [[thread_position_in_grid]], uint stride [[threads_per_grid]]) {\n"
       "  uint acc = gid;\n"
       "  for (uint i = gid; i < n; i += stride) { acc = acc * 1664525u + buf[i]; buf[i] = acc; }\n"
+      "}\n"
+      // --- the THREADGROUP-MEMORY competitor (2026-09-27) ---------------------------------------------
+      // WHY IT EXISTS. The air front end's packed dispatch (14 threadgroups, one transform each) is
+      // resident 452us on air and 46.9us here, and the difference is NOT the dispatch count: it is that
+      // the 14 groups run one after another on air and all at once here (air: 452/14 = 32.3us per
+      // group, which is exactly the single group's own work; here: 46.9us for all fourteen). The DFT
+      // kernel declares `threadgroup float2 buf[MAX_FFT_N]` = 32 KiB PER THREADGROUP, i.e. the device's
+      // whole per-core threadgroup budget, so a dispatch of 14 groups needs 14 cores' worth of it at
+      // once. Every contention arm so far used a kernel that declares NO threadgroup memory (the spin
+      // `busy` above), i.e. it competed for cores but not for the resource the DFT actually needs - and
+      // §6.101(1)'s "200 concurrent cbs cost +0.5..+3.5us" was measured with that kernel, or with the
+      // DFT itself. This kernel declares the SAME 32 KiB per group and does the same spin, so a
+      // background cb of 16 such groups covers the whole device's threadgroup memory.
+      //
+      // HOW TO READ IT. If the packed arm inflates towards 14 x 32us while this streams, threadgroup
+      // memory (not cores, not clock) is the currency the air path is short of, and the search moves to
+      // WHO holds it on air. If it stays ~47us, the resource is not threadgroup memory and the air
+      // mechanism is somewhere else entirely.
+      "\nkernel void busy_tg(device float* out [[buffer(0)]], constant uint& iters [[buffer(1)]],\n"
+      "                    uint gid [[thread_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {\n"
+      "  threadgroup float2 pad[4096];\n"
+      "  pad[tid] = float2(float(tid), 0.5f);\n"
+      "  threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+      "  float acc = pad[tid & 4095u].x;\n"
+      "  for (uint i = 0; i < iters; ++i) { acc = fma(acc, 1.000001f, 0.5f); }\n"
+      "  out[gid] = acc;\n"
       "}\n";
   out = source;
   return true;
@@ -613,6 +639,115 @@ int main()
                   label,
                   shared.window_us,
                   static_cast<unsigned long long>(background_cbs.load(std::memory_order_relaxed)));
+    }
+  }
+
+  // --- THE AIR MIX (2026-09-27): every shape the device really shares the packed dispatch with ------
+  //
+  // The air reading this section exists for (dev doc 6.123/§6.124, legs p57-p70): the front end's packed
+  // dispatch is resident ~452-482us on air while a single-transform command buffer of the SAME kernel is
+  // 46.85us there and the packed shape is 46.9us here. 452/14 = 32.3us per threadgroup is the single
+  // group's own work, i.e. on air the fourteen groups run ONE AFTER ANOTHER, and the offline arms above
+  // say why the previous explanations do not hold: the same-kernel background stream (transforms = 14/56,
+  // further up) leaves the measured arm at 12.9-15.9us.
+  //
+  // What is left is the resource the DFT kernel actually needs: `threadgroup float2 buf[4096]` = 32 KiB
+  // PER GROUP, the device's whole per-core threadgroup budget. The arms below therefore mix in, one at a
+  // time, (a) the plain route's own shape - single-transform DFT cbs on the other queue, which is what
+  // the front end queue actually streams on air - and (b) a spin kernel that declares the SAME 32 KiB per
+  // group, sixteen groups per command buffer, i.e. a full device's worth of threadgroup memory.
+  std::printf("\n--- the air mix: the packed arm against what the device really shares it with ---\n");
+  {
+    id<MTLComputePipelineState> busy_tg_pipeline =
+        [device newComputePipelineStateWithFunction:[[device newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()]
+                                                                           options:nil
+                                                                             error:&error] newFunctionWithName:@"busy_tg"]
+                                             error:&error];
+    id<MTLComputePipelineState> busy_pipeline =
+        [device newComputePipelineStateWithFunction:[[device newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()]
+                                                                           options:nil
+                                                                             error:&error] newFunctionWithName:@"busy"]
+                                             error:&error];
+    if ((busy_tg_pipeline == nil) || (busy_pipeline == nil)) {
+      std::printf("air-mix pipelines failed: %s\n", error.localizedDescription.UTF8String);
+    } else {
+      id<MTLBuffer> busy_out = [device newBufferWithLength:(1u << 16) * sizeof(float)
+                                                   options:MTLResourceStorageModeShared];
+      const uint32_t busy_iters = 200000;
+      std::atomic<bool>     stop{false};
+      std::atomic<uint64_t> background_cbs{0};
+
+      /// Streams \p kind on the other queue until \p stop: 0 = the DFT itself, 1 = the no-threadgroup
+      /// spin, 2 = the 32 KiB-per-group spin.
+      const auto stream = [&](unsigned kind, unsigned groups) {
+        stop.store(false, std::memory_order_relaxed);
+        background_cbs.store(0, std::memory_order_relaxed);
+        return std::thread([&, kind, groups]() {
+          while (!stop.load(std::memory_order_relaxed)) {
+            id<MTLCommandBuffer>         cb  = [other commandBuffer];
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            if (kind == 0) {
+              [enc setComputePipelineState:pipeline];
+              [enc setBuffer:in offset:0 atIndex:0];
+              [enc setBuffer:out offset:0 atIndex:1];
+              [enc setBuffer:twiddle offset:0 atIndex:2];
+              [enc setBuffer:perm offset:0 atIndex:3];
+              const uint32_t radix2 = 8, radix3 = 1, inverse = 0, base = 0;
+              [enc setBytes:&radix2 length:sizeof(uint32_t) atIndex:4];
+              [enc setBytes:&radix3 length:sizeof(uint32_t) atIndex:5];
+              [enc setBytes:&inverse length:sizeof(uint32_t) atIndex:6];
+              [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
+              [enc setBuffer:grid offset:0 atIndex:8];
+              [enc setBuffer:window offset:0 atIndex:9];
+              [enc setBuffer:gw offset:0 atIndex:10];
+              [enc setBuffer:in16 offset:0 atIndex:11];
+              [enc setBuffer:ip offset:0 atIndex:12];
+              [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+                  threadsPerThreadgroup:MTLSizeMake(std::min<unsigned>(fft_n, 1024u), 1, 1)];
+            } else {
+              [enc setComputePipelineState:(kind == 1) ? busy_pipeline : busy_tg_pipeline];
+              [enc setBuffer:busy_out offset:0 atIndex:0];
+              [enc setBytes:&busy_iters length:sizeof(uint32_t) atIndex:1];
+              if (kind == 1) {
+                [enc dispatchThreads:MTLSizeMake(4096, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+              } else {
+                [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(768, 1, 1)];
+              }
+            }
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            background_cbs.fetch_add(1, std::memory_order_relaxed);
+          }
+        });
+      };
+
+      const auto measure_with = [&](const char* label, unsigned kind, unsigned groups, bool run_it) {
+        fill_tables(14, true, true);
+        std::thread worker;
+        if (run_it) {
+          worker = stream(kind, groups);
+          std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        }
+        fill_tables(14, true, true);
+        const arm_result r = run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1);
+        if (run_it) {
+          stop.store(true, std::memory_order_relaxed);
+          worker.join();
+        }
+        std::printf("%-52s window=%9.1fus  per-transform=%7.1fus  (background cbs=%llu)\n",
+                    label,
+                    r.window_us,
+                    r.per_transform_us,
+                    static_cast<unsigned long long>(background_cbs.load(std::memory_order_relaxed)));
+      };
+
+      measure_with("14 in 1 dispatch, device otherwise IDLE", 0, 0, false);
+      measure_with("14 in 1 dispatch, OTHER queue: 1-transform DFT cbs", 0, 1, true);
+      measure_with("14 in 1 dispatch, OTHER queue: 14-transform DFT cbs", 0, 14, true);
+      measure_with("14 in 1 dispatch, OTHER queue: spin, 0 KiB tgmem", 1, 0, true);
+      measure_with("14 in 1 dispatch, OTHER queue: spin, 32 KiB x 16 groups", 2, 16, true);
+      measure_with("14 in 1 dispatch, OTHER queue: spin, 32 KiB x 4 groups", 2, 4, true);
     }
   }
 
