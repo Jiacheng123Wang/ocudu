@@ -8369,6 +8369,16 @@ cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n
   `merged_hop_ablated` 的 **n ≈ 1.8 万**（必须出现），其 exec p50 若 **~20–80 µs** ⇒ 那 ~450 µs 是这些 kernel 的**执行**；若仍 **~450 µs** ⇒ 与"活"无关，这一线收口。
 
 
+### 6.137 `p82`：消去跳仍然读不到 —— label 被后面的 `merged_hop` 覆盖行盖掉（**一行修**，已定案）（2026-09-27）
+
+* `p82` 读数：旋钮两行 ✓、`[metal_ablate] ABLATION ON` ✓、对照干净（`merged_hop` n=145943、exec p50 **470.0**、`ch_wt` 41.1、`cbs/lane=2.00 (max=2)`、契约 9/9、`gaps=0`、V1 **1399.8**），但 per-label 表里**仍然没有 `merged_hop_ablated`**。
+* **根因（读码即定案）**：`commit()` 里的 label 次序是
+  `burst_label = "lane_burst"` → （我的）`if (ablation_for_cb(…)) burst_label = "merged_hop_ablated";` → **`#if OCUDU_METAL_STATS` 里的 `if (commit_label == merged_hop) burst_label = "merged_hop";`**
+  ⇒ 在合并路上**后面那一行把消去 label 盖掉**。`p80`/`p81`/`p82` 三条腿因此都读不到消去总体（`p80` 的 n=1 是 adopt 之前的偶发路径）。
+* **修法（一行：把消去那段挪到覆盖之后，消去优先）**；离线自证沿用现有三条命令（`EVERY=1` ⇒ 延迟链 5/5 FAIL；不设旋钮 ⇒ 0 FAIL）。
+* **判据不变**（同腿两总体）：`merged_hop_ablated` 的 exec p50 **20–80 µs** ⇒ 那 ~450 µs 是**这些 kernel 的执行**；仍 **~450 µs** ⇒ 与"活"无关、本平台无杠杆。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
