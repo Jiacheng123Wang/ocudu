@@ -71,6 +71,22 @@ public:
   /// \note Per thread, like the burst itself, and reset by every commit.
   static void set_commit_label(gpu_lane_probe::stage which);
 
+  /// \brief Installs the ABLATION pipeline: every deferred stage's dispatch is bound to it instead of its own.
+  ///
+  /// WHY IT EXISTS (dev doc 6.132). Five air legs put ~450us of device execution in ONE buffer per hop,
+  /// with WHICH buffer moving as the structure changes while the same dispatches cost 47us in another
+  /// placement - i.e. a cost that looks independent of the kernels' work. The offline harness cannot
+  /// reproduce it (~35 arms), the device has no per-dispatch timestamp and a shared event is only visible
+  /// at buffer granularity, so the only ruler left is subtraction INSIDE the delivery structure: the same
+  /// command buffer, the same dispatch grid sizes, the same bindings, the same fences and the same commit,
+  /// with every stage's kernel replaced by a no-op.
+  ///
+  /// \note THE ABLATED RUN IS NOT A WORKING RADIO: the estimator, the equalizer and the demapper write
+  ///       nothing, so the decoder decodes stale LLRs and every CRC fails. It exists to be measured (the
+  ///       lane's buffer windows), never to be judged on link quality - the leg that uses it says so.
+  /// \note A no-op when \p pipeline is nil, which is the default: the delivery path is untouched.
+  static void set_ablation_pipeline(id<MTLComputePipelineState> pipeline);
+
   /// \brief Waits for every command buffer committed by this thread's bursts.
   /// \return True when all of them completed successfully.
   static bool wait_committed();

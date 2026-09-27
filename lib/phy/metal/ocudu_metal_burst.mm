@@ -150,6 +150,10 @@ struct burst_state {
   /// next burst_ensure_open(); 0 = nothing published, which keeps the old "newest generation" rule.
   uint64_t                          stage_wait = 0;
   std::vector<id<MTLCommandBuffer>> outstanding; // committed through this thread, not waited yet
+  /// The ABLATION pipeline installed by set_ablation_pipeline(): when set, every stage's dispatch is
+  /// bound to it instead of its own, so a leg can measure a hop whose buffers carry no work at all.
+  id<MTLComputePipelineState> ablation_pipeline = nil;
+
   /// What the buffer this burst commits carries, for the lane probe's busy split (see set_commit_label()).
   ocudu::metal::gpu_lane_probe::stage commit_label = ocudu::metal::gpu_lane_probe::stage::equalizer_demapper;
 
@@ -336,7 +340,10 @@ id<MTLComputeCommandEncoder> shared_burst::encoder(id<MTLComputePipelineState> p
       // different buffer object, so order them explicitly.
       [s.enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
     }
-    [s.enc setComputePipelineState:pipeline];
+    // The ABLATION arm swaps only what the encoder BINDS: the bookkeeping (and therefore the stage
+    // barriers, the fence structure and the dispatch grid each caller asks for) stays exactly what the
+    // delivery path does, which is the whole point of the arm (dev doc 6.132).
+    [s.enc setComputePipelineState:((s.ablation_pipeline != nil) ? s.ablation_pipeline : pipeline)];
     s.pipeline = pipeline;
   }
   return s.enc;
@@ -463,6 +470,11 @@ bool shared_burst::adopt(id<MTLCommandBuffer> cb)
   s.pipeline = nil;
   s.n        = 0;
   return true;
+}
+
+void shared_burst::set_ablation_pipeline(id<MTLComputePipelineState> pipeline)
+{
+  state().ablation_pipeline = pipeline;
 }
 
 void shared_burst::set_commit_label(gpu_lane_probe::stage which)

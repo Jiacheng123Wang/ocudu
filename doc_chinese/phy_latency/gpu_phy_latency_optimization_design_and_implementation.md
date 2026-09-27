@@ -8220,6 +8220,48 @@ supportsCounterSampling:AtDispatchBoundary = no
 这与**消去法**合起来是下一轮的两个抓手。
 
 
+### 6.131 ★★ 消去法之前又关掉四族：窗口**不是等待**、**不是足迹**、**不是队列排空**、**不是绑定大小**（离线，2026-09-27）
+
+> 在实现消去法旋钮之前，先把"窗口到底是不是执行"这件事钉死。四条臂**全部否**，因此 §6.132 的消去法现在是唯一剩的手段。
+
+| 假设 | 臂（都在 `wip/dft_dispatch_cost.mm`）| 读数 | 判定 |
+|---|---|---|---|
+| ★ 设备侧等待被算进窗口（H-B）| 一条等事件（~500 µs 后才被另一条 cb 信号）的打包 cb，与不等事件的对照 | **11.8 µs（等待）vs 11.8 µs（对照）**，宿主实测 752 µs | ❌ **等待落在 `commit→start`**，`GPUStartTime` 是"真正开始执行"的时刻 ⇒ **窗口是真执行** |
+| 已映射足迹/页表压力 | 分配并写满 **64 × 8 MB = 537 MB** `StorageModeShared` 缓冲后再测 | **11.8 → 11.8 µs** | ❌ 足迹不是原因（与 §6.79 的 staging 反例不冲突：那条是"每槽新建 14 个缓冲"）|
+| `GPUEndTime` 是**队列排空**而不是本 cb 最后一条派发 | 测量臂后面**紧跟**一条 2673 µs 的缓冲 | **11.9 µs**（后面那条 2672.9 µs）| ❌ 窗口只算自己 |
+| 绑定缓冲的**大小**（不是碰到的字节）| 同样的 kernel、同样的触碰字节，但 `in/out/grid/window` 换成 **4 × 64 MB** | **11.9 µs** | ❌ 绑定大小不计费 |
+
+⇒ 四条合起来：**那 ~450 µs 是"这条 cb 自己的执行"，而且与内容、与足迹、与后续队列无关** —— 这与 §6.129③ 的"同一批派发换个位置就从 517 变 70"合在一起，指向**调度/执行**层面的东西，而不是数据或等待。
+⇒ 因此只剩**消去法**（§6.132）：把交付结构里的"活"换成空 kernel，看窗口动不动。
+
+#### ① 消去法旋钮的落地（默认关，交付路径不变）
+
+* `ocudu_demod.metal` 新增 `lane_ablate_noop`（一条几乎不存在的 kernel，只声明一个 buffer）。
+* `shared_burst::set_ablation_pipeline(pipeline)`：装上之后，`encoder()` 里**只换绑定的 pipeline**，
+  **保留**原来的 `s.pipeline` 记账 ⇒ **阶段屏障、fence 结构、每个调用者要的派发网格、提交结构全部与交付一致**（这才是这条臂的意义）。
+* `ocudu_demod_metal_engine.mm`：`OCUDU_LANE_ABLATE=1` 时从同一个 metallib 建 noop pipeline 并装上，并打一条 **WARNING**（提醒这不是一条能工作的链路）。
+* `OCUDU_LANE_ABLATE` **不设或为 0** 时 `ablation_pipeline == nil` ⇒ `encoder()` 走的就是原来那一行 ⇒ **交付路径逐字节不变**（`ctest -L phy` 串行复核）。
+
+#### ② 腿的预登记（`p78-n78-ablate`）
+
+```bash
+cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
+  doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p78-n78-ablate \
+  --regime=stress \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2 \
+  OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_DFT_BATCH_SYMBOLS=14 \
+  OCUDU_LANE_ABLATE=1
+```
+
+| 判据（对照 = 同日同配方的 `p72`）| 若 | 则 |
+|---|---|---|
+| `merged_hop` 的 `start→end`（`p72` = **468.7**）| **≈40–80 µs** | ★ **那 ~450 是这些 kernel 的"执行"** ⇒ 下一步二分是哪一段（eq / CE / demap），并且杠杆回到"换 kernel 形状" |
+| 同上 | **≈400–470 µs（几乎不动）** | ★ **那 ~450 与"活"无关** ⇒ 是平台给这条 cb 记的账（调度/提交侧）⇒ 本平台**无杠杆**，这一线的结论就是"已定价、不可动" |
+| `ch_wt`（40.8）/ 契约 / `gaps` / 池 | **不许变**（`ch_wt` 不在 burst 里，应该不动；`gaps=0`、`rx_overflows=0` 必须保持）| —— |
+| CRC / RF / 吞吐 | **预期全红**（没人写估计与 LLR）| 登记为**预期**，不作判据 |
+| `cbs/lane` | 预期 **2.00**（结构没变）| 若变 ⇒ 说明某段因失败而退出了 burst，要读原因 |
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

@@ -203,3 +203,23 @@ kernel void demod_soft(device const float2* symbols    [[buffer(0)]], // [OFDM s
         return;
     }
 }
+
+/// \brief The ABLATION kernel: a dispatch that carries a stage's exact grid and bindings but no work.
+///
+/// WHY IT EXISTS (dev doc 6.131/6.132). Five air legs say one buffer per hop carries ~450us of device
+/// execution, that WHICH buffer moves with the structure, and that the same dispatches cost 47us
+/// elsewhere - i.e. the cost looks independent of what the kernels do. Every offline reproduction has
+/// failed (~35 arms), the device offers no per-dispatch timestamp (no AtDispatchBoundary, and compute
+/// encoders cannot sample), and a shared event is only visible at buffer granularity. The one test left
+/// is SUBTRACTION inside the delivery structure: run a leg with every deferred stage's dispatch bound to
+/// this kernel - the same command buffer, the same grid sizes, the same bindings, the same fences and the
+/// same commit, with the work removed.
+///
+/// Bound by shared_burst::encoder() when OCUDU_LANE_ABLATE=1 (see set_ablation_pipeline). It declares one
+/// buffer so a binding exists; every other binding a stage sets is simply unused.
+kernel void lane_ablate_noop(device uchar* sink [[buffer(0)]], uint gid [[thread_position_in_grid]])
+{
+  if (gid == 0xFFFFFFFFu) {
+    sink[0] = 0; // unreachable: keeps the parameter alive without writing anything
+  }
+}

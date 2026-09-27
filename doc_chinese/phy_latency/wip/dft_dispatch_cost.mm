@@ -771,6 +771,314 @@ int main()
     }
   }
 
+  // --- MEMORY FOOTPRINT: the air process holds ~hundreds of MB of mapped buffers, the harness ~10MB ---
+  //
+  // WHY (dev doc 6.131). With the wait family closed (a device-side event wait is NOT inside the window:
+  // 11.8us waited vs 11.8us control, host elapsed 752us) the remaining explanations have to be about
+  // execution. The one difference between this process and the air one that no arm has ever reproduced is
+  // the SIZE of the mapped working set: the air pipeline holds the receive pool, the transmit rings, the
+  // zero-copy grids, the exported tensors and thousands of wraps - hundreds of MB of shared
+  // (host-visible) buffers - while every arm here runs with ~10MB. A dispatch's bindings then cost page
+  // walks and TLB fills that a small-footprint process never pays. 6.79's staging arm is consistent with
+  // this reading (it CREATEd fourteen buffers a slot and got +464us ~ 14 x 33us).
+  //
+  // WHAT IT DOES. Allocates and touches a large set of shared buffers (the size is printed), keeps them
+  // alive, and re-measures the packed arm that every other arm reports at 12-47us.
+  std::printf("\n--- memory footprint: the packed arm with a large mapped working set ---\n");
+  {
+    const auto median_of = [](std::vector<double> v) {
+      if (v.empty()) {
+        return 0.0;
+      }
+      std::sort(v.begin(), v.end());
+      return v[v.size() / 2];
+    };
+    fill_tables(14, true, true);
+    const arm_result before = run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1);
+
+    std::vector<id<MTLBuffer>> balloon;
+    size_t                     bytes = 0;
+    for (unsigned i = 0; i != 64; ++i) {
+      id<MTLBuffer> b = [device newBufferWithLength:(8u << 20) options:MTLResourceStorageModeShared];
+      if (b == nil) {
+        break;
+      }
+      std::memset(b.contents, 0xA5, 8u << 20); // touch every page, like a live pool
+      balloon.push_back(b);
+      bytes += (8u << 20);
+    }
+    const arm_result during = run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1);
+    std::printf("%-52s window=%9.1fus\n", "packed arm, small footprint (the harness default)", before.window_us);
+    std::printf("%-52s window=%9.1fus  (%.0f MB mapped and touched)\n",
+                "packed arm, large footprint",
+                during.window_us,
+                static_cast<double>(bytes) / 1e6);
+    (void)median_of;
+    balloon.clear();
+  }
+
+  // --- BOUND-BUFFER SIZE: does the device charge for what a dispatch BINDS, not what it touches? -----
+  //
+  // WHY (dev doc 6.131). Everything else about "execution" has been closed: the window is this buffer's
+  // own last dispatch (a 2673us buffer behind it changes nothing), an event wait is NOT inside it, the
+  // mapped footprint does not matter (537MB: 11.8 -> 11.8us), and the same content costs 47us or 517us
+  // depending only on WHICH buffer carries it. The one property of a buffer that no arm has varied is the
+  // SIZE of the buffers it binds: the air hop binds the receive pool, the resource grid, the exported
+  // tensors and the LLR target - tens to hundreds of KB each - while the arms here bind 3-90KB. If the
+  // device validates or maps the whole bound range, execution would scale with what is bound rather than
+  // with what is touched, which is exactly a content-independent, placement-dependent cost.
+  //
+  // WHAT IT DOES. Re-measures the packed arm with the same kernel and the same touched bytes, but with
+  // `in`, `out`, `grid` and `window` replaced by 64MB buffers (the kernel touches only their first bytes).
+  std::printf("\n--- bound-buffer size: same work, same touched bytes, bigger bindings ---\n");
+  {
+    fill_tables(14, true, true);
+    const arm_result small = run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1);
+
+    const size_t   big_len = 64u << 20;
+    id<MTLBuffer>  in_big = [device newBufferWithLength:big_len options:MTLResourceStorageModeShared];
+    id<MTLBuffer>  out_big = [device newBufferWithLength:big_len options:MTLResourceStorageModeShared];
+    id<MTLBuffer>  grid_big = [device newBufferWithLength:big_len options:MTLResourceStorageModeShared];
+    id<MTLBuffer>  win_big = [device newBufferWithLength:big_len options:MTLResourceStorageModeShared];
+    std::memset(in_big.contents, 0, big_len);
+    std::memset(out_big.contents, 0, big_len);
+    std::memset(grid_big.contents, 0, big_len);
+    std::memset(win_big.contents, 0, big_len);
+    const arm_result big = run_arm(queue, pipeline, in_big, out_big, twiddle, perm, grid_big, win_big, in16, gw, ip, 14, 1);
+    std::printf("%-52s window=%9.1fus\n", "packed arm, bindings of a few KB (harness default)", small.window_us);
+    std::printf("%-52s window=%9.1fus  (4 x 64 MB bound, same bytes touched)\n",
+                "packed arm, bindings of 64 MB",
+                big.window_us);
+  }
+
+  // --- IS GPUEndTime STAMPED AT OUR LAST DISPATCH, OR WHEN THE QUEUE DRAINS? ------------------------
+  //
+  // WHY (dev doc 6.131). If Metal stamped a buffer's GPUEndTime when the QUEUE drains rather than when
+  // that buffer's own last dispatch retires, then every window in this line would include whatever runs
+  // next on the same queue - and the air lane's buffers are always followed by the next hop's (or the
+  // peer lane's) work, which is exactly where a content-independent ~450us could come from.
+  //
+  // WHAT IT DOES. Measures the packed arm alone (control), then measures it again with a LONG buffer
+  // committed back to back behind it on the same queue. If the first buffer's window grows to the second
+  // one's duration, the window is queue-drain, not execution, and every window reading has to be re-read.
+  std::printf("\n--- is GPUEndTime our last dispatch, or the queue draining? ---\n");
+  {
+    id<MTLComputePipelineState> busy_pipeline =
+        [device newComputePipelineStateWithFunction:[[device newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()]
+                                                                           options:nil
+                                                                             error:&error] newFunctionWithName:@"busy"]
+                                             error:&error];
+    id<MTLBuffer> busy_out = [device newBufferWithLength:(1u << 16) * sizeof(float)
+                                                 options:MTLResourceStorageModeShared];
+    const uint32_t busy_iters = 200000;
+    const auto     commit_busy = [&](id<MTLCommandQueue> q) {
+      id<MTLCommandBuffer>         cb  = [q commandBuffer];
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:busy_pipeline];
+      [enc setBuffer:busy_out offset:0 atIndex:0];
+      [enc setBytes:&busy_iters length:sizeof(uint32_t) atIndex:1];
+      [enc dispatchThreads:MTLSizeMake(4096, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+      [enc endEncoding];
+      [cb commit];
+      return cb;
+    };
+    const auto median_of = [](std::vector<double> v) {
+      if (v.empty()) {
+        return 0.0;
+      }
+      std::sort(v.begin(), v.end());
+      return v[v.size() / 2];
+    };
+    fill_tables(14, true, true);
+    std::vector<double> alone, followed, busy_len;
+    for (unsigned run = 0; run != nof_runs + nof_warmup; ++run) {
+      { // control: measured alone
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:in offset:0 atIndex:0];
+        [enc setBuffer:out offset:0 atIndex:1];
+        [enc setBuffer:twiddle offset:0 atIndex:2];
+        [enc setBuffer:perm offset:0 atIndex:3];
+        const uint32_t radix2 = 8, radix3 = 1, inverse = 0, base = 0;
+        [enc setBytes:&radix2 length:sizeof(uint32_t) atIndex:4];
+        [enc setBytes:&radix3 length:sizeof(uint32_t) atIndex:5];
+        [enc setBytes:&inverse length:sizeof(uint32_t) atIndex:6];
+        [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
+        [enc setBuffer:grid offset:0 atIndex:8];
+        [enc setBuffer:window offset:0 atIndex:9];
+        [enc setBuffer:gw offset:0 atIndex:10];
+        [enc setBuffer:in16 offset:0 atIndex:11];
+        [enc setBuffer:ip offset:0 atIndex:12];
+        [enc dispatchThreadgroups:MTLSizeMake(14, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(std::min<unsigned>(fft_n, 1024u), 1, 1)];
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (run >= nof_warmup) {
+          alone.push_back((cb.GPUEndTime - cb.GPUStartTime) * 1e6);
+        }
+      }
+      { // measured, with a long buffer behind it on the SAME queue
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:in offset:0 atIndex:0];
+        [enc setBuffer:out offset:0 atIndex:1];
+        [enc setBuffer:twiddle offset:0 atIndex:2];
+        [enc setBuffer:perm offset:0 atIndex:3];
+        const uint32_t radix2 = 8, radix3 = 1, inverse = 0, base = 0;
+        [enc setBytes:&radix2 length:sizeof(uint32_t) atIndex:4];
+        [enc setBytes:&radix3 length:sizeof(uint32_t) atIndex:5];
+        [enc setBytes:&inverse length:sizeof(uint32_t) atIndex:6];
+        [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
+        [enc setBuffer:grid offset:0 atIndex:8];
+        [enc setBuffer:window offset:0 atIndex:9];
+        [enc setBuffer:gw offset:0 atIndex:10];
+        [enc setBuffer:in16 offset:0 atIndex:11];
+        [enc setBuffer:ip offset:0 atIndex:12];
+        [enc dispatchThreadgroups:MTLSizeMake(14, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(std::min<unsigned>(fft_n, 1024u), 1, 1)];
+        [enc endEncoding];
+        [cb commit];
+        id<MTLCommandBuffer> behind = commit_busy(queue);
+        [cb waitUntilCompleted];
+        [behind waitUntilCompleted];
+        if (run >= nof_warmup) {
+          followed.push_back((cb.GPUEndTime - cb.GPUStartTime) * 1e6);
+          busy_len.push_back((behind.GPUEndTime - behind.GPUStartTime) * 1e6);
+        }
+      }
+    }
+    std::printf("%-52s window=%9.1fus\n", "packed arm alone (control)", median_of(alone));
+    std::printf("%-52s window=%9.1fus  (the buffer behind it ran %.1fus)\n",
+                "packed arm with a long buffer queued behind it",
+                median_of(followed),
+                median_of(busy_len));
+  }
+
+  // --- IS A DEVICE-SIDE WAIT INSIDE THE WINDOW? -----------------------------------------------------
+  //
+  // WHY (dev doc 6.129/6.130). Every reading in this line assumes `GPUEndTime - GPUStartTime` is
+  // EXECUTION. Five legs say one buffer per hop carries ~450us and that WHICH buffer moves with the
+  // structure while the same content costs 47us elsewhere - which is what a *wait* looks like, not what
+  // execution looks like. The waits that could do it are the grid-production fence and the front-end
+  // fence, and Q24 has never seen them (`per kind: stage=..., corr=0 grid=0`). If Metal stamps
+  // GPUStartTime when the buffer is dispatched - before an `encodeWaitForEvent:` resolves - then such a
+  // wait is inside the window and the whole attribution changes.
+  //
+  // WHAT IT DOES. A buffer that waits on an event which a LATER commit signals, then runs the usual
+  // packed dispatch. The host sleeps so the wait is unambiguous (500us, an order of magnitude above the
+  // dispatch itself), and the arm prints the waited buffer's own window next to a control that does not
+  // wait.
+  std::printf("\n--- is a device-side wait inside GPUStart->GPUEnd? ---\n");
+  {
+    id<MTLSharedEvent> wait_event = [device newSharedEvent];
+    fill_tables(14, true, true);
+
+    std::vector<double> waited_window;
+    std::vector<double> control_window;
+    for (unsigned run = 0; run != nof_runs + nof_warmup; ++run) {
+      // (a) the control: no wait at all.
+      {
+        id<MTLCommandBuffer>         cb  = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:in offset:0 atIndex:0];
+        [enc setBuffer:out offset:0 atIndex:1];
+        [enc setBuffer:twiddle offset:0 atIndex:2];
+        [enc setBuffer:perm offset:0 atIndex:3];
+        const uint32_t radix2 = 8, radix3 = 1, inverse = 0, base = 0;
+        [enc setBytes:&radix2 length:sizeof(uint32_t) atIndex:4];
+        [enc setBytes:&radix3 length:sizeof(uint32_t) atIndex:5];
+        [enc setBytes:&inverse length:sizeof(uint32_t) atIndex:6];
+        [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
+        [enc setBuffer:grid offset:0 atIndex:8];
+        [enc setBuffer:window offset:0 atIndex:9];
+        [enc setBuffer:gw offset:0 atIndex:10];
+        [enc setBuffer:in16 offset:0 atIndex:11];
+        [enc setBuffer:ip offset:0 atIndex:12];
+        [enc dispatchThreadgroups:MTLSizeMake(14, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(std::min<unsigned>(fft_n, 1024u), 1, 1)];
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (run >= nof_warmup) {
+          control_window.push_back((cb.GPUEndTime - cb.GPUStartTime) * 1e6);
+        }
+        if (run == nof_warmup) {
+          std::printf("DEBUG control run: start=%.6f end=%.6f diff_us=%.3f status=%ld\n",
+                      cb.GPUStartTime, cb.GPUEndTime, (cb.GPUEndTime - cb.GPUStartTime) * 1e6,
+                      (long)cb.status);
+        }
+      }
+      // (b) the waited buffer: it waits on generation run+1, which only the NEXT commit signals, and the
+      // host sleeps in between so the wait is unambiguous.
+      const uint64_t gen = run + 1;
+      id<MTLCommandBuffer> waited = [queue commandBuffer];
+      [waited encodeWaitForEvent:wait_event value:gen];
+      {
+        id<MTLComputeCommandEncoder> enc = [waited computeCommandEncoder];
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:in offset:0 atIndex:0];
+        [enc setBuffer:out offset:0 atIndex:1];
+        [enc setBuffer:twiddle offset:0 atIndex:2];
+        [enc setBuffer:perm offset:0 atIndex:3];
+        const uint32_t radix2 = 8, radix3 = 1, inverse = 0, base = 0;
+        [enc setBytes:&radix2 length:sizeof(uint32_t) atIndex:4];
+        [enc setBytes:&radix3 length:sizeof(uint32_t) atIndex:5];
+        [enc setBytes:&inverse length:sizeof(uint32_t) atIndex:6];
+        [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
+        [enc setBuffer:grid offset:0 atIndex:8];
+        [enc setBuffer:window offset:0 atIndex:9];
+        [enc setBuffer:gw offset:0 atIndex:10];
+        [enc setBuffer:in16 offset:0 atIndex:11];
+        [enc setBuffer:ip offset:0 atIndex:12];
+        [enc dispatchThreadgroups:MTLSizeMake(14, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(std::min<unsigned>(fft_n, 1024u), 1, 1)];
+        [enc endEncoding];
+      }
+      const auto t0 = std::chrono::steady_clock::now();
+      [waited commit];
+      std::this_thread::sleep_for(std::chrono::microseconds(500));
+      id<MTLCommandBuffer> signaller = [other commandBuffer];
+      [signaller encodeSignalEvent:wait_event value:gen];
+      [signaller commit];
+      [waited waitUntilCompleted];
+      [signaller waitUntilCompleted];
+      const double host_us =
+          std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+      if (run >= nof_warmup) {
+        if ((waited.GPUEndTime > waited.GPUStartTime) && (waited.GPUStartTime > 0.0)) {
+          waited_window.push_back((waited.GPUEndTime - waited.GPUStartTime) * 1e6);
+        }
+      }
+      if (run == nof_warmup) {
+        std::printf("DEBUG waited run: start=%.6f end=%.6f diff_us=%.3f host_us=%.1f status=%ld\n",
+                    waited.GPUStartTime, waited.GPUEndTime,
+                    (waited.GPUEndTime - waited.GPUStartTime) * 1e6, host_us, (long)waited.status);
+      }
+    }
+    const auto median_of = [](std::vector<double> v) {
+      if (v.empty()) {
+        return 0.0;
+      }
+      std::sort(v.begin(), v.end());
+      return v[v.size() / 2];
+    };
+    std::printf("%-52s window=%9.1fus  (n=%zu)\n",
+                "control: packed dispatch, no wait",
+                median_of(control_window),
+                control_window.size());
+    std::printf("%-52s window=%9.1fus  (n=%zu)\n",
+                "packed dispatch AFTER a ~500us event wait",
+                median_of(waited_window),
+                waited_window.size());
+    std::printf("READ: ~47us means the wait is OUTSIDE the window (commit -> start); ~550us means a\n"
+                "      device-side wait IS charged to GPUStart->GPUEnd and every 'window = execution'\n"
+                "      reading in this line has to be re-read.\n");
+  }
+
   // --- cb-INTERNAL timeline: WHERE INSIDE a command buffer does its window go? ---------------------
   //
   // WHY (dev doc 6.129(5)). There are three rulers today - buffer level (GPUStartTime -> GPUEndTime,
