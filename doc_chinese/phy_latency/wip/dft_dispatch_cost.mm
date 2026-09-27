@@ -182,7 +182,8 @@ arm_result run_arm(id<MTLCommandQueue>          queue,
                    id<MTLComputePipelineState>  thrash_pipeline = nil,
                    id<MTLBuffer>                thrash_buf = nil,
                    uint32_t                     thrash_n = 0,
-                   id<MTLSharedEvent>           signal_event = nil)
+                   id<MTLSharedEvent>           signal_event = nil,
+                   unsigned                     close_hold_us = 0)
 {
   std::vector<double> windows;
   windows.reserve(nof_runs);
@@ -243,6 +244,18 @@ arm_result run_arm(id<MTLCommandQueue>          queue,
           threadsPerThreadgroup:MTLSizeMake(std::min<unsigned>(fft_n, 1024u), 1, 1)];
     }
     [enc endEncoding];
+    if (close_hold_us != 0) {
+      // THE HAND-OVER'S OTHER ORDER (2026-09-27, dev doc 6.127): the front end's block is created at the
+      // slot's FIRST symbol, the transforms are dispatched when the batch fills (the slot's LAST symbol),
+      // and the buffer is then handed over UNCOMMITTED - the lane commits it only when the hop reaches the
+      // estimator. So on air the dispatch is encoded FIRST and the commit comes ~hundreds of microseconds
+      // later, while every arm here encoded and committed back to back. `open_hold_us` above holds the
+      // encoder open BEFORE the dispatch is encoded; this holds the CLOSED buffer before the commit, which
+      // is the air order. If a buffer that sits encoded and uncommitted costs the device-side wait the legs
+      // show (~390us once per hop, independent of dispatches and threadgroups, absent on the plain route),
+      // this arm is where it appears - and if it does not, the air constant is not a submission-order cost.
+      std::this_thread::sleep_for(std::chrono::microseconds(close_hold_us));
+    }
     if (signal_event != nil) {
       // The D1 hand-over signals a shared event on the block it releases (the replacement waits on it),
       // which every plain-route buffer - the PRACH ones that read 47.8us on air - does not do.
@@ -479,6 +492,13 @@ int main()
     std::printf("%-52s window=%9.1fus\n", "encoder open 500us before the commit", held.window_us);
     std::printf("%-52s window=%9.1fus\n", "committed from ANOTHER thread (the lane)", other.window_us);
     std::printf("%-52s window=%9.1fus\n", "both (open a slot, committed by the lane)", both.window_us);
+    // The air order (see run_arm's close_hold_us): encoded first, committed hundreds of us later.
+    const arm_result closed500 =
+        run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1, nullptr, 0, false, 0, false, nil, nil, 0, nil, 500);
+    const arm_result closed2000 =
+        run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1, nullptr, 0, false, 0, false, nil, nil, 0, nil, 2000);
+    std::printf("%-52s window=%9.1fus\n", "encoded, then 500us before the commit", closed500.window_us);
+    std::printf("%-52s window=%9.1fus\n", "encoded, then 2000us before the commit", closed2000.window_us);
   }
 
   // --- fresh wrap per run: a NEW MTLBuffer object over the SAME radio pages -----------------------
