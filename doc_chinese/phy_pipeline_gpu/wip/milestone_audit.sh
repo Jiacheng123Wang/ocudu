@@ -186,6 +186,69 @@ leg_commit_check() {   # <label> <leg .stderr path> <kind>
         "leg ran $legc; $legc..HEAD changes ${nfiles:-0} file(s), ${ncode:-0} of them under lib/include/apps/tests$([ "${ncode:-0}" != "0" ] && echo '  <- this leg is NOT evidence about HEAD')"
 }
 
+# ---------------------------------------------------------------- 0c. A LEG MUST BE A DELIVERY LEG
+#
+# WHY THIS EXISTS (2026-09-27). Every criterion below judges a leg's READINGS, and none of them can tell
+# a DELIVERY leg from a MEASUREMENT ARM, because an arm can satisfy all of them: p84 (the ablation arm,
+# OCUDU_LANE_ABLATE=1) reads contract 9 of 9, crossings 0.00+0.00, stale=0, gaps=0, pop_blocking 39us -
+# and its link is deliberately broken (CRC-OK 48.4%). Fed to this script it would have scored the same
+# 23 PASS as the delivery leg. The two facts that separate them are mechanical, so they are checked:
+#
+#   (1) THE KNOB LINES. run_leg.sh prints every OCUDU_* it was given at the top of the leg's stderr. A
+#       DELIVERY leg may carry the two probes the report needs (they perturb slightly - a completion
+#       handler per buffer, a counter - but every acceptance leg on record carries them), and it may set
+#       a knob EXPLICITLY to its delivery default. Anything else is a behaviour-changing arm.
+#       FAIL-CLOSED ON PURPOSE: an unknown knob is not assumed harmless, it is refused - so a new probe
+#       has to be added to the list below, deliberately, which is the moment to ask whether it changes
+#       what the leg does.
+#   (2) THE LINK DECODED. `[ul_by_size] ... N CRC-OK hop(s)` against `[ul_gpu_lane] lanes=` is the one
+#       number an ablation cannot fake. Measured over 60 legs (p3x-p8x): the ablation arms read 43.7-58.8%
+#       (p51 43.7, p80 47.1, p84 48.4, p83 49.4, p82 56.1, p81 58.8), the post-sigma2-fix delivery legs
+#       79.9-95.6%. The floor is 60%, i.e. it sits in the empty band between them and is a FLOOR, not a
+#       quality criterion: V5's "CRC KO% must not degrade" is judged by a human against the leg's era.
+kNOB_ANY=" OCUDU_METAL_GPU_TIME OCUDU_UL_PHASE_SEGMENTS "                       # probes: report-only, but they do perturb
+kNOB_EQ=" OCUDU_DFT_BATCH_SYMBOLS=14 OCUDU_DFT_OPEN_BLOCK=1 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_CE_LANE_ORDER=merged " # == the delivery default
+kCRC_FLOOR_PCT=60
+
+leg_arm_check() {   # <label> <leg .stderr path> <kind>
+  local label=$1 f=$2 kind=$3 kv name bad="" n=0 seen=""
+  while IFS= read -r kv; do
+    [ -n "$kv" ] || continue
+    n=$((n+1))
+    seen="$seen $kv"
+    name=${kv%%=*}
+    case "$kNOB_ANY" in *" $name "*) continue ;; esac
+    case "$kNOB_EQ"  in *" $kv "*)   continue ;; esac
+    bad="$bad $kv"
+  done < <(grep -aE '^knob *: ' "$f" 2>/dev/null | sed 's/^knob *: *//')
+  if [ -n "$bad" ]; then
+    check "$kind leg $label: is a DELIVERY leg (probe knobs only, or a knob at its delivery default)" \
+          "no behaviour-changing knob" FAIL \
+          "behaviour-changing knob(s):$bad  <- a measurement arm must not certify acceptance: it can satisfy every other criterion here (p84 read contract 9/9, gaps 0, crossings 0.00+0.00, stale=0, and its link was deliberately dead)"
+  else
+    check "$kind leg $label: is a DELIVERY leg (probe knobs only, or a knob at its delivery default)" \
+          "no behaviour-changing knob" PASS \
+          "$n knob line(s), all probe-only or equal to their delivery default:${seen:- <none, which is the strongest case>}"
+  fi
+}
+
+leg_crc_check() {   # <label> <leg .stderr path> <kind>   (the ablation arm's one un-fakeable reading)
+  local label=$1 f=$2 kind=$3 crc lanes pct
+  crc=$(grep -aE 'CRC-OK hop\(s\)' "$f" 2>/dev/null | tail -1 | grep -oE '[0-9]+ CRC-OK' | grep -oE '[0-9]+')
+  lanes=$(grep -aE '\[ul_gpu_lane\] lanes=' "$f" 2>/dev/null | tail -1 | grep -oE 'lanes=[0-9]+' | grep -oE '[0-9]+')
+  if [ -z "$crc" ] || [ -z "$lanes" ] || [ "$lanes" = "0" ]; then
+    check "$kind leg $label: the link decoded (CRC-OK / lanes >= ${kCRC_FLOOR_PCT}%)" \
+          ">= ${kCRC_FLOOR_PCT}% of hops CRC-OK" RED \
+          "crc=${crc:-<unreadable>} lanes=${lanes:-<unreadable>} - the ablation arm's one un-fakeable reading is unreadable"
+    return
+  fi
+  pct=$(awk -v a="$crc" -v b="$lanes" 'BEGIN { printf "%.1f", 100.0 * a / b }')
+  check "$kind leg $label: the link decoded (CRC-OK / lanes >= ${kCRC_FLOOR_PCT}%)" \
+        ">= ${kCRC_FLOOR_PCT}% of hops CRC-OK" \
+        "$(awk -v p="$pct" -v fl="$kCRC_FLOOR_PCT" 'BEGIN { print (p >= fl) ? "PASS" : "FAIL" }')" \
+        "${crc}/${lanes} = ${pct}%  (arms read 43.7-58.8%, delivery 79.9-95.6%; the floor sits in the empty band)"
+}
+
 # ---------------------------------------------------------------- 0. the binary under test
 cd "$ROOT"
 stamp=$(grep -oE '[0-9a-f]{10}' build/hashes.h 2>/dev/null | head -1)
@@ -412,6 +475,8 @@ if [ -n "$LEG" ]; then
 fi
 if [ -n "${LEGF:-}" ] && [ -f "$LEGF" ]; then
   leg_commit_check "$LEG" "$LEGF" "default"
+  leg_arm_check "$LEG" "$LEGF" "default"
+  leg_crc_check "$LEG" "$LEGF" "default"
   for n in "${NAMEARR[@]}"; do
     grep -qF "]   $n:" "$LEGF" && got=$((got+1))
   done
@@ -459,6 +524,8 @@ if [ -n "$STRESSLEG" ]; then
 fi
 if [ -n "${SF:-}" ] && [ -f "$SF" ]; then
   leg_commit_check "$STRESSLEG" "$SF" "stress"
+  leg_arm_check "$STRESSLEG" "$SF" "stress"
+  leg_crc_check "$STRESSLEG" "$SF" "stress"
   sgot=0
   for n in "${NAMEARR[@]}"; do grep -qF "]   $n:" "$SF" && sgot=$((sgot+1)); done
   check "stress leg $STRESSLEG: the 9 contract NAMES are all present" "9" \

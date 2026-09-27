@@ -7,6 +7,23 @@
 # record or the presence of an instrument, and "cannot read" counts as RED rather than as absent
 # (5.9.97 caught a hard gate printing "None" that looked exactly like a pass).
 #
+# 2026-09-27 REPAIR (this script had gone stale enough to be unusable - measured: 5 of 9 on a healthy
+# delivery leg, p72-n78-batch14). Three kinds of repair, and the distinction matters:
+#
+#   * OUT-OF-DATE LITERALS, corrected: the contract grew to NINE names (lane host participation, 6.97)
+#     while this file still demanded "MET (8 of 8"; and `cbs/lane` is judged on its MEAN (2.00), which is
+#     what the leg prints and what V4 registered - the "max <= 2" literal came from the early legs whose
+#     worst hop happened to be 2, and the current ones read max=5 with the same mean. The worst hop is
+#     now REPORTED, not judged (no threshold was ever registered for it).
+#   * BINDINGS, made explicit: `stale=0` was registered for the DEFAULT regime (under load, 5.9.127 R4
+#     licenses the opposite) and ">= 50% of slots carry a UL grant" for the n1/FDD geometry (a 20 MHz TDD
+#     cell with ul_ratio 0.30 cannot reach 50% by construction). A check whose binding does not match the
+#     leg now reads NOT JUDGED with the reason, instead of FAILing a healthy leg - the rule the milestone
+#     audit already follows for A1-2 ("judged wherever it can be judged, never softened").
+#   * ARM DETECTION, added (the reason this file could certify a leg whose link was deliberately dead):
+#     the same two checks the milestone audit gained - the leg's `knob` lines must carry nothing that
+#     changes behaviour, and CRC-OK/lanes must be >= 60% (arms read 43.7-58.8%, delivery 79.9-95.6%).
+#
 # usage:
 #   bash leg_gate.sh s65-heavy-ul                      # the leg, against the s62 baseline
 #   bash leg_gate.sh s65-heavy-ul s62-default-fenced    # explicit baseline
@@ -77,16 +94,70 @@ def check(name, ok, detail):
     verdict = "PASS" if ok is True else ("RED (cannot read)" if ok is None else "FAIL")
     rows.append((verdict, name, detail))
 
+def check_bound(name, ok, detail, bound_here, reason):
+    """A check whose BINDING does not match this leg reads NOT JUDGED with the reason, never FAIL (2026-09-27).
+    `ok` is only consulted when bound_here is True; `ok=None` there still means RED (cannot read)."""
+    if not bound_here:
+        rows.append(("NOT JUDGED", name, "binding does not match this leg: " + reason))
+        return
+    check(name, ok, detail)
+
+# ---- the leg's own identity: regime and geometry, read from the report header -----------------------
+# Both are needed below, and both are printed by run_leg.sh into the leg's .stderr:
+#   [leg] regime=stress
+#   cell config   : configs/gnb_rf_b200_tdd_n78_20mhz.yml
+leg_regime = f(leg_err, r"\[leg\] regime=(\w+)") or "?"
+leg_cfg    = f(leg_err, r"cell config\s*:\s*(\S+)") or "?"
+is_default = (leg_regime == "default")
+is_n1_fdd  = ("fdd_n1" in leg_cfg)
+
+# ---- ARM DETECTION (2026-09-27): a measurement arm must not certify acceptance ---------------------
+# p84 (ablation arm) satisfied EVERY other criterion in this file: contract 9 of 9, crossings 0.00+0.00,
+# stale=0, gaps=0, cbs/lane=2.00 - with a link that was deliberately dead (CRC-OK 48.4%). Two mechanical
+# facts separate an arm from a delivery leg; both are now judged, and the knob list is FAIL-CLOSED: an
+# unknown knob is refused rather than assumed harmless, so adding a probe is a deliberate act.
+KNOB_ANY = ("OCUDU_METAL_GPU_TIME", "OCUDU_UL_PHASE_SEGMENTS")            # probes: report-only, but they do perturb
+KNOB_EQ  = ("OCUDU_DFT_BATCH_SYMBOLS=14", "OCUDU_DFT_OPEN_BLOCK=1",
+            "OCUDU_DFT_RELEASE_BLOCK=1", "OCUDU_CE_LANE_ORDER=merged")    # == the delivery default
+CRC_FLOOR_PCT = 60.0
+
+knobs = re.findall(r"^knob\s*:\s*(\S+)", leg_err, re.M)
+bad_knobs = [k for k in knobs if (k.split("=")[0] not in KNOB_ANY) and (k not in KNOB_EQ)]
+check("DELIVERY leg: probe knobs only, or a knob at its delivery default",
+      len(bad_knobs) == 0,
+      ("behaviour-changing knob(s): " + " ".join(bad_knobs) +
+       "  <- an arm can satisfy every other criterion here") if bad_knobs
+      else (f"{len(knobs)} knob line(s): " + (" ".join(knobs) if knobs else "<none, which is the strongest case>")))
+
+crc_n  = f(leg_err, r"(\d+) CRC-OK hop")
+lane_n = f(leg_err, r"\[ul_gpu_lane\] lanes=(\d+)")
+if crc_n is None or lane_n is None or int(lane_n) == 0:
+    check("the link decoded: CRC-OK / lanes >= 60%", None, f"crc={crc_n} lanes={lane_n}")
+else:
+    crc_pct = 100.0 * int(crc_n) / int(lane_n)
+    check("the link decoded: CRC-OK / lanes >= 60%", crc_pct >= CRC_FLOOR_PCT,
+          f"{crc_n}/{lane_n} = {crc_pct:.1f}%  (arms read 43.7-58.8%, delivery 79.9-95.6%)")
+
 # BOTH printed forms (2026-09-24): the reader used to know only "MET (8 of 8 checks applicable)", so a
 # contract that FAILED - "NOT MET: 1 of 8 applicable checks failed (mode=gpu)" - printed as None, i.e. as
 # "cannot read" instead of as the failure it was.
+# 2026-09-27: the contract has NINE names since 6.97 (lane host participation), so the literal "8 of 8" is
+# gone; what is judged is "all nine NAMES are present AND MET", which is era-proof (pitfall 28: names).
+NAMES = ["radio sample continuity", "dft radio inputs", "zero-copy wraps", "lane host participation",
+         "ce device estimates", "host device data crossings", "cfo compensation", "baseband metrics",
+         "host sample assembly"]
+names_found = sum(1 for n in NAMES if f"]   {n}:" in leg_err)
 contract = f(leg_err, r"contract ((?:MET|NOT MET)[^\n]*)")
 mode     = f(leg_err, r"contract \(mode=([a-z_]+)\)")
-check("contract 8 of 8, mode=gpu", (contract is not None) and contract.startswith("MET (8 of 8") and mode == "gpu",
-      f"{contract} mode={mode}")
+check("contract: the 9 names present and MET, mode=gpu",
+      (names_found == 9) and (contract is not None) and contract.startswith("MET (9 of 9") and mode == "gpu",
+      f"names {names_found}/9; {contract} mode={mode}")
 
+# 2026-09-27: registered for the DEFAULT regime. Under load, 5.9.127's R4 licenses the opposite (the
+# stressed legs on record read stale=1..2), so a stress leg is not judged on it - reported instead.
 stale = f(leg_err, r"\[ul_pipeline\] stale=(\d+)")
-check("stale = 0", stale == "0", f"stale={stale}")
+check_bound("stale = 0", stale == "0", f"stale={stale} (regime={leg_regime})",
+            bound_here=is_default, reason=f"registered for the default regime; this leg is regime={leg_regime}")
 
 cross = f(leg_err, r"= ([0-9.]+) read\(s\) \+ ([0-9.]+) write\(s\) per hop")
 check("crossings 0.00 + 0.00 per hop", cross == ("0.00", "0.00"), f"{cross}")
@@ -94,9 +165,12 @@ check("crossings 0.00 + 0.00 per hop", cross == ("0.00", "0.00"), f"{cross}")
 cbs  = f(leg_err, r"\[ul_gpu_lane\] lanes=\d+ cbs/lane=([0-9.]+)")
 cbsm = f(leg_err, r"cbs/lane=[0-9.]+ \(max=(\d+)\)")
 drop = f(leg_err, r"cbs/lane=[0-9.]+ \(max=\d+\) dropped=(\d+)")
-check("cbs/lane <= 2.00, max <= 2, dropped = 0",
-      (cbs is not None) and (float(cbs) <= 2.001) and (cbsm == "2") and (drop == "0"),
-      f"cbs/lane={cbs} max={cbsm} dropped={drop}")
+# 2026-09-27: the MEAN is the criterion (it is what V4 registered and what the leg prints); the worst hop
+# is reported. The old "max <= 2" literal came from the early legs, and holding it would fail every
+# current leg (p72..p84 all read max=5 with cbs/lane=2.00).
+check("cbs/lane <= 2.00 (mean) and dropped = 0",
+      (cbs is not None) and (float(cbs) <= 2.001) and (drop == "0"),
+      f"cbs/lane={cbs} dropped={drop}  [reported, not judged: worst hop max={cbsm}]")
 
 gaps = f(leg_err, r"radio sample continuity: (\d+) gaps")
 check("radio sample continuity: 0 gaps", gaps == "0", f"gaps={gaps}")
@@ -104,9 +178,14 @@ check("radio sample continuity: 0 gaps", gaps == "0", f"gaps={gaps}")
 check("VALIDITY: UL >= 2.0 Mbit/s (5x the baseline)",
       (l_mbps is not None) and (l_mbps >= 2.0),
       f"{l_mbps if l_mbps is None else round(l_mbps, 2)} Mbit/s against {b_mbps if b_mbps is None else round(b_mbps, 2)}")
-check("VALIDITY: UL grant in >= 50% of slots",
-      (l_duty is not None) and (l_duty >= 50.0),
-      f"{l_duty if l_duty is None else round(l_duty, 1)}% against {b_duty if b_duty is None else round(b_duty, 1)}%")
+# 2026-09-27: registered on the n1/FDD geometry, where every slot carries uplink. A 20 MHz TDD cell with
+# ul_ratio 0.30 cannot put a grant in 50% of slots by construction (the current stress legs read ~19%
+# while carrying 9.3 Mbit/s, 12x the baseline), so the check is bound to the geometry it was written for.
+check_bound("VALIDITY: UL grant in >= 50% of slots", (l_duty is not None) and (l_duty >= 50.0),
+            f"{l_duty if l_duty is None else round(l_duty, 1)}% against {b_duty if b_duty is None else round(b_duty, 1)}% "
+            f"(config={os.path.basename(leg_cfg)}, regime={leg_regime})",
+            bound_here=is_n1_fdd,
+            reason=f"registered on the n1/FDD geometry; this leg is {os.path.basename(leg_cfg)} (ul_ratio 0.30)")
 
 pool_line = f(leg_err, r"(\[ul_rx_pool\][^\n]*)")
 free_min  = f(leg_err, r"\[ul_rx_pool\].*?free_min=(-?\d+)")
@@ -124,23 +203,34 @@ check("dft radio inputs in the NEW format (5.9.99)", new_fmt is not None, (new_f
 
 print(f"pass 5 gate: {leg_lab}   (baseline {base_lab}, slot {slot_ms} ms)")
 print(f"  leg log: {os.path.basename(leg_log)}")
+print(f"  leg identity: regime={leg_regime}  config={os.path.basename(leg_cfg)}")
 print()
 for verdict, name, detail in rows:
     print(f"  [{verdict:<16}] {name}")
     print(f"                     {detail}")
-red = sum(1 for v, _, _ in rows if v != "PASS")
+red = sum(1 for v, _, _ in rows if v in ("FAIL", "RED (cannot read)"))
+na  = sum(1 for v, _, _ in rows if v == "NOT JUDGED")
+judged = len(rows) - na
+tail = "" if red == 0 else f"  --  {red} to explain"
+if na:
+    tail += f"  ({na} NOT JUDGED: binding does not match this leg)"
 print()
-print(f"  {len(rows) - red} of {len(rows)} checks pass" + ("" if red == 0 else f"  --  {red} to explain"))
+print(f"  {judged - red} of {judged} judged checks pass" + tail)
 
 # ---- INFORMATION, deliberately NOT a tenth row ---------------------------------------------------
-# The milestone table (5.9.54 1) carries the row "dropped slots / RF real-time failures | 0 / 0", and
-# the audit of 5.9.120 found that half of it is a ONE-LEG claim: s47 and s67 read 0, but s62=2, s63=4,
+# The milestone table (5.9.54 1) carries the row "dropped slots / RF real-time failures | 0 / 0", and the
+# audit of 5.9.120 found that half of it is a ONE-LEG claim: s47 and s67 read 0, but s62=2, s63=4,
 # s64b=21, s65=8, s66=40 and s69=33 (all `[RF] [W] Real-time failure in RF: underflow|late`). It is
 # printed here rather than judged because NO THRESHOLD IS REGISTERED, and inventing one inside a gate
 # is how a criterion becomes whatever the last person wanted. What it must not do is stay invisible:
 # a leg with 33 of them currently scores 7 of 9 and looks like the one with 0.
+#
+# 2026-09-27: the RF count also moves with the LINK, not only with the code - the current stress legs
+# (p65..p84) read 1974-3500 of them with `gaps=0` and the pool green. V3 was re-ruled on 2026-09-26 for
+# exactly that reason (dev doc 6.122): "RF <= 10" became "gaps == 0 AND the per-DL-transmission real-time
+# failure rate inside the mode's band". This line stays INFO, and that rate is what V3 is judged by.
 rtf = len(re.findall(r"Real-time failure in RF", leg_txt))
 print()
 print(f"  [INFO           ] RF real-time failures in this leg's .log: {rtf}")
-print(f"                     not a criterion (no threshold registered); 5.9.54's '0 RF failures' row holds only on s47/s67")
+print(f"                     not a criterion (no threshold registered; V3 re-ruled 2026-09-26: gaps==0 + the per-DL rate band)")
 PY
