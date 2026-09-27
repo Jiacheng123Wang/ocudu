@@ -8333,6 +8333,18 @@ cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n
   跑完的判据行：`[metal_stats] … per label` 里要有 **`merged_hop_ablated`** 这一行（没有它 ⇒ 没命中，腿作废）。
 
 
+### 6.134 `p80` 的消去只命中 **1 次**（n=1）：决策点选错（adopt 路）——已修；而那 1 个样本是 **18.1 µs**（2026-09-27）
+
+* **`p80` 的读数**：旋钮两行都在、`[metal_ablate] ABLATION ON` 也在、契约 9/9、`gaps=0`、`cbs/lane=2.00 (max=5)`；
+  但 per-label 表里 **`merged_hop_ablated n=1`**（exec **18.1 µs**），而 `merged_hop n=144941` 仍是 468.6 µs ⇒ **这条腿的对照是好的，消去样本只有 1 个**。
+* **根因（我的）**：决策原本写在 `burst_ensure_open()` 里"新建 cb"的那条分支，而**合并路的那条 cb 是被 adopt 的**（`shared_burst::adopt()`，前端块交棒过来的未提交缓冲）⇒ 绝大多数跳根本没经过那条分支。
+  修法：把决策挪到 **`encoder()` 的第一次调用**（`ablate_this_decided` 每 burst 一次）——**新建路与 adopt 路都覆盖**。
+* 离线复核：`EVERY=1` 下延迟链测试仍然 **5 个用例全 FAIL**（消去确实生效）。
+* ⚠ **那 1 个样本（18.1 µs）只是线索，不是证据**：它方向明确（同样的 cb、同样的结构，去掉活之后 468.6 → 18.1），但 n=1。
+  **下一条腿（`p81-n78-ablate8`，同一命令）就是把它变成证据**：预期 `merged_hop_ablated` 有 ~1.8 万个样本，且若它落在 **~20–80 µs** ⇒
+  **那 ~450 µs 就是这些 kernel 的执行**（下一轮二分 eq/CE/demap）；若它仍 ~450 ⇒ 与"活"无关。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

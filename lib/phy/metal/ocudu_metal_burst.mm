@@ -155,7 +155,12 @@ struct burst_state {
 
   /// True when THIS burst is an ablated one (see ablate_next_burst): its dispatches are bound to the
   /// no-op pipeline and its buffer carries the "ablated" label, so the report keeps the two apart.
-  bool ablate_this_burst = false;
+  /// The decision is taken at the burst's FIRST encoder() call, not when a buffer is created: on the
+  /// merged route the lane's buffer is ADOPTED (shared_burst::adopt) rather than created here, and the
+  /// first version of this switch only decided on the created path - measured on p80, where one hop in
+  /// eight should have been ablated and exactly ONE was (n=1).
+  bool ablate_this_burst  = false;
+  bool ablate_this_decided = false;
 
   ~burst_state()
   {
@@ -375,10 +380,10 @@ static bool burst_ensure_open(burst_state& s)
   if (queue == nil) {
     return false;
   }
-  s.ablate_this_burst = false;
-  s.cb                = [queue commandBuffer];
+  s.ablate_this_burst   = false;
+  s.ablate_this_decided = false;
+  s.cb                  = [queue commandBuffer];
   if (s.cb != nil) {
-    s.ablate_this_burst = ablate_next_burst();
     // Back-end stage fence (S-7g-19, Step 1'): the lane burst reads what the ESTIMATOR wrote - the
     // weights, the per-symbol estimates and the noise variance - and the estimator wrote it into a
     // command buffer of its own, committed as soon as it was encoded so that its GPU work overlaps
@@ -429,6 +434,13 @@ id<MTLComputeCommandEncoder> shared_burst::encoder(id<MTLComputePipelineState> p
   burst_state& s = state();
   if (!burst_ensure_open(s)) {
     return nil;
+  }
+
+  // The ablation decision belongs to the burst, and this is the one place every stage of it passes
+  // through - whether the buffer was created here or adopted from the front end (dev doc 6.133).
+  if (!s.ablate_this_decided) {
+    s.ablate_this_burst   = ablate_next_burst();
+    s.ablate_this_decided = true;
   }
 
   // A stage that accumulated dispatches (instead of encoding one per call) hands them over here,
