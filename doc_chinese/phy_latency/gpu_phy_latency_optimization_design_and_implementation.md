@@ -9398,6 +9398,29 @@ V1 = 1409.1 µs（IQ → LLR，[ul_gpu_pipeline]）
 * 0.1% 的块被推迟 1–6 ms ⇒ 对**均值**的贡献只有**几 µs/跳**（≈0.3% 的 V1），**中位完全不动**；它决定的是 **V1 的 max/p99** —— CPU 路径的 max 是 1.3–2.0 ms，GPU 路径是 6.6–7.9 ms。
 * ⚠ 因此：这条**不是**"可优化项"（不是算法/结构），而是**平台交互的尾部成本**；在判据里它只体现在 `[ul_gpu_pipeline] max` 与 `stale`。
 
+#### ④b ⚠ 腿 `p94-cg-all-light` 作废：**电台 USB 掉线**（2026-09-28 12:08）——本账第一次出现这个失败类
+
+**时间线（全部来自那条腿自己的文件）**：
+
+| 时刻 | 事件 | 出处 |
+|---|---|---|
+| ~12:08:5x | DL 的 RLC 队列开始缓慢积压（`queued_sdus=10`，即 DL 发不出去）| `.log` 的 `[RLC] … queued_sdus=` 行 |
+| 腿内大部分时间 | **RX 无数据**：stdout 共 **52** 行 `Error: exceeded maximum number of timed out receive calls.` —— 每行 = `radio_uhd_rx_stream.cpp` 的 **10 次 ×200 ms 超时**上限 ⇒ 累计 **~104 s 的接收静默** | `.log.stdout` |
+| 12:10:29 | DL 队列涨到 **1000** 个 SDU（87000 B）| `.log` |
+| 崩溃瞬间 | `[ERROR] [STREAMER] recv packet demuxer unexpected sid 0x50` → `libc++abi: terminating due to uncaught exception of type uhd::usb_error: RuntimeError: USBError -5: usb tx2 submit failed: LIBUSB_ERROR_NOT_FOUND` | `.log.stderr` |
+| 收尾 | `Abort trap: 6`，`rc=134`；**无 contract / 无 `[metal_stats]`** ⇒ `run_leg.sh` 正确地打出 `THIS LEG HAS NO COMPLETE REPORT` | `.stdout` |
+
+**这不是实验造成的**：⑤ 号臂**不含** `gpu_load`（外部负载在 ⑦）；机器上当时也没有 `gpu_load` 进程。
+
+★ **它也不是孤立的**：同一失败类（`exceeded maximum number of timed out receive calls`）在档案里**只有两处**，另一处正是 **`p92` 的第一次尝试（11:56，被看门狗强杀那次）**；而夹在中间的 `p92` 重跑（11:59）与 `p93`（12:01）**是干净的**（完整报告、`gaps/ovf=0`、blocks≈calls）。
+⇒ 电台自 **11:56 起就是"边缘状态"**：坏 → 自愈 → 再坏。`LIBUSB_ERROR_NOT_FOUND`（设备/接口在 libusb 视野里消失）指向**USB 物理链路的稳定性**，而不是我们的代码。
+
+**新的运行纪律（本次新增）**：
+
+1. **任何 abort / 看门狗强杀 / `Forcing exit` 之后，先给 B200 断电重启**（拔插 USB，等 ~10 s，最好换口、不走 hub），再 `uhd_find_devices` 确认枚举（本次崩溃后**已能枚举**：`B200 / 000000560 / lutetia`）。
+2. **每条腿的头 ~15 s 看 stdout**：`exceeded maximum…` / `failed receiving packet` 一旦出现 ⇒ **立刻 Ctrl-C**，那条腿必然是 void，不必盲跑 4 分钟。
+3. 报告守卫是有效的：这次它自己喊出了 `NO COMPLETE REPORT`，没有被读成"零值"。
+
 #### ⑤ 机制候选与判别实验（都是"下一步"，未做）
 
 | 候选 | 判别实验 | 代价 |
