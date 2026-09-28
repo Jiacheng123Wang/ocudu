@@ -6,6 +6,7 @@
 #include "lib/scheduler/ue_context/ue_cell_repository.h"
 #include "lib/scheduler/ue_context/ue_repository.h"
 #include "lib/scheduler/ue_scheduling/triggered_ul_grant_scheduler.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
 #include "tests/unittests/scheduler/test_utils/config_generators.h"
 #include "tests/unittests/scheduler/test_utils/result_test_helpers.h"
@@ -34,6 +35,7 @@ class trig_ul_sched_test : public scheduler_test_simulator, public ::testing::Te
 public:
   trig_ul_sched_test() : scheduler_test_simulator(scheduler_test_sim_config{.auto_uci = true, .auto_crc = true})
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BW-16-2");
     add_cell(sched_config_helper::make_default_sched_cell_configuration_request());
   }
 
@@ -264,6 +266,7 @@ class trig_ul_grant_unit_test : public ::testing::Test
 protected:
   trig_ul_grant_unit_test()
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BW-16-2");
     cfg_mgr.add_cell(sched_config_helper::make_default_sched_cell_configuration_request());
     cell_ues.emplace(cfg_mgr.get_cell(CELL_IDX), nullptr);
     ue_repo.register_cell(*cell_ues);
