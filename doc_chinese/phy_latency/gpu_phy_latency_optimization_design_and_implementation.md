@@ -10243,6 +10243,38 @@ p116: tokens_early=signals:0,     by_event:0,     by_complete:36733   ← 对照
 
 ★ **下一步最小方案（不改 PHY 代码）**：① 用 `wip/leg_triage.sh <label>` 给每条腿**先分类**（健康/边缘/病态 + 百分比）；② **病态腿同期**跑 `sudo sample <pid> 10`（+ `ps -M <pid> | wc -l`）把"谁在占 CPU、UHD worker 卡在哪"抓下来；③ 按 M-A/M-B/M-C 的读数分派修法。**只有先把触发条件看见，才有资格谈修哪里。**
 
+#### ⑫ ★★★ macOS **内核调度**视角的排查（用户 2026-09-29 提问）：能查的都查了（**五项负结果**），并备好**一套可执行工具链 + 一个零代码 A/B**
+
+**用户判读（与数据一致）**：CPU 与 GPU **都**会出现，只是**机率**不同 ⇒ 更像"**一直存在的宿主调度危险**，GPU 路径把它的概率抬高"，而不是某个 PHY 模块的缺陷。
+
+**本轮（零腿）的负结果 —— 都排除掉，别再重复**：
+
+| 查什么 | 怎么查 | 结果 |
+|---|---|---|
+| B200 是否与别的设备共用总线 | `ioreg -p IOUSB` | **独占一个 XHCI 控制器**（`AppleT8132USBXHCI@03000000 → USB3 Gen2 Hub → USRP B200`）；手机/键鼠/Dock 在**另外三个**控制器上 ⇒ **总线争用排除** |
+| 有没有第三方进程占用 B200 | `ioreg -l -r -c IOUSBHostDevice` 的 `IOUserClientCreator` | B200 **无外部用户客户端**；但 **UTM(pid 439) 与 Chrome(pid 9970) 各持有 14 个** USB 用户客户端（都在 Dock/键鼠/音频上）⇒ **宿主负载有外部来源**，与"腿的机率不同"可能有关（记录在案，未证实） |
+| 控制器自己有没有报错 | `ioreg` 的 `controller-statistics` / `port-statistics` | `SpuriousInterruptCount=0`、`EOF2Violation*Count=0`、`AddressFailureCount=0`、`EnumerationFailureCount=0`、`link-error-count=0` ⇒ **控制器层面零故障** ⇒ 症状是"**没被及时服务**"，不是"看到了错误" |
+| 统一日志里有没有驱动消息 | `log show --info --debug` 病态窗口（21:50–22:10）vs 健康窗口（22:20–22:50） | USB/GPU 驱动消息 **2 条 vs 0 条**（那 2 条还是 configd 给 Dock 命名的）⇒ **默认级别下 USB 栈不落日志**；要看必须 `sudo log config --subsystem <USB 子系统> --mode level:debug,persist:on` |
+| 调度器暴露了什么 | `sysctl -a \| grep -iE 'sched\|qos'` | `kern.sched: edge`、`sched_rt_avoid_cpu0`、`sched_recommended_cores`；机器 = **Apple M4 Pro，14 核（10P + 4E）** |
+
+**可执行的"内核调度"工具链（本机已验证参数与权限要求）**：
+
+1. ★ **`sudo taskpolicy -l <0..5> -t <0..5> -p <pid>`**：**对运行中的进程改 latency / throughput QoS tier**（`mach/task_policy.h`：`LATENCY_QOS_TIER_0..5`、`THROUGHPUT_QOS_TIER_0..5`，启动默认都是 **TIER_3**）；**`sudo taskinfo <pid>` 把 tier 读回来**（本机 `/usr/bin/taskinfo` 存在、需 root）⇒ **这是"内核调度是不是杠杆"的零代码判据**。
+2. `sudo powermetrics --samplers tasks,interrupts,sfi --show-process-qos-tiers --show-process-wait-times --show-process-amp -i 1000 -n <秒> -o <文件>`：**按进程**给出 QoS tier、**调度等待时间**、**P/E 核分布**，外加**中断落点**与 selective-forced-idle（`powermetrics` 在本机只差 root，参数已验证合法）。
+3. `sudo sample <pid> 5`（用户栈）/ `sudo spindump`（含内核栈）：看 **UHD / libusb 自己的线程**在哪里等 —— 那些线程**不归我们调度**，而融合车道比 CPU 路径多出的唤醒源（Metal 完成回调、lane fence、grid-ready、token 事件）正是首要嫌疑。
+4. ★ 新脚本 **`wip/host_sched_watch.sh <秒> [输出目录]`**（**先跑它、再飞腿**）：开跑前/后各抓一次 XHCI 统计，全程 1 Hz `powermetrics`，gNB 起来时抓 `taskinfo` + 线程表 + 一次 mid-leg `sample`，并把上面那条 `taskpolicy` 命令**带着 pid 打印出来**；腿跑完再用 `wip/leg_triage.sh <label>` 分类。
+
+**预登记的零代码 A/B（下一步就该飞这个）**：
+
+| 腿 | 施加 | 若"调度 tier 是杠杆" | 若"危险在内核 workloop/中断路径" |
+|---|---|---|---|
+| 对照 | 无（`gpu` default，与 `p123` 同配方）| 按当前机率（历史 `gpu` 56/61 病态）| 同 |
+| **升档** | 腿跑到 ~10 s 时 `sudo taskpolicy -l 5 -t 5 -p <pid>` | **`dl_tx_call>1ms` 与 RX 尾巴当场塌到 ≤0.006% / ≤0.01%**，且 `powermetrics` 里该进程调度等待时间下降 | 无变化 |
+| **降档** | 同样在 ~10 s 时 `sudo taskpolicy -l 0 -t 0 -p <pid>` | **当场变严重** | 无变化 |
+
+* 判读：升/降**双向都动** ⇒ 机制 = **进程调度 tier**（修法 = 启动时设 tier，**不动数据路径**，属"策略"而非 PHY）；**都不动** ⇒ 危险在下游（内核 workloop/中断），继续用 ②③ 的内核栈 + 打开 USB 栈 debug 日志。
+* ⚠ **口径**：`[ul_rx_timing]` / `[dl_tx_call]` 是**终值计数器**，腿内切换只有 **RF 失败的时间戳**能切分（所以腿内 A/B 的读数是"切换前/后的 RF 失败速率"，RX 尾巴要**两条腿**对比）；这也再次说明 ⑨ 的**周期打印探针**值得做。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
