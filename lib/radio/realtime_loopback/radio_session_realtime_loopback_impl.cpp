@@ -148,9 +148,10 @@ baseband_gateway_receiver::metadata radio_session_realtime_loopback_impl::receiv
 
   // Sleep until all the requested samples are available in the buffer.
   baseband_gateway_timestamp last_requested_sample_timestamp = next_receive_timestamp + nof_requested_samples - 1;
-  while (last_requested_sample_timestamp > get_current_rf_timestamp()) {
+  while (last_requested_sample_timestamp > current_rf_timestamp) {
     OCUDU_RTSAN_SCOPED_DISABLER(scoped_disabler);
     std::this_thread::sleep_for(std::chrono::microseconds(1));
+    current_rf_timestamp = get_current_rf_timestamp();
   }
 
   // Read samples from the loopback buffer.

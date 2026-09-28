@@ -6,6 +6,7 @@
 #include "ocudu/gateways/baseband/baseband_gateway_receiver.h"
 #include "ocudu/gateways/baseband/baseband_gateway_transmitter.h"
 #include "ocudu/gateways/baseband/buffer/baseband_gateway_buffer_dynamic.h"
+#include "ocudu/ocuduvec/zero.h"
 #include "ocudu/support/executors/task_worker.h"
 #include "ocudu/support/math/complex_normal_random.h"
 #include <gtest/gtest.h>
@@ -157,6 +158,14 @@ protected:
       for (ci16_t& sample : channel_view) {
         sample = generate_random_ci16(tx_dist, tx_rgen[channel_id]);
       }
+    }
+  }
+
+  void zero_baseband_buffer(baseband_gateway_buffer_writer& buffer) const
+  {
+    for (unsigned channel_id = 0; channel_id != nof_channels; ++channel_id) {
+      span<ci16_t> channel_view = buffer.get_channel_buffer(channel_id);
+      ocuduvec::zero(channel_view);
     }
   }
 
@@ -390,6 +399,88 @@ TEST_P(RealtimeLoopbackRadioFixture, TxUnderflow)
 
     // Check that the timestamp matched the expected value.
     ASSERT_EQ(md.ts, start_time + rx_sample_count);
+
+    // Validate data for each channel. Since this test does not run in real time, the received samples should match the
+    // transmitted ones in all cases.
+    check_received_samples(rx_buffer.get_reader(), rx_sample_count);
+
+    rx_sample_count += receive_block_size;
+    remaining_rx_samples -= receive_block_size;
+  }
+
+  // Stop session.
+  session->stop();
+}
+
+// This test checks that when the transmitted samples run out, the receive calls still return without errors
+// indefinitely, and that a subsequent valid transmission is processed correctly.
+TEST_P(RealtimeLoopbackRadioFixture, ReceiveAfterTransmitSamplesRunOut)
+{
+  // Asynchronous task executor.
+  std::unique_ptr<task_executor> async_task_executor = make_task_executor_ptr(*async_task_worker);
+
+  // Notifier.
+  radio_notifier_spy radio_notifier;
+
+  // Radio configuration.
+  radio_configuration::radio radio_config = create_radio_config();
+
+  // Create a custom current time function for the realtime loopback radio. This function advances the RF
+  // timestamp in increments of the RX block size.
+  baseband_gateway_timestamp                    current_rf_timestamp = 1000000;
+  unique_function<baseband_gateway_timestamp()> get_current_rf_timestamp_manual_clock =
+      [&current_rf_timestamp, rx_block_sz = rx_block_size]() { return current_rf_timestamp += rx_block_sz; };
+
+  // Create radio session.
+  std::unique_ptr<radio_session> session = factory->create_with_custom_time(
+      radio_config, *async_task_executor, radio_notifier, get_current_rf_timestamp_manual_clock);
+  ASSERT_NE(session, nullptr);
+
+  // Set starting time.
+  baseband_gateway_timestamp start_time = current_rf_timestamp - rx_block_size;
+
+  // Start processing.
+  session->start(start_time);
+
+  // Get the transmitter and receiver.
+  baseband_gateway_receiver&    receiver    = session->get_baseband_gateway(0).get_receiver();
+  baseband_gateway_transmitter& transmitter = session->get_baseband_gateway(0).get_transmitter();
+
+  // Prepare buffers.
+  baseband_gateway_buffer_dynamic rx_buffer(nof_channels, rx_block_size);
+  baseband_gateway_buffer_dynamic tx_buffer(nof_channels, tx_block_size);
+  tx_buffer.resize(tx_block_size);
+
+  // Write valid buffer samples. The samples are set to zero to avoid confusion with later writes.
+  zero_baseband_buffer(tx_buffer.get_writer());
+  baseband_gateway_transmitter_metadata tx_md;
+  tx_md.ts = current_rf_timestamp + tx_advance_samples;
+  transmitter.transmit(tx_buffer.get_reader(), tx_md);
+  tx_md.ts += tx_block_size;
+
+  // Attempt to read for 100 ms. When the transmitted samples run out, the receive calls should still return without
+  // errors, even if the buffer contents are not valid.
+  baseband_gateway_receiver::metadata rx_md;
+  while (rx_md.ts < start_time + radio_config.sampling_rate_Hz / 10) {
+    rx_md = receiver.receive(rx_buffer.get_writer());
+  }
+
+  // Generate transmit random data for each channel.
+  generate_random_samples(tx_buffer.get_writer());
+
+  // After 100 ms, transmit a valid buffer with random samples. The samples should be processed correctly. Place the
+  // transmission timestamp tx_advance_samples ahead of the last received timestamp.
+  tx_md.ts = rx_md.ts + rx_block_size + tx_advance_samples;
+  transmitter.transmit(tx_buffer.get_reader(), tx_md);
+
+  // Compute the remaining samples to receive.
+  unsigned remaining_rx_samples = (tx_md.ts + tx_block_size) - (rx_md.ts + rx_block_size);
+  unsigned rx_sample_count      = 0;
+  while (remaining_rx_samples > 0) {
+    // Compute the receive block size and receive.
+    unsigned receive_block_size = std::min(rx_block_size, remaining_rx_samples);
+    rx_buffer.resize(receive_block_size);
+    rx_md = receiver.receive(rx_buffer.get_writer());
 
     // Validate data for each channel. Since this test does not run in real time, the received samples should match the
     // transmitted ones in all cases.

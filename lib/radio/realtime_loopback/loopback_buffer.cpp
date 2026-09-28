@@ -105,6 +105,9 @@ void loopback_buffer::read(baseband_gateway_buffer_writer& data, baseband_gatewa
                    timestamp,
                    timestamp + nof_requested_samples,
                    last_tx_ts);
+
+    // Advance the last RX timestamp. This makes the reading position advance, even if there are no available samples.
+    last_rx_timestamp.store(timestamp + nof_requested_samples - 1, std::memory_order_release);
     return;
   }
 
