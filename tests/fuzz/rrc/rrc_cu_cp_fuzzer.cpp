@@ -28,6 +28,7 @@
 #include "ocudu/ran/rb_id.h"
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <mutex>
 
 using namespace ocudu;
@@ -64,6 +65,8 @@ void ensure_state()
 {
   std::call_once(g_init_flag, []() {
     g_state = new fuzz_state();
+
+    std::atexit([]() { g_state->worker.stop(); });
 
     // Bring one UE all the way up before fuzzing starts. A broken security bring-up is otherwise
     // invisible: every payload would be dropped by PDCP on integrity failure and the harness would

@@ -29,6 +29,7 @@
 #include "ocudu/ocudulog/ocudulog.h"
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 
@@ -84,6 +85,8 @@ void ensure_state()
 {
   std::call_once(g_init_flag, []() {
     g_state = new fuzz_state();
+
+    std::atexit([]() { g_state->worker.stop(); });
 
     // Bring one UE all the way up before fuzzing starts, so that a broken bring-up shows as an abort
     // rather than as a harness that only ever reaches the UE lookup.
