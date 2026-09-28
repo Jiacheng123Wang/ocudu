@@ -120,7 +120,9 @@ is_n1_fdd  = ("fdd_n1" in leg_cfg)
 # stale=0, gaps=0, cbs/lane=2.00 - with a link that was deliberately dead (CRC-OK 48.4%). Two mechanical
 # facts separate an arm from a delivery leg; both are now judged, and the knob list is FAIL-CLOSED: an
 # unknown knob is refused rather than assumed harmless, so adding a probe is a deliberate act.
-KNOB_ANY = ("OCUDU_METAL_GPU_TIME", "OCUDU_UL_PHASE_SEGMENTS")            # probes: report-only, but they do perturb
+# Probes: report-only, but they do perturb (see milestone_audit.sh: the category rule and why
+# OCUDU_UL_SLOT_TRACE is one of them).
+KNOB_ANY = ("OCUDU_METAL_GPU_TIME", "OCUDU_UL_PHASE_SEGMENTS", "OCUDU_UL_SLOT_TRACE")
 KNOB_EQ  = ("OCUDU_DFT_BATCH_SYMBOLS=14", "OCUDU_DFT_OPEN_BLOCK=1",
             "OCUDU_DFT_RELEASE_BLOCK=1", "OCUDU_CE_LANE_ORDER=merged")    # == the delivery default
 CRC_FLOOR_PCT = 60.0

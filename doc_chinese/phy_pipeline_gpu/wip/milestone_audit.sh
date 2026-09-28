@@ -216,7 +216,12 @@ leg_commit_check() {   # <label> <leg .stderr path> <kind>
 #       hops / scheduled hops, so with a nearly idle phone it measures the PHONE, not the code - p85
 #       (default regime, no load generator: 660 hops in 118s) reads 60.0% while the SAME BINARY under load
 #       (p86: 145341 hops) reads 86.0%. Below kCRC_MIN_HOPS the check is therefore REPORTED, not judged.
-kNOB_ANY=" OCUDU_METAL_GPU_TIME OCUDU_UL_PHASE_SEGMENTS "                       # probes: report-only, but they do perturb
+# Probes: report-only (they change no delivery decision), but they DO perturb - each costs host work on a
+# path the leg is measuring, which is why the leg's own [ul_rx_timing] loop/slip readings stay part of its
+# evidence. A knob belongs here by CATEGORY, not by name: OCUDU_UL_SLOT_TRACE joined when the [ul_slot_trace]
+# instrumentation was read on an acceptance leg (dev doc 6.145 (6) (1)); the behaviour-changing knobs stay
+# refused below.
+kNOB_ANY=" OCUDU_METAL_GPU_TIME OCUDU_UL_PHASE_SEGMENTS OCUDU_UL_SLOT_TRACE "
 kNOB_EQ=" OCUDU_DFT_BATCH_SYMBOLS=14 OCUDU_DFT_OPEN_BLOCK=1 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_CE_LANE_ORDER=merged " # == the delivery default
 kCRC_FLOOR_PCT=60
 kCRC_MIN_HOPS=20000
