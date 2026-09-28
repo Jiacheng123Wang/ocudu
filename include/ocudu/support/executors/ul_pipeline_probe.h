@@ -559,27 +559,27 @@ public:
     }
     rx_wait_us.push_back(static_cast<double>(wait_ns) / 1e3);
 
-    // The M2 SAME-LEG TEST (dev doc 6.150 (6)): does this receive's own window overlap one in which the host was
-    // blocked on a Metal completion? The ring is walked in full every receive (16 compares at ~2 kHz - nothing),
-    // and the report prints the two rates next to the null hypothesis's prediction, the blocking duty cycle.
-    if ((begin_ns != 0) && (end_ns >= begin_ns) && (dft_block_count != 0)) {
+    // The SAME-LEG TEST (dev doc 6.150 (6)): does this receive's own window overlap one of the submission's
+    // windows, per kind? Three rings of 16 walked in full every receive - 48 compares at ~2 kHz, nothing - and the
+    // report prints every rate next to the duty cycle of the window it was measured against, because that duty
+    // cycle is exactly what the coincidence reading predicts.
+    if ((begin_ns != 0) && (end_ns >= begin_ns) && (dft_block_count[0] != 0)) {
       ++rx_overlap_seen;
-      const bool overlaps = [&] {
-        for (size_t i = 0; i != max_dft_block_windows; ++i) {
-          const dft_block_window& w = dft_block_windows[i];
-          if ((w.end_ns > w.begin_ns) && (begin_ns < w.end_ns) && (w.begin_ns < end_ns)) {
-            return true;
-          }
-        }
-        return false;
-      }();
-      if (wait_ns >= rx_slow_ns) {
+      const bool slow = (wait_ns >= rx_slow_ns);
+      if (slow) {
         ++rx_slow_seen;
       }
-      if (overlaps) {
-        ++rx_overlap_total;
-        if (wait_ns >= rx_slow_ns) {
-          ++rx_overlap_slow;
+      for (size_t k = 0; k != static_cast<size_t>(dft_window_kind::count); ++k) {
+        bool hit = false;
+        for (size_t i = 0; (i != max_dft_block_windows) && !hit; ++i) {
+          const dft_block_window& w = dft_block_windows[k][i];
+          hit                       = (w.end_ns > w.begin_ns) && (begin_ns < w.end_ns) && (w.begin_ns < end_ns);
+        }
+        if (hit) {
+          ++rx_overlap_total[k];
+          if (slow) {
+            ++rx_overlap_slow[k];
+          }
         }
       }
     }
@@ -776,18 +776,37 @@ public:
   /// \param[in] begin_ns/end_ns The window itself, on the same steady clock record_rx_wait() timestamps with,
   ///                 when the caller can supply it: that is what turns this series into the same-leg test for the
   ///                 receive tail (see the overlap account below). 0 means "duration only".
-  void record_dft_wait(int64_t wait_ns, int64_t begin_ns = 0, int64_t end_ns = 0)
+  void record_dft_wait(int64_t wait_ns,
+                       int64_t begin_ns         = 0,
+                       int64_t end_ns           = 0,
+                       int64_t commit_begin_ns  = 0,
+                       int64_t gpu_begin_ns     = 0,
+                       int64_t gpu_end_ns       = 0,
+                       int64_t gpu_offset_ns    = 0)
   {
     if (wait_ns < 0) {
       return;
     }
     std::lock_guard<std::mutex> lock(mutex);
     dft_wait_us.push_back(static_cast<double>(wait_ns) / 1e3);
-    if ((begin_ns != 0) && (end_ns > begin_ns)) {
-      dft_block_windows[dft_block_next] = dft_block_window{begin_ns, end_ns};
-      dft_block_next                   = (dft_block_next + 1) % max_dft_block_windows;
-      ++dft_block_count;
-      dft_block_total_ns += (end_ns - begin_ns);
+    const auto place = [&](dft_window_kind kind, int64_t b, int64_t e) {
+      if ((b == 0) || (e <= b)) {
+        return;
+      }
+      const size_t k                       = static_cast<size_t>(kind);
+      dft_block_windows[k][dft_block_next[k]] = dft_block_window{b, e};
+      dft_block_next[k]                    = (dft_block_next[k] + 1) % max_dft_block_windows;
+      ++dft_block_count[k];
+      dft_block_total_ns[k] += static_cast<uint64_t>(e - b);
+    };
+    place(dft_window_kind::wait, begin_ns, end_ns);
+    // The commit window runs from just before the command buffer is committed to the end of the wait, so it
+    // contains whatever the driver does at submission time - the interval M2's wait-only window could not see.
+    place(dft_window_kind::commit_to_end, commit_begin_ns, end_ns);
+    place(dft_window_kind::gpu, gpu_begin_ns, gpu_end_ns);
+    if (gpu_offset_ns != 0) {
+      gpu_clock_offset_ns = gpu_offset_ns;
+      ++gpu_clock_samples;
     }
   }
 
@@ -1228,22 +1247,51 @@ public:
     // fall inside those windows almost always; if it is a coincidence, they should overlap at the rate the
     // windows' duty cycle predicts (measured on the blocking arms: ~4%).
     {
-      const double slow_rate = (rx_slow_seen != 0) ? (100.0 * rx_overlap_slow / rx_slow_seen) : 0.0;
-      const double all_rate  = (rx_overlap_seen != 0) ? (100.0 * rx_overlap_total / rx_overlap_seen) : 0.0;
-      const double duty      = (leg_span_ns > 0) ? (100.0 * static_cast<double>(dft_block_total_ns) / leg_span_ns) : 0.0;
-      // THE LINE TO READ: the slow-receive overlap rate against the duty cycle. Coincidence predicts the two are
-      // equal; the blocking being the cause predicts the first is near 100% whatever the second is.
-      std::fprintf(stderr,
-                   "[ul_rx_wait] DFT-blocking overlap: %llu blocking window(s) = %.0f%% of the leg; slow (>1 ms) "
-                   "receives %llu of %llu overlapped one = %.0f%% (a coincidence predicts %.0f%%; all receives "
-                   "%.0f%%)\n",
-                   static_cast<unsigned long long>(dft_block_count),
-                   duty,
-                   static_cast<unsigned long long>(rx_overlap_slow),
+      // Each array has its OWN denominator: the slow rates are out of the slow receives, the "all receives" ones
+      // out of every receive the account saw. Mixing them is the same mistake this account already made once (it
+      // read 50% for a leg whose only slow receive did overlap), so the two are computed by two lambdas.
+      const auto rate = [&](size_t k, const std::array<uint64_t, 3>& c, uint64_t den) {
+        return (den != 0) ? (100.0 * static_cast<double>(c[k]) / static_cast<double>(den)) : 0.0;
+      };
+      const auto duty = [&](size_t k) {
+        return (leg_span_ns > 0) ? (100.0 * static_cast<double>(dft_block_total_ns[k]) / leg_span_ns) : 0.0;
+      };
+      const auto kind_name = [](size_t k) {
+        switch (static_cast<dft_window_kind>(k)) {
+          case dft_window_kind::wait:
+            return "wait";
+          case dft_window_kind::commit_to_end:
+            return "commit->end";
+          case dft_window_kind::gpu:
+            return "gpu";
+          default:
+            return "?";
+        }
+      };
+      // THE LINE TO READ: each overlap rate next to the duty cycle of the window it was measured against.
+      // Coincidence predicts rate == duty; that window being the cause predicts rate ~ 100% and duty ~ whatever.
+      // The NUMERATORS are printed, not only the rates: a rate alone cannot be checked (or compared between two
+      // legs whose receive counts differ), and a reader who wants "how many of the slow ones fell in the GPU span"
+      // should not have to reconstruct it from two percentages.
+      std::fprintf(stderr, "[ul_rx_wait] DFT-window overlap: %llu slow of %llu receive(s) accounted",
                    static_cast<unsigned long long>(rx_slow_seen),
-                   slow_rate,
-                   duty,
-                   all_rate);
+                   static_cast<unsigned long long>(rx_overlap_seen));
+      for (size_t k = 0; k != static_cast<size_t>(dft_window_kind::count); ++k) {
+        std::fprintf(stderr,
+                     "; %s %llu/%llu=%.0f%% vs duty %.1f%% (%llu win, all %llu/%llu=%.0f%%)",
+                     kind_name(k),
+                     static_cast<unsigned long long>(rx_overlap_slow[k]),
+                     static_cast<unsigned long long>(rx_slow_seen),
+                     rate(k, rx_overlap_slow, rx_slow_seen),
+                     duty(k),
+                     static_cast<unsigned long long>(dft_block_count[k]),
+                     static_cast<unsigned long long>(rx_overlap_total[k]),
+                     static_cast<unsigned long long>(rx_overlap_seen),
+                     rate(k, rx_overlap_total, rx_overlap_seen));
+      }
+      std::fprintf(stderr, "; gpu-clock offset last %.0fus over %llu sample(s)\n",
+                   static_cast<double>(gpu_clock_offset_ns) / 1e3,
+                   static_cast<unsigned long long>(gpu_clock_samples));
     }
     print_slot_trace();
     print_by_size();
@@ -1560,16 +1608,31 @@ private:
     int64_t begin_ns = 0;
     int64_t end_ns   = 0;
   };
+  /// WHICH WINDOW of a submission the timestamps describe (dev doc 6.150 (6), the M2b step).
+  ///
+  /// M2 asked whether a slow receive falls inside the host's waitUntilCompleted and answered NO: 7% of the slow
+  /// receives overlapped it, exactly like 7% of ALL receives (duty cycle 4%) - no enrichment. But that test could
+  /// only see the WAIT, which is neither the driver's work at COMMIT time nor the cb's GPU EXECUTION, and those are
+  /// the two remaining candidates: a stall inside the GPU span is memory/device contention, one inside the commit
+  /// span is driver submission work, and one in neither means the two share an upstream cause instead.
+  enum class dft_window_kind : unsigned { wait = 0, commit_to_end = 1, gpu = 2, count = 3 };
   static constexpr size_t max_dft_block_windows = 16;
-  std::array<dft_block_window, max_dft_block_windows> dft_block_windows{};
-  size_t   dft_block_next     = 0;
-  uint64_t dft_block_count    = 0;
-  uint64_t dft_block_total_ns = 0;
-  /// Receive calls the account could be applied to at all (a blocking DFT window was known), then those whose
-  /// window overlapped one, and of those the slow (>1 ms) ones.
-  uint64_t rx_overlap_seen  = 0;
-  uint64_t rx_overlap_total = 0;
-  uint64_t rx_overlap_slow  = 0;
+  std::array<std::array<dft_block_window, max_dft_block_windows>, static_cast<size_t>(dft_window_kind::count)>
+      dft_block_windows{};
+  std::array<size_t, static_cast<size_t>(dft_window_kind::count)>   dft_block_next{};
+  std::array<uint64_t, static_cast<size_t>(dft_window_kind::count)> dft_block_count{};
+  std::array<uint64_t, static_cast<size_t>(dft_window_kind::count)> dft_block_total_ns{};
+  /// The last (host at wait end) - GPUEndTime offset. It exists to VALIDATE the comparison instead of assuming it:
+  /// the GPU timestamps share the host steady clock's epoch (ocudu_metal_burst.mm already computes
+  /// `now - cb.GPUEndTime`), and this number is what says so on a leg - small and positive means the window is
+  /// placed correctly, a huge value would mean the two clocks disagree and the gpu column is meaningless.
+  int64_t  gpu_clock_offset_ns = 0;
+  uint64_t gpu_clock_samples   = 0;
+  /// Receive calls the account could be applied to at all, then those whose window overlapped one of the
+  /// submission's windows, per kind, and of those the slow (>1 ms) ones.
+  uint64_t rx_overlap_seen = 0;
+  std::array<uint64_t, static_cast<size_t>(dft_window_kind::count)> rx_overlap_total{};
+  std::array<uint64_t, static_cast<size_t>(dft_window_kind::count)> rx_overlap_slow{};
   /// Every slow receive, whether it overlapped or not: without this denominator the ratio above says nothing
   /// (measured while writing this account: printing rx_overlap_slow over rx_overlap_seen gave "1 (50%)" for a leg
   /// where the only slow receive WAS the one that overlapped - the 50% was the fast receive next to it).
@@ -1626,7 +1689,15 @@ public:
   {
   }
   void record_slot_rx_wait(uint64_t /*slot*/, int64_t /*wait_ns*/, bool /*spans_stream_start*/ = false) {}
-  void record_dft_wait(int64_t /*wait_ns*/, int64_t /*begin_ns*/ = 0, int64_t /*end_ns*/ = 0) {}
+  void record_dft_wait(int64_t /*wait_ns*/,
+                       int64_t /*begin_ns*/        = 0,
+                       int64_t /*end_ns*/          = 0,
+                       int64_t /*commit_begin_ns*/ = 0,
+                       int64_t /*gpu_begin_ns*/    = 0,
+                       int64_t /*gpu_end_ns*/      = 0,
+                       int64_t /*gpu_offset_ns*/   = 0)
+  {
+  }
   std::optional<ul_phase_durations> get_phase_durations(uint64_t /*slot*/) { return std::nullopt; }
   /// P0-5's pairing hook, compiled out with the rest of the probe: there are no phase samples to announce, so a
   /// caller that registers an observer is told nothing - which is also what the lane probe's report says (it

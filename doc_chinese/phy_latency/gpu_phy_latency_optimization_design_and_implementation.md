@@ -9614,7 +9614,15 @@ slow (>1 ms) receives 26 of 387 overlapped one = 7%  (a coincidence predicts 4%;
 * ⚠ **覆盖范围的诚实声明（这决定了"否"的强度）**：我记录的窗口是 **`[wait_begin, wait_end]`**，即**阻塞区间本身**。它**不覆盖**：(a) 提交/编码那一刻的驱动处理（`commit_open()` 到 wait 开始之间）；(b) 该 cb 的 **GPU 执行窗口**（`GPUStartTime → GPUEndTime`，引擎其实已经在读这两个时间戳）。
   ⇒ 所以"否"的边界是：**停顿不在"宿主等待"里**；它是否落在"驱动提交期"或"GPU 执行期"里**还没测**。
 
-**下一步仪表（小改，窗口按种类分开）**：每次提交记**三个窗口**（`commit → wait_end`、`GPUStart → GPUEnd`、`wait` 本身），报告分别给重叠率 ⇒ 一次就能分辨"停顿在 GPU 执行里"（访存争用）/"在驱动提交处理里"/"两者都不在"（⇒ 上游另有共同原因）。
+**下一步仪表（小改，窗口按种类分开）—— ✅ 已实现（2026-09-28）**：每次提交记**三个窗口**（`commit → wait_end`、`GPUStart → GPUEnd`、`wait` 本身），报告给出**每一类的命中数/慢接收数 = 率 vs 该类窗口的占空比**：
+```
+[ul_rx_wait] DFT-window overlap: S slow of M receive(s) accounted; wait h/S=P% vs duty D% (W win, all a/M=q%);
+             commit->end …; gpu …; gpu-clock offset last Zus over K sample(s)
+```
+* **分子与占空比都打出来**：只给比率无法核对，也无法在两条样本数不同的腿之间比较。
+* ★ **`gpu-clock offset` 是"把假设变成读数"的那一项**：GPU 时间戳与宿主 `steady_clock` 是否同基准**不靠假设**（`ocudu_metal_burst.mm` 已有 `now − cb.GPUEndTime` 的用法），报告打出的偏移应当是**小的正值**；若它巨大，则 `gpu` 列无意义（那种情况下我会先修换算再读）。
+* 离线自证：`the_three_submission_windows_are_counted_apart`（嵌套情形三列都命中；**非嵌套**情形只有 `gpu` 列命中；一小时外的那次任何列都不命中）+ 两个反向臂（三列共用一个环 ⇒ FAIL；GPU 环不填充 ⇒ FAIL），**10/10 PASS**、`ctest -L phy -j 1` **203/203**。
+* ⚠ 写这两个用例时又踩到**同一类坑两次**并都已修：① 比率的分母混用（"all receives" 要用自己的分母）；② 探针是**进程级单例**，ctest 每个用例独立进程、而直接跑二进制不是 ⇒ 断言改为**增量**，且"不该命中"的接收放在**任何窗口都不可能覆盖的时刻**。
 
 **下一步（M2 的因果检验，代码小改已登记）**
 

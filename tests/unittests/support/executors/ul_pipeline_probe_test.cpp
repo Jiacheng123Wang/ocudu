@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <gtest/gtest.h>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -126,6 +127,20 @@ std::string capture_report()
   }
   std::fclose(capture);
   return out;
+}
+
+/// The DFT-window overlap counters of a report: {slow seen, wait hits, commit->end hits, gpu hits, gpu-clock
+/// samples}. Shared by the two M2 cases, because a COUNT is what they assert on: the probe is a process-wide
+/// singleton, ctest runs each case in its own process and a direct run of this binary does not, so absolute values
+/// hold in one mode and not the other - deltas hold in both.
+std::array<long long, 5> dft_window_counts(const std::string& report)
+{
+  auto num = [&](const char* pat) {
+    std::smatch m;
+    return std::regex_search(report, m, std::regex(pat)) ? std::strtoll(m[1].str().c_str(), nullptr, 10) : -1LL;
+  };
+  return {num(R"((\d+) slow of )"), num(R"(wait (\d+)/)"), num(R"(commit->end (\d+)/)"), num(R"(gpu (\d+)/)"),
+          num(R"(offset last -?\d+us over (\d+) sample)")};
 }
 
 /// Offset of the "<name>] samples=" header of a series, or npos when the report carries no line for it.
@@ -883,6 +898,8 @@ TEST(ul_pipeline_probe_test, slow_receives_are_tested_against_the_dft_blocking_w
   };
   const auto t0 = std::chrono::steady_clock::now();
 
+  const auto before = dft_window_counts(capture_report());
+
   // One blocking window, 400 us long: the shape the device-grid arms show (384 us median).
   const auto win_begin = t0;
   const auto win_end   = t0 + std::chrono::microseconds(400);
@@ -893,21 +910,106 @@ TEST(ul_pipeline_probe_test, slow_receives_are_tested_against_the_dft_blocking_w
                        /*spans_stream_start=*/false,
                        ns(win_begin + std::chrono::microseconds(100)),
                        ns(win_begin + std::chrono::microseconds(2100)));
-  // (b) ... and a fast one that ends BEFORE it starts: it must not be counted as an overlap.
+  // (b) ... and a fast one that cannot overlap ANY window this process has recorded: an hour before now. Placing
+  // it microseconds before the window was not enough - in a direct (single-process) run the ring still holds the
+  // windows of the cases that ran before this one, and the "no overlap" half of the test then fails for a reason
+  // that has nothing to do with the code under test (measured while writing the M2b case below).
   probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::microseconds(500)).count(),
                        /*spans_stream_start=*/false,
-                       ns(win_begin - std::chrono::microseconds(900)),
-                       ns(win_begin - std::chrono::microseconds(400)));
+                       ns(win_begin - std::chrono::hours(1)),
+                       ns(win_begin - std::chrono::hours(1) + std::chrono::microseconds(500)));
 
   const std::string report = capture_report();
-  // THE LINE THAT MATTERS: the slow receive overlapped (100% of the slow ones), against the coincidence reading
-  // the same line prints next to it. Two receives were seen and only one of them was slow, so a denominator mix-up
-  // shows up here as 50% - which is how the first version of this account was caught.
-  EXPECT_NE(report.find("slow (>1 ms) receives 1 of 1 overlapped one = 100%"), std::string::npos) << report;
-  EXPECT_NE(report.find("1 blocking window(s)"), std::string::npos) << report;
-  // The duty cycle is printed next to them, because it is the number the coincidence reading predicts - the whole
-  // point of the line is that a reader compares the two without having to know which is which.
-  EXPECT_NE(report.find("(a coincidence predicts"), std::string::npos) << report;
+  const auto        after  = dft_window_counts(report);
+  ASSERT_GE(after[0], 0LL) << report;
+  // One slow receive was recorded and it overlapped the wait; this case records NO commit and NO gpu window, so
+  // those two columns must stay where they were - which is the check that the wait column is not simply "everything
+  // that is slow".
+  EXPECT_EQ(after[0] - before[0], 1) << report;
+  EXPECT_EQ(after[1] - before[1], 1) << "the slow receive overlapped the wait" << report;
+  EXPECT_EQ(after[2] - before[2], 0) << "no commit window was recorded" << report;
+  EXPECT_EQ(after[3] - before[3], 0) << "no GPU window was recorded" << report;
+  // The duty cycle is printed next to each rate, because it is the number the coincidence reading predicts.
+  EXPECT_NE(report.find("vs duty"), std::string::npos) << report;
+}
+
+/// EACH SUBMISSION WINDOW IS COUNTED APART: the wait, the commit-to-end span and the GPU execution span.
+///
+/// M2 could only see the wait, and answered "no" (7% overlap against a 7% baseline). The two it could not see are
+/// the driver's commit-time work and the cb's GPU execution, and telling them apart is the whole point of M2b: a
+/// stall inside the GPU span is device/memory contention, one inside the commit span is driver submission work,
+/// and one in neither means the two share an upstream cause. This case builds a receive that overlaps ONLY the GPU
+/// window and asserts it lands in that column and not in the others - the mistake that would make the whole test
+/// say "gpu" for every stall would be a window placed on the wrong clock.
+TEST(ul_pipeline_probe_test, the_three_submission_windows_are_counted_apart)
+{
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+  const auto                ns    = [](std::chrono::steady_clock::time_point tp) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
+  };
+  const auto t0 = std::chrono::steady_clock::now();
+
+  // The counters are process-wide (the probe is a singleton) and ctest runs each case in its own process while a
+  // direct run of this binary does not, so the assertions are DELTAS: the same case then holds either way. This is
+  // the second time this file has been bitten by that difference (the rebase counter case was the first).
+  const auto before = dft_window_counts(capture_report());
+
+  // commit at t0, the wait runs t0+200us..t0+600us, and the GPU executes inside it (t0+250us..t0+450us).
+  const auto commit   = t0;
+  const auto w_begin  = t0 + std::chrono::microseconds(200);
+  const auto w_end    = t0 + std::chrono::microseconds(600);
+  const auto g_begin  = t0 + std::chrono::microseconds(250);
+  const auto g_end    = t0 + std::chrono::microseconds(450);
+  probe.record_dft_wait(std::chrono::nanoseconds(std::chrono::microseconds(400)).count(),
+                        ns(w_begin),
+                        ns(w_end),
+                        ns(commit),
+                        ns(g_begin),
+                        ns(g_end),
+                        std::chrono::nanoseconds(std::chrono::microseconds(5)).count());
+
+  // (a) A slow receive INSIDE the GPU span - which is also inside the wait and inside commit->end, exactly as a
+  // real submission nests. It must be counted in all three.
+  probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::milliseconds(2)).count(),
+                       /*spans_stream_start=*/false,
+                       ns(g_begin + std::chrono::microseconds(10)),
+                       ns(g_end - std::chrono::microseconds(10)));
+  // (a2) A SECOND submission whose windows are deliberately NOT nested: its GPU span sits 5 ms BEFORE its commit
+  // and wait. A receive inside that span must then be claimed by the gpu column ONLY - which is what makes the
+  // columns demonstrably separate rather than merely present (a single shared ring would count it everywhere, and a
+  // gpu ring that is never filled would count it nowhere).
+  const auto g2_begin = t0 - std::chrono::microseconds(5000);
+  const auto g2_end   = t0 - std::chrono::microseconds(4000);
+  probe.record_dft_wait(std::chrono::nanoseconds(std::chrono::microseconds(300)).count(),
+                        ns(w_begin),
+                        ns(w_end),
+                        ns(commit),
+                        ns(g2_begin),
+                        ns(g2_end),
+                        std::chrono::nanoseconds(std::chrono::microseconds(5)).count());
+  probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::milliseconds(2)).count(),
+                       /*spans_stream_start=*/false,
+                       ns(g2_begin + std::chrono::microseconds(10)),
+                       ns(g2_end - std::chrono::microseconds(10)));
+
+  // (b) A slow receive that NO window may claim: an hour AFTER now, so it cannot intersect the windows of this
+  // case nor those a previous case left in the process-wide ring. This is the discriminating half - a window
+  // placed on the wrong clock, or an intersection test that is too loose, would count this one too.
+  probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::milliseconds(2)).count(),
+                       /*spans_stream_start=*/false,
+                       ns(commit + std::chrono::hours(1)),
+                       ns(commit + std::chrono::hours(1) + std::chrono::milliseconds(2)));
+
+  const std::string report = capture_report();
+  const auto        after  = dft_window_counts(report);
+  ASSERT_GE(before[0], 0LL) << report;
+  ASSERT_GE(after[0], 0LL) << report;
+  EXPECT_EQ(after[0] - before[0], 3) << "three slow receives were recorded ((a), (a2), (b))" << report;
+  EXPECT_EQ(after[1] - before[1], 1) << "only (a) overlaps the wait" << report;
+  EXPECT_EQ(after[2] - before[2], 1) << "only (a) overlaps commit->end" << report;
+  EXPECT_EQ(after[3] - before[3], 2) << "(a) and (a2) overlap the GPU span, (b) does not" << report;
+  EXPECT_EQ(after[4] - before[4], 2) << "the GPU clock offset was sampled once per submission" << report;
+  EXPECT_NE(report.find("gpu-clock offset last 5us over"), std::string::npos) << report;
 }
 
 /// A LATER SFN CYCLE REBASES A SLOT INSTEAD OF REUSING THE PREVIOUS CYCLE'S LANDMARKS.

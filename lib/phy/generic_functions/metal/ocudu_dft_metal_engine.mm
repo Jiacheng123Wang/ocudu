@@ -2102,6 +2102,9 @@ bool dft_metal_engine::wait_slot(unsigned slot)
   }
   // The transform of this slot may still be sitting in the OPEN command buffer of its block: commit it
   // first, or the wait below would target a buffer that has not been committed at all.
+  // The COMMIT instant goes with the wait (dev doc 6.150 (6), M2b): the driver's submission-time work sits between
+  // here and the wait, and that interval is what M2's wait-only window could not see.
+  const auto commit_begin = std::chrono::steady_clock::now();
   if (engine->open_cb != nil) {
     (void)commit_open();
   }
@@ -2115,12 +2118,30 @@ bool dft_metal_engine::wait_slot(unsigned slot)
   // synchronization actually occupies the caller - not the GPU span (last_gpu_us) of the buffer it waits for.
   const auto wait_begin = std::chrono::steady_clock::now();
   [cmd_buf waitUntilCompleted];
-  const auto wait_end = std::chrono::steady_clock::now();
-  // The WINDOW, not only its length: the receive side tests its own windows against this one (dev doc 6.150 (6)).
+  const auto wait_end    = std::chrono::steady_clock::now();
+  const auto ns          = [](std::chrono::steady_clock::time_point tp) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
+  };
+  // The WINDOWS, not only the length: the receive side tests its own windows against each of them (dev doc 6.150
+  // (6)). The GPU span is converted with the offset the host observes at the end of the wait, so no assumption
+  // about the two clocks sharing an epoch is needed - and the offset itself is reported, which is what turns that
+  // assumption into a reading (it should be small and positive).
+  int64_t gpu_begin_ns = 0;
+  int64_t gpu_end_ns   = 0;
+  int64_t gpu_off_ns   = 0;
+  if ((cmd_buf.GPUStartTime > 0.0) && (cmd_buf.GPUEndTime > 0.0)) {
+    gpu_begin_ns = static_cast<int64_t>(cmd_buf.GPUStartTime * 1e9);
+    gpu_end_ns   = static_cast<int64_t>(cmd_buf.GPUEndTime * 1e9);
+    gpu_off_ns   = ns(wait_end) - gpu_end_ns;
+  }
   ul_pipeline_probe::get().record_dft_wait(
       std::chrono::duration_cast<std::chrono::nanoseconds>(wait_end - wait_begin).count(),
-      std::chrono::duration_cast<std::chrono::nanoseconds>(wait_begin.time_since_epoch()).count(),
-      std::chrono::duration_cast<std::chrono::nanoseconds>(wait_end.time_since_epoch()).count());
+      ns(wait_begin),
+      ns(wait_end),
+      ns(commit_begin),
+      gpu_begin_ns,
+      gpu_end_ns,
+      gpu_off_ns);
   if (cmd_buf.status != MTLCommandBufferStatusCompleted) {
     ocudulog::fetch_basic_logger("PHY").error("Metal DFT: slot {} command buffer failed with status {}",
                                               slot,
