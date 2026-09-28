@@ -283,7 +283,7 @@ TEST(event_trigger_asn1, event_d1_matches_its_conditional_counterpart)
 {
   OCUDU_TEST_REQUIREMENTS("CU-NTN-MOB-2", "CU-NTN-MOB-3");
 
-  rrc_event_id event_id;
+  rrc_event_id event_id{};
   event_id.id                        = rrc_event_id::event_id_t::d1;
   event_id.distance_thresh_from_ref1 = 5000;
   event_id.distance_thresh_from_ref2 = 3000;
@@ -401,3 +401,156 @@ TEST(event_trigger_asn1, event_a5_encodes_both_thresholds)
   EXPECT_EQ(ev.a5_thres1.rsrp(), 40);
   EXPECT_EQ(ev.a5_thres2.rsrq(), 20);
 }
+
+// ============================================================================
+// Event-based measurement reporting for events A1-A6 (CU-GEN-6).
+// Each event is configured with distinct values and converted into a full reportConfigNR, which is packed and
+// unpacked, so that the configuration the UE receives is valid ASN.1, and then checked field by field.
+// ============================================================================
+
+namespace {
+
+using asn1_event_type = asn1::rrc_nr::event_trigger_cfg_s::event_id_c_::types;
+
+struct event_a1_a6_test_params {
+  rrc_event_id::event_id_t id;
+  asn1_event_type          asn1_type;
+};
+
+/// Prints the event name in the test name, e.g. a_events/event_trigger_a1_a6_asn1.report_config_packs_and_unpacks/a1.
+std::string event_param_name(const ::testing::TestParamInfo<event_a1_a6_test_params>& info)
+{
+  return to_string(info.param.id);
+}
+
+/// Distinct values for every field, so that a field written to the wrong place is caught. Both A5 thresholds use the
+/// same quantity, as the event compares the serving and the neighbour cell in the configured trigger quantity.
+constexpr uint8_t  thres1_rsrp     = 40;
+constexpr uint8_t  thres2_rsrp     = 20;
+constexpr uint8_t  offset_rsrp     = 6;
+constexpr uint8_t  hysteresis      = 4;
+constexpr uint16_t time_to_trigger = 80;
+
+/// Fills the event fields TS 38.331 defines for the given A-event: a threshold for A1/A2/A4, an offset for A3/A6 and
+/// two thresholds for A5. useAllowedCellList only exists for A3-A6.
+rrc_event_trigger_cfg make_a_event_trigger_cfg(rrc_event_id::event_id_t id)
+{
+  rrc_event_trigger_cfg cfg = make_event_trigger_cfg();
+
+  cfg.event_id.id              = id;
+  cfg.event_id.report_on_leave = true;
+  cfg.event_id.hysteresis      = hysteresis;
+  cfg.event_id.time_to_trigger = time_to_trigger;
+
+  rrc_meas_trigger_quant thres_or_offset;
+  if (id == rrc_event_id::event_id_t::a3 or id == rrc_event_id::event_id_t::a6) {
+    thres_or_offset.rsrp = offset_rsrp;
+  } else {
+    thres_or_offset.rsrp = thres1_rsrp;
+  }
+  cfg.event_id.meas_trigger_quant_thres_or_offset = thres_or_offset;
+
+  if (id == rrc_event_id::event_id_t::a5) {
+    rrc_meas_trigger_quant thres2;
+    thres2.rsrp                             = thres2_rsrp;
+    cfg.event_id.meas_trigger_quant_thres_2 = thres2;
+  }
+
+  if (id != rrc_event_id::event_id_t::a1 and id != rrc_event_id::event_id_t::a2) {
+    cfg.event_id.use_allowed_cell_list = true;
+  }
+
+  return cfg;
+}
+
+/// Checks the fields that all A-events share.
+template <typename Event>
+void check_common_event_fields(const Event& ev)
+{
+  EXPECT_TRUE(ev.report_on_leave);
+  EXPECT_EQ(ev.hysteresis, hysteresis);
+  EXPECT_EQ(ev.time_to_trigger.to_number(), time_to_trigger);
+}
+
+/// Checks the event-specific fields of the encoded event against the values set by make_a_event_trigger_cfg().
+void check_event_fields(const asn1::rrc_nr::event_trigger_cfg_s::event_id_c_& ev, rrc_event_id::event_id_t id)
+{
+  switch (id) {
+    case rrc_event_id::event_id_t::a1:
+      check_common_event_fields(ev.event_a1());
+      EXPECT_EQ(ev.event_a1().a1_thres.rsrp(), thres1_rsrp);
+      break;
+    case rrc_event_id::event_id_t::a2:
+      check_common_event_fields(ev.event_a2());
+      EXPECT_EQ(ev.event_a2().a2_thres.rsrp(), thres1_rsrp);
+      break;
+    case rrc_event_id::event_id_t::a3:
+      check_common_event_fields(ev.event_a3());
+      EXPECT_EQ(ev.event_a3().a3_offset.rsrp(), offset_rsrp);
+      EXPECT_TRUE(ev.event_a3().use_allowed_cell_list);
+      break;
+    case rrc_event_id::event_id_t::a4:
+      check_common_event_fields(ev.event_a4());
+      EXPECT_EQ(ev.event_a4().a4_thres.rsrp(), thres1_rsrp);
+      EXPECT_TRUE(ev.event_a4().use_allowed_cell_list);
+      break;
+    case rrc_event_id::event_id_t::a5:
+      check_common_event_fields(ev.event_a5());
+      EXPECT_EQ(ev.event_a5().a5_thres1.rsrp(), thres1_rsrp);
+      EXPECT_EQ(ev.event_a5().a5_thres2.rsrp(), thres2_rsrp);
+      EXPECT_TRUE(ev.event_a5().use_allowed_cell_list);
+      break;
+    case rrc_event_id::event_id_t::a6:
+      check_common_event_fields(ev.event_a6());
+      EXPECT_EQ(ev.event_a6().a6_offset.rsrp(), offset_rsrp);
+      EXPECT_TRUE(ev.event_a6().use_allowed_cell_list);
+      break;
+    default:
+      FAIL() << "Not an A-event";
+  }
+}
+
+class event_trigger_a1_a6_asn1 : public ::testing::TestWithParam<event_a1_a6_test_params>
+{};
+
+const std::array<event_a1_a6_test_params, 6> a_event_params = {{
+    {rrc_event_id::event_id_t::a1, asn1_event_type::event_a1},
+    {rrc_event_id::event_id_t::a2, asn1_event_type::event_a2},
+    {rrc_event_id::event_id_t::a3, asn1_event_type::event_a3},
+    {rrc_event_id::event_id_t::a4, asn1_event_type::event_a4},
+    {rrc_event_id::event_id_t::a5, asn1_event_type::event_a5},
+    {rrc_event_id::event_id_t::a6, asn1_event_type::event_a6},
+}};
+
+} // namespace
+
+/// The report configuration of every A-event is encoded as an event-triggered reportConfigNR that is valid ASN.1: it
+/// packs, unpacks to the same event with the same parameters and packs back to the same bytes.
+TEST_P(event_trigger_a1_a6_asn1, report_config_packs_and_unpacks)
+{
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-6");
+
+  const event_a1_a6_test_params& params = GetParam();
+
+  const auto asn1_report_cfg = report_cfg_nr_to_rrc_asn1(rrc_report_cfg_nr{make_a_event_trigger_cfg(params.id)});
+
+  byte_buffer   packed;
+  asn1::bit_ref bref{packed};
+  ASSERT_EQ(asn1_report_cfg.pack(bref), asn1::OCUDUASN_SUCCESS);
+
+  asn1::rrc_nr::report_cfg_nr_s unpacked;
+  asn1::cbit_ref                cbref{packed};
+  ASSERT_EQ(unpacked.unpack(cbref), asn1::OCUDUASN_SUCCESS);
+
+  ASSERT_EQ(unpacked.report_type.type(), asn1::rrc_nr::report_cfg_nr_s::report_type_c_::types::event_triggered);
+  const auto& ev = unpacked.report_type.event_triggered().event_id;
+  ASSERT_EQ(ev.type(), params.asn1_type);
+  check_event_fields(ev, params.id);
+
+  byte_buffer   repacked;
+  asn1::bit_ref rebref{repacked};
+  ASSERT_EQ(unpacked.pack(rebref), asn1::OCUDUASN_SUCCESS);
+  EXPECT_EQ(packed, repacked);
+}
+
+INSTANTIATE_TEST_SUITE_P(a_events, event_trigger_a1_a6_asn1, ::testing::ValuesIn(a_event_params), event_param_name);
