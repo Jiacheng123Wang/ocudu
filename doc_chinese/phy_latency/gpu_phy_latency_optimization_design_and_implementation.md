@@ -9602,7 +9602,21 @@ V1 = 1409.1 µs（IQ → LLR，[ul_gpu_pipeline]）
 **`p107-cg-grid-ce-clean`（2026-09-28 14:05，同臂、干净）**：`gaps=0 gap_samples=0 ts0_blocks=0 rx_overflows=0 rx_lates=0` ✓；阳性对照 `ce device estimates: 43 093 device, 0 host -> OK` ✓、`[ul_dft_wait] no samples recorded` ✓；**`recv(max=101 348us over 1ms=2 over 5ms=1)` ⇒ 2/590 783 = `0.0003%`**、`slip max=531 µs`、`loop max=255 µs`。
 ⇒ ★★★ **M2′ 固化**：**"设备网格 + 设备侧消费者"在场、而宿主不阻塞 ⇒ 停顿率与全 CPU 路径同级（0.000–0.003%）**。机制**唯一存活项 = "宿主真阻塞在 Metal 完成上"**。
 
-**下一步（M2 的因果检验，代码小改已登记）**：给**慢接收事件打时间戳**，并统计"慢接收是否落在 `waitUntilCompleted` 的阻塞窗口内"（同腿共现率 vs 基线率）——这是把"跨臂相关"变成"同腿共现"的唯一办法，也正是 §6.150⑤ 表里 (d) 那条已登记的仪表改动。**M2 的因果检验：仪表已实现（2026-09-28，`ul_pipeline_probe.h` + 两处调用点）**
+**下一步（M2 的因果检验，代码小改已登记）**：给**慢接收事件打时间戳**，并统计"慢接收是否落在 `waitUntilCompleted` 的阻塞窗口内"（同腿共现率 vs 基线率）——这是把"跨臂相关"变成"同腿共现"的唯一办法，也正是 §6.150⑤ 表里 (d) 那条已登记的仪表改动。**M2 的因果检验：仪表已实现（2026-09-28，`ul_pipeline_probe.h` + 两处调用点）****M2 的同腿判决（腿 `p108-cg-dft-grid-m2`，2026-09-28 14:17）—— ★ 否**：
+
+```
+[ul_rx_wait] DFT-blocking overlap: 38187 blocking window(s) = 4% of the leg;
+slow (>1 ms) receives 26 of 387 overlapped one = 7%  (a coincidence predicts 4%; all receives 7%)
+```
+
+* **慢接收与阻塞窗口的重叠率 7%，与"全部接收"的 7% 完全相同**（阻塞占空比 4%）⇒ **没有任何富集** ⇒ **宿主的那段阻塞不是停顿的原因**；跨臂相关（有阻塞的臂有停顿、没阻塞的臂没有）因此是**共症状**，不是因果。
+* 该腿其它读数（用于界定"ping 尖峰能有多大是 gNB 的"）：`[ul_rx_wait] max = 8 614 µs`、`[dl_tx_slack] min = −3.0 ms`、`stale=0`、`gaps=0`、池 `held_max=13 free_min=19`、`recv>1ms = 387/579 176 = 0.067%`（与 `p100` 的 0.073% 同量级）。
+* ⚠ **覆盖范围的诚实声明（这决定了"否"的强度）**：我记录的窗口是 **`[wait_begin, wait_end]`**，即**阻塞区间本身**。它**不覆盖**：(a) 提交/编码那一刻的驱动处理（`commit_open()` 到 wait 开始之间）；(b) 该 cb 的 **GPU 执行窗口**（`GPUStartTime → GPUEndTime`，引擎其实已经在读这两个时间戳）。
+  ⇒ 所以"否"的边界是：**停顿不在"宿主等待"里**；它是否落在"驱动提交期"或"GPU 执行期"里**还没测**。
+
+**下一步仪表（小改，窗口按种类分开）**：每次提交记**三个窗口**（`commit → wait_end`、`GPUStart → GPUEnd`、`wait` 本身），报告分别给重叠率 ⇒ 一次就能分辨"停顿在 GPU 执行里"（访存争用）/"在驱动提交处理里"/"两者都不在"（⇒ 上游另有共同原因）。
+
+**下一步（M2 的因果检验，代码小改已登记）**
 
 * `record_dft_wait(wait_ns, begin_ns, end_ns)` 现在**记住窗口**（16 个的环 + 累计阻塞时长），`record_rx_wait(...)` 接收自己的窗口并在每次接收时与环比对 ⇒ 报告新增一行：
   `[ul_rx_wait] DFT-blocking overlap: K blocking window(s) = D% of the leg; slow (>1 ms) receives X of N overlapped one = P% (a coincidence predicts D%; all receives Q%)`
