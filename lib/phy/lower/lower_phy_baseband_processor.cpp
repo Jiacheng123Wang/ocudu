@@ -1372,7 +1372,14 @@ void lower_phy_baseband_processor::ul_process()
   {
     const auto recv_us =
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t_recv_begin).count();
-    ul_pipeline_probe::get().record_rx_wait(recv_us * 1000, spans_stream_start);
+    // The interval rides along for the same-leg overlap test (dev doc 6.150 (6)): it is the same steady_clock
+    // the receive timing series already uses, so no extra clock read is added.
+    ul_pipeline_probe::get().record_rx_wait(
+        recv_us * 1000,
+        spans_stream_start,
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t_recv_begin.time_since_epoch()).count(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count());
     // The per-slot timeline (OCUDU_UL_SLOT_TRACE) needs the ONE instant the other series take for granted: the
     // arrival of the samples that COMPLETE a slot. Everything else in the probe starts at the slot's FIRST
     // sample, which is a different instant whenever the block carrying a slot's tail is not the block that

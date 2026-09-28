@@ -545,7 +545,7 @@ public:
   ///       whole-slot policy this series has one sample per slot and under the symbol-grained one it has one per
   ///       block. Compare its counts against the policy in force, not against [ul_pipeline]'s. For the hop-scoped
   ///       companion see record_slot_rx_wait().
-  void record_rx_wait(int64_t wait_ns, bool spans_stream_start = false)
+  void record_rx_wait(int64_t wait_ns, bool spans_stream_start = false, int64_t begin_ns = 0, int64_t end_ns = 0)
   {
     if (wait_ns < 0) {
       return;
@@ -558,6 +558,38 @@ public:
       return;
     }
     rx_wait_us.push_back(static_cast<double>(wait_ns) / 1e3);
+
+    // The M2 SAME-LEG TEST (dev doc 6.150 (6)): does this receive's own window overlap one in which the host was
+    // blocked on a Metal completion? The ring is walked in full every receive (16 compares at ~2 kHz - nothing),
+    // and the report prints the two rates next to the null hypothesis's prediction, the blocking duty cycle.
+    if ((begin_ns != 0) && (end_ns >= begin_ns) && (dft_block_count != 0)) {
+      ++rx_overlap_seen;
+      const bool overlaps = [&] {
+        for (size_t i = 0; i != max_dft_block_windows; ++i) {
+          const dft_block_window& w = dft_block_windows[i];
+          if ((w.end_ns > w.begin_ns) && (begin_ns < w.end_ns) && (w.begin_ns < end_ns)) {
+            return true;
+          }
+        }
+        return false;
+      }();
+      if (wait_ns >= rx_slow_ns) {
+        ++rx_slow_seen;
+      }
+      if (overlaps) {
+        ++rx_overlap_total;
+        if (wait_ns >= rx_slow_ns) {
+          ++rx_overlap_slow;
+        }
+      }
+    }
+    if ((begin_ns != 0) && (end_ns >= begin_ns)) {
+      if (leg_first_ns == 0) {
+        leg_first_ns = begin_ns;
+      }
+      leg_last_ns = end_ns;
+      leg_span_ns = leg_last_ns - leg_first_ns;
+    }
   }
 
   /// \brief Records the receive wait of the block that COMPLETED \p slot, for the hop-scoped [ul_rx_wait_hop].
@@ -741,13 +773,22 @@ public:
   ///     real latency.
   ///
   /// Recorded per WAIT, not per slot: a route that waits per symbol records one per symbol (see the demodulator).
-  void record_dft_wait(int64_t wait_ns)
+  /// \param[in] begin_ns/end_ns The window itself, on the same steady clock record_rx_wait() timestamps with,
+  ///                 when the caller can supply it: that is what turns this series into the same-leg test for the
+  ///                 receive tail (see the overlap account below). 0 means "duration only".
+  void record_dft_wait(int64_t wait_ns, int64_t begin_ns = 0, int64_t end_ns = 0)
   {
     if (wait_ns < 0) {
       return;
     }
     std::lock_guard<std::mutex> lock(mutex);
     dft_wait_us.push_back(static_cast<double>(wait_ns) / 1e3);
+    if ((begin_ns != 0) && (end_ns > begin_ns)) {
+      dft_block_windows[dft_block_next] = dft_block_window{begin_ns, end_ns};
+      dft_block_next                   = (dft_block_next + 1) % max_dft_block_windows;
+      ++dft_block_count;
+      dft_block_total_ns += (end_ns - begin_ns);
+    }
   }
 
   /// \brief Remembers one landmark instant of a slot, and CREATES its timeline entry when the landmark proves
@@ -1180,6 +1221,30 @@ public:
     // decomposition "wait for this hop's samples + the span of this hop" adds up inside one population.
     print_series("ul_rx_wait_hop", sorted_rx_wait_hop);
     print_series("ul_dft_wait", sorted_dft_wait);
+    // THE SAME-LEG TEST of the receive tail (dev doc 6.150 (6), the M2 hypothesis). Across arms the stalls appear
+    // exactly where the host BLOCKS on a Metal completion (0.000-0.001% where it does not, 0.06-0.11% where it
+    // does, at the same traffic and with the same device grid present in both). What a cross-arm correlation
+    // cannot say is CAUSALITY, and this line is the test: if the blocking is the cause, the slow receives should
+    // fall inside those windows almost always; if it is a coincidence, they should overlap at the rate the
+    // windows' duty cycle predicts (measured on the blocking arms: ~4%).
+    {
+      const double slow_rate = (rx_slow_seen != 0) ? (100.0 * rx_overlap_slow / rx_slow_seen) : 0.0;
+      const double all_rate  = (rx_overlap_seen != 0) ? (100.0 * rx_overlap_total / rx_overlap_seen) : 0.0;
+      const double duty      = (leg_span_ns > 0) ? (100.0 * static_cast<double>(dft_block_total_ns) / leg_span_ns) : 0.0;
+      // THE LINE TO READ: the slow-receive overlap rate against the duty cycle. Coincidence predicts the two are
+      // equal; the blocking being the cause predicts the first is near 100% whatever the second is.
+      std::fprintf(stderr,
+                   "[ul_rx_wait] DFT-blocking overlap: %llu blocking window(s) = %.0f%% of the leg; slow (>1 ms) "
+                   "receives %llu of %llu overlapped one = %.0f%% (a coincidence predicts %.0f%%; all receives "
+                   "%.0f%%)\n",
+                   static_cast<unsigned long long>(dft_block_count),
+                   duty,
+                   static_cast<unsigned long long>(rx_overlap_slow),
+                   static_cast<unsigned long long>(rx_slow_seen),
+                   slow_rate,
+                   duty,
+                   all_rate);
+    }
     print_slot_trace();
     print_by_size();
     // The series printed below cross both modes unchanged.
@@ -1481,6 +1546,40 @@ private:
   std::vector<double> rx_wait_hop_us;
   /// Host time blocked inside the front-end DFT's wait_slot() (µs), one sample per WAIT (see record_dft_wait).
   std::vector<double> dft_wait_us;
+
+  /// \brief One [cmd_buf waitUntilCompleted] window the host spent blocked on a Metal completion.
+  ///
+  /// WHY THE TIMESTAMPS EXIST (dev doc 6.150 (6), the M2 test). Across arms the receive stalls appear in exactly
+  /// those configurations where this wait BLOCKS - median 0.1 us with a host-resident grid (the call returns at
+  /// once), 384 us with a device-resident one - and nowhere else: the device grid alone (p97, and p106/p107 with a
+  /// device-side consumer and no block) reads 0.000-0.001% while the blocking arms read 0.06-0.11%. A cross-arm
+  /// correlation is not a cause, so the question became same-leg: does a slow receive happen INSIDE one of these
+  /// windows, or merely as often as their duty cycle predicts? The windows (a short ring) and the duration total
+  /// are what answer it, and the duty cycle is the null hypothesis's prediction - ~4% on the blocking arms.
+  struct dft_block_window {
+    int64_t begin_ns = 0;
+    int64_t end_ns   = 0;
+  };
+  static constexpr size_t max_dft_block_windows = 16;
+  std::array<dft_block_window, max_dft_block_windows> dft_block_windows{};
+  size_t   dft_block_next     = 0;
+  uint64_t dft_block_count    = 0;
+  uint64_t dft_block_total_ns = 0;
+  /// Receive calls the account could be applied to at all (a blocking DFT window was known), then those whose
+  /// window overlapped one, and of those the slow (>1 ms) ones.
+  uint64_t rx_overlap_seen  = 0;
+  uint64_t rx_overlap_total = 0;
+  uint64_t rx_overlap_slow  = 0;
+  /// Every slow receive, whether it overlapped or not: without this denominator the ratio above says nothing
+  /// (measured while writing this account: printing rx_overlap_slow over rx_overlap_seen gave "1 (50%)" for a leg
+  /// where the only slow receive WAS the one that overlapped - the 50% was the fast receive next to it).
+  uint64_t rx_slow_seen = 0;
+  /// One slow receive for the count above: the threshold is the same 1 ms the timing series counts over.
+  static constexpr int64_t rx_slow_ns = 1000000;
+  /// Leg span for the duty cycle: first -> last receive window seen.
+  int64_t leg_first_ns = 0;
+  int64_t leg_last_ns  = 0;
+  int64_t leg_span_ns  = 0;
   /// The instant the samples completing each traced slot arrived (see record_slot_samples_complete()).
   std::map<uint64_t, std::chrono::high_resolution_clock::time_point> slot_samples_done;
   /// One entry per traced slot, keyed by slot: the per-slot timeline printed by print_slot_trace().
@@ -1522,9 +1621,12 @@ public:
   void record_ce_end(uint64_t /*slot*/) {}
   void record_end_crc_ok(uint64_t /*slot*/, size_t /*mac_pdu_bytes*/) {}
   void record_fapi_mac_end(uint64_t /*slot*/) {}
-  void record_rx_wait(int64_t /*wait_ns*/, bool /*spans_stream_start*/ = false) {}
+  void record_rx_wait(int64_t /*wait_ns*/, bool /*spans_stream_start*/ = false, int64_t /*begin_ns*/ = 0,
+                      int64_t /*end_ns*/ = 0)
+  {
+  }
   void record_slot_rx_wait(uint64_t /*slot*/, int64_t /*wait_ns*/, bool /*spans_stream_start*/ = false) {}
-  void record_dft_wait(int64_t /*wait_ns*/) {}
+  void record_dft_wait(int64_t /*wait_ns*/, int64_t /*begin_ns*/ = 0, int64_t /*end_ns*/ = 0) {}
   std::optional<ul_phase_durations> get_phase_durations(uint64_t /*slot*/) { return std::nullopt; }
   /// P0-5's pairing hook, compiled out with the rest of the probe: there are no phase samples to announce, so a
   /// caller that registers an observer is told nothing - which is also what the lane probe's report says (it

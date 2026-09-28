@@ -9597,9 +9597,21 @@ V1 = 1409.1 µs（IQ → LLR，[ul_gpu_pipeline]）
 | `p94` all | ✅ | ✅ | **是（382 µs）** | **0.111%** | 546 |
 
 ⇒ ★★★ **存活并收窄为 M2**：必要条件是 **"宿主在一个输出落在设备内存的 Metal 提交上*真的阻塞*"**（`[ul_dft_wait]` 中位从 0.1 µs 跳到 381–384 µs 的那几族），而**不是**：设备网格本身（`p97`/`p106` 都有它，零停顿）、设备侧消费者（`p106` 有，零停顿）、输入路径（M1 否）、网格内存压力（`p97` 否）、设备工作量（消去臂否）、流量（否）、外部 GPU 活动（`p96` 否）。
-⇒ ⚠ **限定**：`p106` 有 **4 次 `gaps`/`rx_overflows`（丢过样）**，且跑了 ~772 s（calls 1.54 M，是别的腿的 2.7×）⇒ 它的"零停顿"要连"那一腿的接收路径以**溢出/丢样**而非阻塞的形式表现"一起读，**需要复飞一条干净的（0 gaps）来固化**。
+⇒ ⚠ **限定（已被 `p107` 清掉）**：`p106` 有 **4 次 `gaps`/`rx_overflows`**、且跑了 ~772 s ⇒ 需要一条干净的复飞固化。
 
-**下一步（M2 的因果检验，代码小改已登记）**：给**慢接收事件打时间戳**，并统计"慢接收是否落在 `waitUntilCompleted` 的阻塞窗口内"（同腿共现率 vs 基线率）——这是把"跨臂相关"变成"同腿共现"的唯一办法，也正是 §6.150⑤ 表里 (d) 那条已登记的仪表改动。
+**`p107-cg-grid-ce-clean`（2026-09-28 14:05，同臂、干净）**：`gaps=0 gap_samples=0 ts0_blocks=0 rx_overflows=0 rx_lates=0` ✓；阳性对照 `ce device estimates: 43 093 device, 0 host -> OK` ✓、`[ul_dft_wait] no samples recorded` ✓；**`recv(max=101 348us over 1ms=2 over 5ms=1)` ⇒ 2/590 783 = `0.0003%`**、`slip max=531 µs`、`loop max=255 µs`。
+⇒ ★★★ **M2′ 固化**：**"设备网格 + 设备侧消费者"在场、而宿主不阻塞 ⇒ 停顿率与全 CPU 路径同级（0.000–0.003%）**。机制**唯一存活项 = "宿主真阻塞在 Metal 完成上"**。
+
+**下一步（M2 的因果检验，代码小改已登记）**：给**慢接收事件打时间戳**，并统计"慢接收是否落在 `waitUntilCompleted` 的阻塞窗口内"（同腿共现率 vs 基线率）——这是把"跨臂相关"变成"同腿共现"的唯一办法，也正是 §6.150⑤ 表里 (d) 那条已登记的仪表改动。**M2 的因果检验：仪表已实现（2026-09-28，`ul_pipeline_probe.h` + 两处调用点）**
+
+* `record_dft_wait(wait_ns, begin_ns, end_ns)` 现在**记住窗口**（16 个的环 + 累计阻塞时长），`record_rx_wait(...)` 接收自己的窗口并在每次接收时与环比对 ⇒ 报告新增一行：
+  `[ul_rx_wait] DFT-blocking overlap: K blocking window(s) = D% of the leg; slow (>1 ms) receives X of N overlapped one = P% (a coincidence predicts D%; all receives Q%)`
+* ★ **这一行自带零假设的数**：若阻塞与停顿只是巧合，`P ≈ D`（实测 D ≈ 3.8–4.1%）；若阻塞是原因，`P → 100%`。
+* 离线自证：`ul_pipeline_probe_test.slow_receives_are_tested_against_the_dft_blocking_windows`（**9/9 PASS**，全套 `ctest -L phy -j 1` **202/202**）；反向臂：去掉重叠判定 ⇒ 该用例 FAIL（已确认重编）。
+  ⚠ 写这条仪表时**自己踩过一个统计口径错误**并被用例抓住：最初把「重叠的慢接收数 / 见过的全部接收数」当成了慢接收的重叠率（读成 50%），必须同时数「**总共多少次慢接收**」作分母 ⇒ 已修，用例断言写死为 `slow (>1 ms) receives 1 of 1 overlapped one = 100%`。
+* ⚠ 该臂的契约 `ce device estimates` 会 FAIL（CE 在宿主是这一臂的变量）——已登记的"契约对阶梯臂的适用性"小改**本次未做**（需要发布 effective backend，改动更大），读作"对本臂不适用"。
+
+**下一步（M2 的因果检验，代码小改已登记）**
 
 ## 7. 杠杆与候选改动（技术账）
 

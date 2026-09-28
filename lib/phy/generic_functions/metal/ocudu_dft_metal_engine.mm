@@ -2115,8 +2115,12 @@ bool dft_metal_engine::wait_slot(unsigned slot)
   // synchronization actually occupies the caller - not the GPU span (last_gpu_us) of the buffer it waits for.
   const auto wait_begin = std::chrono::steady_clock::now();
   [cmd_buf waitUntilCompleted];
+  const auto wait_end = std::chrono::steady_clock::now();
+  // The WINDOW, not only its length: the receive side tests its own windows against this one (dev doc 6.150 (6)).
   ul_pipeline_probe::get().record_dft_wait(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_begin).count());
+      std::chrono::duration_cast<std::chrono::nanoseconds>(wait_end - wait_begin).count(),
+      std::chrono::duration_cast<std::chrono::nanoseconds>(wait_begin.time_since_epoch()).count(),
+      std::chrono::duration_cast<std::chrono::nanoseconds>(wait_end.time_since_epoch()).count());
   if (cmd_buf.status != MTLCommandBufferStatusCompleted) {
     ocudulog::fetch_basic_logger("PHY").error("Metal DFT: slot {} command buffer failed with status {}",
                                               slot,

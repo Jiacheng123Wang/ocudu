@@ -867,6 +867,49 @@ TEST(ul_pipeline_probe_test, phase_samples_are_announced_once_each_for_the_pairi
   ::unsetenv("OCUDU_UL_PHASE_SEGMENTS");
 }
 
+/// THE SAME-LEG TEST for the receive tail: a slow receive that falls INSIDE a blocking DFT window.
+///
+/// Across arms the stalls appear exactly where the host blocks on a Metal completion (0.000-0.001% where it does
+/// not, 0.06-0.11% where it does) - but a cross-arm correlation cannot say causality, and the null hypothesis has
+/// a number: if the two are independent, slow receives overlap the blocking windows at their duty cycle (~4% on
+/// the measured legs). This case pins the accounting that tells them apart, including the two ways it could lie:
+/// an overlap miss (a window that should match) and a false positive (a receive that ends before the window
+/// starts).
+TEST(ul_pipeline_probe_test, slow_receives_are_tested_against_the_dft_blocking_windows)
+{
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+  const auto                ns    = [](std::chrono::steady_clock::time_point tp) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
+  };
+  const auto t0 = std::chrono::steady_clock::now();
+
+  // One blocking window, 400 us long: the shape the device-grid arms show (384 us median).
+  const auto win_begin = t0;
+  const auto win_end   = t0 + std::chrono::microseconds(400);
+  probe.record_dft_wait(std::chrono::nanoseconds(std::chrono::microseconds(400)).count(), ns(win_begin), ns(win_end));
+
+  // (a) a SLOW receive whose window straddles the blocking one...
+  probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::milliseconds(2)).count(),
+                       /*spans_stream_start=*/false,
+                       ns(win_begin + std::chrono::microseconds(100)),
+                       ns(win_begin + std::chrono::microseconds(2100)));
+  // (b) ... and a fast one that ends BEFORE it starts: it must not be counted as an overlap.
+  probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::microseconds(500)).count(),
+                       /*spans_stream_start=*/false,
+                       ns(win_begin - std::chrono::microseconds(900)),
+                       ns(win_begin - std::chrono::microseconds(400)));
+
+  const std::string report = capture_report();
+  // THE LINE THAT MATTERS: the slow receive overlapped (100% of the slow ones), against the coincidence reading
+  // the same line prints next to it. Two receives were seen and only one of them was slow, so a denominator mix-up
+  // shows up here as 50% - which is how the first version of this account was caught.
+  EXPECT_NE(report.find("slow (>1 ms) receives 1 of 1 overlapped one = 100%"), std::string::npos) << report;
+  EXPECT_NE(report.find("1 blocking window(s)"), std::string::npos) << report;
+  // The duty cycle is printed next to them, because it is the number the coincidence reading predicts - the whole
+  // point of the line is that a reader compares the two without having to know which is which.
+  EXPECT_NE(report.find("(a coincidence predicts"), std::string::npos) << report;
+}
+
 /// A LATER SFN CYCLE REBASES A SLOT INSTEAD OF REUSING THE PREVIOUS CYCLE'S LANDMARKS.
 ///
 /// The trace is keyed by the MODULAR slot, and not every landmark is re-recorded every cycle: PUXCH completes the
