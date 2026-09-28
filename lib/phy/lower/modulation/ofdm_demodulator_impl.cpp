@@ -130,6 +130,53 @@ bool block_release_armed()
   return grid_handover_armed();
 }
 
+/// \brief Diagnostic arm: restore the historical "one host wait per slot" policy (OCUDU_DFT_WAIT_PER_SLOT=1).
+///
+/// WHY IT EXISTS (2026-09-28, design document 6.151⑨). `wait_per_slot` now also requires
+/// handover_allowed(), because the per-slot wait only covers transforms that share the slot's single
+/// command buffer. That is provably true of the zero-copy (radio-input) route - each symbol's submission
+/// registers its own ring slot against the slot's open block (ocudu_dft_metal_engine.mm:2401) and
+/// wait_slot() commits that block before it waits (:2157) - but NOT of the staged route, whose per-transform
+/// buffers end every group (:2366) and whose thirteen earlier symbols were therefore never waited for.
+/// The split/debug mode paid the per-symbol wait for both routes; this arm gives an operator the historical
+/// policy back on the route where it is covered, so that two questions can be answered without a rebuild:
+///  * whether the afternoons' wrap-arm storms (p100/p102/p108/p109) were the wait policy or the time of day
+///    (the evening legs p112/p114/p115 are clean at the SAME link margin), and
+///  * what the policy costs in the split mode (measured with it: the wrap arm's uplink hop went 993 -> 1393us
+///    and its batching 14 -> 8 transforms per dispatch).
+///
+/// It is honoured ONLY while the transform input is NOT staged: the coverage argument above is the
+/// radio-input route's, and a staged transform destroys exactly the batching it rests on. Asking for both
+/// together cannot recreate the hole this arm exists to test, so the per-symbol wait is kept and the refusal
+/// is reported once.
+bool per_slot_wait_requested()
+{
+  const char* arm = std::getenv("OCUDU_DFT_WAIT_PER_SLOT");
+  if ((arm == nullptr) || (std::strtoul(arm, nullptr, 10) == 0)) {
+    return false;
+  }
+  const char* staged = std::getenv("OCUDU_DFT_STAGE_INPUT");
+  if ((staged != nullptr) && (std::strtoul(staged, nullptr, 10) != 0)) {
+    static bool reported = false;
+    if (!reported) {
+      reported = true;
+      ocudulog::fetch_basic_logger("PHY").warning(
+          "OFDM demodulator: OCUDU_DFT_WAIT_PER_SLOT is ignored while OCUDU_DFT_STAGE_INPUT is on - the "
+          "per-slot wait does not cover a staged transform (its own command buffer ends every batch), so "
+          "the per-symbol wait is kept");
+    }
+    return false;
+  }
+  static bool reported_once = false;
+  if (!reported_once) {
+    reported_once = true;
+    ocudulog::fetch_basic_logger("PHY").info(
+        "OFDM demodulator: OCUDU_DFT_WAIT_PER_SLOT is on - this run waits once per slot (at its last "
+        "symbol) as every leg did before 6.151⑨, which is a DIAGNOSTIC arm and not a delivery policy");
+  }
+  return true;
+}
+
 } // namespace
 
 ofdm_symbol_demodulator_impl::ofdm_symbol_demodulator_impl(const ofdm_demodulator_configuration& ofdm_config,
@@ -472,8 +519,8 @@ void ofdm_symbol_demodulator_impl::finish_symbol(resource_grid_writer& grid, uns
   //       OCUDU_DFT_STAGE_INPUT=1 would combine an allowed hand-over with unbatched transforms. That arm is
   //       not flown (the staging arm belongs to the split mode, where this predicate now waits per symbol);
   //       if it ever is, its per-slot wait will not cover the staged symbols.
-  const bool wait_per_slot =
-      pipeline_slots[slot].device_write && grid_consumed_on_device && handover_allowed();
+  const bool wait_per_slot = pipeline_slots[slot].device_write && grid_consumed_on_device &&
+                             (handover_allowed() || per_slot_wait_requested());
   // D1 step 2: instead of committing the slot's block, HAND IT OVER to the hop that will read this grid.
   // The upper PHY's first back-end stage adopts it (same command buffer, its own encoder), so the slot's
   // transforms, the channel estimation, the equalization and the demapping are ONE submission - which is
