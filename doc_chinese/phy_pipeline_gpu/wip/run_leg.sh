@@ -223,13 +223,32 @@ fi
 #                right, which is how the old script could only ever express one mode.
 case "$MODE" in
   cpu_gpu)
-    MODE_ARGS=(
-      --expert_phy.pusch_dft_type metal
-      --expert_phy.pusch_channel_estimator_algo metal_mmse
-      --expert_phy.pusch_channel_equalizer_backend metal
-      --expert_phy.pusch_ldpc_decoder_type auto
-      --expert_phy.device_resource_grid on
-    ) ;;
+    # WHICH MODULES ARE OFFLOADED IS SELECTABLE (2026-09-28, the "module ladder"). The default stays exactly what
+    # this mode has always passed, so every existing cpu_gpu reading keeps its meaning; the ladder exists because
+    # the slow-receive tail turned out to need a Metal path PRESENT rather than busy (dev doc 6.150: cpu 0.002%
+    # vs cpu_gpu 0.118% vs gpu 0.058-0.171%, at the same traffic and on one binary), and "which module brings it"
+    # cannot be answered from the archive - its cpu_gpu legs all carry the full set.
+    #
+    # A whitelist rather than free-form options: each arm has to be a configuration resolve_phy_pipeline() accepts,
+    # and "auto" resolves to CPU in this mode, so a single-module arm is legal and the others stay on the CPU.
+    # The set is echoed into the leg's own stderr (mode options), so an arm states what it offloaded.
+    case "${LEG_CG_MODULES:-all}" in
+      all)  MODE_ARGS=(
+              --expert_phy.pusch_dft_type metal
+              --expert_phy.pusch_channel_estimator_algo metal_mmse
+              --expert_phy.pusch_channel_equalizer_backend metal
+              --expert_phy.pusch_ldpc_decoder_type auto
+              --expert_phy.device_resource_grid on
+            ) ;;
+      none) MODE_ARGS=() ;;   # every module auto -> CPU, grid auto -> host grid: the CPU-equivalent control
+      grid) MODE_ARGS=( --expert_phy.device_resource_grid on ) ;;  # the grid alone, no module offloaded
+      dft)  MODE_ARGS=( --expert_phy.pusch_dft_type metal ) ;;
+      ce)   MODE_ARGS=( --expert_phy.pusch_channel_estimator_algo metal_mmse ) ;;
+      eq)   MODE_ARGS=( --expert_phy.pusch_channel_equalizer_backend metal ) ;;
+      *)    echo "refusing LEG_CG_MODULES='${LEG_CG_MODULES}': accepted values are all|none|grid|dft|ce|eq" >&2
+            echo "  (all = this mode's historical set; none/grid/dft/ce/eq = the 6.150 module ladder)" >&2
+            exit 2 ;;
+    esac ;;
   *)
     MODE_ARGS=() ;;
 esac
