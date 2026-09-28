@@ -153,6 +153,7 @@ fi
 
 CLI_ARGS=()
 REGIME=default
+SMOKE=0
 for kv in "$@"; do
   case "$kv" in
     # CONSUMED here, not forwarded: this one is a property of the LEG, not a gNB option. It is written
@@ -166,6 +167,14 @@ for kv in "$@"; do
     --regime=default) REGIME=default ;;
     --regime=stress)  REGIME=stress ;;
     --regime=*)       echo "refusing '$kv': regime must be default or stress" >&2; exit 2 ;;
+    # SMOKE SECONDS: watch the first N seconds for the radio's own failure lines and stop the leg if they appear.
+    # Added after p94 (2026-09-28) died of a B200 USB drop: the receive stream had been timing out for ~104 s
+    # ("exceeded maximum number of timed out receive calls", 10 x 200 ms trials each) while the DL queue grew to
+    # 1000 SDUs, and the leg only ended when an uncaught uhd::usb_error aborted the process - so the operator paid
+    # four minutes plus a phone test for a leg that was already void in its first seconds. Default 0 = OFF: this
+    # adds no behaviour to any leg that does not ask for it.
+    --smoke=*)        SMOKE=${kv#*=}
+                      case "$SMOKE" in ''|*[!0-9]*) echo "refusing '$kv': --smoke=SECONDS (a number)" >&2; exit 2 ;; esac ;;
     --*)                  CLI_ARGS+=("$kv") ;;
     OCUDU_*=*)            export "$kv" ;;
     *=*)                  echo "refusing '$kv': a knob must be OCUDU_*=…, and a gNB option must start with --" >&2; exit 2 ;;
@@ -269,8 +278,9 @@ echo >&2
 # leg carries the cell geometry and the knobs it ran with even when the console is gone. The geometry is
 # not decoration: "余量" is 1 - residency/slot, and both the PRB count and the slot period come from this
 # file (wip/ul_load.sh reads it back out of the cell line).
-PROVENANCE=$(printf '[leg] regime=%s\npipeline mode : %s\nmode options  : %s\nleg           : %s\ncell config   : %s\ngNB options   : %s\n' \
-  "$REGIME" "$MODE" "${MODE_ARGS[*]:-<none>}" "$LABEL" "${CONFIG#$ROOT/}" "${CLI_ARGS[*]:-<none>}")
+PROVENANCE=$(printf '[leg] regime=%s\nsmoke test    : %s\npipeline mode : %s\nmode options  : %s\nleg           : %s\ncell config   : %s\ngNB options   : %s\n' \
+  "$REGIME" "$([ "$SMOKE" -gt 0 ] && echo "${SMOKE}s (a radio failure line stops the leg)" || echo off)" \
+  "$MODE" "${MODE_ARGS[*]:-<none>}" "$LABEL" "${CONFIG#$ROOT/}" "${CLI_ARGS[*]:-<none>}")
 # The LEADING newline is load-bearing: $(printf ...) strips the trailing one, so appending directly
 # glued the first knob line onto the 'gNB options' line - measured on every leg (s82: 'gNB options   :
 # <none>knob          : OCUDU_UL_PHASE_SEGMENTS=1'), which silently defeats any '^knob' grep and made
@@ -328,8 +338,36 @@ done
   --expert_phy.phy_pipeline "$MODE" \
   "${LOG_LEVEL_ARGS[@]}" \
   --log.filename "$LOG" \
-  >&3 2>&4
+  >&3 2>&4 &
+GNB_PID=$!
+# ONE Ctrl-C MUST STOP gnb AND NOT THIS SCRIPT. Until 2026-09-28 gnb ran in the FOREGROUND, and the script survived
+# a Ctrl-C only because bash ignores SIGINT in itself while it waits for a foreground job. Holding the pid (which
+# the smoke test below needs) turned that into `wait` on a BACKGROUND job, where that protection does NOT apply:
+# the script would die with gnb, skipping the end-of-leg report check - the very guard that says "do not read this
+# leg". So the contract is explicit now instead of inherited: the trap stops gnb and lets this script finish.
+stop_gnb() { [ -n "${GNB_PID:-}" ] && kill -INT "$GNB_PID" 2>/dev/null; }
+trap stop_gnb INT
+SMOKE_PID=""
+if [ "$SMOKE" -gt 0 ]; then
+  (
+    for ((si = 1; si <= SMOKE; ++si)); do
+      sleep 1
+      if grep -aqE 'exceeded maximum number of timed out receive calls|failed receiving packet|usb_error|LIBUSB_ERROR' \
+           "$LOG.stdout" "$LOG.stderr" 2>/dev/null; then
+        echo >&2
+        echo "!! RADIO SMOKE TEST: the receive stream is failing after ${si}s (see above) - stopping this leg NOW." >&2
+        echo "   It would produce no report anyway (see dev doc 6.150 (4b): p94 died this way after ~104 s of silence)." >&2
+        echo "   Fix the radio (power-cycle the B200, uhd_find_devices), then re-run." >&2
+        kill -INT "$GNB_PID" 2>/dev/null
+        exit 0
+      fi
+    done
+  ) &
+  SMOKE_PID=$!
+fi
+wait "$GNB_PID"
 rc=$?
+if [ -n "$SMOKE_PID" ]; then kill "$SMOKE_PID" 2>/dev/null; wait "$SMOKE_PID" 2>/dev/null; fi
 exec 3>&- 4>&-
 wait "$out_tee" "$err_tee"
 
