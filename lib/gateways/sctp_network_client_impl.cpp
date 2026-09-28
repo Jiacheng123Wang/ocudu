@@ -49,15 +49,15 @@ public:
     if (not ssl_enabled) {
       auto dest_addr = server_addr.native();
       bytes_sent     = ::sctp_sendmsg(fd,
-                                  pdu_span.data(),
-                                  pdu_span.size(),
-                                  const_cast<struct sockaddr*>(dest_addr.addr),
-                                  dest_addr.addrlen,
-                                  htonl(ppid),
-                                  0,
-                                  stream_no,
-                                  0,
-                                  0);
+                                      pdu_span.data(),
+                                      pdu_span.size(),
+                                      const_cast<struct sockaddr*>(dest_addr.addr),
+                                      dest_addr.addrlen,
+                                      htonl(ppid),
+                                      0,
+                                      stream_no,
+                                      0,
+                                      0);
     } else {
       ocudu_assert(ssl, "Trying to send a PDU with SSL enabled, but no SSL association is present");
       bytes_sent = ssl->write(pdu_span);
@@ -83,12 +83,12 @@ private:
     }
 
     // Shutdown DTLS connection if enabled.
-    if (ssl_enabled) {
-      ssl->shutdown();
-      logger.debug("{}: called shutdown for DTLS association", client_name);
-    } else {
-      logger.debug("{}: did not call shutdown for DTLS association", client_name);
-    }
+    // if (ssl_enabled) {
+    //  ssl->shutdown();
+    //  logger.debug("{}: called shutdown for DTLS association", client_name);
+    //} else {
+    //  logger.debug("{}: did not call shutdown for DTLS association", client_name);
+    //}
 
     int ret = ::shutdown(fd, SHUT_RDWR);
 

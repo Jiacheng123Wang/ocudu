@@ -7,6 +7,7 @@
 #include "ocudu/gateways/sctp_dtls_mode.h"
 #include "ocudu/ocudulog/logger.h"
 #include <memory>
+#include <mutex>
 #include <netinet/in.h>
 #include <netinet/sctp.h>
 
@@ -77,6 +78,10 @@ private:
   dtls_context&                        ssl_ctx;
   sctp_network_gateway_dtls_interface& gw;
   static constexpr uint32_t            dtls_max_len = 9100;
+
+  /// Receive, write and shutdown can use the SSL* from separate threads.
+  /// This mutex is used to protect them.
+  std::mutex ssl_mutex;
 
   ocudulog::basic_logger& logger;
 };

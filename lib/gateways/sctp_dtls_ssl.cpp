@@ -79,7 +79,8 @@ bool openssl_dtls_ssl::init(int socket)
 
 bool openssl_dtls_ssl::shutdown()
 {
-  int ret = SSL_shutdown(ssl);
+  std::lock_guard lock(ssl_mutex);
+  int             ret = SSL_shutdown(ssl);
   if (ret == 1) {
     logger.debug("SSL_shutdown success: ret={}", ret);
     return true;
@@ -140,6 +141,7 @@ bool openssl_dtls_ssl::handshake()
 
 expected<byte_buffer, dtls_ssl_read_error> openssl_dtls_ssl::receive()
 {
+  std::lock_guard lock(ssl_mutex);
   /// SSL should be initialized from here on.
   std::array<uint8_t, dtls_max_len> buff;
   int                               ret = SSL_read(ssl, buff.data(), dtls_max_len);
@@ -148,7 +150,7 @@ expected<byte_buffer, dtls_ssl_read_error> openssl_dtls_ssl::receive()
     unsigned long ssl_error = SSL_get_error(ssl, ret);
     if (ssl_error == SSL_ERROR_ZERO_RETURN) {
       logger.debug("SSL_read returned SSL_ERROR_ZERO_RETURN, SSL_get_error={}", openssl_error{ssl_error});
-      SSL_shutdown(ssl);
+      // SSL_shutdown(ssl);
       return make_unexpected(dtls_ssl_read_error::shutdown);
     }
     logger.error("SSL_read returned {}, SSL_get_error={}", ret, openssl_error{ssl_error});
@@ -169,7 +171,8 @@ expected<byte_buffer, dtls_ssl_read_error> openssl_dtls_ssl::receive()
 
 int openssl_dtls_ssl::write(span<const uint8_t> pdu_span)
 {
-  int bytes_written = SSL_write(ssl, pdu_span.data(), pdu_span.size());
+  std::lock_guard lock(ssl_mutex);
+  int             bytes_written = SSL_write(ssl, pdu_span.data(), pdu_span.size());
   if (bytes_written <= 0) {
     int err = SSL_get_error(ssl, bytes_written);
     logger.error("Could not write {} bytes to DTLS connection. err={}", pdu_span.size(), get_ssl_error_string(err));
