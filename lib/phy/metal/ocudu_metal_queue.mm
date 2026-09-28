@@ -831,17 +831,25 @@ void shared_queue_stats_report()
           // itself is not visible (dev doc 6.137: three legs were flown for exactly this reading before the
           // label defect was found). min/p5 makes that population readable from the label it hid in, and it
           // costs one line per label on every leg.
+          //
+          // MAX since 2026-09-29 (dev doc 6.159): the question that started this was "can one dispatch's
+          // device EXECUTION ever be twice its usual time" (a 14-transform FFT batch run in two waves if the
+          // GPU has no room for it), and p50/p95/min/p5 cannot answer it - p95=48.1us against p50=46.5us
+          // leaves a 2x subpopulation of a few percent invisible. The max costs nothing (the vector is
+          // already sorted) and turns "no such sample was ever seen" into a reading instead of an inference.
           std::fprintf(stderr,
-                       "[metal_stats]   %-16s n=%7zu wait p50=%9.1fus p95=%9.1fus min=%8.1fus p5=%8.1fus | "
-                       "exec p50=%9.1fus p95=%9.1fus min=%8.1fus p5=%8.1fus%s\n",
+                       "[metal_stats]   %-16s n=%7zu wait p50=%9.1fus p95=%9.1fus max=%9.1fus min=%8.1fus p5=%8.1fus | "
+                       "exec p50=%9.1fus p95=%9.1fus max=%9.1fus min=%8.1fus p5=%8.1fus%s\n",
                        kv.second.c_str(),
                        kv.first,
                        pct_sorted(ls.wait_ns, 0.5),
                        pct_sorted(ls.wait_ns, 0.95),
+                       pct_sorted(ls.wait_ns, 1.0),
                        pct_sorted(ls.wait_ns, 0.0),
                        pct_sorted(ls.wait_ns, 0.05),
                        pct_sorted(ls.exec_ns, 0.5),
                        pct_sorted(ls.exec_ns, 0.95),
+                       pct_sorted(ls.exec_ns, 1.0),
                        pct_sorted(ls.exec_ns, 0.0),
                        pct_sorted(ls.exec_ns, 0.05),
                        (ls.open == 0) ? "" : " (some windows never closed)");
