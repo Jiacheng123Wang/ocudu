@@ -164,12 +164,12 @@ struct dft_stats_t {
   std::atomic<uint64_t> radio_inputs{0};
   /// \brief The subset of \c radio_inputs that read the radio's pages ZERO-COPY (the wrap succeeded).
   ///
-  /// The contract needs this count separately since the mode decides which of the two is required (design
-  /// document 6.151⑨): in the fused lane the input must NOT be copied (`staged == 0`), while the split mode
-  /// `cpu_gpu` must not read the radio's pages at all (`radio_zero_copy == 0`, because its zero-copy read was
-  /// measured to break the uplink there - see stage_input_requested()). `wrap_copies` cannot answer either
-  /// question alone: it counts EVERY wrap that fell back to a copy in this engine, the grid's and the engine's
-  /// own tables included, so `radio_inputs == wrap_copies` would be an equality between two different units.
+  /// A DIAGNOSTIC, and the one that settles "which memory did the transforms actually read": `wrap_copies`
+  /// cannot answer it (it counts EVERY wrap that fell back to a copy in this engine, the grid's and the
+  /// engine's own tables included - two different units), and `radio_inputs` alone cannot either (it counts
+  /// both routes). Read against the mode: the fused lane is expected to have `radio_zero_copy ==
+  /// radio_inputs`, and an arm flown with OCUDU_DFT_STAGE_INPUT=1 is expected to have zero of them - that
+  /// is exactly how leg p111 proved the (since withdrawn) cpu_gpu staging default had fired.
   std::atomic<uint64_t> radio_zero_copy{0};
   /// Wraps of this engine that could not be zero-copy and were staged instead (see wrap_buffer): the
   /// engine's own tables when they are not page aligned, or a caller's buffer the registry does not
@@ -727,39 +727,22 @@ static void register_dft_contract_check()
            // unit test or a tool exercises the engine directly): nothing to require of it.
            return std::nullopt;
          }
-         // ★★ THE CLAIM IS THE MODE'S OWN, because the two modes claim OPPOSITE things at this boundary
-         // (2026-09-28, design document 6.151⑨). Whoever changes one of these two forms must change the
-         // other's evidence with it - they are one decision, not two knobs:
+         // Stated in terms of the COPIES, because that is what the contract claims and what the engine
+         // counts where the decision is made. The reverse arm lives in
+         // dft_processor_metal_unit_test.cpp: an input whose zero-copy wrap is refused (a pointer Metal
+         // will not take without a copy) has to turn this red.
          //
-         //  * `gpu` - the fused lane, and the DELIVERY mode. Its whole point is that the IQ never travels
-         //    back to the host, so this boundary must not pay a copy: requirement `staged == 0`. The reverse
-         //    arm lives in dft_processor_metal_unit_test.cpp - an input whose zero-copy wrap is refused (a
-         //    pointer Metal will not take without a copy) has to turn this red.
-         //  * `cpu_gpu` - the split debug/control mode (NOT a delivery mode; phy_pipeline_mode.h defines it
-         //    as "every module boundary keeps its own host <-> device crossing"). Since 6.151⑨ its DFT input
-         //    is deliberately staged, because reading the radio's pages zero-copy there was measured to
-         //    break the uplink's control plane (see stage_input_requested()). Requirement, the opposite
-         //    one: NOTHING read the radio's pages, i.e. every radio input went through the copy -
-         //    `radio_zero_copy == 0`.
-         //
-         // Both forms are stated in terms of the copies, because that is what the engine counts where the
-         // decision is made; `wrap_copies` is reported apart from the transform counts because it counts
-         // WRAPS (the grid's and the engine's own tables included), not transforms - the old form mixed
-         // those populations and passed for the wrong reason (5.9.98).
+         // NOTE (2026-09-28, 6.151⑨): for a few hours this check also had a `cpu_gpu` form requiring
+         // `radio_zero_copy == 0`, to match a mode default that staged the input. Both the default and the
+         // form were withdrawn when the default failed on air (p111) - the requirement is the same in
+         // every mode again: the transform's input IS the radio's samples.
          const uint64_t zero_copy = s.radio_zero_copy.load(std::memory_order_relaxed);
-         if (phy_pipeline_mode_registry::get() == phy_pipeline_mode::gpu) {
-           std::fprintf(stderr,
-                        "; fused lane: the transform input must BE the radio's samples, so the copies "
-                        "(staged=%llu) must be 0",
-                        static_cast<unsigned long long>(staged));
-           return staged == 0;
+         if (zero_copy != radio) {
+           std::fprintf(stderr, "; radio_zero_copy=%llu of radio_inputs=%llu",
+                        static_cast<unsigned long long>(zero_copy),
+                        static_cast<unsigned long long>(radio));
          }
-         std::fprintf(stderr,
-                      "; split mode: every radio input must be a staged copy (its module boundary pays one "
-                      "by design), so the zero-copy reads (radio_zero_copy=%llu of radio_inputs=%llu) must be 0",
-                      static_cast<unsigned long long>(zero_copy),
-                      static_cast<unsigned long long>(radio));
-         return zero_copy == 0;
+         return staged == 0;
        }});
 }
 
@@ -1537,58 +1520,29 @@ bool refuse_time_input(dft_engine_impl* engine, const dft_metal_engine::grid_wri
 ///
 /// It selects the route the engine ALREADY takes when a wrap is refused (the same \c newBufferWithBytes
 /// fallback, counted by \c staged in the "dft radio inputs" check), so it is a measurement arm and not a
-/// new mechanism: the bytes the kernels read are identical, the contract check that says "the input was
-/// not staged" is expected to FAIL on this arm, and that is the point of flying it.
+/// new mechanism: the bytes the kernels read are identical.
 ///
-/// ★★ THE SPLIT MODE STAGES BY DEFAULT SINCE 2026-09-28 (design document 6.151⑨), and it is a FIX, not a
-/// measurement arm. Read this before "restoring zero-copy" here:
-///
-///  * WHAT WAS MEASURED. In \c cpu_gpu the transform read the radio's receive buffer - the very memory the
-///    UHD receive path writes, because radio_uhd_rx_stream::receive_block() hands OUR pointer to
-///    uhd::rx_streamer::recv() - through the zero-copy wrap, and the uplink's control plane was lost: the
-///    phone's scheduling requests stopped being served (SR detections fell from the clean leg's ~500/min to
-///    103 in a whole leg, and the SR resource went silent), it fell back to a RACH per uplink data arrival
-///    (~10/s; 2044 PRACH detections in one leg, one per ping reply), the RAR/Msg3 grants that storm needed
-///    starved the DRB's downlink queue (queued_sdus 1->22), the RLC discarded SDUs - the ping packets that
-///    went missing - and a later big grant released a whole batch at once, which is the host's linearly
-///    decreasing RTT ramp. One copy removes every one of those readings: leg p105 (the same two module
-///    knobs, input staged) came out PRACH=1, TA_CMD=1, SR back at ~500/min, against p100/p109's storm.
-///  * WHY IT IS NOT A ZERO-COPY REGRESSION. The FINAL design is ONE lane: IQ -> LLR either wholly on the
-///    CPU or wholly on the GPU - data ping-ponging between host and device inside a hop is itself the cost
-///    the fused lane exists to remove (phy_pipeline_mode.h says exactly that, and it DEFINES \c cpu_gpu as
-///    "every module boundary keeps its own host <-> device crossing"). Handing the radio's pages to the
-///    kernel is the FUSED lane's privilege; in the split mode a copy at the module boundary is that mode's
-///    own semantics, not a broken promise. The split mode is a debug/control mode, not a delivery mode.
-///  * THE DELIVERY PATH IS UNTOUCHED, and that is checked, not assumed: \c gpu legs keep the wrap
-///    (p103/p104: radio_inputs=435260/2066078, wrap_copies=0) and stay clean on air (PRACH=1, 0 SDU
-///    discards), and the "dft radio inputs" contract check keeps requiring \c staged == 0 there.
-///  * THE COPY IS COUNTED AND REPORTED as what it is: dft_stats_wrap_copy() feeds \c wrap_copies and
-///    wrap_buffer() declares a host write site to the crossings audit, so a leg that pays it says so on its
-///    own [metal_stats] dft line. ★ A \c cpu_gpu leg with wrap_copies > 0 is therefore a NON-zero-copy
-///    reading: it must not be quoted as evidence about G1/G2 or about zero-copy claims.
-///  * WHAT IT IS NOT: a diagnosis. The mechanism by which the split mode's zero-copy read corrupted the
-///    control plane is still OPEN. The lifetime explanation was refuted by the engine's own counters
-///    (keepalives=648774/648774 in the storm leg: every zero-copy transform held and released its input
-///    token) and the samples are read where the radio put them ([ul_host] assembled=0, in_place=...), so the
-///    remaining candidates are a visibility/ordering effect between the UHD writes and the GPU's read, which
-///    a copy sidesteps by construction. Design document 6.151⑨ carries the diagnostic that would settle it
-///    (compare the device's grid against a host reference computed from the bytes the host saw), and
-///    REMOVING this default is what that diagnosis buys - not a preference.
-///
-/// \note OCUDU_DFT_STAGE_INPUT forces the answer either way (1 = always stage, 0 = never stage, for A/B
-///       arms); unset selects the mode's default. It is read at every submission, so a leg's own
-///       [metal_stats] dft line states which route it actually took.
+/// ★★ IT IS AN ARM AGAIN, NOT A MODE DEFAULT (2026-09-28, design document 6.151⑨). For a few hours this
+/// function also returned TRUE whenever the published mode was \c cpu_gpu, on the theory that the
+/// zero-copy read of the radio's pages was what broke the uplink's control plane in that mode. **That
+/// theory is refuted by two legs, and the default was withdrawn:**
+///  * leg \c p111 (dft+grid, staged BY DEFAULT) reported `radio_inputs=514332 wrap_copies=514332
+///    radio_zero_copy=0` - every input copied - and stormed exactly like the wrap legs (2179 PRACH
+///    detections, 162 discarded SDUs, the phone's SR back down to 103 against the clean legs' ~2100);
+///  * leg \c p112 (`LEG_CG_MODULES=grid`, at the same poor link margin, PHR +10 dB) is completely clean
+///    (PRACH=1, 0 discards, SR 2159) - and its own startup line says the grid is written from the HOST
+///    there (a CPU DFT provides no device grid write), so the clean/storm boundary is "is the DEVICE grid
+///    write active", not "which memory do the transforms read".
+///  * the default also had a measured price: the staged route allocates one MTLBuffer per transform
+///    (514332 of them in p111), and the uplink hop's median went from **993-997us (wrap: p100/p109) to
+///    1542-1547us (staged: p111/p105)** - a ~550us per hop cost for no gain.
+/// ⇒ keep this knob OFF unless an experiment asks for it, and do not re-derive the mode default from the
+///   old cross-arm correlation: that correlation was confounded (see 6.151⑨). The mechanism behind the
+///   storm now lives on the other half of the pair - the device-written grid and whoever reads it.
 bool stage_input_requested()
 {
   const char* env = std::getenv("OCUDU_DFT_STAGE_INPUT");
-  if (env != nullptr) {
-    return std::strtoul(env, nullptr, 10) != 0;
-  }
-  // The mode's default: the split mode stages (see the block above), the fused lane wraps. No published
-  // mode means a unit test or a tool exercising the engine directly - those keep the historical wrap, and
-  // the batch test's negative control is what pins that (it REQUIRES an in-flight overwrite to corrupt the
-  // grid, i.e. it requires the wrap).
-  return phy_pipeline_mode_registry::is_published() && (phy_pipeline_mode_registry::get() == phy_pipeline_mode::cpu_gpu);
+  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
 }
 
 id<MTLBuffer> wrap_buffer(dft_engine_impl* engine, const void* ptr, size_t length)

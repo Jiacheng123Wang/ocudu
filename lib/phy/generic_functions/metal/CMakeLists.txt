@@ -51,12 +51,6 @@ set_directory_properties(PROPERTIES LABELS "phy")
 
 add_test(dft_processor_metal_unit_test dft_processor_metal_unit_test)
 add_test(ofdm_demodulator_metal_batch_test ofdm_demodulator_metal_batch_test)
-# ★ A SECOND CASE, ONE PROCESS, ONE MODE (design document 6.151⑨): the split mode `cpu_gpu` stages the DFT
-# input by default - its module boundary pays one copy by design - so the batch test's negative control has to
-# come out the OTHER way there (an in-flight sample overwrite must NOT change the grid, i.e. the transform is
-# reading a copy). The mode registry is process-wide and cannot be un-published, so the second mode needs a run
-# of its own rather than mixing two populations in one contract line.
-add_test(ofdm_demodulator_metal_batch_test_split_stages ofdm_demodulator_metal_batch_test --stage-split)
 add_executable(ofdm_demodulator_metal_batch_test test/ofdm_demodulator_metal_batch_test.cpp)
 target_link_libraries(ofdm_demodulator_metal_batch_test PRIVATE
     ocudu_dft ocudu_dft_metal ocudu_lower_phy_modulation ocudu_phy_support ocudu_support)
