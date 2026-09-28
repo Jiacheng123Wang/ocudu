@@ -120,8 +120,15 @@ for f in "${RESOLVED[@]}"; do
     # The columns are: slot rxwait t2f ce ldpc crc_ok tf_from_done pipeline. In mode=gpu t2f/ce are HOST
     # instants (see 6.145 (4)); what must NOT happen is a column that is NaN for every row, which is what a
     # landmark that is never reached in this mode would produce.
-    nan=$(grep -aE '^  *[0-9]+ +[0-9]' "$f" | grep -c 'nan' || true)
-    judge "[ul_slot_trace] rows carrying a NaN column" "INFO (a failed decode has no crc_ok)" "$nan" INFO
+    # HOW MANY ROWS ARE REAL HOP TIMELINES. A row is created by a slot's first codeblock decode, so a row whose
+    # `ldpc` column is NaN is a row whose slot key came round AGAIN in a later SFN cycle without a grant: the
+    # rebase emptied it and only rxwait (every slot) - sometimes t2f - came back. That is the documented meaning
+    # of a NaN field ("this landmark was not reached for this slot", see the row struct) and NOT data loss: the
+    # distributions above are unaffected. It does mean an IDLE leg's trace is mostly shells (p89: 15 complete of
+    # 512) while a loaded one is mostly complete (p90: 449 of 512), so what a reader wants first is this count.
+    complete=$(grep -aE '^  *[0-9]+ +[0-9]' "$f" | awk '{print ($5=="nan") ? 0 : 1}' | grep -c 1 || true)
+    judge "[ul_slot_trace] rows carrying a complete timeline" "INFO (an idle leg holds few - see 6.148 (5))" \
+          "$complete" INFO
     # THE FIX'S OWN PRE-REGISTERED CHECK (6.148 (5)). A row is keyed by the MODULAR slot, and a landmark of the
     # PREVIOUS SFN cycle used to be paired with this cycle's base - printing a delta of -10.24 s. The fix drops a
     # slot's landmarks when its base is refreshed, so (a) no row may carry a delta of about minus one SFN cycle

@@ -447,12 +447,19 @@ fi
 # the `phy` LABEL. Three PHY tests carry a different label, so they are topped up by name (disjoint).
 FILTER_LABEL="phy"
 FORMER_TOPUP="du_low_phy_pipeline_test|baseband_gateway_buffer_metal_smoke_test|pusch_processor_benchmark"
-stage run "ctest -L $FILTER_LABEL (193 tests, ~25 s)"
+stage run "ctest -L $FILTER_LABEL (>=193 tests, ~25 s)"
 ctest --test-dir build -L "$FILTER_LABEL" >"$T/ctest" 2>&1
 cl=$(grep -E "tests passed" "$T/ctest" | tail -1)
-check "ctest -L phy (the label gate): 193 runnable at the merged HEAD (was 179 before the origin/main merge)" "193" \
-      "$([ "$cl" = "100% tests passed out of 193" ] && echo PASS || echo "$([ -z "$cl" ] && echo RED || echo FAIL)")" \
-      "${cl:-<unreadable>}  (replaces the name-regex gate: 157 selected, 19 of them substring noise)"
+# A FLOOR, NOT AN EQUALITY. The total is dynamic - this file's own pitfall-28 lesson, written three lines below
+# for the test binaries - and hard-coding it made the first legitimate growth read FAIL (2026-09-28: the UL
+# pipeline probe's 8 cases joined the label, 193 -> 201, see dev doc 6.148 (5)). What the gate has to catch is
+# the label SHRINKING (a test silently dropping out of the acceptance path - which is exactly how that whole
+# binary came to sit outside it under the directory's "support" label) and any FAILED case. A total ABOVE the
+# floor is a test that joined the label, and the evidence line below says which.
+n_phy=$(echo "$cl" | grep -oE "out of [0-9]+" | grep -oE "[0-9]+")
+check "ctest -L phy (the label gate): 100% of >=193 runnable (the total may GROW, never shrink)" "100% and n>=193" \
+      "$(echo "$cl" | grep -q "^100% tests passed out of " && [ -n "$n_phy" ] && [ "$n_phy" -ge 193 ] && echo PASS || echo "$([ -z "$cl" ] && echo RED || echo FAIL)")" \
+      "${cl:-<unreadable>}  (floor 193; grew to 201 on 2026-09-28 - the UL pipeline probe's 8 cases are inside the label now)"
 # The three PHY tests the label used to miss are inside it now (they were a manual top-up); if one of
 # them loses its label again, this reads RED and the gate silently shrinks - which is the whole lesson.
 n=$(ctest --test-dir build -N -L "$FILTER_LABEL" -R "$FORMER_TOPUP" 2>/dev/null | grep -oE "^Total Tests: [0-9]+" | grep -oE "[0-9]+")
