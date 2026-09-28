@@ -16,7 +16,12 @@
 #include "ocudu/ran/subcarrier_spacing.h"
 #include "ocudu/support/error_handling.h"
 #include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 
 using namespace ocudu;
 
@@ -155,8 +160,12 @@ bool per_slot_wait_requested()
   if ((arm == nullptr) || (std::strtoul(arm, nullptr, 10) == 0)) {
     return false;
   }
-  const char* staged = std::getenv("OCUDU_DFT_STAGE_INPUT");
-  if ((staged != nullptr) && (std::strtoul(staged, nullptr, 10) != 0)) {
+  const char* stage_env = std::getenv("OCUDU_DFT_STAGE_INPUT");
+  // ... unless the AUDIT is watching: that combination is then the positive control the audit needs (it
+  // recreates the staged route's hole, and the audit reports it as EARLY != LATE - see grid_audit()).
+  const char* audit_env = std::getenv("OCUDU_DFT_GRID_AUDIT");
+  const bool  audited   = (audit_env != nullptr) && (std::strtoul(audit_env, nullptr, 10) != 0);
+  if (!audited && (stage_env != nullptr) && (std::strtoul(stage_env, nullptr, 10) != 0)) {
     static bool reported = false;
     if (!reported) {
       reported = true;
@@ -175,6 +184,151 @@ bool per_slot_wait_requested()
         "symbol) as every leg did before 6.151⑨, which is a DIAGNOSTIC arm and not a delivery policy");
   }
   return true;
+}
+
+/// \brief Diagnostic arm OCUDU_DFT_GRID_AUDIT=<stride>: is the slot's grid COMPLETE when the host is told it is?
+///
+/// WHY IT EXISTS (2026-09-28, design document 6.151⑨⑭). The split mode's uplink collapses when the per-slot
+/// wait is in force and comes back when every symbol is waited for - measured with the two arms
+/// (OCUDU_DFT_WAIT_PER_SLOT): p118 storms (PRACH 2472, the phone's SR down to 125, PHR +9 -> +2, the downlink
+/// queue 1 -> 7) while p115 is clean at the same link margin. The code reading says the per-slot wait SHOULD
+/// cover the slot (each symbol registers its ring slot against the slot's one open block, and wait_slot()
+/// commits that block before it waits), so the mechanism is still open - and a fix whose reason is unknown
+/// can be undone by the next unrelated change.
+///
+/// WHAT IT MEASURES, and why that is decisive: after the end-of-slot wait returns, the grid is supposed to be
+/// final. This arm snapshots it there (EARLY), drains every submission the engine has committed
+/// (dft_processor::wait()), snapshots the SAME resource elements again (LATE) and compares.
+///  * EARLY != LATE => the wait that just returned did NOT cover the whole slot's grid writes, and the host
+///    readers (the CE on the host in this arm, and the PUCCH) run right after it. The per-symbol difference
+///    counts are the fingerprint: they name which OFDM symbols were still being written.
+///  * EARLY == LATE => the grid is complete when the slot is reported, and the hole is elsewhere (the
+///    reader's generation, or something downstream of the grid).
+///
+/// A DIAGNOSTIC ARM that perturbs the pipeline on purpose (one full drain per audited slot flattens the
+/// transform pipeline): it must not be flown as a delivery leg, and its own report line says how many slots
+/// it audited. \c stride samples one slot out of \c stride (1 = every slot).
+///
+/// \note It also gates the otherwise-refused OCUDU_DFT_STAGE_INPUT + OCUDU_DFT_WAIT_PER_SLOT combination (see
+///       per_slot_wait_requested()): with this arm watching, that combination is the POSITIVE CONTROL - it
+///       recreates the staged route's hole, which the audit must then report as EARLY != LATE.
+struct grid_audit_state {
+  unsigned stride     = 0;
+  bool     parsed     = false;
+  uint64_t seen       = 0;
+  uint64_t audited    = 0;
+  uint64_t with_diff  = 0;
+  uint64_t total_diff = 0;
+  uint64_t max_diff   = 0;
+  /// Differing resource elements per OFDM symbol of the slot: the fingerprint of an uncovered write.
+  std::array<uint64_t, NOF_OFDM_SYM_PER_SLOT_NORMAL_CP> symbol_diff = {};
+  /// EARLY snapshot, with the shape it was taken with.
+  std::vector<uint32_t> early;
+  unsigned              subc = 0;
+  unsigned              symb = 0;
+  unsigned              ports = 0;
+};
+
+grid_audit_state& grid_audit()
+{
+  static grid_audit_state state;
+  if (!state.parsed) {
+    state.parsed     = true;
+    const char* env  = std::getenv("OCUDU_DFT_GRID_AUDIT");
+    state.stride     = (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 0;
+    static const bool registered = []() {
+      std::atexit([]() {
+        grid_audit_state& s = grid_audit();
+        if (s.stride == 0) {
+          return;
+        }
+        std::fprintf(stderr,
+                     "[grid_audit] slots: audited=%llu of %llu seen, EARLY!=LATE in %llu, differing REs=%llu "
+                     "(max %llu in one slot); per-symbol=[",
+                     static_cast<unsigned long long>(s.audited),
+                     static_cast<unsigned long long>(s.seen),
+                     static_cast<unsigned long long>(s.with_diff),
+                     static_cast<unsigned long long>(s.total_diff),
+                     static_cast<unsigned long long>(s.max_diff));
+        for (unsigned i = 0; i != s.symbol_diff.size(); ++i) {
+          std::fprintf(stderr, "%s%llu", (i == 0) ? "" : ",", static_cast<unsigned long long>(s.symbol_diff[i]));
+        }
+        std::fprintf(stderr,
+                     "] (stride=%u; EARLY = right after the slot's wait, LATE = after draining every "
+                     "committed submission)\n",
+                     s.stride);
+      });
+      return true;
+    }();
+    (void)registered;
+  }
+  return state;
+}
+
+/// Whether this slot is sampled by the audit arm (and counts it).
+bool grid_audit_due()
+{
+  grid_audit_state& s = grid_audit();
+  if (s.stride == 0) {
+    return false;
+  }
+  bool due = (s.seen % s.stride) == 0;
+  ++s.seen;
+  return due;
+}
+
+/// Copies every resource element of \p view (all ports and symbols) as raw cbf16 words (4 bytes each).
+///
+/// The device view is the one grid layout the demodulator already knows (submit_grid_write() builds it), and
+/// with unified memory its base is the grid's own buffer - so this is a plain host read of the storage the
+/// kernel writes, at the moment the caller chooses (see grid_audit()).
+void grid_audit_take(const resource_grid_device_view& view, std::vector<uint32_t>& into)
+{
+  grid_audit_state& s = grid_audit();
+  s.subc              = view.nof_subc;
+  s.symb              = view.nof_symb;
+  s.ports             = view.nof_ports;
+  into.assign(static_cast<size_t>(view.nof_ports) * view.nof_symb * view.nof_subc, 0);
+  const auto* base = static_cast<const uint32_t*>(view.base);
+  for (unsigned p = 0; p != view.nof_ports; ++p) {
+    for (unsigned l = 0; l != view.nof_symb; ++l) {
+      uint32_t* dst = into.data() + (static_cast<size_t>(p) * view.nof_symb + l) * view.nof_subc;
+      std::memcpy(dst, base + view.get_symbol_offset(p, l), static_cast<size_t>(view.nof_subc) * sizeof(uint32_t));
+    }
+  }
+}
+
+/// Compares the grid against the EARLY snapshot and accumulates the per-symbol fingerprint (see grid_audit()).
+void grid_audit_compare(const resource_grid_device_view& view)
+{
+  grid_audit_state& s = grid_audit();
+  if ((s.subc != view.nof_subc) || (s.symb != view.nof_symb) || (s.ports != view.nof_ports) ||
+      (s.early.size() != static_cast<size_t>(view.nof_ports) * view.nof_symb * view.nof_subc)) {
+    // The shape changed under us: nothing to compare with, and the next audited slot re-takes the snapshot.
+    return;
+  }
+  const auto* base     = static_cast<const uint32_t*>(view.base);
+  uint64_t    slot_diff = 0;
+  for (unsigned p = 0; p != view.nof_ports; ++p) {
+    for (unsigned l = 0; l != view.nof_symb; ++l) {
+      const uint32_t* src = base + view.get_symbol_offset(p, l);
+      const uint32_t* ref = s.early.data() + (static_cast<size_t>(p) * view.nof_symb + l) * view.nof_subc;
+      uint64_t        diff = 0;
+      for (unsigned k = 0; k != view.nof_subc; ++k) {
+        diff += (src[k] != ref[k]) ? 1u : 0u;
+      }
+      if (l < s.symbol_diff.size()) {
+        s.symbol_diff[l] += diff;
+      }
+      slot_diff += diff;
+    }
+  }
+  ++s.audited;
+  s.total_diff += slot_diff;
+  s.max_diff = std::max(s.max_diff, slot_diff);
+  if (slot_diff != 0) {
+    ++s.with_diff;
+  }
 }
 
 } // namespace
@@ -590,6 +744,18 @@ void ofdm_symbol_demodulator_impl::finish_symbol(resource_grid_writer& grid, uns
     span<const cf_t> dft_output = dft->get_output_batch().subspan(static_cast<size_t>(slot) * dft_size, dft_size);
     process_dft_output(grid, dft_output, pipeline_slots[slot].port_index, pipeline_slots[slot].symbol_index);
   }
+  // ★ OCUDU_DFT_GRID_AUDIT (diagnostic arm, see grid_audit()): the wait above just returned, so the grid is
+  // supposed to be final - snapshot it, drain every committed submission, and compare. A difference is the
+  // direct evidence that the wait did not cover the slot, with the per-symbol counts as the fingerprint.
+  if (pipeline_slots[slot].device_write && last_symbol_of_slot && grid_audit_due()) {
+    const resource_grid_device_view audit_view = grid.get_device_view();
+    if (audit_view.is_valid()) {
+      grid_audit_take(audit_view, grid_audit().early);
+      dft->wait();
+      grid_audit_compare(audit_view);
+    }
+  }
+
   pipeline_slots[slot].valid = false;
 }
 
