@@ -357,7 +357,7 @@ V4 ✅ `cbs/lane=2.00 (max=2)`、crossings `0.00+0.00`（`p47` 的诊断臂 3.00
 | `[mmse_time_sum] defer_wait distribution` | `port_channel_estimator_metal_mmse_impl.cpp` | 宿主**等延迟链**的时间分布 | **与 residency 是同一窗口的两个视角**（宿主视角 / 设备视角）⇒ **不可相加** |
 | `[mmse_time_sum]`（其它字段）| 同上 | 估计器宿主阶段：`pre/stage/submit/unpack/cpl_*/corr/gpu_path/cpu_blocks` | 全部**只有几十 µs** ⇒ 估计器的**宿主**工作不是时延主项 |
 | `[ul_rx_pool]` | `lower_phy_baseband_processor.cpp` | 接收缓冲池：`taken/returned/held_end/held_max/pool/free_min/starved_takes/starved_events` | **`held_max == pool` + `free_min == 0` + `starved_events > 0` = 池被抽干**（接收线程会被 `pop_blocking()` 阻塞）⇒ **这就是 underflow 的直接原因** |
-| `[ul_rx_wait]` | 收包侧（`ul_pipeline_probe`）| 接收线程**一次 `receive()`**（收齐整块）的阻塞时长 | 三段覆盖不到时的去处；**它是 `t2f` 的一部分**（§2.3）。它的**尾部**（~101 ms 级）是**传输/驱动**现象，**只能在本序列与 `[ul_rx_timing]`/`[ul_rx]` 里看到**，不会出现在 `stale` 里（§4.1.1）；dry-pool drop 分支的那次 `receive()` 两条序列都不记（§4.1.1 盲区 3）|
+| `[ul_rx_wait]` | 收包侧（`ul_pipeline_probe`）| 接收线程**一次 `receive()`**（收齐整块）的阻塞时长 | 三段覆盖不到时的去处；**它是 `t2f` 的一部分**（§2.3）。它的**尾部**（~101 ms 级）是**本进程自己的启动项**（`delay_s = 0.1` 把电台流起点推后 100 ms，**不是传输打嗝** —— 见 **§6.146**），只能在本序列与 `[ul_rx_timing]`/`[ul_rx]` 里看到，不会出现在 `stale` 里（§4.1.1）；dry-pool drop 分支的那次 `receive()` 两条序列都不记（§4.1.1 盲区 3）|
 | `[metal_stats] burst dispatches` | `ocudu_metal_burst.mm` | 一跳里各模块的 dispatch **次数** | 次数 ≠ 时间；不要用它推断时延 |
 | `[metal_stats] gpu busy (front_end/back_end)` | `ocudu_metal_queue.mm` | **每队列**命令缓冲的 GPU 时间 | 只到"队列"这一层（`commits/busy/mean/window`），**不是 kernel 级** |
 | `[metal_stats] dft handover …` | `ocudu_dft_metal_engine.mm` | 交棒：`handed/taken/superseded/evicted/…`、`keepalives=released/attached (max in flight)`、`(armed=…)`、**P2-E 的 `tokens_early=signals:N,by_event:M,by_complete:K`** | `keepalives` 的差额=**在飞**（不是泄漏），判泄漏看 `max in flight`（§5.9.120）；**P2-E：`by_event == 0` 表示"开关开了但释放没搬到前端"**，此时池数字应读作**未变**（§6.4）|
@@ -4084,7 +4084,8 @@ p29  09:28:00.626260 [RF] … overflow  →  09:28:00.627279 [PHY] … (54500 sa
   ⇒ **宿主从不"迟到发问"**。⇒ §6.51 ⑥ 里"打宿主优先级/亲和性臂"的猜想**被本腿否掉**。
 * **`recv`（调用内部）有 657 次 >1 ms、24 次 >5 ms** ⇒ **是传输在调用内部顶住**。
   （`max=100645 µs` 是**已知的启动伪读数**：`[ul_rx_wait] max` 在**每一条**腿上都是 ~101 ms（含 0-gap 的 `p27`/`p31`），
-  且 `slip max(19.45 ms) ≪ recv max(100.6 ms)` ⇒ 那次调用**没有前驱**（`slip` 不计算第一次），即开流前的那一次。）
+  且 `slip max(19.45 ms) ≪ recv max(100.6 ms)` ⇒ 那次调用**没有前驱**（`slip` 不计算第一次），即开流前的那一次。
+  ★ **为什么正好是 ~101 ms：见 §6.146 —— `ru_controller_sdr_impl` 的 `delay_s = 0.1` 把电台流起点推后 100 ms 并对齐到子帧。**）
 * **`slip` 最大 19.45 ms**：`slip = loop + recv − 本块空口时长` ⇒ **那一次迭代里未读积压增长了约 19.5 ms**
   ⇒ **这正是 64 帧（~5–8 ms 余量）必丢、256 帧（~20–30 ms）能吸收的那种事件**。
 * 三腿的 `[ul_rx_wait]` **形状几乎相同**（median 474/473/474、p95 595/597/595、max ~101 ms）
@@ -8860,6 +8861,21 @@ python3 doc_chinese/phy_latency/wip/ul_grant_stats.py /tmp/gnb_n78_ul_ab.log
 
 ★ **收包策略这一条决定了 A 的量级**：`ul_pipeline_probe.h` 明写 —— 整槽收包时"**一个块就是一整个时隙，所以等待不可能短于'直到本槽最后一个样点存在'**"；而 `record_start()` 取的是**该块的第一个样点**的时间戳 ⇒ **A ≈ 一个时隙（30 kHz = 500 µs）**，与算力无关。
 
+★ **A 的物理含义（用户 2026-09-27 追问"473 是不是说明 CPU 迟到 27 µs"）—— A = 时隙时长 − δ，δ = 宿主唤醒相位**：
+
+设 `T0` = 本槽第一个样点存在的瞬间（ADC 时间线，**固定**），`T1 = T0 + slot`（最后一个样点），`Tc` = 宿主**发起** `receive()` 的时刻（`record_start()` 打的墙钟）。则 `A = T1 − Tc = slot − δ`，其中 `δ = Tc − T0`：
+
+| 腿 | slot | A 中位 | ⇒ δ | 读法 |
+|---|---|---|---|---|
+| `p86`（n78 gpu，30 kHz）| 500 | **473.0** | **+27 µs** | 宿主在**槽边界之后** 27 µs 才来要样本 |
+| 用户引的 n1 腿（15 kHz）| 1000 | **1054.0** | **−54 µs** | 宿主在**槽边界之前** 54 µs 就来了 |
+
+* ★ **A 变小 ≠ 变快**：样本在 `T1` 之前**根本不存在**，一跳最早也只能从 `T1` 起步。宿主**更早**来 ⇒ A 变大而物理延迟不变；**更晚**来 ⇒ A 变小、V1 也变小，而 `T0 → LLR` 的物理延迟**一点没变**。
+* ★ 因此 **V1 与 A 都以 `Tc` 为锚**：`V1 = (T0 → LLR 的物理延迟) − δ`。跨腿/跨模式比 V1 时，**δ 是未记账的偏移**（p86 是 27 µs）；要还原物理延迟就把它加回去。
+* ⇒ 这也解释了 A 为什么在不同腿/模式间从 473 跳到 1054：**变的是 δ（宿主唤醒相位），不是结构**。
+* ⇒ "理想情况下 A 应该是 500"这句话的正确读法：500 只是"宿主恰好在 `T0` 醒来"（δ = 0）时的读数。它既不是下界（A 可以更大），**也不是目标**（把 A 做小不减少任何延迟）。真正的目标是 **`T1 → LLR` 的那 936.8 µs**（= 1409.8 − 473.0：头 43.4 + residency 636.8 + 差值的 256.6）。
+* ⚠ **唯一需要盯的 A 的尾部**是"宿主太晚"那一侧（`min` 越小 = 来得越晚）：p86 `min=22.0` ⇒ 最晚一次宿主在槽边界之后 478 µs 才来（仍 > 0 ⇒ 仍没丢样）。**漂移**（δ 持续增长 = 宿主落后于时间线）才是故障前兆，由 `[ul_rx_timing]` 的 **`slip`** 度量（p86 `slip max=8820 µs`、`over 1ms=424` ⇒ 稳态没有漂移）。
+
 ★ **这张表的依据（用户 2026-09-27 追问："在没有这样的探针改造前，这些数凭什么？"）** —— **全部来自 `p86` 那条腿当时就已经开着的三台仪器**，没有一个是新探针：
 
 | 仪器 | 门控 | `p86` 原始行（`wip/logs/gnb_gpu_p86-n78-stress_0927_1500.log.stderr`）|
@@ -8993,6 +9009,74 @@ V1 = 1409.8 µs（墙钟：本槽第一个样点 → LLR 交付）
 
 1. **A 一直有直接读数**：`[ul_rx_wait]`（按块，`report()` 无条件打印）。**p86 上的实测中位就是 473.0 µs**（`mean=496.9`、`p95=593.0`、`samples=553142`；而 gpu 腿里 `553142 ≈ 腿长/一个时隙` 正说明**每槽一块**）。所以缺口不是"A 没仪器"，而是**没有人把 `[ul_rx_wait]` 的中位读成 A**（§5.8.29 在 cpu 腿上量过 median 1057.0 / mean 997.9），以及 §6.144⑤ 的树把它标成了"无直接读数"、用 ≈500 参与了残差计算。
 2. **那一段"未测"仍成立，但数值要用实测 A 重算**：`V1 − A − 头 − residency = 1409.8 − 473.0 − 43.4 − 636.8 = ` **256.6 µs**（老账的 "~230" 是用 A = 500 算出来的）⇒ 它是目前**最大的测量盲区**，而 ④ 的 `ce → ldpc` 列 + `[ul_gpu_lane]` 的设备 end 就能把它夹住 ⇒ **不需要新仪器就能先做一次**。
+
+### 6.146 ★★★ 那个"每条腿都 ~101 ms"的 `[ul_rx_wait] max` **不是打嗝，是本进程自己的启动项**：源码里的 `delay_s = 0.1`（用户 2026-09-27 追问"CPU 来取样本要等 101 ms，从哪个角度看都不正常"）
+
+#### ① 结论
+
+`[ul_rx_wait]` 的最大值在**每一条腿**上都是 ~101 ms（`p86` 100.786 / 用户那条 n1 腿 101.557 / 更早的 101591、101670、101319、100645…），跨 **cpu / cpu_gpu / gpu 三种模式、五种配置、9 天**都成立。它**不是**传输或驱动打嗝，而是：
+
+> ★ **电台流的起点被本进程故意推后 100 ms**，而接收线程**立刻就开始要样本** ⇒ **每次运行的第一条 `receive()` 必然等约 100.5–101.9 ms**。
+
+源码（`lib/ru/sdr/ru_controller_sdr_impl.cpp:70-76`，无 `start_time` 时走的那条分支）：
+
+```cpp
+// Calculate starting time from the radio current time plus one hundred milliseconds.
+double                     delay_s      = 0.1;
+baseband_gateway_timestamp current_time = radio->read_current_time();
+baseband_gateway_timestamp start_ts     = current_time + static_cast<uint64_t>(delay_s * srate_MHz * 1e6);
+// Round start time to the next subframe.
+uint64_t sf_duration = static_cast<uint64_t>(srate_MHz * 1e3);
+start_ts             = divide_ceil(start_ts, sf_duration) * sf_duration;   // 对齐到子帧
+radio->start(start_ts);
+```
+
+* 这个 `0.1 s` 是**给定的启动余量**（给 TX 流与电台起流留时间），不是异常；**向上取整到子帧**解释了观测值比 100 ms 多出的那 0.5–1.9 ms。
+* （另一条 `start_time.has_value()` 的分支走 1PPS：起点 ="下一个 PPS 上升沿前 10 ms"。**这两条腿不是那条**——若走 PPS，首次等待会接近 1 s，而不是稳定的 ~101 ms。）
+
+#### ② 为什么能断定它落在"**首次调用**"上（**证明**，不是推断）
+
+`[ul_rx_timing]` 的 `slip` 是"这次迭代相对样点时间线的漂移"，定义为 `slip = loop + recv − air`（探针原话），而它**只对"有前驱"的调用计算**：`if (last_return_ns != 0)`（`lower_phy_baseband_processor.cpp:614`；进程内**恰好一次**调用没有前驱）。
+
+⇒ 对**任何非首次调用**：`recv = slip − loop + air ≤ slip_max + air`。
+
+| 腿 | `slip_max` | `air`（本块空口时长）| ⇒ 非首次调用的 `recv` **上界** | 实测 `recv_max` | 结论 |
+|---|---|---|---|---|---|
+| `p86`（n78 gpu）| 8 820 µs | 500 µs | **9 320 µs** | **100 783 µs** | 100.8 ms **只能**是首次调用 ✅ |
+| `p62`（n78 cpu）| 10 540 µs | 500 µs | 11 040 µs | 100 847 µs | 同上 ✅ |
+| `p43`（n78 half-slot）| 5 922 µs | 250 µs | 6 172 µs | 100 514 µs | 同上 ✅ |
+
+#### ③ 跨腿复核（`doc_chinese/phy_pipeline_gpu/wip/logs/` 里 53 条带 `[ul_rx_timing]` 的腿）
+
+抽样（13 条，全表见本条的生成方式：`grep -m1 '^\[ul_rx_timing\]' *.log.stderr`）：
+
+| 腿（模式）| `rxwait` 中位 | `rxwait` max | `recv_max` | `loop_max` | `slip_max` | `rx_overflows`/`gaps` |
+|---|---|---|---|---|---|---|
+| `p33-n78-rxring`（gpu）| 474.0 | 100 646 | 100 645 | 1 187 | 19 453 | 0 / 0 |
+| `p37-n78-ring512`（gpu）| 473.0 | 101 359 | 101 355 | 5 032 | 6 925 | 0 / 0 |
+| `p42-n78-hostgap`（gpu）| 473.0 | 100 729 | 100 724 | 6 498 | 11 997 | 0 / 0 |
+| `p53-n78-tailmark`（gpu）| 473.0 | 100 708 | 100 702 | 2 762 | 15 687 | 0 / 0 |
+| `p62-n78-repro-cpu`（cpu）| 473.0 | 100 851 | 100 847 | 251 | 10 540 | 0 / 0 |
+| `p64-n78-repro-cpugpu`（cpu_gpu）| 473.0 | 100 836 | 100 832 | 5 079 | 7 051 | 1 / 0 |
+| `p86-n78-stress`（gpu）| 473.0 | 100 786 | 100 783 | 1 644 | 8 820 | 0 / 0 |
+| ★ `p36-n78-bigframe`（**真积压的反例**）| **1 625.0** | 103 986 | 103 981 | 118 | **59 734** | **135 143** / — |
+
+* `recv_max` 恒在 **100.5–101.9 ms**（与模式、配置、负载**无关**）⇒ 与"固定的启动偏移"一致，与"随机的传输打嗝"不一致。
+* `loop_max` 只有 0.1–7 ms ⇒ **宿主从不迟到发问**（`loop` ＝上一次返回→本次发起，宿主自己的活儿＋调度）。
+* `slip_max` 2–60 ms，**恒 ≪ `recv_max`** ⇒ 稳态没有把时间线跑丢。
+* ★ **反例给出的判据**：`p36`（bigframe，已知的坏腿）是唯一 `slip_max` 逼近 `recv_max` 的腿，且 `rx_overflows = 135 143`、`rxwait` 中位 1625 µs ⇒ **真积压长什么样与启动项完全不同**，可以一眼分开。
+
+#### ④ 读法（写进探针手册，替换旧归属）
+
+1. **`[ul_rx_wait] max` 是个常量，不要当症状**：它等于启动项（~101 ms，§①②）。看接收侧要看**中位/尾部形状**（中位 = A，见 §6.144⑤ 的 δ 口径）。
+2. 判"接收侧打嗝"要看 **`[ul_rx_timing]`**：`recv` 大而 `loop` 小 ⇒ 传输/电台在调用内部顶住；`loop` 大而 `load1` 高 ⇒ macOS 调度；两者都正常而 CRC/SINR 差 ⇒ 空口（§4.1.1 的三条归属规则）。
+3. 判"有没有丢样/积压"要看 **`[ul_rx]`**（`rx_overflows` / `rx_lates` / `gaps` / `gap_us`）与 **`slip`**（`slip` 持续为正才是落后）。
+4. 判"它有没有进流水线"要看**分母**：`[ul_rx_wait]` 按**块**（每槽一次），而 V1 只统计**走到 LLR 的跳**；启动那一次落在"还没有 PUSCH 授权"的时隙上 ⇒ 两条序列都看不到它（`stale=0` 与它不矛盾，§4.1.1 盲区 1/2）。
+
+#### ⑤ 更正两处旧写法
+
+* §4.1.1 的手册表里写"它的**尾部**（~101 ms 级）是**传输/驱动**现象" —— **归属错了**：它是**本进程自己**推后的流起点（本节①②）。已经就地改掉。
+* §6.55② 当时已经用 `slip ≪ recv` 正确断定"那次调用没有前驱"，但**没给出为什么正好是 ~101 ms**；本节把它补成源码级结论。
 
 ## 7. 杠杆与候选改动（技术账）
 
