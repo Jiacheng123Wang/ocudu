@@ -8,6 +8,7 @@
 #include "metrics/upper_phy_metrics_collector_impl.h"
 #include "uplink_processor_impl.h"
 #include "uplink_processor_pool_impl.h"
+#include "uplink_processor_printer_decorator.h"
 #include "upper_phy_impl.h"
 #include "upper_phy_pdu_validators.h"
 #include "upper_phy_rx_results_notifier_printer_decorator.h"
@@ -410,7 +411,13 @@ private:
     backend->on_new_sector(config.sector, std::move(notifier));
 
     // Create uplink processor using the new notifier.
-    return base_factory->create(config2, std::forward<Args>(args)...);
+    std::unique_ptr<uplink_processor> processor = base_factory->create(config2, std::forward<Args>(args)...);
+    if (!processor) {
+      return nullptr;
+    }
+
+    // Wrap the uplink processor for stopping the backend before the processor.
+    return std::make_unique<uplink_processor_printer_decorator>(std::move(processor), backend);
   }
 
   std::shared_ptr<uplink_processor_factory>         base_factory;

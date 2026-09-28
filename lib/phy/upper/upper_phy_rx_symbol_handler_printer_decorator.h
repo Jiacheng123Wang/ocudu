@@ -21,12 +21,6 @@ public:
   {
   }
 
-  ~upper_phy_rx_symbol_handler_printer_decorator() override
-  {
-    // Stop the backend when the decorator, i.e., upper PHY, is destroyed.
-    backend->stop();
-  }
-
   void
   handle_rx_symbol(const upper_phy_rx_symbol_context& context, const shared_resource_grid& grid, bool is_valid) override
   {
