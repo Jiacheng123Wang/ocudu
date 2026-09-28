@@ -188,6 +188,8 @@ grep -ac "$(git -C /Users/jiachengwang/dev/ocudu rev-parse --short=10 HEAD)" /Us
 10. ★★ **"检查存在"≠"检查在判据读的那条路径上"**（本仓第三次同类）：`ul_pipeline_probe_test` 的 8 个用例只挂了目录标签 `support`，而验收跑的是 `ctest -L phy` ⇒ 探针的契约与回归臂**从未被执行**（§6.148⑤）。已加 `phy` 标签；⚠ `gtest_discover_tests(... PROPERTIES LABELS "a;b")` 的分号必须**转义**（否则变成两个属性，`ctest --show-only=json-v1` 可见），且改 CMake 后**必须重新 configure**。验收计数 **193 → 201**。
 11. ★★ **门禁里的"总数"要写成下界，不能写成等号**：审计要求 `ctest -L phy` 恰好 `out of 193`，而 §6.148⑤ 让标签涨到 201 ⇒ **第一次合法增长被读成 FAIL**。已改成 **100% 且 n ≥ 193**（缩水照样抓——那正是探针 8 个用例掉出验收路径的方式）。
 13. ★★ **电台会"边缘化"且能自愈**（2026-09-28 首次遇到）：`p92` 第一次（11:56）与 `p94`（12:08）都出现 `exceeded maximum number of timed out receive calls`（~104 s 接收静默）⇒ 后者以 `uhd::usb_error … LIBUSB_ERROR_NOT_FOUND` 未捕获异常 **Abort trap: 6** 收场，那条腿无报告、已作废；夹在中间的 `p92` 重跑与 `p93` 却完全干净。
+14. ★★ **ping 的"偶发尖峰"要先当**会话起飞瞬态**读，别当复发性停顿**（2026-09-28）：`p108` 那条腿的 ping 报 `max 1.658 s / pipe 16`，在 gNB 日志里对上的是**前 15 s 内**的一段 `1.60 s`（RLC/MAC 发送 + SCHED）与 `4.0 s` 空档，**连"核心→gNB 到达"（GTPU）那层都在** ⇒ 那一瞬间没有包到 gNB ⇒ 上游（宿主协议栈/核心，最可能是 ND/ARP）在会话开头停了一下；**gNB 的无线路径界是 ms 级**。
+    ⇒ **纪律**：跑统计用的 ping 之前**先热身**（`ping -c 10`）；尖峰若出现在**会话中段**，宿主上 `tcpdump -i <tun> -n icmp` 抓 20 s 就能判"请求有没有及时离开宿主"。
     ⇒ **纪律**：① 任何 abort / 强杀 / `Forcing exit` 之后**先给 B200 断电重启**并 `uhd_find_devices` 确认；② 每条腿**头 15 s 看 stdout**，出现 `exceeded maximum` / `failed receiving packet` 就立刻 Ctrl-C（那条腿必 void），别盲跑完。
 12. ★ **读 `[ul_slot_trace]` 的第一件事是数"完整行"**：`ldpc` 非 NaN ⇔ 该行是**该周期**的一次真实跳；空载腿 512 行里可能只有十几行完整（`p89` 15 行），这**不是异常**而是"重置"语义的正常形态（分布序列不受影响）。`probe_recheck.sh` 会直接打这个计数。
 
