@@ -184,6 +184,8 @@ def main():
         "OCUDU_EQ_DIRECT_GRID": "均衡直接读网格（`y_gather` 消失，派发 10→6/跳）",
         "OCUDU_DEMOD_DEFER_ENCODE": "解映射延迟编码（融合车道的分组形状）",
         "OCUDU_CE_Y_DIRECT": "信道估计直接读 y（省一次 gather）",
+        "OCUDU_DFT_RELEASE_TOKENS_EARLY": "P2-E：输入令牌在\"最后一个读输入的派发\"之后释放（默认开的理由 = 去掉输入保持；"
+                                          "**不是接收尾巴的修复** —— 见开发文档 6.157）",
     }
     on_list = [k for k in sorted(hits) if default_of(hits[k]) == "ON"]
     for knob in on_list:
