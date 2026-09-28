@@ -527,7 +527,7 @@ D11 `waiter-committed-first > 0` 且 `max` ≈ 停顿 ⇒ **Q9-G 成立**，做�
 
 ★★★ **2026-09-28 处置（用户裁决，§6.151⑨）**：**分裂模式 `cpu_gpu` 的 DFT 输入改为"提交时拷一份"（一次 memcpy），交付的融合车道保持零拷贝。**理由是模式定位：`cpu_gpu` 只是**中间（debug／对照）模式**，最终形态是"IQ 一旦开始流动，要么全 CPU、要么全 GPU"——同一跳内 CPU↔GPU 来回本身就是开销；而 `phy_pipeline_mode.h` 本来就把 `cpu_gpu` 定义成"每个模块边界各留一次 host↔device 搬运"、把 `gpu` 定义成"只剩 IQ 上传 + LLR 下传两次"。落地 = 模式化默认（env 可强制双向）＋ 新增精确计数器 `radio_zero_copy` ＋ 契约 `dft radio inputs` 按模式重述（`gpu`：`staged==0`；`cpu_gpu`：`radio_zero_copy==0`）＋ 一条独立进程的离线用例；`ctest -L phy` **205 全绿**。
 ⇒ **两条纪律**：① `cpu_gpu` 腿 `wrap_copies>0` ⇒ **该腿不是零拷贝读数**，不得用于论证 G1/G2；② 本轮动了引擎 C++ ⇒ **`p103`/`p104` 需重飞一对**（default + stress）以重新取得 HEAD 证据；验证修复的那条腿 = `cpu_gpu` + `LEG_CG_MODULES=dft+grid`（不设 env），预期 PRACH=1、TA_CMD≈1、SR ~500/分、丢 SDU=0。
-⇒ **机制仍未诊断**（是隔离，不是根治）：生命周期解释已被 `keepalives=648774/648774` 否掉、`[ul_host] assembled=0` 排除"PHY 自拷"、写作方查实是 **UHD 直接写我们的池缓冲**（`radio_uhd_rx_stream.cpp:26-34`）；剩余候选是"UHD 写 ↔ GPU 读 的可见性/时序"，**判别实验与其撤销条件写在 §6.151⑨⑤**。
+⇒ **机制仍未诊断**（是隔离，不是根治）：生命周期解释已被 `keepalives=648774/648774` 否掉、`[ul_host] assembled=0` 排除"PHY 自拷"、写作方查实是 **UHD 直接写我们的池缓冲**（`radio_uhd_rx_stream.cpp:26-34`）；剩余候选是"UHD 写 ↔ GPU 读 的可见性/时序"，**判别实验与其撤销条件写在 §6.151⑨⑦**。
 
 ---
 
