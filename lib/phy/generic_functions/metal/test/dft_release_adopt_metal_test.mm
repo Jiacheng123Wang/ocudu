@@ -379,16 +379,17 @@ int main()
 
     // ---- P2-E: WHEN the input comes back, and the knob that decides it -----------------------------
     //
-    // The switch is DEFAULT OFF, and its two states are the two arms of the loop below: a block released at its
-    // command buffer's completion (the behaviour every leg before P2-E had) and one released at the last
-    // dispatch that reads the input. Both are exercised in ONE process - the switch is read per call, exactly
-    // like OCUDU_DFT_RELEASE_BLOCK, so the arms cannot be two binaries that drifted apart.
+    // The switch is DEFAULT ON since leg p122 (design document 6.156), and its two states are the two arms of
+    // the loop below: a block released at its command buffer's completion (the behaviour every leg before the
+    // default moved) and one released at the last dispatch that reads the input. Both are exercised in ONE
+    // process - the switch is read per call, exactly like OCUDU_DFT_RELEASE_BLOCK, so the arms cannot be two
+    // binaries that drifted apart.
     {
       ::unsetenv("OCUDU_DFT_RELEASE_TOKENS_EARLY");
-      if (metal::dft_metal_engine::early_token_release_enabled()) {
+      if (!metal::dft_metal_engine::early_token_release_enabled()) {
         std::fprintf(stderr,
-                     "FAIL: the early token release reports itself ARMED with OCUDU_DFT_RELEASE_TOKENS_EARLY "
-                     "unset - it is a diagnostic arm and must default OFF\n");
+                     "FAIL: the early token release reports itself DISARMED with OCUDU_DFT_RELEASE_TOKENS_EARLY "
+                     "unset - it is the delivery default since 6.156\n");
         return 1;
       }
       ::setenv("OCUDU_DFT_RELEASE_TOKENS_EARLY", "1", 1);
@@ -402,8 +403,8 @@ int main()
         return 1;
       }
       std::fprintf(stderr,
-                   "[dft-release] arm 0c (P2-E): the early token release is DEFAULT OFF, arms on =1 and "
-                   "disarms on =0\n");
+                   "[dft-release] arm 0c (P2-E): the early token release is DEFAULT ON (6.156), stays armed on "
+                   "=1 and disarms on =0\n");
     }
 
     // ---- P2-E's PREMISE, measured on the machine that runs this test ---------------------------------

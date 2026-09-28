@@ -1195,7 +1195,8 @@ static bool block_release_requested()
 }
 
 /// \brief P2-E: whether the block's INPUT tokens are released at its last input-reading dispatch instead of at
-/// the command buffer's completion (`OCUDU_DFT_RELEASE_TOKENS_EARLY=1`, **DEFAULT OFF**).
+/// the command buffer's completion (**DEFAULT ON** since leg `p122`, 2026-09-28; \c
+/// OCUDU_DFT_RELEASE_TOKENS_EARLY=0 is the one-line retreat).
 ///
 /// WHY IT EXISTS. The tokens exist because the front end's transforms run later than the call that hands the
 /// samples over (see retain_for_block()). They are released by the completion handler, and after D1 the
@@ -1206,6 +1207,16 @@ static bool block_release_requested()
 /// tens of microseconds, and the receiving chain pays for it - the radio's receive pool is the backpressure the
 /// receive loop blocks on (measured: the pool drained to `held_max == pool` with `starved_events` in the
 /// thousands, and the 2.85x n1 regression carries a ~5 s receive stall).
+///
+/// ★★ WHY IT IS NOW THE DEFAULT (design document 6.156, leg p122). With the switch OFF the delivery lane paid
+/// for that hold in its RECEIVE TAIL, which is the whole reason the tail was 30x the CPU path: on air,
+/// `[ul_rx_timing] recv over 1 ms` was 479 of 670890 calls (0.071%) with 411 receives slipping more than a
+/// millisecond, against **6 of 592711 (0.001%) and 3 slips** with the switch ON - the CPU path's own level -
+/// and the same leg was BETTER everywhere else too: V1's median 1401.5 -> 1366.7us, V1's max 6242 -> 2704us,
+/// ping's max 167 -> 62 ms, with the red lines untouched (`crossings` 0 host read / 0 host write, `stale=0`,
+/// `gaps=0`, `cbs/lane=2.00`, the 9-of-9 contract, `released` and `radio_zero_copy` both unchanged, and the
+/// batch still 14 transforms per dispatch - the signal adds one command to a command buffer that already
+/// exists).
 ///
 /// HOW. With the switch on, the block encodes a signal on a shared event right after its encoder is closed
 /// (i.e. after every dispatch that reads the input, and before the adopter's first dispatch), and the tokens
@@ -1218,7 +1229,7 @@ static bool block_release_requested()
 static bool release_tokens_early_requested()
 {
   const char* env = std::getenv("OCUDU_DFT_RELEASE_TOKENS_EARLY");
-  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+  return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
 }
 
 /// \brief The event a block signals once its last input-reading dispatch has run (P2-E).

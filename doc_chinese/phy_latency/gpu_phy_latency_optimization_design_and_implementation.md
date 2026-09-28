@@ -9952,6 +9952,26 @@ slow (>1 ms) receives 26 of 387 overlapped one = 7%  (a coincidence predicts 4%;
 1. **分模块臂（`ce`/`eq`/`grid`/`dft` 单独）之所以在 CPU 级**：它们没有"整跳一个块 + 令牌随块活到跳尾"这套结构；
 2. **分裂模式修好后的残余尾巴（0.026–0.045%）应当也能被同一旋钮吃掉**（那边没有交棒、令牌在**块完成**时释放，仍早于 P2-E 的"最后一个读输入的派发"）—— 属调试模式，优先级低于交付。
 
+**★★ 机制的正面证据（空口计数器）与一处离线陷阱**：
+
+```
+p122: tokens_early=signals:32386, by_event:10930, by_complete:21455   ← 34% 的块确实经事件提前释放
+p116: tokens_early=signals:0,     by_event:0,     by_complete:36733   ← 对照腿：全部在完成时释放
+```
+
+* `by_event>0` 是"释放真的提前了"的**直接证据** ✓；对照腿为 0 ✓（该计数器本来就是为这个判据造的）。
+* ⚠ **离线陷阱（务必记住）**：`dft_release_adopt_metal_test` 会打一行 `P2-E premise: a signal encoded MID-buffer was published ONLY AT COMPLETION … margin 96.4 ms - the token release cannot move to the front end's end on this platform`。那一行测的是**它自己 ~100 ms 量级的合成窗口**里的中途信号，**不能**用来判断这条臂；空口上（~1.5 ms 的块）同一条路径有 **34%** 的块提前释放 ⇒ **判这条臂用空口计数器，不用那行离线结论**。（离线该测试仍然全绿：`ctest -L phy` 203/203，其自身 rc=0；那条 `zero-copy wraps … 1 misaligned -> FAILED` 是它合成环境的既有红条，两种默认值下一致。）
+
+**已实施**：`release_tokens_early_requested()` 改为**默认开**（`OCUDU_DFT_RELEASE_TOKENS_EARLY=0` 为后退旋钮），并把 `dft_release_adopt_metal_test` 的默认值断言同步改到新语义（它正是这道护栏）。**待取证（预登记）**：在新 HEAD 上飞**验收对**（`gpu` default + stress，**不设任何 env**）：
+
+| 读数 | 期望 | 对照（旧默认）|
+|---|---|---|
+| `[ul_rx_timing] recv over 1ms / calls` | **≈0.001–0.01%** | 0.071% / 0.119% |
+| `slip over 1ms` | **≤ ~30** | 411 / 684 |
+| `tokens_early … by_event` | **> 0（≈1/3）** | 0 |
+| V1 中位 / max | **≤1400 / ≤~3000 µs** | 1401.5 / 6242 |
+| 契约 / `crossings` / `cbs/lane` / `gaps` / `stale` / PRACH | 9/9 · 0+0 · 2.00 · 0 · 0 · 1 | 同 |
+
 **落地路径（建议）**：① 把 P2-E **改为默认开**（保留 `OCUDU_DFT_RELEASE_TOKENS_EARLY=0` 作为后退旋钮）+ 注释/旋钮清单/本文档；② 在**新 HEAD** 上重飞**验收对**（default + stress，**不设任何 env**）⇒ 一次同时完成"复现（含加压，0.119% 那条）"与"验收取证"；③ 门禁 + 审计 + 入档。
 
 ### 6.155 ★★ 收束风暴线、回到**接收尾巴**（用户 2026-09-28 指示）：全臂对照 + 两条新否证 + 新的正面线索
