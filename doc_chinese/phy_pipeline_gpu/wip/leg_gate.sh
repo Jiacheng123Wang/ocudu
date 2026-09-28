@@ -277,15 +277,20 @@ print()
 if slack and call and rx:
     rate   = 100.0 * int(call[1]) / int(call[0])
     rxrate = 100.0 * int(rx[1]) / int(rx[0])
-    verdict = "HEALTHY" if rate < 0.01 else "SICK"
+    # Three bands, MEASURED: over the legs on record the healthy side tops out at 0.0064% and the sick side
+    # starts at 0.0248%. The middle band is reported as such rather than folded into either side - p114 sat
+    # there (0.0218%) while p125 sat ON the healthy edge (0.0058%, with a 0.0095% receive tail), and calling
+    # that middle band "healthy" would license a tail reading from a leg whose transport was not clean.
+    # Same bands as wip/leg_triage.sh.
+    verdict = "HEALTHY" if rate < 0.0064 else ("MARGINAL" if rate < 0.0248 else "SICK")
     print(f"  [INFO           ] transport health (DL side, dev doc 6.157): dl_tx_call over 1ms = "
           f"{call[1]}/{call[0]} = {rate:.4f}%  ->  {verdict}")
     print(f"                     this leg's RX tail = {rx[1]}/{rx[0]} = {rxrate:.4f}%; "
           f"dl_tx_slack below 1ms={slack[0]}, AT/BELOW 0={slack[1]}")
-    print("                     " + ("an RX-tail reading from this leg IS usable"
-          if verdict == "HEALTHY" else
-          "do NOT attribute this leg's RX tail to code: at this rate the tail follows the transport")
-          + "  (band over 86 legs: healthy <=0.0064%, sick >=0.0248%)")
+    print("                     " + {"HEALTHY": "an RX-tail reading from this leg IS usable",
+                                   "MARGINAL": "cite this leg's RX tail WITH its transport (it is not clean)",
+                                   "SICK": "do NOT attribute this leg's RX tail to code: at this rate the tail follows the transport"}[verdict]
+          + "  (bands over the legs on record: healthy <=0.0064%, marginal 0.0064-0.0248%, sick >=0.0248%)")
 else:
     print(f"  [INFO           ] transport health (DL side, dev doc 6.157): cannot read "
           f"([dl_tx_slack]/[dl_tx_call]/[ul_rx_timing] missing from this leg's report)")
