@@ -371,7 +371,7 @@ variables:
     COMPILER: clang
     CMAKE_BUILD_TYPE: Release
     ASSERT_LEVEL: NONE
-    TEST_MODE: none
+    TEST_MODE: default
     MARCH: x86-64-v3
 
 # Combinations to use in schedules matrix
