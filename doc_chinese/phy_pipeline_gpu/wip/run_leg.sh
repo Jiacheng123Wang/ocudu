@@ -250,13 +250,25 @@ case "$MODE" in
               --expert_phy.device_resource_grid on
             ) ;;
       none) MODE_ARGS=() ;;   # every module auto -> CPU, grid auto -> host grid: the CPU-equivalent control
-      grid) MODE_ARGS=( --expert_phy.device_resource_grid on ) ;;  # the grid alone, no module offloaded
-      dft)  MODE_ARGS=( --expert_phy.pusch_dft_type metal ) ;;
-      ce)   MODE_ARGS=( --expert_phy.pusch_channel_estimator_algo metal_mmse ) ;;
-      eq)   MODE_ARGS=( --expert_phy.pusch_channel_equalizer_backend metal ) ;;
-      *)    echo "refusing LEG_CG_MODULES='${LEG_CG_MODULES}': accepted values are all|none|grid|dft|ce|eq" >&2
-            echo "  (all = this mode's historical set; none/grid/dft/ce/eq = the 6.150 module ladder)" >&2
-            exit 2 ;;
+      # A '+' SEPARATED COMBINATION of the same primitives, because no SINGLE module reproduces the stalls and the
+      # whole set does: measured 2026-09-28 (batch 3) - none 0.001%, grid 0.001%, ce 0.001%, eq 0.001%, dft 0.003%,
+      # ALL FOUR 0.111% together with the receive-pool dry-out and a host that waits for the DFT. So the question
+      # became "which SUBSET", and `LEG_CG_MODULES=dft+grid+ce` is how it gets asked.
+      *)    MODE_ARGS=()
+            _mods=()
+            IFS='+' read -r -a _mods <<< "${LEG_CG_MODULES}"
+            for _m in "${_mods[@]}"; do
+              case "$_m" in
+                grid) MODE_ARGS+=( --expert_phy.device_resource_grid on ) ;;
+                dft)  MODE_ARGS+=( --expert_phy.pusch_dft_type metal ) ;;
+                ce)   MODE_ARGS+=( --expert_phy.pusch_channel_estimator_algo metal_mmse ) ;;
+                eq)   MODE_ARGS+=( --expert_phy.pusch_channel_equalizer_backend metal ) ;;
+                *)    echo "refusing LEG_CG_MODULES='${LEG_CG_MODULES}': '$_m' is not one of grid|dft|ce|eq" >&2
+                      echo "  (a combination is written with '+', e.g. dft+grid+ce; 'none' and 'all' stand alone)" >&2
+                      exit 2 ;;
+              esac
+            done
+            [ ${#_mods[@]} -gt 0 ] || { echo "refusing empty LEG_CG_MODULES" >&2; exit 2; } ;;
     esac ;;
   *)
     MODE_ARGS=() ;;
