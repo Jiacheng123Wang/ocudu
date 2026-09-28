@@ -9902,6 +9902,7 @@ slow (>1 ms) receives 26 of 387 overlapped one = 7%  (a coincidence predicts 4%;
 * `leg_gate`：`p116` **8 of 8 judged**、`p117` **9 of 9 judged**（其余检查与腿的 binding 不匹配 ⇒ 不判）。
 * ★ 用户观察"iperf3 流量偏低"——**成因是上行链路，不是车道**：同一条 stress 配方下今天的 **UL SINR 中位 12.9 dB vs 历史 23.5 dB（差 10.6 dB）**，调度器据此把 UL MCS 从 256QAM 降到 QPSK/16QAM、TBS 中位 4097→976（DL 侧调制/TBS 完全一致，256QAM/233 ⇒ 是**上行单侧**变差，PHR 两边都 +8 ⇒ 不是功率被顶）。CRC-KO 反而更低（7.2% vs 15.9%），因为 MCS 更保守。
 * ★★ **因此这条对子还给出一条稳健性结论**：**10.6 dB 的上行链路差下，V1/契约/gaps/stale/cbs-lane 全部同档全绿** ⇒ 验收判据对链路差异稳健。
+* ✅ **收尾**：`milestone_audit.sh --quick` = **28 PASS / 0 FAIL / 0 RED ⇒ `offline acceptance: GREEN`**（两条"腿的提交 = HEAD"由 FAIL 转 PASS）⇒ 本轮欠账清空。
 * ⚠ 提醒（腿侧）：本轮换代码后 `p103`/`p104` 已不是 HEAD 证据，这一对即为新 HEAD 的证据腿；重跑时仍按"先停 ping/iperf3 → 等上行排空 → 单次 Ctrl-C"。
 
 ## 7. 杠杆与候选改动（技术账）
