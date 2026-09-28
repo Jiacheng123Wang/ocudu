@@ -9078,6 +9078,62 @@ radio->start(start_ts);
 * §4.1.1 的手册表里写"它的**尾部**（~101 ms 级）是**传输/驱动**现象" —— **归属错了**：它是**本进程自己**推后的流起点（本节①②）。已经就地改掉。
 * §6.55② 当时已经用 `slip ≪ recv` 正确断定"那次调用没有前驱"，但**没给出为什么正好是 ~101 ms**；本节把它补成源码级结论。
 
+### 6.147 ★★ `[ul_rx_wait]` 的总体收口：**启动项剥离（可见地）+ 按跳配对的新序列 `[ul_rx_wait_hop]`**（用户 2026-09-27 指示："一次性读数不应该进入 `[ul_rx_wait]` 的视野；它应该专注 PUSCH 链路的真实表现"）
+
+#### ① 用户的要求与它命中的既有原则
+
+> "既然那 ~101 ms 尾部是启动时的一次性读数（孤立的），而 `[ul_rx_wait]` 反映的应该是整个链路的统计特征，那么这个一次性读数就不应该进入 `[ul_rx_wait]` 的视野。`[ul_rx_wait]` 应该专注于我们关心的（目前是 PUSCH）链路的真实表现。"
+
+三条既有原则都指向同一个方向：**① 序列的总体必须是它声称描述的对象**（本仓已因"两个序列总体不同"吃过账）；**② 排除必须可见，不许静默过滤**（`stale` 的样本照收但单独打印、crossings 打印被减掉的调试触碰）；**③ §6.146 已证**那个 ~101 ms 是 `delay_s = 0.1` 的启动项、每次运行**恰好一次**。
+
+#### ② 交付的实现（三个动作，全部在探针内，交付路逐字节不变）
+
+| # | 动作 | 位置 |
+|---|---|---|
+| **A** | **启动那条不进分布**：`record_rx_wait(wait_ns, spans_stream_start)`；为真时写进 `rx_wait_startup_us` 并 return（**保留而非丢弃**）| `ul_pipeline_probe.h` |
+| **A′** | **报告显式打印它**：`[ul_rx_wait] startup=100786.0us excluded (1 sample: the first receive() of the run spans the radio's stream start; see dev doc 6.146)` | 同上（`report()`）|
+| **B** | **新序列 `[ul_rx_wait_hop]`**：`record_slot_rx_wait(slot, wait_ns, spans_stream_start)` 把"**完成该槽的那一块**"的等待按槽存进有界登记表（512，插入序淘汰），由 `record_ldpc_start(slot)`（**V1 的终点**）消费 | 同上 + `lower_phy_baseband_processor.cpp` |
+
+★ **谓词只有一处**：`ul_rx_note_call()` 的返回值（`last_return_ns == 0`，即"这次调用没有前驱"）—— 与 `[ul_rx_timing]` 的 `loop/slip` **用的是同一个判据**（此前两个仪器对同一事件各有一套规则，这本身就不一致）。`ul_rx_note_call()` 从 `void` 改为返回 `bool`。
+
+★ **按块的那条序列不缩小总体**（否则"打嗝落在空时隙上"就再也看不见了，§4.1.1 的三个盲区之一）——**新增**一条而不是**替换**。
+
+#### ③ 离线自证（`ul_pipeline_probe_test`，含三个反向臂，全部**确认真的重编**）
+
+`tests/unittests/support/executors/ul_pipeline_probe_test.cpp` 的 `one_report_shape_per_pipeline_mode` 末尾新增一段，断言四件事：
+
+1. 带 `spans_stream_start=true` 的记录**不进**分布（计数只 +1，那是随后那条普通记录）；
+2. 它**没被丢掉**：报告里出现 `[ul_rx_wait] startup=101000.0us`；
+3. `[ul_rx_wait_hop]` 只收**被跳消费**的那一条（`record_start` + `record_slot_rx_wait` + `record_ldpc_start`）⇒ 1 个样本、均值 ≈3 ms；
+4. 空闲槽（绑定了但没有跳）与启动槽（`spans_stream_start=true`）**都不进**该序列。
+
+| 臂 | 变异 | 期望症状 | 实测 |
+|---|---|---|---|
+| 对照 | —— | 7/7 PASS | ✅ **7/7 PASS** |
+| **A** | 去掉启动分支（启动样本进分布）| `startup=` 行消失 / 计数不符 | ✅ **FAILED**（缺 `startup=`）|
+| **B** | 绑定去掉（`record_slot_rx_wait` 不存）| `[ul_rx_wait_hop] no samples recorded` | ✅ **FAILED** |
+| **C** | 跳 landmark 不消费 | 同上 | ✅ **FAILED** |
+| 复原 | —— | 7/7 PASS | ✅ **7/7 PASS** |
+
+⚠ **一个真踩到的坑（写进纪律）**：用 `cp` 复原被变异的头文件后，`cmake --build` **可能因为 mtime 打平而不重编**，于是"复原后仍 FAIL"——读到的是**上一个二进制的读数**。因此本节的每个臂都**核对了 `Building CXX object` 的条数**（B 那次 `=0` 被当场判 VOID，改用 `rm -f <obj>` 强制重编后才算数）。这与"旋钮没传进去"（`p78`）、"label 没生效"（`p82`）是同一族错误。
+
+#### ④ 预登记（下次空口腿要读的三个数）
+
+1. **`[ul_rx_wait] max` 必须从 ~101 ms 掉到 ms 量级**（p86 有 9 次 `recv > 5 ms` ⇒ 预期 **5–20 ms**）；若仍 ~101 ms ⇒ **剥离没生效，该腿不算数**。
+2. **`[ul_rx_wait_hop]` 的中位应 ≈ `[ul_rx_wait]` 的中位**（整槽策略下"完成槽的那一块"就是那一槽的块；p86 的基准是 473.0）；两条的**样本数之比**应 ≈ 跳数/槽数（p86：145340/553142 ≈ 0.26）。
+3. **`[ul_rx_wait] startup=` 必须恰好出现一行、值 ≈100.5–101.9 ms**（§6.146 的 53 条腿基线）。
+
+#### ⑤ 口径变更（留原文 + 指针）
+
+* **旧腿**：`[ul_rx_wait] max ≈101 ms` ⇒ 读作"启动项仍在分布里"，不是链路尾部。
+* **新腿**：`max` 是链路尾部；启动项在 `startup=` 字段。
+* 引用 p85/p86 的 `max` 时必须按旧口径说明（§6.146 已记录基线值）。
+
+#### ⑥ 代价（已向用户说明并获准）
+
+* 改动全在 `ENABLE_FLOW_PROBES` 内 ⇒ **release 构建逐字节不变**、与 G1/G2 无关（§6.145③ 的探针契约自动满足）。
+* lab 二进制变了 ⇒ 按本仓纪律 **`p85`/`p86` 不再是"跑在 HEAD 上的证据"** ⇒ 下次有手机时**重飞一对**（或者与交付配置改动合并成一次）。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

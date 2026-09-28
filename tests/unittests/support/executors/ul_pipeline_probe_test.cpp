@@ -467,6 +467,47 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
 
   unsetenv("OCUDU_UL_SLOT_TRACE");
   unsetenv("OCUDU_UL_PHASE_SEGMENTS");
+
+  // ---- the start-up receive wait is reported APART, and the hop-scoped wait is its own population ------------
+  //
+  // The first receive() of a run spans the radio's stream start (the RU starts that stream 100 ms ahead BY DESIGN,
+  // ru_controller_sdr_impl: delay_s = 0.1), so what it measures is that start-up offset and not the link: it
+  // appears exactly once per run, and it used to become the series' `max` on every leg - the first number a reader
+  // looks at - and cost three write-ups and one wrong attribution before it was explained (dev doc 6.146). The
+  // probe is therefore TOLD which call it is, keeps it out of the distribution and prints it as its own field.
+  {
+    const int before = samples(capture_report(), "ul_rx_wait");
+    probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::milliseconds(101)).count(), /*spans_stream_start=*/true);
+    probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::milliseconds(5)).count());
+    const std::string report = capture_report();
+    // The start-up sample did NOT enter the distribution, while the ordinary one did.
+    EXPECT_EQ(samples(report, "ul_rx_wait"), before + 1) << report;
+    // ... and it is not silently dropped either: it is named, so the report accounts for the call the distribution
+    // does not have. A silent filter here would be worse than the artifact it removes.
+    EXPECT_NE(report.find("[ul_rx_wait] startup=101000.0us"), std::string::npos) << report;
+
+    // THE HOP-SCOPED SERIES. A wait is bound to the slot it completed (record_slot_rx_wait) and consumed by the
+    // hop's own landmark (record_ldpc_start), so the series has the HOPS' population and not the blocks': that is
+    // what lets "the wait for this hop's samples" be read next to "the span of this hop". A block whose wait is
+    // never consumed stays in the bounded registry and contributes nothing - by design, and it is also why the
+    // per-block series was NOT narrowed to this population (a hiccup on an idle slot leaves a trace there only).
+    constexpr uint64_t hop_slot     = 600;
+    constexpr uint64_t idle_slot    = 601;
+    constexpr uint64_t startup_slot = 602;
+    probe.record_start(hop_slot);
+    probe.record_slot_rx_wait(hop_slot, std::chrono::nanoseconds(std::chrono::milliseconds(3)).count());
+    probe.record_ldpc_start(hop_slot); // the hop that consumes it
+    probe.record_slot_rx_wait(idle_slot, std::chrono::nanoseconds(std::chrono::milliseconds(4)).count());
+    probe.record_start(startup_slot);
+    probe.record_slot_rx_wait(startup_slot, std::chrono::nanoseconds(std::chrono::milliseconds(101)).count(),
+                              /*spans_stream_start=*/true);
+    probe.record_ldpc_start(startup_slot);
+    const std::string hop_report = capture_report();
+    // Exactly ONE sample: the idle slot's wait belongs to no hop, and the start-up block belongs to no hop either -
+    // which is the same rule the distribution follows, applied to the second population.
+    EXPECT_EQ(samples(hop_report, "ul_rx_wait_hop"), 1) << hop_report;
+    EXPECT_NEAR(mean_us(hop_report, "ul_rx_wait_hop"), 3000.0, 300.0) << hop_report;
+  }
 }
 
 /// The samples that finish too late to be used are COUNTED APART (5.9.54 item 7), and that is only worth

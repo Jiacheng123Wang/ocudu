@@ -136,6 +136,25 @@ inline bool ul_slot_completed_by_block(uint64_t  block_begin,
 /// than "until the slot's last sample exists" - which is the structural latency that a symbol-grained receive
 /// policy exists to remove (S-7g-13). Read together with the receive policy in force.
 ///
+/// TWO THINGS THE [ul_rx_wait] DISTRIBUTION DELIBERATELY EXCLUDES OR SPLITS OFF (dev doc 6.146/6.147), because a
+/// series has to describe the population it names:
+///
+///  * THE START-UP CALL IS REPORTED APART. The very first receive() of a run spans the radio's stream start: the RU
+///    controller starts that stream 100 ms in the future by design (ru_controller_sdr_impl, delay_s = 0.1), while
+///    the receive thread asks for samples immediately - so the first call blocks for ~101 ms in EVERY run, whatever
+///    the mode or load, and it is one sample, not a link behaviour. It is therefore NOT pushed into the
+///    distribution (where it used to become `max`, the first number a reader looks at - and where it cost three
+///    separate write-ups and one wrong attribution before it was explained): it is kept in rx_wait_startup_us and
+///    printed as its own field, so the exclusion is visible rather than silent. The caller marks it, because the
+///    caller is what knows the call had no predecessor (the same rule [ul_rx_timing] applies to loop/slip).
+///  * THE HOP-SCOPED COMPANION IS A SEPARATE SERIES. [ul_rx_wait] counts BLOCKS, while the pipeline series count
+///    HOPS, so the two populations differ (an idle slot contributes a wait sample and no hop). [ul_rx_wait_hop]
+///    carries the wait of the block that COMPLETED the slot, but only for the slots a hop was recorded on - i.e.
+///    the same population as [ul_gpu_pipeline]/[ul_pipeline] - which is what makes the decomposition
+///    "wait + (everything after the samples)" add up inside ONE population. The per-block series is NOT narrowed
+///    to that population on purpose: a transport hiccup that lands on an idle slot leaves a trace there and nowhere
+///    else (see 4.1.1's blind spots).
+///
 /// The phase-segment series (time-frequency / channel estimation / equalization+demodulation) measure the CPU side of
 /// the module boundaries, so they are meaningless once the whole IQ -> LLR chain runs inside the fused device-side
 /// lane: in phy_pipeline_mode::gpu neither their recording nor their report happens (the lane reports its own
@@ -267,6 +286,17 @@ public:
     // Bound the registry by insertion order (see record_start): unmatched entries belong to TBs that ended
     // without a CRC-OK completion (or with one in a shifted slot).
     evict_oldest(pending_ldpc_starts);
+
+    // The wait this hop's own samples took, for the hops that reach this landmark (see record_slot_rx_wait):
+    // consumed here rather than reported per block, so [ul_rx_wait_hop] has the same population as the hop
+    // series it decomposes. Recorded before the mode split on purpose - it is about the RECEIVE side, which is
+    // the same code in every mode. One entry per recorded hop: a second decode attempt for the same slot (a
+    // retransmission) finds nothing and contributes nothing, which is the same rule [ul_gpu_pipeline] follows.
+    auto rx_wait_it = slot_rx_wait_us.find(slot);
+    if (rx_wait_it != slot_rx_wait_us.end()) {
+      rx_wait_hop_us.push_back(rx_wait_it->second);
+      slot_rx_wait_us.erase(rx_wait_it);
+    }
 
     if (in_fused_lane()) {
       // Fused lane (phy_pipeline_mode::gpu): the module boundaries the phase segments measure do not exist here, so
@@ -505,17 +535,57 @@ public:
   /// series here there is no pairing to get wrong (no slot key, no staleness gate, no negative-duration case).
   /// \param[in] wait Nanoseconds the host spent inside receive(). Negative values are dropped (they can only come
   ///                 from a caller that mixed the two ends up).
+  /// \param[in] spans_stream_start True for the ONE call that spans the radio's stream start, i.e. the first
+  ///                 receive() of the run - the caller knows it because that call has no predecessor (the rule
+  ///                 [ul_rx_timing] applies to loop/slip). Such a call is reported apart (rx_wait_startup_us) and
+  ///                 never enters the distribution or a hop: it measures the radio's start-up offset
+  ///                 (ru_controller_sdr_impl starts the stream 100 ms ahead by design), not the link.
   ///
   /// \note Counted per BLOCK, not per slot: the block size is the receive policy's (see ul_process), so under the
   ///       whole-slot policy this series has one sample per slot and under the symbol-grained one it has one per
-  ///       block. Compare its counts against the policy in force, not against [ul_pipeline]'s.
-  void record_rx_wait(int64_t wait_ns)
+  ///       block. Compare its counts against the policy in force, not against [ul_pipeline]'s. For the hop-scoped
+  ///       companion see record_slot_rx_wait().
+  void record_rx_wait(int64_t wait_ns, bool spans_stream_start = false)
   {
     if (wait_ns < 0) {
       return;
     }
     std::lock_guard<std::mutex> lock(mutex);
+    if (spans_stream_start) {
+      // Reported, never distributed: it is ONE sample per run and it belongs to the radio's start-up, not to the
+      // uplink. Kept (not dropped) so the report can account for the sample the distribution does not have.
+      rx_wait_startup_us = static_cast<double>(wait_ns) / 1e3;
+      return;
+    }
     rx_wait_us.push_back(static_cast<double>(wait_ns) / 1e3);
+  }
+
+  /// \brief Records the receive wait of the block that COMPLETED \p slot, for the hop-scoped [ul_rx_wait_hop].
+  ///
+  /// \param[in] slot Slot whose samples are now all in (same reference as record_slot_samples_complete).
+  /// \param[in] wait_ns How long that block's receive blocked.
+  /// \param[in] spans_stream_start True for the start-up call (see record_rx_wait): it belongs to no hop.
+  ///
+  /// WHY IT IS SEPARATE FROM [ul_rx_wait]. The two answer different questions and have different populations:
+  ///   * [ul_rx_wait] is per BLOCK and covers every block, including the slots that carry no PUSCH - which is what
+  ///     makes it the series that catches a transport hiccup landing on an idle slot;
+  ///   * [ul_rx_wait_hop] is per HOP - the wait is stored here keyed by slot, and consumed by record_ldpc_start(),
+  ///     so it only ends up in the distribution for slots a hop was actually recorded on. That is the population
+  ///     [ul_gpu_pipeline]/[ul_pipeline] use, so "the wait for this hop's samples" and "the span of this hop" can
+  ///     be read from the same hops. Under the whole-slot policy the completing block IS the hop's block.
+  ///
+  /// \note The registry is bounded by insertion order like the other pending maps: an entry is normally consumed
+  ///       within one hop (~1.5 ms), so the bound only matters when hops stop being recorded (idle slots).
+  void record_slot_rx_wait(uint64_t slot, int64_t wait_ns, bool spans_stream_start = false)
+  {
+    if ((wait_ns < 0) || spans_stream_start) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    slot_rx_wait_us[slot] = static_cast<double>(wait_ns) / 1e3;
+    while (slot_rx_wait_us.size() > max_slot_rx_wait) {
+      slot_rx_wait_us.erase(slot_rx_wait_us.begin());
+    }
   }
 
   /// \brief Records that a received block completed \p slot, i.e. its samples carry the slot's LAST sample.
@@ -928,6 +998,8 @@ public:
     std::vector<double> sorted_stale_gpu_pipeline;
     std::vector<double> sorted_fapi_mac;
     std::vector<double> sorted_rx_wait;
+    std::vector<double> sorted_rx_wait_hop;
+    double              startup_rx_wait_us = std::numeric_limits<double>::quiet_NaN();
     std::vector<double> sorted_dft_wait;
     {
       std::lock_guard<std::mutex> lock(mutex);
@@ -942,6 +1014,8 @@ public:
       sorted_stale_gpu_pipeline = stale_gpu_pipeline_us;
       sorted_fapi_mac     = fapi_mac_latencies_us;
       sorted_rx_wait      = rx_wait_us;
+      sorted_rx_wait_hop  = rx_wait_hop_us;
+      startup_rx_wait_us  = rx_wait_startup_us;
       sorted_dft_wait     = dft_wait_us;
     }
     auto pct = [](const std::vector<double>& sorted, double p) {
@@ -1039,6 +1113,19 @@ public:
     // The receive's own series, and the only one whose count is per BLOCK rather than per slot or per TB (see
     // record_rx_wait). Printed next to the pipeline it is part of, because [ul_time_frequency] includes it.
     print_series("ul_rx_wait", sorted_rx_wait);
+    // The ONE sample the distribution above does not have, reported rather than dropped: the first receive() of
+    // the run spans the radio's stream start (ru_controller_sdr_impl starts it 100 ms ahead by design), so it
+    // measures that start-up offset and not the link. It is named here so a reader can account for the counts of
+    // the two lines, and so that "the max is a constant ~101 ms on every leg" cannot come back unnoticed.
+    if (!std::isnan(startup_rx_wait_us)) {
+      std::fprintf(stderr,
+                   "[ul_rx_wait] startup=%.1fus excluded (1 sample: the first receive() of the run spans the "
+                   "radio's stream start; see dev doc 6.146)\n",
+                   startup_rx_wait_us);
+    }
+    // The same wait, but only for the slots a hop was recorded on: the population the hop series use, so the
+    // decomposition "wait for this hop's samples + the span of this hop" adds up inside one population.
+    print_series("ul_rx_wait_hop", sorted_rx_wait_hop);
     print_series("ul_dft_wait", sorted_dft_wait);
     print_slot_trace();
     print_by_size();
@@ -1165,6 +1252,11 @@ private:
   /// registries are bounded by insertion count, not by time) would match a fresh completion with the same slot
   /// key and produce bogus latencies of one or more whole wrap cycles.
   static constexpr std::chrono::seconds max_entry_age{2};
+
+  /// How many completed-but-not-yet-consumed slots [ul_rx_wait_hop]'s registry may hold (see
+  /// record_slot_rx_wait). An entry is normally consumed within one hop (~1.5 ms), so this only bounds the case
+  /// where hops stop being recorded - an idle stretch, where the oldest entries are the safe ones to drop.
+  static constexpr size_t max_slot_rx_wait = 512;
 
   /// The span beyond which a completion is too late to be used: the configuration's uplink HARQ round trip,
   /// after which the transport block has been retransmitted anyway. Default 8 ms, which is what the n78/n1
@@ -1323,6 +1415,17 @@ private:
   /// Receive wait times (µs), one per received BLOCK (see record_rx_wait): the span the host spent blocked inside
   /// receiver.receive(). The only series with no pairing: the two clock reads bracket a single call.
   std::vector<double> rx_wait_us;
+  /// The ONE receive wait of the run that spans the radio's stream start (µs; NaN = not seen, see
+  /// record_rx_wait). Reported as its own field instead of entering rx_wait_us: it is the radio's start-up
+  /// offset, it appears once per run, and it used to be the series' `max` on every leg.
+  double rx_wait_startup_us = std::numeric_limits<double>::quiet_NaN();
+  /// Receive waits of the blocks that completed a slot, keyed by slot, awaiting the hop that will consume them
+  /// (see record_slot_rx_wait / record_ldpc_start). Bounded by insertion order: std::map is ordered by slot, and
+  /// with max_slot_rx_wait entries the oldest key is the safe one to drop.
+  std::map<uint64_t, double> slot_rx_wait_us;
+  /// The hop-scoped receive waits (µs), one per recorded hop (see record_slot_rx_wait): the same population the
+  /// hop series use, so the wait can be read next to the span it is part of.
+  std::vector<double> rx_wait_hop_us;
   /// Host time blocked inside the front-end DFT's wait_slot() (µs), one sample per WAIT (see record_dft_wait).
   std::vector<double> dft_wait_us;
   /// The instant the samples completing each traced slot arrived (see record_slot_samples_complete()).
@@ -1359,7 +1462,8 @@ public:
   void record_ce_end(uint64_t /*slot*/) {}
   void record_end_crc_ok(uint64_t /*slot*/, size_t /*mac_pdu_bytes*/) {}
   void record_fapi_mac_end(uint64_t /*slot*/) {}
-  void record_rx_wait(int64_t /*wait_ns*/) {}
+  void record_rx_wait(int64_t /*wait_ns*/, bool /*spans_stream_start*/ = false) {}
+  void record_slot_rx_wait(uint64_t /*slot*/, int64_t /*wait_ns*/, bool /*spans_stream_start*/ = false) {}
   void record_dft_wait(int64_t /*wait_ns*/) {}
   std::optional<ul_phase_durations> get_phase_durations(uint64_t /*slot*/) { return std::nullopt; }
   /// P0-5's pairing hook, compiled out with the rest of the probe: there are no phase samples to announce, so a

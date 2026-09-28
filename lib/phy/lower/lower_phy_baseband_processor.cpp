@@ -590,7 +590,11 @@ int64_t ul_rx_load1_x100()
 ///       test says so and its `current_timestamp` has no relation to a sample clock - measured there: recv
 ///       max 696 us with loop max 1503 us over 318 blocks, which says what the fixture does, nothing about a
 ///       radio. The probe is to be read ON AIR, next to the same leg's `[RF] ... overflow` count.
-void ul_rx_note_call(int64_t begin_ns, int64_t return_ns, int64_t air_us, baseband_gateway_receiver::rx_error error)
+/// \returns true for the FIRST call of the run, i.e. the one that spans the radio's stream start. The receive
+///          probe needs that answer to keep the ~101 ms start-up wait out of the link's distribution (dev doc
+///          6.146/6.147), and it is answered HERE because this is where the predecessor rule lives (see LOOP
+///          above): the call with no predecessor is the one that blocked while the radio was still starting.
+bool ul_rx_note_call(int64_t begin_ns, int64_t return_ns, int64_t air_us, baseband_gateway_receiver::rx_error error)
 {
   ul_rx_stats& c = ul_rx_counters();
   c.calls.fetch_add(1, std::memory_order_relaxed);
@@ -662,6 +666,10 @@ void ul_rx_note_call(int64_t begin_ns, int64_t return_ns, int64_t air_us, baseba
            !c.load1_at_tail_max_x100.compare_exchange_weak(load_prev, load_x100, std::memory_order_relaxed)) {
     }
   }
+
+  // Answers the one question the receive probe cannot answer itself (see the declaration): this call had no
+  // predecessor, so it is the one that spans the radio's stream start.
+  return (last_return_ns == 0);
 }
 
 /// Records the size of one discontinuity, in µs (see ul_rx_stats::gap_us).
@@ -1339,10 +1347,15 @@ void lower_phy_baseband_processor::ul_process()
   // The air time of the block the call asked for: the reference the receive timing is read against (see
   // ul_rx_note_call). `srate` is in kHz, so samples * 1000 / kHz is microseconds.
   //
-  ul_rx_note_call(std::chrono::duration_cast<std::chrono::nanoseconds>(rx_call_begin.time_since_epoch()).count(),
-                  std::chrono::duration_cast<std::chrono::nanoseconds>(rx_call_end.time_since_epoch()).count(),
-                  static_cast<int64_t>(nof_samples) * 1000 / static_cast<int64_t>(srate.to_kHz()),
-                  rx_metadata.error);
+  // True for the first call of the run: it spans the radio's stream start, so the wait it measures is the
+  // radio's start-up offset (~101 ms on every leg) and NOT a link behaviour. Both receive probes use it - the
+  // timing series to leave loop/slip unmeasured, the [ul_rx_wait] series to report it apart instead of letting
+  // it become the distribution's `max` (dev doc 6.146/6.147).
+  const bool spans_stream_start =
+      ul_rx_note_call(std::chrono::duration_cast<std::chrono::nanoseconds>(rx_call_begin.time_since_epoch()).count(),
+                      std::chrono::duration_cast<std::chrono::nanoseconds>(rx_call_end.time_since_epoch()).count(),
+                      static_cast<int64_t>(nof_samples) * 1000 / static_cast<int64_t>(srate.to_kHz()),
+                      rx_metadata.error);
 #if defined(OCUDU_FLOW_PROBES)
   // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES), plus the [ul_rx_wait] series.
   //
@@ -1359,7 +1372,7 @@ void lower_phy_baseband_processor::ul_process()
   {
     const auto recv_us =
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t_recv_begin).count();
-    ul_pipeline_probe::get().record_rx_wait(recv_us * 1000);
+    ul_pipeline_probe::get().record_rx_wait(recv_us * 1000, spans_stream_start);
     // The per-slot timeline (OCUDU_UL_SLOT_TRACE) needs the ONE instant the other series take for granted: the
     // arrival of the samples that COMPLETE a slot. Everything else in the probe starts at the slot's FIRST
     // sample, which is a different instant whenever the block carrying a slot's tail is not the block that
@@ -1423,6 +1436,13 @@ void lower_phy_baseband_processor::ul_process()
             newest_completed.compare_exchange_strong(prev, completed, std::memory_order_relaxed)) {
           ul_pipeline_probe::get().record_slot_samples_complete(
               completed % slots_per_sfn_cycle, nof_samples, recv_us * 1000, std::chrono::high_resolution_clock::now());
+          // The same wait, bound to the slot it completed: [ul_rx_wait_hop] consumes it only for the slots a hop
+          // is recorded on, so its population matches the hop series it decomposes (dev doc 6.147). Recorded
+          // OUTSIDE the trace switch - the trace is opt-in, this series is not - but under the same "once per
+          // completed slot" guard, which is what keeps one wait per slot when a policy ends several blocks
+          // inside the same one.
+          ul_pipeline_probe::get().record_slot_rx_wait(
+              completed % slots_per_sfn_cycle, recv_us * 1000, spans_stream_start);
         }
       }
     }
