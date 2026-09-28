@@ -256,4 +256,38 @@ rtf = len(re.findall(r"Real-time failure in RF", leg_txt))
 print()
 print(f"  [INFO           ] RF real-time failures in this leg's .log: {rtf}")
 print(f"                     not a criterion (no threshold registered; V3 re-ruled 2026-09-26: gaps==0 + the per-DL rate band)")
+
+# ---- TRANSPORT HEALTH (INFO, and the covariate every receive-tail claim has to carry) --------------
+# Dev doc 6.157 (legs p122/p123/p124, 2026-09-28): the receive tail measured by `[ul_rx_timing] recv over
+# 1ms / calls` is NOT a property of the RX host path. Across 86 legs it tracks the DL TRANSMIT call's own
+# `over 1ms` share - another thread, another direction, a channel this code does not drive - at Spearman
+# 0.986, with the two shares at a stable ratio of 0.75-1.0. Two legs of the SAME mode, recipe and knob state
+# (p122 / p123) differed 79x in the tail and 130x in this covariate, so a leg whose transport is missing its
+# deadlines cannot be used as evidence about the RX path (and, symmetrically, is the only kind of leg on
+# which a receive-tail reading means anything at all).
+#
+# The band is MEASURED, not chosen: of the 86 legs the healthy side tops out at 0.0064% and the sick side
+# starts at 0.0248%, a four-fold gap. It is INFO rather than a tenth judged row because a leg can be sick
+# here and still be a perfectly good latency/contract leg (p116/p117/p123 all carry valid V1 and contract
+# readings); failing one would fail legs nothing about them is wrong, which is how a gate stops being read.
+slack = f(leg_err, r"\[dl_tx_slack\][^\n]*?below 1ms=(\d+),[^\n]*?AT/BELOW 0=(\d+)")
+call  = f(leg_err, r"\[dl_tx_call\] calls=(\d+)[^\n]*?over 1ms=(\d+)")
+rx    = f(leg_err, r"\[ul_rx_timing\] calls=(\d+) recv\(max=\d+us over 1ms=(\d+)")
+print()
+if slack and call and rx:
+    rate   = 100.0 * int(call[1]) / int(call[0])
+    rxrate = 100.0 * int(rx[1]) / int(rx[0])
+    verdict = "HEALTHY" if rate < 0.01 else "SICK"
+    print(f"  [INFO           ] transport health (DL side, dev doc 6.157): dl_tx_call over 1ms = "
+          f"{call[1]}/{call[0]} = {rate:.4f}%  ->  {verdict}")
+    print(f"                     this leg's RX tail = {rx[1]}/{rx[0]} = {rxrate:.4f}%; "
+          f"dl_tx_slack below 1ms={slack[0]}, AT/BELOW 0={slack[1]}")
+    print("                     " + ("an RX-tail reading from this leg IS usable"
+          if verdict == "HEALTHY" else
+          "do NOT attribute this leg's RX tail to code: at this rate the tail follows the transport")
+          + "  (band over 86 legs: healthy <=0.0064%, sick >=0.0248%)")
+else:
+    print(f"  [INFO           ] transport health (DL side, dev doc 6.157): cannot read "
+          f"([dl_tx_slack]/[dl_tx_call]/[ul_rx_timing] missing from this leg's report)")
+    print(f"                     'cannot read' is not 'healthy': do not use this leg for a receive-tail claim")
 PY

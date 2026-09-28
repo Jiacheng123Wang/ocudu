@@ -1208,15 +1208,23 @@ static bool block_release_requested()
 /// receive loop blocks on (measured: the pool drained to `held_max == pool` with `starved_events` in the
 /// thousands, and the 2.85x n1 regression carries a ~5 s receive stall).
 ///
-/// ★★ WHY IT IS NOW THE DEFAULT (design document 6.156, leg p122). With the switch OFF the delivery lane paid
-/// for that hold in its RECEIVE TAIL, which is the whole reason the tail was 30x the CPU path: on air,
-/// `[ul_rx_timing] recv over 1 ms` was 479 of 670890 calls (0.071%) with 411 receives slipping more than a
-/// millisecond, against **6 of 592711 (0.001%) and 3 slips** with the switch ON - the CPU path's own level -
-/// and the same leg was BETTER everywhere else too: V1's median 1401.5 -> 1366.7us, V1's max 6242 -> 2704us,
-/// ping's max 167 -> 62 ms, with the red lines untouched (`crossings` 0 host read / 0 host write, `stale=0`,
-/// `gaps=0`, `cbs/lane=2.00`, the 9-of-9 contract, `released` and `radio_zero_copy` both unchanged, and the
-/// batch still 14 transforms per dispatch - the signal adds one command to a command buffer that already
-/// exists).
+/// ★★ WHY IT IS NOW THE DEFAULT (design document 6.156, then CORRECTED by 6.157 on legs p123/p124). The switch
+/// stays ON because it removes a STRUCTURAL hold and nothing else: armed on air, 25-33% of the blocks release
+/// their input through the event rather than at completion (measured `by_event` 15154 of 46414 on p123 and
+/// 37094 of 147645 on p124), so an input is no longer held for a hop in which only its first dispatch reads it.
+///
+/// ⚠ IT IS NOT A RECEIVE-TAIL FIX, and the reading that said it was does not reproduce. p122 armed the switch
+/// by hand and read `[ul_rx_timing] recv over 1 ms` 6 of 592711 calls (0.001%) with 3 slips against 479 of
+/// 670890 (0.071%) with 411 slips on the delivery leg before it, and 6.156 registered that as a 60-70x fix.
+/// The next leg of the SAME mode and recipe, with the switch armed by default, read **675 of 842093 (0.080%)
+/// with 549 slips** - the unarmed legs' own level - while its `by_event` share stayed at 33%, i.e. the route
+/// this switch owns was working exactly as it had on p122. What actually separated those two legs was their
+/// RADIO HOST INTERFACE: p123 missed real-time deadlines in BOTH directions for the whole leg (1071 UHD
+/// `underflow`/`late` events spread over every tenth of it, `[dl_tx_slack] AT/BELOW 0 = 162`, minimum slack
+/// -22160us) against 4 events and a minimum slack of +832us on p122; across 86 legs the DL transmit call's
+/// `over 1 ms` share tracks the receive tail's at Spearman 0.986 (design document 6.157). So: the hold is why
+/// this switch is ON; the tail belongs to the transport, and the leg that carries it has to be identified
+/// before any tail reading is attributed to code (6.157's discipline).
 ///
 /// HOW. With the switch on, the block encodes a signal on a shared event right after its encoder is closed
 /// (i.e. after every dispatch that reads the input, and before the adopter's first dispatch), and the tokens

@@ -166,7 +166,10 @@ def main():
     n_none = sum(1 for k in hits if not leg_counts.get(k) and not doc_counts.get(k))
     n_on = sum(1 for k in hits if default_of(hits[k]) == "ON")
     n_test = sum(1 for k in hits if scope_of(hits[k][0][0]) == "test")
-    print(f"合计 **{len(hits)}** 个旋钮：**{n_on}** 个默认 `ON`（= 交付形态的一部分）；"
+    print(f"合计 **{len(hits)}** 个旋钮：**{n_on}** 个默认 `ON`"
+          f"（`OCUDU_DFT_RELEASE_TOKENS_EARLY` 于 2026-09-28 由 OFF 改为 ON：**理由 = 输入保持**，"
+          f"见开发文档 6.157；6.156 当初写的\"吃掉接收尾巴 60-70×\"**已被 6.157 撤回**）"
+          f"（= 交付形态的一部分）；"
           f"**{n_leg}** 个有腿登记行、**{n_doc}** 个只在记录里出现过、**{n_none}** 个两处都没有；其中 **{n_test}** 个的首个读取点在 `test/`（离线臂）。")
     print()
 

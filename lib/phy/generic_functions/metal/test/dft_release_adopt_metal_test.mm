@@ -379,7 +379,9 @@ int main()
 
     // ---- P2-E: WHEN the input comes back, and the knob that decides it -----------------------------
     //
-    // The switch is DEFAULT ON since leg p122 (design document 6.156), and its two states are the two arms of
+    // The switch is DEFAULT ON since leg p122 (design document 6.156; the REASON for the default was corrected
+    // by 6.157 - it is the input HOLD that the default removes, not the receive tail that p122 seemed to have
+    // removed with it), and its two states are the two arms of
     // the loop below: a block released at its command buffer's completion (the behaviour every leg before the
     // default moved) and one released at the last dispatch that reads the input. Both are exercised in ONE
     // process - the switch is read per call, exactly like OCUDU_DFT_RELEASE_BLOCK, so the arms cannot be two
@@ -389,7 +391,7 @@ int main()
       if (!metal::dft_metal_engine::early_token_release_enabled()) {
         std::fprintf(stderr,
                      "FAIL: the early token release reports itself DISARMED with OCUDU_DFT_RELEASE_TOKENS_EARLY "
-                     "unset - it is the delivery default since 6.156\n");
+                     "unset - it is the delivery default since 6.156 (reason restated in 6.157)\n");
         return 1;
       }
       ::setenv("OCUDU_DFT_RELEASE_TOKENS_EARLY", "1", 1);
