@@ -243,6 +243,11 @@ static constexpr pucch_f1_params f1_freq_hop{
     .nof_cyc_shifts         = pucch_nof_cyclic_shifts::two,
     .occ_supported          = true,
 };
+static constexpr pucch_f1_params f1_12_syms{
+    .nof_syms       = 12,
+    .nof_cyc_shifts = pucch_nof_cyclic_shifts::twelve,
+    .occ_supported  = true,
+};
 
 static constexpr pucch_f2_params f2_multiple_rbs{
     .max_nof_rbs = 3,
@@ -281,6 +286,8 @@ void PrintTo(const pucch_resource_builder_params& value, ::std::ostream* os)
       *os << "F1 (high density)";
     } else if (f1_params == f1_freq_hop) {
       *os << "F1 (freq hop)";
+    } else if (f1_params == f1_12_syms) {
+      *os << "F1 (12 symbols)";
     } else {
       *os << "F1 (unknown)";
     }
@@ -390,4 +397,13 @@ INSTANTIATE_TEST_SUITE_P(,
                                  .nof_cell_csi_resources   = 2,
                                  .f0_or_f1_params          = f1_freq_hop,
                                  .f2_or_f3_or_f4_params    = f2_freq_hop,
+                             },
+                             // PUCCH limited to 12 symbols, e.g., when SRS takes the last symbols of the slot.
+                             pucch_resource_builder_params{
+                                 .nof_cell_res_set_configs = 2,
+                                 .nof_cell_sr_resources    = 72,
+                                 .nof_cell_csi_resources   = 2,
+                                 .f0_or_f1_params          = f1_12_syms,
+                                 .f2_or_f3_or_f4_params    = f2_multiple_rbs,
+                                 .max_nof_symbols          = 12,
                              }));
