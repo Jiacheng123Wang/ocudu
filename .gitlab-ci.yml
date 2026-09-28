@@ -566,7 +566,7 @@ unit coverage:
         tar -czf coverage_html.tar.gz coverage_html
         curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file coverage_html.tar.gz ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/coverage_html/latest/coverage_html.tar.gz
       fi
-  coverage: /^\s*Line coverage:\s*\d+.\d+\%/
+  coverage: /^\s*Line coverage:\s*\d+(?:\.\d+)?%/
   artifacts:
     paths:
       - coverage_html
