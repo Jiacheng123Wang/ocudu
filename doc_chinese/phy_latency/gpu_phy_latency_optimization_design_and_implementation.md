@@ -9783,7 +9783,11 @@ slow (>1 ms) receives 26 of 387 overlapped one = 7%  (a coincidence predicts 4%;
 
 * **腿跑的确实是新二进制**（`Built in Release mode using commit 2e4c89956e`、构建 18:34 < 起跑 18:41；二进制内含 `radio_zero_copy` 与新的契约措辞），`mode=cpu_gpu`、`dft=metal` + `device_resource_grid=on`、**未设任何 `OCUDU_*` 旋钮**。
 * **风暴照旧**：`detected_preambles` 已 1427（266/589/148 每分），`Discarding SDUs` 117，`TA_CMD` 27，ping 的 SR 真被发出仅 5 次/分（干净腿 413–603），请求到达**零空档** ⇒ 同一签名；三条 RTT 斜坡（seq 136 / 1045 / 1146，皆 ~16 包批量释放）。
-* ⇒ **至少"输入 staged 就够"不成立**。⚠ 待腿退出后读 `[metal_stats] dft … radio_zero_copy=` 与契约行，确认默认值是否真的生效（若 `radio_zero_copy=0` ⇒ 生效而无效；若 `>0` ⇒ 我的判据没生效，是代码问题）。
+* ★★ **腿作废，但它仍然回答了那个开问题**：关机时 `Could not stop application after 5 seconds. Forcing exit.` ⇒ 排在契约之后的 `[metal_stats]` 块没打 ⇒ `run_leg.sh` 判 **NO COMPLETE REPORT（本腿不得当证据读，尤其不得把缺失的计数器读成 0）**。**但契约行抢先打出来了，它证明默认值生效**：
+  `dft radio inputs: … 709548 buffer wrap(s) had to stage a host copy … split mode: … zero-copy reads (radio_zero_copy=0 of radio_inputs=709548) must be 0 -> OK`
+  ⇒ **输入已 staged（`radio_zero_copy=0`）而风暴照旧** ⇒ **"零拷贝输入读 ⇒ 风暴"这条归因到此关闭**；剩下站得住的是下面 ⑥ 的"臂 × 功率状态"交互。
+  ⚠ 该腿的 `ce device estimates: 0 device, 62281 host -> FAILED` 是 **`dft+grid` 臂的已知预期 FAIL**（CE 在宿主，§6.150⑥ 已登记），不是新问题。
+  ⚠ **关机挂住**（`Forcing exit`）在全归档只出现过两次：`p70-n78-spp1024`（0927，gpu 模式、无关臂）与 `p110`；同走 staged 路径的 `p105`（433916 次 staged）**没挂** ⇒ 罕见、有先例、**不是本改动的专属产物**；`p110` 同时是 RF 实时失败率最高的腿（1773 vs p109 1184 / p105 474），与"关机时仍有东西没离开循环"一致。★ 缓解办法（腿侧，零代码）：**先停 ping、等几秒让 UL 排空，再按一次 Ctrl-C**。若在后续腿上复现，第一件该做的是把 staged 路径从"每个变换 `newBufferWithBytes` 新建"改成**每个块一次分配**（引擎自持、寿命随块/令牌），既治挂住也去掉一处真实低效。
 
 **⑥ ★★★ 新的、更强的判别量：手机的发射功率状态（`SE_PHR: ph=[…`）—— 并且它与臂**互相混杂**
 
