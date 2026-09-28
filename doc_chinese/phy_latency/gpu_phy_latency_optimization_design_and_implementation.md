@@ -9831,6 +9831,21 @@ slow (>1 ms) receives 26 of 387 overlapped one = 7%  (a coincidence predicts 4%;
   ⇒ **丢包账闭合**：ping 丢的 162 个包 = RLC 丢弃的 162 个 SDU；`pipe 16` 与 `max 1632 ms` = 那条批量释放停顿（与 `p109` 的 1658 ms 同签名）。
 * ★ **"平均时延更高"的分解（同臂对照，不是跨臂）**：`avg` 从 27.3 ms（干净）涨到 92.0 ms，**主体是风暴本身**（手机转入 RACH 模式后典型回复 ~60 ms vs 干净腿 ~25 ms）+ 三条 1.6 s 停顿；**其中属于 staging 的只有 ~0.55 ms**（UL 跳中位 993→1542，wrap 腿 `p100`/`p109` vs staged 腿 `p111`）。另有一条**与本次改动无关的臂级差**：**设备网格写**腿的 UL 跳中位 ~1.55 ms vs 宿主写网格腿 **598 µs**（`p112`）⇒ 即使干净的 `dft+grid` 腿（`p105` 1547 µs）也会比宿主网格腿高出 ~1 ms 的基线 RTT。
 
+**⑨ ✅ 顺路修掉一处真实的顺序缺口：`wait_per_slot` 现在要求"交棒可用"（`ofdm_demodulator_impl.cpp`）**
+
+在读上面这些报告时发现：`grid_consumed_on_device = config.device_resource_grid`（`lower_phy_factory.cpp:148`）把"**网格在设备上写**"当成了"**网格在设备上被消费**"，于是 `wait_per_slot` 为真 ⇒ **只等每槽最后一个符号**（日志自陈 "the earlier symbols are not waited for"）。这条等待的全部理由是"**一个队列按提交顺序完成命令缓冲**"，而它只覆盖**进了同一个命令缓冲（块）**的变换：
+
+| 路由 | `batched=`（批派发/承载变换）| 槽末等待是否覆盖全槽 |
+|---|---|---|
+| 零拷贝（wrap）`p100`/`p109` | **37308/522312、46341/648774**（每批 14）| ✅ 覆盖（全槽一个 cb）|
+| **staged**（拷贝）`p105`/`p111` | **0/0**、`0 joined an open block` | ❌ **只覆盖最后一个符号** |
+| 宿主路 `p93` | 0/0（无电台输入）| 不适用（网格由宿主写）|
+
+⇒ 在**交棒被拒**的配置（`cpu_gpu`、以及任何宿主读者臂）里，staged 路会把**前 13 个符号的网格写置之不待**，而 **CE（该臂在宿主）与 PUCCH（构造上就是宿主读者）** 正好随后就去读那张网格 —— 这正是代码自己警告过的失败模式（"a host consumer ... would read memory the GPU has not written yet"）。**修法（保守形式，一行）**：`wait_per_slot = device_write && grid_consumed_on_device && handover_allowed()` —— 只有"读者的顺序由交棒/grid-ready 等待提供"时才允许一跳只等一次；**交付的融合车道行为不变**（`handover_allowed()` 为真），分裂/调试模式退回逐符号等待（只损失调试模式里的一个优化）。
+★ **这条缺口也追认了撤回 staging 默认为正确**：那个默认不只是没用（+550 µs/跳），它还**悄悄破坏了 `wait_per_slot` 所依赖的每槽一个 cb 的批量化**。
+★ **它不解释 wrap 腿的风暴**（`p100`/`p109` 的批量化完好、槽末等待覆盖全槽）⇒ 对那两条腿，**"设备写出的网格内容是否正确"仍是唯一未测的落点**，即下面那条仪器。
+★ **离线自证**：`ofdm_demodulator_metal_batch_test` 的 `[grid] pipelined device write vs host write` 与 `[armed] hand-over grid vs host write` 仍 **0/17808 不一致** ⇒ 改动不改变设备网格的数值；`ctest -L phy` 全绿。
+
 * **机制现在只剩一个落点**：**由 Metal kernel 在设备上写的资源网格，以及读它的那些宿主消费者**（本臂里 CE 在宿主、PUCCH 无设备视图）。★ **仪器缺口**：现有 8 条契约检查**没有一条**覆盖"设备写出的网格内容/可见性"（`p111` 与 `p112` 的检查清单逐字相同）。⇒ 下一步该做的仪器：**在空口上把设备写出的网格与用同一批样点在宿主算出的参考网格逐 RE 比对**（离线该比对是精确的：`[grid] pipelined device write vs host write: REs=17808 mismatching=0`），外加"宿主消费者拿到的网格代次"读数。相关假设（待证）：设备网格若有细微错误 ⇒ 宿主 CE 的估计偏 ⇒ 功率控制把手机顶到上限（PHR→0）⇒ 控制信道先崩 ⇒ 风暴。
 
 

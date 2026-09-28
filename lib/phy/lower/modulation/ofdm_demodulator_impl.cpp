@@ -453,7 +453,27 @@ void ofdm_symbol_demodulator_impl::finish_symbol(resource_grid_writer& grid, uns
   // The slot's transforms were encoded into one command buffer (see set_lane_slot()): its last symbol is
   // where the block ends, so the command buffer is closed here - before the wait below, which would
   // otherwise find nothing to wait for.
-  const bool wait_per_slot = pipeline_slots[slot].device_write && grid_consumed_on_device;
+  // ★★ AND ONLY WHEN THE HAND-OVER IS THERE TO ORDER THOSE READERS (2026-09-28, 6.151⑨).
+  // The declaration above is about the DEPLOYMENT (config.device_resource_grid), but the wait this line
+  // controls is what an ORDERING needs: "one queue completes its command buffers in submission order" only
+  // covers a symbol whose transforms went into the slot's single command buffer (the block), and a host
+  // reader that runs right after this call is ordered by nothing else. Measured with the counters the
+  // engine already reports: the zero-copy route DOES put all fourteen symbols of a slot into one dispatch
+  // (`batched=37308/522312` and `46341/648774` on p100/p109 - 14 transforms each), but the staged route
+  // cannot (each transform carries its own fresh buffer, so it gets a command buffer of its own:
+  // `batched=0/0` on p105/p111, "0 joined an open block") - and with the hand-over refused, which is what
+  // `cpu_gpu` and every host-reader arm do, the per-slot wait then leaves thirteen symbols' grid writes
+  // uncovered while the CE (on the host in that arm) and the PUCCH (a host reader by construction) read
+  // that grid. `handover_allowed()` is exactly "a reader is ordered without this wait": either the adopted
+  // block carries the ordering, or the block's own completion is waited for at the slot's last symbol.
+  // Requiring it is therefore the conservative form - it never skips a wait a reader might need - and it
+  // costs the optimization only in the split/debug mode, never in the delivery lane.
+  // \note Residual, recorded so it is not rediscovered the hard way: mode=gpu with
+  //       OCUDU_DFT_STAGE_INPUT=1 would combine an allowed hand-over with unbatched transforms. That arm is
+  //       not flown (the staging arm belongs to the split mode, where this predicate now waits per symbol);
+  //       if it ever is, its per-slot wait will not cover the staged symbols.
+  const bool wait_per_slot =
+      pipeline_slots[slot].device_write && grid_consumed_on_device && handover_allowed();
   // D1 step 2: instead of committing the slot's block, HAND IT OVER to the hop that will read this grid.
   // The upper PHY's first back-end stage adopts it (same command buffer, its own encoder), so the slot's
   // transforms, the channel estimation, the equalization and the demapping are ONE submission - which is
