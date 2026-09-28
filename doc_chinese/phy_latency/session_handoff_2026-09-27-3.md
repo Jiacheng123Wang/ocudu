@@ -174,7 +174,13 @@ grep -ac "$(git -C /Users/jiachengwang/dev/ocudu rev-parse --short=10 HEAD)" /Us
 ```
 三者必须一致。**若之后又提交了任何东西** ⇒ 必须 `touch build/hashes.h && cmake --build build --target gnb` 重打戳重链，否则 `run_leg.sh` 会拒。
 
-★ **当前状态（2026-09-28，本 memo 最后更新）**：**证据腿 = `p103`/`p104`，跑在 `ec380995ae`**；此后到 HEAD 的提交**全部是文档**（判据：`git diff --name-only ec380995ae..HEAD -- '*.cpp' '*.h' '*.mm' '*.yml'` 为空）⇒ **二进制/配置未变，那一对腿的验收读数仍然续用**；但**任何新腿**在飞之前仍按上面三条核对（`run_leg.sh` 自己也会拒"戳 ≠ HEAD"）。
+★ **当前状态（2026-09-28，本 memo 最后更新）**：**验收对 = `p103`/`p104`，跑在 `ec380995ae`**。此后到 HEAD 的改动**不是"只有文档"**（⚠ 本 memo 初稿这样写过，是错的，已更正）：`git diff --name-only ec380995ae..HEAD` = **3 个探针文件**（`include/ocudu/support/executors/ul_pipeline_probe.h`、`lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm`、`tests/unittests/support/executors/ul_pipeline_probe_test.cpp`，即 M2/M2b 仪器）+ 文档。
+⇒ 按本仓纪律（探针动了 C++ 就不再算"跑在 HEAD 上的证据"），**`p103`/`p104` 严格说已不是 HEAD 证据**，但**它们的读数仍然有效**：探针是**两把钥匙**（编译期 option 默认 OFF ＋ 运行期 env 默认关 ⇒ **关着时交付路径逐字节不变**，§6.145③），V1/契约/红线都不是探针造出来的。
+⇒ **实际后果只有一条**：**下一条腿之前必须重打戳重链**（`touch build/hashes.h && cmake --build build --target gnb`），否则 `run_leg.sh` 拒；要不要为此再飞一对验收腿，由用户裁决（交付二进制未变，我倾向"与下一次必飞合并"）。
+
+★ **本次会话末尾的实际状态（2026-09-28，已重打戳）**：`git log -1` = `build/hashes.h` = `gnb` 内嵌戳（三者一致，已核）；`milestone_audit.sh --quick` = **26 PASS / 2 FAIL / 0 RED / 4 INFO**，**两条 FAIL 同因**（`p103`/`p104` 跑在 `ec380995ae`，而 `ec380995ae..HEAD` 含 3 个**探针**文件）⇒ 按上面那条读：**不是回归**，是"腿的提交 ≠ HEAD"这条既定 FAIL（下一对腿落地即消）。
+★ **标签地板又有一次合法增长：`ctest -L phy` 现在 204 个**（M2b 的 `the_three_submission_windows_are_counted_apart` 进了标签 ⇒ `gtest_discover_tests` 一个用例算一个 ctest 测试）——地板规则（`100%` 且 `n ≥ 193`）正确地没有把它读成 FAIL。
+⚠ **本次遇到一次既有 flake 并已定性**：`port_channel_estimator_metal_mmse_unit_test_ta_chain` **Bus error**（一次 204 分之 1；**单独重跑 3/3 全过**）⇒ 就是审计里那条"6.5 flake 规则：红了就重跑一次"覆盖的那个用例族，**与探针改动无关**（读 `lower_phy_test` 的自述行也会看到 `radio sample continuity … FAILED` 这类**测试内部日志字符串**，它不代表用例失败，审计判的是 `[  FAILED  ]` 用例行）。
 
 
 ---

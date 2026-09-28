@@ -9709,7 +9709,7 @@ slow (>1 ms) receives 26 of 387 overlapped one = 7%  (a coincidence predicts 4%;
 
 #### ⑤ ★★★ 成因是**配置级**的：`dft` + `grid` 同时开 ⇒ 手机退回 **RACH 风暴**（~10 次/s）
 
-手机不是在发 SR 要授权，而是在**做随机接入**：`PRACH detected_preambles` 在 `p109` 出现 **2044 次**（07:00:22–07:04:07，稳定 ~10/s），**每次一个新 `tc-rnti`**（0x4833→0x4846→0x4a5e…），且 Msg3 里带 **`C-RNTI: 0x4601`**（= 那部手机自己的 C-RNTI）⇒ 每 100 ms 一次 RACH（= 每次 ping 回复都撞上一次 RACH）。
+手机不是在发 SR 要授权，而是在**做随机接入**：`PRACH detected_preambles` 在 `p109` 出现 **2044 次**（07:00:22 → 07:04:33，密集段 ~10/s 直到 ~07:04:07；按分钟 260/566/588/530/76/21/3），**每次一个新 `tc-rnti`**（0x4833→0x4846→0x4a5e…），且 Msg3 里带 **`C-RNTI: 0x4601`**（= 那部手机自己的 C-RNTI）⇒ 每 100 ms 一次 RACH（= 每次 ping 回复都撞上一次 RACH）。
 
 **全 leg 普查（`grep -c detected_preambles`）—— 与 `LEG_CG_MODULES` 精确对应**：
 
