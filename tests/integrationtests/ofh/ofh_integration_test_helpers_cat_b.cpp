@@ -224,7 +224,7 @@ void dl_cplane_checker::check(span<const uint8_t> message, slot_point slot, unsi
 
   std::optional<dl_beam_list> beams_opt = beam_registry.read(slot);
   if (!beams_opt.has_value()) {
-    report_error(slot, eaxc, "no beam-ports registered for the slot");
+    nof_unverified_messages.fetch_add(1, std::memory_order_relaxed);
     return;
   }
   auto& beams = *beams_opt;

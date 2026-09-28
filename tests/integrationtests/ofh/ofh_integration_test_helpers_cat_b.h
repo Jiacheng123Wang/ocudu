@@ -184,6 +184,11 @@ public:
   /// Returns the number of errors detected.
   unsigned get_nof_errors() const { return nof_errors.load(std::memory_order_relaxed); }
 
+  /// \brief Returns the number of messages whose beam-ports could not be verified.
+  ///
+  /// Detects a message transmitted long after its slot, when the registry entry of the slot was already overwritten.
+  unsigned get_nof_unverified_messages() const { return nof_unverified_messages.load(std::memory_order_relaxed); }
+
 private:
   /// Accounts an error and prints it, up to a maximum number of printed errors.
   void report_error(slot_point slot, unsigned eaxc, std::string_view error);
@@ -195,6 +200,7 @@ private:
   /// Expected packed beamforming weights per beam-port.
   std::vector<std::vector<uint8_t>> expected_weights;
   std::atomic<unsigned>             nof_errors{0};
+  std::atomic<unsigned>             nof_unverified_messages{0};
 };
 
 } // namespace test
