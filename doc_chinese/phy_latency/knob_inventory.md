@@ -7,7 +7,7 @@
 > **默认值**是**从守卫表达式读出来的**（`ON` = 不设或非 0 都开；`OFF` = 必须显式置 1；`AUTO` = 由别处推导；`?` = 需要读注释）。
 > **飞过的腿数**来自 `logs/*.log.stderr` 顶部的 `knob : NAME=VALUE` 登记行 —— 这是**唯一能区分「新仪器」与「已退役」的一列**，源码里两者长得一样。
 
-合计 **113** 个旋钮：**19** 个默认 `ON`（= 交付形态的一部分）；**16** 个有腿登记行、**89** 个只在记录里出现过、**8** 个两处都没有；其中 **19** 个的首个读取点在 `test/`（离线臂）。
+合计 **113** 个旋钮：**20** 个默认 `ON`（`OCUDU_DFT_RELEASE_TOKENS_EARLY` 于 2026-09-28 由 OFF 改为 ON，见开发文档 6.156）（= 交付形态的一部分）；**16** 个有腿登记行、**89** 个只在记录里出现过、**8** 个两处都没有；其中 **19** 个的首个读取点在 `test/`（离线臂）。
 
 ## 1. 交付形态的一部分（默认 `ON`）——**验收腿上不许出现「改成 OFF」的值**
 
@@ -114,7 +114,7 @@
 | `OCUDU_DFT_OPEN_BLOCK` | ON | lib | `lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm:1130` | 2 | `lib/phy/generic_functions/metal` | 0 | 32/12 | — |
 | `OCUDU_DFT_PIPELINE_DEPTH` | ? | lib | `lib/phy/lower/modulation/ofdm_demodulator_impl.cpp:376` | 1 | `lib/phy/lower/modulation` | 0 | 18/6 | — |
 | `OCUDU_DFT_RELEASE_BLOCK` | OFF | include | `include/ocudu/phy/phy_pipeline_grid_ready.h:293` | 1 | `include/ocudu` | 6 | 62/11 | 0 |
-| `OCUDU_DFT_RELEASE_TOKENS_EARLY` | OFF | lib | `lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm:1188` | 1 | `lib/phy/generic_functions/metal` | 0 | 9/5 | — |
+| `OCUDU_DFT_RELEASE_TOKENS_EARLY` | ON | lib | `lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm:1231` | 1 | `lib/phy/generic_functions/metal` | 0 | 9/5 | — |
 | `OCUDU_DFT_STAGE_INPUT` | OFF | lib | `lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm:1495` | 1 | `lib/phy/generic_functions/metal` | 1 | 4/1 | 1 |
 | `OCUDU_EQ_DEFER_ENCODE` | ON | lib | `lib/phy/upper/channel_processors/metal/ocudu_equalizer_metal_engine.mm:1852` | 5 | `lib/phy/upper/channel_processors` | 0 | 37/11 | — |
 | `OCUDU_EQ_DEV_TABLES` | ON | lib | `lib/phy/upper/channel_processors/metal/ocudu_equalizer_metal_engine.mm:442` | 1 | `lib/phy/upper/channel_processors` | 0 | 4/3 | — |
