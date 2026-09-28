@@ -143,6 +143,8 @@
 | **⑬** | ✅ **M2b 判决：三个窗口全部否（§6.150⑥，腿 `p109`）**：`wait 7% vs duty 3.9%` / `commit→end 7% vs 3.9%` / `gpu 6% vs 0.6%`，而"全部接收"命中 6% ⇒ **无富集**；★ `gpu-clock offset = 60 µs` 证明时钟同基准（"否"不是在错时钟上得出的）⇒ 停顿**不在**宿主等待/提交期/GPU 执行期任何一段 | 分析 | ✅ 已判 |
 | **⑭** | ★★★ **ping 尖峰的真正机制（§6.151，更正 §6.150⑦）**：`dft`+`grid` 配置 ⇒ 手机 **RACH 风暴（~10 次/s，2044 次）** ⇒ DL 授权被 RAR/Msg3 吃掉 ⇒ `queued_sdus` 堆到 15–22 + **`RLC DL: Discarding SDUs. pdcp_sn=551..556` = 用户丢的 seq 552–557（一对一）** ⇒ 恢复时一个 **912/1083 B 大授权**把 12–16 个请求一次推给手机 ⇒ 手机用**一个 1473 B UL TB** 一次回完 ⇒ 宿主看到 RTT **线性斜坡**。判别腿 **`p105`**（同旋钮 + `OCUDU_DFT_STAGE_INPUT=1`）**风暴 2400→1** ⇒ **M1（共享页）对"功能性上行"是·是**，对"毫秒尾部"仍是·否（p105 尾部 0.065% ≈ p100 0.073%）| 分析 | ✅ 已判；**代码侧待裁决** |
 | **⑮** | ⚠ **风暴腿清单（引用读数前必查 `detected_preambles`）**：风暴腿 `p94`/`p100`/`p102`/`p108`/`p109`（2044–2407）；干净 `p92`/`p93`/`p97`/`p98`/`p99`/`p101`/`p105`/`p106`/`p107` + 验收对 `p103`/`p104`（**PRACH=1、丢SDU=0**）| 纪律 | ✅ 入册（§6.151⑦）|
+| **⑯** | ✅ **修复已落地（用户裁决 2026-09-28，§6.151⑨）**：**分裂模式 `cpu_gpu` 的 DFT 输入默认 staged（一次 memcpy）**，交付的融合车道保持零拷贝 wrap。实现 = `stage_input_requested()` 模式化默认（env `OCUDU_DFT_STAGE_INPUT` 仍可双向强制）＋ **新增精确计数器 `radio_zero_copy`**（报告在 `[metal_stats] dft …`）＋ **契约 `dft radio inputs` 按模式重述**（`gpu`：`staged==0`；`cpu_gpu`：`radio_zero_copy==0`）＋ 新 ctest 用例 `ofdm_demodulator_metal_batch_test --stage-split`（模式注册表进程级、不可撤销 ⇒ 必须独立进程）。**离线两臂反向自证**：无模式 `[reuse] mismatching=17808`、`--stage-split` `mismatching=0` + 契约 `radio_zero_copy=0 of radio_inputs=770 -> OK`；`ctest -L phy` **204 → 205 全绿** | 代码+测试+文档 | ✅ **完成**（待空口验证）|
+| **⑰** | ★ **待用户飞腿**：① **验证腿** `sudo -E bash …/run_leg.sh cpu_gpu <label> --regime=default` ＋ `LEG_CG_MODULES=dft+grid`（**不设任何 env 旋钮**）⇒ 预期 `detected_preambles=1`、`TA_CMD≈1`、`sr=yes` 回到 ~500/分、丢 SDU=0、且 `wrap_copies>0`（= 该腿输入为 staged）；② **交付对重飞**（`gpu` default + stress）：本轮动了 C++（引擎）⇒ 按纪律 `p103`/`p104` 不再是 HEAD 证据 | 两条腿 + 一对 | **待飞** |
 
 ### 3.3 两条候选（**用户此前裁定：LDPC→Metal 单独规划**）
 
@@ -207,6 +209,7 @@ grep -ac "$(git -C /Users/jiachengwang/dev/ocudu rev-parse --short=10 HEAD)" /Us
     ⇒ **纪律**：① "RTT 斜坡 + `pipe N` + 丢包"三件套 = **一次批量释放**（`pipe N` ≈ 一次停顿里攒下的包数），不是"普遍慢"；② 见到斜坡先去查 **DL 队列 `queued_sdus`** 与 **RLC 丢弃**，不要先怀疑无线路径。
 16. ★★ **每条腿必须读 `detected_preambles` 计数（风暴判据）**：`>100` = **风暴腿**（该腿的时延读数含额外 RACH 信令与调度饥饿，**不得单独**用于时延结论），`==1` = 干净。已知风暴腿：`p94`/`p100`/`p102`/`p108`/`p109`（§6.151⑤）。⚠ 这条推翻了"`p100`(dft+grid) vs `p93`(dft)/`p97`(grid) 是单模块干净对照"的读法——它们是**风暴腿 vs 干净腿**。
 17. ★★ **"配置级"这个词要兑现成读数才算结论（本会话第三次同类教训）**：M2/M2b 三窗口全否之后，我一度把残余写成"配置级的常驻状态、本平台无更细仪器"；实际答案是**配置真的会破坏空口功能**（RACH 风暴），而且**只要多读一个计数器**（`detected_preambles`）就能看见。⇒ 纪律：**"无仪器可用"之前，先把该配置下所有既有计数器/日志行扫一遍**（这次是 MAC 的 PRACH 行与 RLC 的丢弃行，都在默认日志里，一直没读）。
+18. ★★ **零拷贝主张要绑模式（本会话新增判据纪律）**：`cpu_gpu` 是**中间（debug/对照）模式**，它的定义本身就是"每个模块边界各留一次 host↔device 搬运"（`phy_pipeline_mode.h`）；`gpu` 融合车道才是"只剩 IQ 上传 + LLR 下传两次"。⇒ ① **分裂模式下 DFT 输入是 staged**（§6.151⑨），其 `[metal_stats] dft … wrap_copies>0` ⇒ **该腿不是零拷贝读数**，不得用它论证 G1/G2 或零拷贝主张；② 契约 `dft radio inputs` 的两段要求（`gpu`：`staged==0`；`cpu_gpu`：`radio_zero_copy==0`）是**一个决定的两面**，改一段必须同步改另一段的读数。⚠ 逆向的教训也记一次：我上一轮把风暴归因成"缺少输入生命周期保护"，被引擎自己的 `keepalives=648774/648774` 当场否掉 ⇒ **下结论前先找该机制自带的计数器**。
 
 ---
 

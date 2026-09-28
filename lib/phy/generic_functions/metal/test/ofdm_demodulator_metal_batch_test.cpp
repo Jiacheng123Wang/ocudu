@@ -25,9 +25,12 @@
 #include "ocudu/phy/support/resource_grid.h"
 #include "ocudu/phy/support/resource_grid_reader.h"
 #include "ocudu/phy/phy_pipeline_grid_ready.h"
+#include "ocudu/phy/phy_pipeline_mode.h"
 #include "ocudu/phy/support/resource_grid_writer.h"
 #include "ocudu/phy/support/support_factories.h"
 #include "ocudu/ran/cyclic_prefix.h"
+
+#include <string>
 #include "ocudu/ran/subcarrier_spacing.h"
 #include <chrono>
 #include <cmath>
@@ -67,8 +70,21 @@ std::vector<cf_t> grid_to_vector(const resource_grid_reader& grid, unsigned nof_
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
+  // ★ THE MODE DECIDES WHICH WAY THIS BINARY'S NEGATIVE CONTROL HAS TO COME OUT (design document 6.151⑨).
+  //
+  // `--stage-split` publishes the SPLIT mode (`cpu_gpu`) before the first DFT engine exists, because the
+  // engine picks its input route from the published mode: the split mode stages the transform input (a copy
+  // at the module boundary, which is that mode's own semantics), the fused lane wraps the radio's pages
+  // zero-copy. The mode registry is process-wide and cannot be un-published, so this needs a run of its own -
+  // ctest registers a second test case for it (see CMakeLists.txt) rather than mixing two modes in one
+  // process, which would leave the contract line of this binary judging a population it never had.
+  const bool stage_split = (argc > 1) && (std::string(argv[1]) == "--stage-split");
+  if (stage_split) {
+    phy_pipeline_mode_registry::set(phy_pipeline_mode::cpu_gpu);
+  }
+
   // D1 (design document 5.9.17): the hand-over has to be ARMED BEFORE the first Metal DFT engine exists -
   // the engine picks its queue once - so it is armed here for the whole binary. It only changes what the
   // sections that DECLARE the grid device-consumed do (see the armed section below); every other section
@@ -448,13 +464,26 @@ int main()
           ++reuse_mismatching;
         }
       }
-      std::printf("[reuse] samples overwritten right after submit: REs=%zu mismatching=%u\n",
+      std::printf("[reuse] samples overwritten right after submit: REs=%zu mismatching=%u (%s)\n",
                   reuse_out.size(),
-                  reuse_mismatching);
-      if (reuse_mismatching == 0) {
+                  reuse_mismatching,
+                  stage_split ? "the split mode must have STAGED the input, so 0 is required"
+                              : "the fused/no-mode path must read the radio's buffer, so non-zero is required");
+      // ONE assertion per mode, and each run gets the one its mode claims (6.151⑨):
+      //  * no published mode (the historical case, and what the delivery lane relies on): overwriting the
+      //    samples of an in-flight transform MUST corrupt the grid - if it does not, the input is being
+      //    staged somewhere and the zero-copy input is vacuous;
+      //  * `cpu_gpu`: the input IS staged by design, so the overwrite must NOT change the grid - and that is
+      //    exactly the property that makes the split mode's uplink work (p105 against p100/p109 on air).
+      const bool reuse_ok = stage_split ? (reuse_mismatching == 0) : (reuse_mismatching != 0);
+      if (!reuse_ok) {
         std::fprintf(stderr,
-                     "FAIL: overwriting the samples of an in-flight transform did not corrupt its grid, so the "
-                     "transform is not reading the buffer it was given (the input is still staged)\n");
+                     "FAIL: %s (mismatching=%u)\n",
+                     stage_split
+                         ? "the split mode's input was NOT staged - the transform read the radio's pages"
+                         : "overwriting the samples of an in-flight transform did not corrupt its grid, so the "
+                           "transform is not reading the buffer it was given (the input is still staged)",
+                     reuse_mismatching);
         ok = false;
       }
     }

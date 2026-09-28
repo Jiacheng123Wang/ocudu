@@ -162,6 +162,15 @@ struct dft_stats_t {
   /// the host - either the caller never asks for it, or the engine refused the samples and the
   /// caller fell back, which it warns about once.
   std::atomic<uint64_t> radio_inputs{0};
+  /// \brief The subset of \c radio_inputs that read the radio's pages ZERO-COPY (the wrap succeeded).
+  ///
+  /// The contract needs this count separately since the mode decides which of the two is required (design
+  /// document 6.151⑨): in the fused lane the input must NOT be copied (`staged == 0`), while the split mode
+  /// `cpu_gpu` must not read the radio's pages at all (`radio_zero_copy == 0`, because its zero-copy read was
+  /// measured to break the uplink there - see stage_input_requested()). `wrap_copies` cannot answer either
+  /// question alone: it counts EVERY wrap that fell back to a copy in this engine, the grid's and the engine's
+  /// own tables included, so `radio_inputs == wrap_copies` would be an equality between two different units.
+  std::atomic<uint64_t> radio_zero_copy{0};
   /// Wraps of this engine that could not be zero-copy and were staged instead (see wrap_buffer): the
   /// engine's own tables when they are not page aligned, or a caller's buffer the registry does not
   /// describe. Counted because a silent copy here is exactly how "the transform reads the radio
@@ -402,6 +411,12 @@ static void dft_stats_radio_input()
   dft_stats().radio_inputs.fetch_add(1, std::memory_order_relaxed);
 }
 
+/// Counts one radio input that read the radio's pages through the zero-copy wrap (see dft_stats_t::radio_zero_copy).
+static void dft_stats_radio_zero_copy()
+{
+  dft_stats().radio_zero_copy.fetch_add(1, std::memory_order_relaxed);
+}
+
 /// Counts one plain-route transform by WHY it did or did not get a command buffer of its own (5.9.113).
 static void dft_stats_plain_submit(bool with_block, bool with_lane_slot)
 {
@@ -441,7 +456,8 @@ static void dft_stats_report()
                // every transform (see ofdm_demodulator_impl::finish_symbol()), so that difference grows
                // without bound and would read like a backlog that is not there.
                "[metal_stats] dft commits=%llu transforms=%llu waits=%llu slots_in_flight=%llu radio_inputs=%llu "
-               "wrap_copies=%llu released=%llu released_waits=%llu batched=%llu/%llu batch_max=%u "
+               "wrap_copies=%llu radio_zero_copy=%llu released=%llu released_waits=%llu batched=%llu/%llu "
+               "batch_max=%u "
                "batch_src=%s slot_symbols=%u\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.transforms.load(std::memory_order_relaxed)),
@@ -449,6 +465,10 @@ static void dft_stats_report()
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.radio_inputs.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.wrap_copies.load(std::memory_order_relaxed)),
+               // radio_zero_copy: the subset that read the radio's pages zero-copy. Which of the two the
+               // contract requires is the MODE's question (6.151⑨): the fused lane requires this count to be
+               // the whole of radio_inputs (zero copies), the split mode requires it to be ZERO.
+               static_cast<unsigned long long>(s.radio_zero_copy.load(std::memory_order_relaxed)),
                // released / released_waits: the release path of D1 step 1. Both are 0 unless the run armed
                // OCUDU_DFT_RELEASE_BLOCK, and released_waits must stay 0 even then (see the struct).
                static_cast<unsigned long long>(s.released.load(std::memory_order_relaxed)),
@@ -707,11 +727,39 @@ static void register_dft_contract_check()
            // unit test or a tool exercises the engine directly): nothing to require of it.
            return std::nullopt;
          }
-         // Stated in terms of the COPIES, because that is what the contract claims and what the engine
-         // counts where the decision is made. The reverse arm lives in
-         // dft_processor_metal_unit_test.cpp: an input whose zero-copy wrap is refused (a pointer Metal
-         // will not take without a copy) has to turn this red.
-         return staged == 0;
+         // ★★ THE CLAIM IS THE MODE'S OWN, because the two modes claim OPPOSITE things at this boundary
+         // (2026-09-28, design document 6.151⑨). Whoever changes one of these two forms must change the
+         // other's evidence with it - they are one decision, not two knobs:
+         //
+         //  * `gpu` - the fused lane, and the DELIVERY mode. Its whole point is that the IQ never travels
+         //    back to the host, so this boundary must not pay a copy: requirement `staged == 0`. The reverse
+         //    arm lives in dft_processor_metal_unit_test.cpp - an input whose zero-copy wrap is refused (a
+         //    pointer Metal will not take without a copy) has to turn this red.
+         //  * `cpu_gpu` - the split debug/control mode (NOT a delivery mode; phy_pipeline_mode.h defines it
+         //    as "every module boundary keeps its own host <-> device crossing"). Since 6.151⑨ its DFT input
+         //    is deliberately staged, because reading the radio's pages zero-copy there was measured to
+         //    break the uplink's control plane (see stage_input_requested()). Requirement, the opposite
+         //    one: NOTHING read the radio's pages, i.e. every radio input went through the copy -
+         //    `radio_zero_copy == 0`.
+         //
+         // Both forms are stated in terms of the copies, because that is what the engine counts where the
+         // decision is made; `wrap_copies` is reported apart from the transform counts because it counts
+         // WRAPS (the grid's and the engine's own tables included), not transforms - the old form mixed
+         // those populations and passed for the wrong reason (5.9.98).
+         const uint64_t zero_copy = s.radio_zero_copy.load(std::memory_order_relaxed);
+         if (phy_pipeline_mode_registry::get() == phy_pipeline_mode::gpu) {
+           std::fprintf(stderr,
+                        "; fused lane: the transform input must BE the radio's samples, so the copies "
+                        "(staged=%llu) must be 0",
+                        static_cast<unsigned long long>(staged));
+           return staged == 0;
+         }
+         std::fprintf(stderr,
+                      "; split mode: every radio input must be a staged copy (its module boundary pays one "
+                      "by design), so the zero-copy reads (radio_zero_copy=%llu of radio_inputs=%llu) must be 0",
+                      static_cast<unsigned long long>(zero_copy),
+                      static_cast<unsigned long long>(radio));
+         return zero_copy == 0;
        }});
 }
 
@@ -807,6 +855,7 @@ static void dft_stats_wrap_copy() {}
 static void dft_stats_batch(uint64_t /*nof_transforms*/) {}
 static void dft_stats_plain_submit(bool /*with_block*/, bool /*with_lane_slot*/) {}
 static void dft_stats_radio_input() {}
+static void dft_stats_radio_zero_copy() {}
 static void dft_stats_release() {}
 static void dft_stats_released_wait() {}
 static void dft_stats_keepalive() {}
@@ -1475,7 +1524,7 @@ bool refuse_time_input(dft_engine_impl* engine, const dft_metal_engine::grid_wri
   return false;
 }
 
-/// \brief Whether this run forces the transform INPUT to be staged instead of wrapped zero-copy (Q25).
+/// \brief Whether this run forces the transform INPUT to be staged instead of wrapped zero-copy.
 ///
 /// WHY IT EXISTS. The front end's transforms read the radio's samples through a zero-copy page mapping
 /// (\c newBufferWithBytesNoCopy), and on air that command buffer is resident ~452us while the whole
@@ -1490,10 +1539,56 @@ bool refuse_time_input(dft_engine_impl* engine, const dft_metal_engine::grid_wri
 /// fallback, counted by \c staged in the "dft radio inputs" check), so it is a measurement arm and not a
 /// new mechanism: the bytes the kernels read are identical, the contract check that says "the input was
 /// not staged" is expected to FAIL on this arm, and that is the point of flying it.
+///
+/// ★★ THE SPLIT MODE STAGES BY DEFAULT SINCE 2026-09-28 (design document 6.151⑨), and it is a FIX, not a
+/// measurement arm. Read this before "restoring zero-copy" here:
+///
+///  * WHAT WAS MEASURED. In \c cpu_gpu the transform read the radio's receive buffer - the very memory the
+///    UHD receive path writes, because radio_uhd_rx_stream::receive_block() hands OUR pointer to
+///    uhd::rx_streamer::recv() - through the zero-copy wrap, and the uplink's control plane was lost: the
+///    phone's scheduling requests stopped being served (SR detections fell from the clean leg's ~500/min to
+///    103 in a whole leg, and the SR resource went silent), it fell back to a RACH per uplink data arrival
+///    (~10/s; 2044 PRACH detections in one leg, one per ping reply), the RAR/Msg3 grants that storm needed
+///    starved the DRB's downlink queue (queued_sdus 1->22), the RLC discarded SDUs - the ping packets that
+///    went missing - and a later big grant released a whole batch at once, which is the host's linearly
+///    decreasing RTT ramp. One copy removes every one of those readings: leg p105 (the same two module
+///    knobs, input staged) came out PRACH=1, TA_CMD=1, SR back at ~500/min, against p100/p109's storm.
+///  * WHY IT IS NOT A ZERO-COPY REGRESSION. The FINAL design is ONE lane: IQ -> LLR either wholly on the
+///    CPU or wholly on the GPU - data ping-ponging between host and device inside a hop is itself the cost
+///    the fused lane exists to remove (phy_pipeline_mode.h says exactly that, and it DEFINES \c cpu_gpu as
+///    "every module boundary keeps its own host <-> device crossing"). Handing the radio's pages to the
+///    kernel is the FUSED lane's privilege; in the split mode a copy at the module boundary is that mode's
+///    own semantics, not a broken promise. The split mode is a debug/control mode, not a delivery mode.
+///  * THE DELIVERY PATH IS UNTOUCHED, and that is checked, not assumed: \c gpu legs keep the wrap
+///    (p103/p104: radio_inputs=435260/2066078, wrap_copies=0) and stay clean on air (PRACH=1, 0 SDU
+///    discards), and the "dft radio inputs" contract check keeps requiring \c staged == 0 there.
+///  * THE COPY IS COUNTED AND REPORTED as what it is: dft_stats_wrap_copy() feeds \c wrap_copies and
+///    wrap_buffer() declares a host write site to the crossings audit, so a leg that pays it says so on its
+///    own [metal_stats] dft line. ★ A \c cpu_gpu leg with wrap_copies > 0 is therefore a NON-zero-copy
+///    reading: it must not be quoted as evidence about G1/G2 or about zero-copy claims.
+///  * WHAT IT IS NOT: a diagnosis. The mechanism by which the split mode's zero-copy read corrupted the
+///    control plane is still OPEN. The lifetime explanation was refuted by the engine's own counters
+///    (keepalives=648774/648774 in the storm leg: every zero-copy transform held and released its input
+///    token) and the samples are read where the radio put them ([ul_host] assembled=0, in_place=...), so the
+///    remaining candidates are a visibility/ordering effect between the UHD writes and the GPU's read, which
+///    a copy sidesteps by construction. Design document 6.151⑨ carries the diagnostic that would settle it
+///    (compare the device's grid against a host reference computed from the bytes the host saw), and
+///    REMOVING this default is what that diagnosis buys - not a preference.
+///
+/// \note OCUDU_DFT_STAGE_INPUT forces the answer either way (1 = always stage, 0 = never stage, for A/B
+///       arms); unset selects the mode's default. It is read at every submission, so a leg's own
+///       [metal_stats] dft line states which route it actually took.
 bool stage_input_requested()
 {
   const char* env = std::getenv("OCUDU_DFT_STAGE_INPUT");
-  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+  if (env != nullptr) {
+    return std::strtoul(env, nullptr, 10) != 0;
+  }
+  // The mode's default: the split mode stages (see the block above), the fused lane wraps. No published
+  // mode means a unit test or a tool exercising the engine directly - those keep the historical wrap, and
+  // the batch test's negative control is what pins that (it REQUIRES an in-flight overwrite to corrupt the
+  // grid, i.e. it requires the wrap).
+  return phy_pipeline_mode_registry::is_published() && (phy_pipeline_mode_registry::get() == phy_pipeline_mode::cpu_gpu);
 }
 
 id<MTLBuffer> wrap_buffer(dft_engine_impl* engine, const void* ptr, size_t length)
@@ -2278,6 +2373,9 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
       b_in16        = b;
       input.is_ci16 = 1u;
       dft_stats_radio_input();
+      // ... and this is the count the FUSED lane's claim rests on and the SPLIT mode's default removes
+      // (6.151⑨): the transform is about to read the radio's own pages.
+      dft_stats_radio_zero_copy();
       // The kernel reads from the ALLOCATION base it was handed, so the offset is the slice's own
       // offset plus the window start within it (the cyclic prefix the transform skips).
       input.offset = static_cast<uint32_t>(offset_bytes / (2 * sizeof(int16_t))) + write.time_window_start;

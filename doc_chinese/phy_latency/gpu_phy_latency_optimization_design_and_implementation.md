@@ -9744,6 +9744,50 @@ slow (>1 ms) receives 26 of 387 overlapped one = 7%  (a coincidence predicts 4%;
 * 验收日报把 **PRACH 计数**列为必读（风暴 = 0 才算健康腿）。
 * §6.150⑦ 的更正已在"证据索引"登记；用户给的那次 ping 轨迹可作为该缺陷的**外部复现证据**（macOS `ping` 的 seq/斜坡/丢包三件套与日志逐条对上）。
 
+#### ⑨ ✅ 处置（用户裁决 2026-09-28）：**分裂模式（`cpu_gpu`）的 DFT 输入改为"提交时拷一份"**，交付的融合车道保持零拷贝
+
+**裁决原话（要点）**：`cpu_gpu` 只是我们设计的**中间（debug／对照）模式，不是最终模式** —— 最终形态是"IQ 一旦开始流动，要么走全 CPU 路径、要么走全 GPU 路径"，**数据在同一跳内于 CPU/GPU 之间来回本身就是开销**，没有充分理由。所以只要这个 bug 是 `cpu_gpu` 特有的，修法就可以是**一次 memcpy**，但必须在**代码注释与设计文档里写清楚**，免得以后把它误读成"零拷贝设计目标被放弃"。
+
+★ 这个裁决与 `include/ocudu/phy/phy_pipeline_mode.h` 的既有定义**完全一致**（原文）：`gpu` = 融合车道，"the whole IQ -> LLR chain runs inside one device-side pipeline with only two host <-> device *data* crossings (the IQ upload and the LLR download)"；而 `cpu_gpu` = "module-level offload. **Each module follows its own backend knob, so every module boundary keeps its own host <-> device crossing**"。⇒ **在分裂模式的模块边界拷一份，是这个模式自己的语义，不是零拷贝目标的破例。**
+
+**① 实现（一处默认值 + 一条按模式重述的判据）**
+
+* `ocudu_dft_metal_engine.mm` 的 `stage_input_requested()` 改为**模式化默认**：未设 `OCUDU_DFT_STAGE_INPUT` 时，**已发布模式 == `cpu_gpu` ⇒ staged（拷贝）**，`gpu` ⇒ wrap（零拷贝）；env 仍可双向强制（`=1` 总拷、`=0` 总不拷）用于 A/B。未发布模式的进程（单测/工具/回放）**保持历史 wrap**。
+* **契约判据按模式重述**（这是**判据变更，先登记再改**）：新增精确计数器 **`radio_zero_copy`**（只数"零拷贝读了电台页"的变换，走 `[metal_stats] dft … radio_zero_copy=` 报告）；`dft radio inputs` 在 **`gpu`** 下仍要求 **`staged == 0`**（融合车道的红线，反向臂仍在 `dft_processor_metal_unit_test.cpp`），在 **`cpu_gpu`** 下要求 **`radio_zero_copy == 0`**（"没有任何变换直接读电台页"），两段的措辞与读数都打在该契约行上。
+  ⚠ 为什么不能直接用 `radio_inputs == wrap_copies`：`wrap_copies` 数的是**所有**回退拷贝（含**网格**与引擎自身表），与"变换数"量纲不同（5.9.98 那次判据修正就是踩了混量纲）。
+
+**② 离线自证（两条臂必须反向成立，各占一个进程）**
+
+`ofdm_demodulator_metal_batch_test` 的负对照（"提交后立刻覆盖样点"）在两种模式下**要求相反**，因此新增了一个 ctest 用例（模式注册表是进程级、不可撤销）：
+
+| 进程 | 负对照读数 | 契约行 |
+|---|---|---|
+| 无模式（历史/交付路）| `[reuse] … mismatching=17808`（wrap 活着）→ `ALL OK` | 不适用 |
+| **`--stage-split`（`cpu_gpu`）** | `[reuse] … mismatching=0`（读的是拷贝）→ `ALL OK` | `radio_zero_copy=0 of radio_inputs=770 … -> OK`（措辞为分裂模式的要求）|
+
+⇒ `ctest -L phy` **204 → 205**（地板规则 ≥193 照旧）。
+
+**③ 交付路径不变的证据（不是承诺）**
+
+| 腿 | 模式 | `radio_inputs` | `wrap_copies` | PRACH | 丢 SDU |
+|---|---|---|---|---|---|
+| `p103` default / `p104` stress | `gpu` | 435 260 / 2 066 078 | **0** | **1** | **0** |
+
+⇒ 融合腿仍走 wrap，契约在 `gpu` 下仍要求 `staged == 0`；本次改动**不触交付二进制路径的行为**（只多了一个计数器与一个模式判断）。
+
+**④ 纪律（新增，与"臂腿不能冒充验收腿"同族）**
+
+★ **`cpu_gpu` 腿的 `wrap_copies > 0` 意味着这条腿不是零拷贝读数**：它的 `crossings` 记账里含这次拷贝，**不得**用它的读数论证 G1/G2 或任何零拷贝主张；引用时写明"该腿输入为 staged"。
+
+**⑤ 仍开放，以及这个默认的撤销条件**
+
+机制**仍未诊断**（搬运仍然只是隔离）：
+
+* 生命周期解释**已被引擎自己的计数否掉**：风暴腿 `keepalives=648774/648774 (max in flight 14)` —— 每个零拷贝变换都挂了输入保留令牌并正常释放；
+* 也不是 PHY 自己又拷了一份：`[ul_host] symbols=10576930 in_place=10576930 assembled=0`（全部"在电台放的地方原地读"）；
+* 写作方已查实：`radio_uhd_rx_stream::receive_block()` 把**我们的池缓冲裸指针**交给 `uhd::rx_streamer::recv()`（一个包一次、循环填满一块）⇒ **写这块内存的就是 UHD 的接收路径**；与 GPU 的读之间除了提交顺序没有别的同步。
+* ⇒ 剩余候选是"**UHD 的写 与 GPU 的读之间的可见性/时序**"，拷贝按构造把它绕开。**判别实验**（决定能否改成零拷贝）：在同一批符号上比 ①提交时宿主看到的切片哈希、②设备写出的网格、③用①在宿主算出的参考网格；②==③ ⇒ 我的时序叙事错，必须换解释；②≠③ 且与"该块刚落地的时刻"相关 ⇒ 用**事件**把 kernel 的输入读序化在 `receive()` 返回之后（`encodeSignalEvent`/`encodeWaitForEvent` 这一族本仓已有），**一个字节都不用拷**。**那次诊断的产出就是这个默认的移除**，而不是偏好。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
