@@ -8974,6 +8974,8 @@ V1 = 1409.8 µs（墙钟：本槽第一个样点 → LLR 交付）
 
 ★ **2026-09-28 已空口确认（§6.148③）**：`p87`/`p88` 两条腿都打出 `rows=512`，`rxwait/t2f/ce/ldpc/crc_ok` 全部到达（`crc_ok` 的 NaN 行数 88/39 ≈ 同腿 CRC BLER 14.4%/8.6%，属合法），且 `ce` 中位 123 µs ≪ residency 628 µs ⇒ **确认它是宿主时刻**。
 
+★ **限定（2026-09-28，读码）**：`record_t2f_end()`/`record_ce_end()` 的第一行是 `if (!records_phase_segments()) return;`，所以在融合车道里**除非 `OCUDU_UL_PHASE_SEGMENTS=1` 强制打开，`t2f`/`ce` 两列不会被记录**（`ldpc_start`/`crc_ok`/`rxwait` 不受影响）。`p87`/`p88` 观测到这两列，是因为它们沿用了 `p85`/`p86` 那条带强制相位分段的配方（§6.148③）。
+
 **为什么断言 `[ul_slot_trace]` 在 gpu 模式"代码上活"**：`trace_slot()` 在四个 recorder 里是**无条件**调用的（`ul_pipeline_probe.h:265 / 342 / 357 / 395`，只被"该槽是否已进 `slot_samples_done`"门控），而四个调用点在 gpu 模式**都到达**：
 
 * `record_t2f_end` —— `puxch_processor_impl.cpp:228`，在"本槽所有符号已提交"处（gpu 模式走的就是 `pipeline_depth > 1` 那条路，即**融合车道的单次提交 + D1 交接**）；
@@ -9195,20 +9197,44 @@ V1 = 1409.1 µs（IQ → LLR，[ul_gpu_pipeline]）
 ⇒ ★ **原来标"未测（差值 256.6）"的那一段，其实就是"队列等待 + 宿主交棒"**（208.7 + ~123 ≈ 332，落在同一量级；之前的账把队列等待算进了设备 `gap`，于是同一笔钱被记了两次、并在 V1 的差额里又空出一块）。**LLR 回传与交付本身 ≲ 数十 µs**。⇒ §6.144⑤ 那张表里"目前最大的测量盲区"这一行**可以撤掉**：V1 的构成现在**每一段都有读数**。
 ⇒ 这同时解释了为什么 `[ul_gpu_lane] gap`（133.5）不能与 residency 相加：gap 是 residency **内部**的设备空闲，而队列等待在 residency **之前**。
 
-#### ⑤ ⚠ 槽时间轴的残留下缺陷：**−10.24 s 的行**（一个 SFU 周期），机制已定位
+#### ⑤ ✅ 槽时间轴的缺陷：**机制两层、已修好、已离线自证**（2026-09-28）
 
-| 列 | `p87` 负值行（< −1 s）| `p88` | 量级 |
-|---|---|---|---|
-| `rxwait` / `t2f` | **0 / 0** | **0 / 0** | 干净 ✅ |
-| `ce` | 4 | **77** | ≈ **−10.24 s** |
-| `ldpc` | 17 | **77** | 同上 |
-| `crc_ok` | 42 | **80** | 同上 |
+**症状**：`ce/ldpc/crc_ok` 的少数行打出 **−10.24 s**（正好一个 SFU 周期；`p87` 4/17/42 行，`p88` 77/77/80 行；`rxwait`/`t2f` 干净）。
 
-**机制**（读码）：行以**模时隙**为键。某槽在第 N 个 SFU 周期带过 PUSCH（于是留下 landmark、且可能因"最慢 128 行保留策略"而长期留表），在第 N+1 个周期**不带** PUSCH ⇒ 没有任何 landmark 更新它，而 `record_slot_samples_complete()` **每槽都会执行**、把该键的基准刷新成新周期 ⇒ 打印时"**新基准 − 旧 landmark** = −10.24 s"。
-* 打印器已经做过一次相关修复（把基准/landmark 的原始 epoch 一起打出来，`base_since_boot`/`landmark_since_boot`，治的是"打印时查表拿到新基准"那一半），但**没有作废旧 landmark** ⇒ 残留这一半。
-* **修法（一行）**：在 `record_slot_samples_complete()` 覆盖某槽基准时，**同时清掉该槽的 landmarks**（新周期里 landmark 必然后到，清掉不会丢东西）；更稳妥再加一条"landmark 早于基准即忽略"的兜底。
-* **影响面**：`rxwait`/`t2f` 干净；受影响的只有 `ce`/`ldpc`/`crc_ok` 的**少数行**（p87 8%、p88 15%）；**分布序列完全不受影响**（它们有 `find_fresh`/`max_entry_age` 的时效闸门），判据也**不读时间轴**。⇒ 属"给人眼看的仪表印出自信但错误的值"，按本仓标准要修，但**不阻塞任何判据**。
-* **离线自证计划**：`ul_slot_trace_test` 加一臂——为某槽记满时间轴，然后**只更新该槽的基准**（模拟下一个 SFU 周期），断言（a）不出现负的 delta、（b）旧 landmark 不再被配对。这样"未刷新即留下旧值"这一族缺陷不能再悄悄回来。
+**机制（两层，缺一不可地解释了症状）**：
+
+1. **map 层**：landmark 以**模时隙**为键。`t2f` **每个周期都会重记**（PUXCH 对它处理的每个槽都在槽末记一次），而 `ce`/`ldpc_start`/`crc_ok` 只在该槽**真的有授权且 TB 被处理/解码**时才重记。于是"上个周期带过 PUSCH、本周期没带"的槽：新周期的 `t2f` 触发重算，而 `slot_landmarks` 里那三个还是**上个周期的时刻** ⇒ `新基准 − 旧 landmark` = **−10.24 s**。
+   （打印器此前修的是另一半——把基准/landmark 的原始 epoch 一起打出来，治"打印时查表拿到新基准"；map 里旧值没作废这一半一直在。）
+2. **行层**：只擦 map 还不够。行的 `t2f_us/ce_us/...` 是**上次重算时写进去的值**，`assign()` 只在 landmark 存在时覆盖、不会清空 ⇒ 擦掉 map 后，行里仍留着**上一周期的差值**。★ 单元夹具第一次跑就抓到了这一层：`ce/ldpc/crc_ok` 读回 **~2 µs**——**看着完全合理**，比负数更危险。
+
+**修法（`ul_pipeline_probe.h`，两处都默认关、release 逐字节不变）**：
+
+| # | 改动 | 为什么 |
+|---|---|---|
+| 1 | `record_slot_samples_complete()` 覆盖某槽基准时，**作废该槽的 landmarks** | 一行描述**一个**周期；不可能丢掉本周期的东西（landmark 是"被这次到达的样本"测出来的，必然在此之后） |
+| 2 | 同时把**行内派生列重置为 NaN**（`t2f/ce/ldpc/crc_ok/tb_bytes/pipeline`）| 新周期只填它真正到达的那些；没带授权的槽就如实报"没到达"，而不是记得上次的跳 |
+| 3 | `us()` 加**兜底**：landmark 早于基准 ⇒ NaN **并计数**；报告头新增 `rebased=N …; negative deltas refused=M` | 不做**静默过滤**：负数一旦回来必须先在报告里看得见（本仓的 `stale`/crossings 都是这个规矩）|
+
+**离线自证（`ul_slot_trace_test.a_new_cycle_rebases_a_slot_instead_of_reusing_last_cycles_landmarks`）**：周期 1 记满四个 landmark，周期 2 **只**重记基准与 `t2f`（模拟"本周期没授权"），断言：该行的 `rxwait` 是新周期那条（防止"行根本没被动过"的假通过）、`t2f` 小且为正、`ce/ldpc/crc_ok` **为 NaN**、`rebased` 差值**正好 4**、`negative deltas refused=0`。
+
+| 臂 | 变异 | 实测 |
+|---|---|---|
+| 对照 | —— | ✅ **8/8 PASS** |
+| **A** | 不擦 map、只重置行 | ✅ **FAILED**（撞在 `refused=0`：兜底把旧 landmark 抓成负数并计数）|
+| **B** | 擦 map、不重置行 | ✅ **FAILED**（撞在三个 NaN 断言：行里留着上周期"看着合理"的 ~2 µs）|
+| 复原 | —— | ✅ **8/8 PASS** |
+（两臂都核对了 `Building CXX object` 条数 =1；这是 §6.147③ 记下的那个"mtime 打平导致没重编"的坑。）
+
+★ **顺带查清一件必须写下来的事**：`record_t2f_end()`/`record_ce_end()` 开头都有 `if (!records_phase_segments()) return;` ⇒ **在 gpu 模式（融合车道）里，除非 `OCUDU_UL_PHASE_SEGMENTS=1` 强制打开，时间轴的 `t2f`/`ce` 两列是空的**。`p87`/`p88` 之所以有这两列，正是因为它们沿用了 `p85`/`p86` 那条**带强制相位分段**的配方。⇒ §6.145④ 的结论要补一句限定：四个 landmark 在 gpu 模式都**会到达**，但其中两个的**记录**被 `records_phase_segments()` 门控。
+
+**影响面**：分布序列与全部判据**都不读**时间轴；受影响的只有那三列在**少数行**上的可读性。**判据无一条因此改变。**
+
+★★ **做这条修复时又抓到一个门禁缺口（本仓第三次同类）：探针的离线自证根本不在验收标签里。**
+`tests/unittests/support/executors/CMakeLists.txt` 给 `ul_pipeline_probe_test` 打的是目录标签 `support`，而**验收命令一直是 `ctest -L phy`** ⇒ 实测 `ctest -N -L phy` 里该二进制的 **8 个用例一个都不在**（`ctest -N -L support` 里 8 个）。也就是说：本工作流每次里程碑引用的 `ctest -L phy 193/193`，以及"**先离线自证再飞腿**"里的"离线"那一半，**从来没有执行过这个探针的契约与回归臂**。
+修法：给它加 `phy` 标签。⚠ 两个坑都踩到了：
+1. `gtest_discover_tests(... PROPERTIES LABELS "support;phy")` 里的分号会被展开成**两个属性**（`LABELS=support` + 一个空的 `phy`）——`ctest --show-only=json-v1` 一看便知；必须写成**转义的分号** `"support\;phy"`；
+2. 改了 CMake 之后**必须重新 configure**（`cmake -S . -B build`），因为标签是写进 configure 期生成的 `*_include.cmake` 的（只 build 不改）。
+⇒ 验收计数因此从 **193 → 201**（历史引用的 193 不含这 8 条，按本仓规矩留原文 + 本指针）。
 
 #### ⑥ 交付判据（腿对在 HEAD 上）
 
@@ -9235,10 +9261,12 @@ V1 = 1409.1 µs（IQ → LLR，[ul_gpu_pipeline]）
 ⇒ **调度器把上行几乎全部压到 QPSK**（90.6k/107k 跳），因为同一调制的 SINR 中位掉了 **~6.6 dB**；授权数不变（594/s）而 TB 掉到 1/4.7 ⇒ 吞吐掉到 1/3.6。**V1 反而略好**（1397.4 vs 1409.1）、lane 各项一致 ⇒ **与 gNB/GPU 路径无关**，是那 6 分钟里空口变了（手机发射功率/热/位置/干扰之一）。
 ⇒ 直接后果与本项目有关的一点：**`p87` 不能再当 default 腿**（它带了载）。
 
-#### ⑧ 下一步（两条，都不需要改代码）
+#### ⑧ 下一步（状态在 ⑤ 修好之后）
 
-1. ★ **补一条真正空载的 default 腿**（`p89-n78-default-idle`，配方同 `p87` 但不打 iperf3）：这是审计那两条 FAIL 的唯一解，且**必须在当前 HEAD 上飞**（一旦提交槽时间轴的修复，`p88` 也会失去 HEAD 证据资格）。
-2. 之后再做槽时间轴的**一行修复 + 离线自证**（⑤），并与下一次交付配置改动（`rv_sequence`/并发 2）**合并成一次重飞**，只付一次空口成本。
+1. ★ **欠一对腿，不是一条**：⑤ 的修复动了 `include/…/ul_pipeline_probe.h`，那是**代码**（不是文档）⇒ 审计的"腿 vs HEAD"行会判 `p87`/`p88` **FAIL**（它们跑在修复前的二进制上）。要恢复"跑在 HEAD 上的证据"，需要**在修复后的 HEAD 上重飞一对**：**空载 default（本来也欠，无需流量）+ 加压 stress（需要 iperf3）**。
+   * 若只飞空载那条：审计会剩一条 FAIL（`stress leg p88: the commit it ran, vs HEAD`）——**可以解释、但不要假装它不存在**（本仓的规矩：`cannot read`/`not on HEAD` 都是要写明的状态）。
+   * 修复本身是**探针改动**（`ENABLE_FLOW_PROBES` 内）⇒ release 路径逐字节不变、交付语义未动；重飞是为了**交付判据 + V1 仪表**都落在同一个二进制上。
+2. 之后才是与交付配置改动（`rv_sequence`/并发 2）合并的那次重飞机会。
 
 ## 7. 杠杆与候选改动（技术账）
 

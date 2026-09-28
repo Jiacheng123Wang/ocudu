@@ -867,4 +867,89 @@ TEST(ul_pipeline_probe_test, phase_samples_are_announced_once_each_for_the_pairi
   ::unsetenv("OCUDU_UL_PHASE_SEGMENTS");
 }
 
+/// A LATER SFN CYCLE REBASES A SLOT INSTEAD OF REUSING THE PREVIOUS CYCLE'S LANDMARKS.
+///
+/// The trace is keyed by the MODULAR slot, and not every landmark is re-recorded every cycle: PUXCH completes the
+/// symbols of every slot it processes, so `t2f` DOES arrive again, while ce/ldpc_start/crc_ok need a grant whose
+/// transport block is processed and decoded. A slot that carried a PUSCH one SFN cycle ago and none now therefore
+/// used to pair THIS cycle's base and t2f with the PREVIOUS cycle's three instants, and printed them as deltas of
+/// MINUS one SFN cycle - a confident wrong number, and the one thing this instrument must not produce. Measured on
+/// air before the fix (2026-09-28, legs p87/p88): 4/17/42 such rows in ce/ldpc/crc_ok, and 77/77/80 on the second
+/// leg.
+TEST(ul_slot_trace_test, a_new_cycle_rebases_a_slot_instead_of_reusing_last_cycles_landmarks)
+{
+  ::setenv("OCUDU_UL_SLOT_TRACE", "4", 1);
+  // ... AND the phase segments are FORCED on, for the same reason the air legs carry the switch: `t2f` and `ce`
+  // are recorded through record_t2f_end()/record_ce_end(), and both return immediately when
+  // records_phase_segments() is false - which is the case in the fused lane unless OCUDU_UL_PHASE_SEGMENTS=1
+  // forces it. Without the switch this case would trace only ldpc_start/crc_ok in mode=gpu and only four in
+  // mode=cpu, i.e. it would assert different things depending on which cases ran before it (measured: rebased=2
+  // after the mode-setting case, 4 when run alone). The two switches are what the p87/p88 legs carried.
+  ::setenv("OCUDU_UL_PHASE_SEGMENTS", "1", 1);
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+  constexpr uint64_t        slot  = 12345;
+
+  // Reads the rebase counter out of a report. The COUNT is asserted as a difference (below) rather than against a
+  // constant: the probe is a process-wide singleton and the other cases in this binary trace slots too, so an
+  // absolute value would assert about the order the cases ran in.
+  const auto rebased_count = [](const std::string& r) -> unsigned long long {
+    const size_t pos = r.find("rebased=");
+    return (pos == std::string::npos) ? 0ull : std::strtoull(r.c_str() + pos + 8, nullptr, 10);
+  };
+
+  // Cycle 1: a full hop, all four landmarks on one row.
+  probe.record_start(slot);
+  probe.record_slot_samples_complete(slot, 3840, 500000, std::chrono::high_resolution_clock::now());
+  probe.record_t2f_end(slot);
+  probe.record_ce_end(slot);
+  probe.record_ldpc_start(slot);
+  probe.record_end_crc_ok(slot, 42);
+
+  // Cycle 2 (one SFN cycle later in the field; here a few ms, the arithmetic is what matters): the slot's samples
+  // complete again and PUXCH completes its symbols, but this time the slot carries no grant - so only t2f arrives,
+  // and the three PUSCH-only landmarks never do.
+  const unsigned long long rebased_before = rebased_count(capture_report());
+  std::this_thread::sleep_for(std::chrono::milliseconds(3));
+  probe.record_slot_samples_complete(slot, 3840, 250000, std::chrono::high_resolution_clock::now());
+  probe.record_t2f_end(slot);
+
+  const std::string report = capture_report();
+  // Both invariant counts are on the report, and neither may be silent: the rebase says what it dropped (exactly
+  // the four landmarks of the cycle that ended), and the refused-negative count must read 0 - a negative span
+  // coming back has to be visible before anyone reads a row.
+  EXPECT_NE(report.find("rebased="), std::string::npos) << report;
+  EXPECT_EQ(rebased_count(report) - rebased_before, 4ull)
+      << "the rebase must drop exactly the four landmarks of the cycle that ended\n"
+      << report;
+  EXPECT_NE(report.find("negative deltas refused=0"), std::string::npos) << report;
+
+  const size_t row = report.find("  12345 ");
+  ASSERT_NE(row, std::string::npos) << report;
+  const std::string   line = report.substr(row, report.find('\n', row) - row);
+  std::istringstream  is(line);
+  std::string         tok;
+  std::vector<double> nums;
+  while (is >> tok) {
+    try {
+      nums.push_back(std::stod(tok));
+    } catch (...) {
+    }
+  }
+  ASSERT_GE(nums.size(), 8u) << line;
+  // The row IS the new cycle's: its base was refreshed, so the wait carried in it is the second one (250 us), not
+  // the first (500 us). Without this the assertions below could pass on a row that was never touched at all.
+  EXPECT_NEAR(nums[1], 250.0, 50.0) << line;
+  // t2f is this cycle's (small and positive)...
+  EXPECT_GE(nums[2], 0.0) << line;
+  EXPECT_LT(nums[2], 3000.0) << line;
+  // ... while the three that never arrived are GONE rather than carried over: a negative value here is exactly the
+  // defect this case exists for, and a value near +10.24 s is the same defect the other way round.
+  EXPECT_TRUE(std::isnan(nums[3])) << "ce was carried over from the previous cycle: " << line;
+  EXPECT_TRUE(std::isnan(nums[4])) << "ldpc was carried over from the previous cycle: " << line;
+  EXPECT_TRUE(std::isnan(nums[5])) << "crc_ok was carried over from the previous cycle: " << line;
+
+  ::unsetenv("OCUDU_UL_SLOT_TRACE");
+  ::unsetenv("OCUDU_UL_PHASE_SEGMENTS");
+}
+
 #endif // OCUDU_FLOW_PROBES

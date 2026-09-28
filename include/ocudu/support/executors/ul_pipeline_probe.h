@@ -618,6 +618,42 @@ public:
     // which those are is only known later (see trace_slot) - capping on completion keeps the run's first
     // milliseconds, which is what an earlier version did and why every printed row had no PUSCH. It grows one
     // entry per slot for the length of a trace that is opt-in anyway; the traced rows themselves are capped.
+    //
+    // A BASE REFRESH REBASES THE SLOT (measured 2026-09-28, legs p87/p88). The key is the MODULAR slot, so a
+    // later SFN cycle completes the same key again - and any landmark still stored under it belongs to the cycle
+    // that just ended. That matters because not every landmark is re-recorded every cycle: PUXCH completes the
+    // symbols of every slot it processes, so `t2f` DOES arrive again, while `ce`/`ldpc_start`/`crc_ok` only
+    // arrive when the slot carries a grant whose transport block is processed and decoded. A slot that carried a
+    // PUSCH one SFN cycle ago and none now therefore used to pair THIS cycle's base and t2f with the PREVIOUS
+    // cycle's three instants, and printed them as deltas of MINUS one SFN cycle (10.24 s): measured 4/17/42 such
+    // rows in ce/ldpc/crc_ok on p87 and 77/77/80 on p88. Dropping them here is what makes a row describe ONE
+    // cycle, and it cannot lose anything of the cycle this base belongs to: a landmark is measured on samples
+    // that this very arrival completed, so this cycle's landmarks all arrive after this point.
+    for (auto it = slot_landmarks.lower_bound({slot, slot_trace_what::t2f});
+         (it != slot_landmarks.end()) && (it->first.first == slot);) {
+      it = slot_landmarks.erase(it);
+      ++slot_trace_rebased;
+    }
+    // ... AND THE ROW'S OWN DELTAS BELONG TO THAT SAME CYCLE, so they go with the landmarks. This second half is
+    // not optional: dropping only the map entries leaves the row printing last cycle's spans next to this cycle's
+    // base - and those look PLAUSIBLE (measured in the unit fixture written for this fix: ce/ldpc/crc_ok came back
+    // as ~2 us, i.e. last cycle's values), which is worse than the negative numbers the map leak produced. The
+    // fields go back to NaN, their documented value for "this landmark was not reached for this slot": the new
+    // cycle fills in the ones it does reach (see trace_slot), and a slot with no grant this time round reports
+    // exactly that instead of a remembered hop.
+    if (auto row_it = slot_trace.find(slot); row_it != slot_trace.end()) {
+      row_it->second.t2f_us        = std::numeric_limits<double>::quiet_NaN();
+      row_it->second.ce_us         = std::numeric_limits<double>::quiet_NaN();
+      row_it->second.ldpc_start_us = std::numeric_limits<double>::quiet_NaN();
+      row_it->second.crc_ok_us     = std::numeric_limits<double>::quiet_NaN();
+      row_it->second.tb_bytes      = std::numeric_limits<double>::quiet_NaN();
+      row_it->second.pipeline_us   = std::numeric_limits<double>::quiet_NaN();
+      // The two raw epochs are NOT touched here: they are the base and the landmark the row's deltas were last
+      // computed against, and the row's next landmark update (trace_slot) rewrites both. Moving the base alone
+      // would break the invariant the report is read with (base <= landmark, pinned by
+      // ul_slot_trace_test.the_raw_instants_describe_the_same_frame_as_the_deltas) and would claim a base no
+      // delta was ever measured from.
+    }
     slot_samples_done[slot] = now;
     if (wait_ns >= 0) {
       slot_trace_pre_wait[slot] = static_cast<double>(wait_ns) / 1e3;
@@ -781,7 +817,16 @@ public:
 
     // Backfill every landmark of this slot, each measured from its samples-complete instant.
     const auto base = slot_samples_done.at(slot);
-    auto       us   = [&base](const std::chrono::high_resolution_clock::time_point& tp) {
+    auto       us   = [&base, this](const std::chrono::high_resolution_clock::time_point& tp) {
+      // A landmark OLDER than the base cannot be a span of this slot: it is a leftover of a previous SFN cycle
+      // (see record_slot_samples_complete, which now drops those, so this should never fire) or a base that
+      // moved under it. Report NaN - a negative span is a confident wrong number, which is the one thing this
+      // trace must not print - and COUNT it, so the invariant stays visible in the header line instead of
+      // becoming a silent filter that a later reader would trust.
+      if (tp < base) {
+        ++slot_trace_negative;
+        return std::numeric_limits<double>::quiet_NaN();
+      }
       return std::chrono::duration_cast<std::chrono::nanoseconds>(tp - base).count() / 1e3;
     };
     auto assign = [&](slot_trace_what w, double& field) {
@@ -844,6 +889,14 @@ public:
       std::fprintf(stderr, "[ul_slot_trace] no slot completed on record (see record_slot_samples_complete())\n");
       return;
     }
+    // The two invariant counters travel with the rows they describe: `rebased` says how many stale instants the
+    // rebase dropped (see record_slot_samples_complete - expected to be large on an air leg, one per traced slot
+    // per SFN cycle), and `negative` must read 0. A reader who sees a delta of -10.24 s and a `negative=0` beside
+    // it knows the row is describing one cycle.
+    std::fprintf(stderr,
+                 "[ul_slot_trace] rebased=%llu landmark(s) dropped with a refreshed base; negative deltas refused=%llu\n",
+                 static_cast<unsigned long long>(slot_trace_rebased),
+                 static_cast<unsigned long long>(slot_trace_negative));
     std::fprintf(stderr,
                  "  %-8s %10s %10s %10s %10s %10s %10s %10s %12s %12s\n",
                  "slot",
@@ -1439,6 +1492,13 @@ private:
   /// newest (see record_slot_samples_complete): refusing means keeping the run's first milliseconds, which on an
   /// air leg is the attach phase, i.e. exactly the slots that carry no PUSCH.
   std::deque<uint64_t> slot_trace_order;
+  /// Landmarks dropped because their slot's base was refreshed by a later SFN cycle (see
+  /// record_slot_samples_complete) - i.e. how many stale instants the rebase kept out of the rows.
+  uint64_t slot_trace_rebased = 0;
+  /// Landmarks refused for being OLDER than their row's base. Must stay 0 (the rebase above is what makes it
+  /// so); it is counted and printed rather than silently mapped to NaN, because a negative span that comes back
+  /// must be visible in the report before anyone reads a row.
+  uint64_t slot_trace_negative = 0;
   /// Every landmark instant seen so far, keyed by (slot, which). A traced slot's entry is built from these, so
   /// the landmarks that arrive before the one that proves it carries a PUSCH are not lost.
   std::map<std::pair<uint64_t, slot_trace_what>, std::chrono::high_resolution_clock::time_point> slot_landmarks;
