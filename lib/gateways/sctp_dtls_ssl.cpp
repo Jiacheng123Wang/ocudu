@@ -147,13 +147,21 @@ expected<byte_buffer, dtls_ssl_read_error> openssl_dtls_ssl::receive()
   int                               ret = SSL_read(ssl, buff.data(), dtls_max_len);
 
   if (ret <= 0) {
-    unsigned long ssl_error = SSL_get_error(ssl, ret);
+    int           saved_errno = errno;
+    unsigned long ssl_error   = SSL_get_error(ssl, ret);
     if (ssl_error == SSL_ERROR_ZERO_RETURN) {
       logger.debug("SSL_read returned SSL_ERROR_ZERO_RETURN, SSL_get_error={}", openssl_error{ssl_error});
-      // SSL_shutdown(ssl);
       return make_unexpected(dtls_ssl_read_error::shutdown);
     }
-    logger.error("SSL_read returned {}, SSL_get_error={}", ret, openssl_error{ssl_error});
+    if (ssl_error == SSL_ERROR_SYSCALL && (saved_errno == ENOTCONN || saved_errno == ESHUTDOWN)) {
+      logger.debug("SSL_read returned SSL_ERROR_SSL because the association is gone. Let gateway decide wether this is "
+                   "expected.  SSL_get_error={} errno={}",
+                   openssl_error{ssl_error},
+                   strerror(saved_errno));
+      return make_unexpected(dtls_ssl_read_error::not_connected);
+    }
+    logger.error(
+        "SSL_read returned {}, SSL_get_error={} errno={}", ret, openssl_error{ssl_error}, strerror(saved_errno));
     unsigned long err;
     while ((err = ERR_get_error()) != 0) {
       char error_buf[256];

@@ -154,7 +154,6 @@ sctp_network_server_impl::sctp_associaton_context::sctp_associaton_context(int  
 
 void sctp_network_server_impl::sctp_associaton_context::receive()
 {
-  parent.logger.debug("received from fd={}", fd);
   if (parent.node_cfg.dtls_cfg.has_value()) {
     receive_dtls();
   } else {
@@ -223,14 +222,14 @@ void sctp_network_server_impl::sctp_associaton_context::receive_dtls()
     return;
   }
 
-  parent.logger.debug("Calling DTLS receive for fd={} assoc={}", fd, assoc_id);
   expected<byte_buffer, dtls_ssl_read_error> plain = ssl->receive();
-  parent.logger.debug("Finished DTLS receive for fd={} assoc={}", fd, assoc_id);
   if (not plain.has_value()) {
     dtls_ssl_read_error err = plain.error();
     if (err == dtls_ssl_read_error::shutdown) {
       parent.logger.debug("Got read error due to DTLS shutdown. Attempting plain read to handle notifications.");
       receive_plain();
+    } else if (err == dtls_ssl_read_error::not_connected) {
+      parent.logger.debug("Got read error due to connection already terminated.");
     } else {
       parent.logger.error("Got read error in DTLS read");
     }
@@ -311,7 +310,6 @@ void sctp_network_server_impl::receive()
                                 &sri,
                                 &msg_flags);
 
-  logger.debug("received {} from fd={}", rx_bytes, socket.fd().value());
   // Handle error.
   if (rx_bytes == -1) {
     if (errno != EAGAIN) {

@@ -25,7 +25,7 @@ struct dtls_ssl_config {
   sctp_assoc_t assoc;
 };
 
-enum class dtls_ssl_read_error { shutdown, unknown };
+enum class dtls_ssl_read_error { shutdown, not_connected, unknown };
 
 class dtls_context;
 class sctp_network_gateway_dtls_interface;
@@ -107,6 +107,8 @@ struct formatter<ocudu::dtls_ssl_read_error> {
     switch (err) {
       case ocudu::dtls_ssl_read_error::shutdown:
         return format_to(ctx.out(), "shutdown");
+      case ocudu::dtls_ssl_read_error::not_connected:
+        return format_to(ctx.out(), "not connected");
       default:
         return format_to(ctx.out(), "unknown");
     }
