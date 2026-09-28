@@ -121,8 +121,23 @@ for f in "${RESOLVED[@]}"; do
     # instants (see 6.145 (4)); what must NOT happen is a column that is NaN for every row, which is what a
     # landmark that is never reached in this mode would produce.
     nan=$(grep -aE '^  *[0-9]+ +[0-9]' "$f" | grep -c 'nan' || true)
-    judge "[ul_slot_trace] no NaN landmark columns" "0 rows carrying nan" "$nan" \
-          "$([ "$nan" = "0" ] && echo PASS || echo INFO)"
+    judge "[ul_slot_trace] rows carrying a NaN column" "INFO (a failed decode has no crc_ok)" "$nan" INFO
+    # THE FIX'S OWN PRE-REGISTERED CHECK (6.148 (5)). A row is keyed by the MODULAR slot, and a landmark of the
+    # PREVIOUS SFN cycle used to be paired with this cycle's base - printing a delta of -10.24 s. The fix drops a
+    # slot's landmarks when its base is refreshed, so (a) no row may carry a delta of about minus one SFN cycle
+    # and (b) the header must say how many stale instants were dropped and that none was refused. A leg flown
+    # before the fix fails BOTH (that is the negative control this check was written against, p87).
+    neg=$(grep -aE '^  *[0-9]+ +[0-9]' "$f" | awk '{for(i=2;i<=6;i++) if ($i+0 < -1000) {n++; break}} END{print n+0}')
+    judge "[ul_slot_trace] rows with a delta of minus a cycle" "0 (6.148 (5): the rebase fix)" "$neg" \
+          "$([ "$neg" = "0" ] && echo PASS || echo FAIL)"
+    ref=$(grep -aoE 'negative deltas refused=[0-9]+' "$f" | tail -1)
+    if [ -z "$ref" ]; then
+      judge "[ul_slot_trace] refused-negative counter" "the header carries it (fix present)" "<absent>" FAIL
+    else
+      judge "[ul_slot_trace] refused-negative counter" "0" "${ref#*=}" \
+            "$([ "${ref#*=}" = "0" ] && echo PASS || echo FAIL)"
+      grep -aoE 'rebased=[0-9]+ landmark' "$f" | tail -1 | sed 's/^/      /'
+    fi
   fi
 
   echo "--- (3) the perturbation self-check (a probe that moves what it measures is void) -------------------"
