@@ -87,6 +87,33 @@ namespace prach_vectortest {
 
 using prach_test_params = test_case_t;
 
+/// Selects the band used to test a given common subcarrier spacing.
+static nr_band get_test_band(subcarrier_spacing scs_common)
+{
+  if (scs_common > subcarrier_spacing::kHz60) {
+    return nr_band::n261;
+  }
+  if (scs_common == subcarrier_spacing::kHz30) {
+    return nr_band::n41;
+  }
+  return nr_band::n3;
+}
+
+/// Discards the test cases whose PRACH configuration index does not map to a valid preamble format.
+static std::vector<test_case_t> get_supported_test_cases()
+{
+  std::vector<test_case_t> test_cases;
+  std::copy_if(prach_scheduler_test_data.begin(),
+               prach_scheduler_test_data.end(),
+               std::back_inserter(test_cases),
+               [](const test_case_t& test_case) {
+                 frequency_range fr = band_helper::get_freq_range(get_test_band(test_case.pusch_scs));
+                 return prach_configuration_get(fr, test_case.dplx_mode, test_case.prach_config_index).format !=
+                        prach_format_type::invalid;
+               });
+  return test_cases;
+}
+
 static sched_cell_configuration_request_message
 make_custom_sched_cell_configuration_request(subcarrier_spacing scs_common,
                                              nr_band            band,
@@ -138,13 +165,7 @@ protected:
     const prach_test_params& params     = GetParam();
     duplex_mode              dplx_mode  = params.dplx_mode;
     subcarrier_spacing       scs_common = params.pusch_scs;
-    nr_band                  band       = nr_band::n3;
-
-    if (scs_common > subcarrier_spacing::kHz60) {
-      band = nr_band::n261;
-    } else if (scs_common == subcarrier_spacing::kHz30) {
-      band = nr_band::n41;
-    }
+    nr_band                  band       = get_test_band(scs_common);
 
     frequency_range fr                 = band_helper::get_freq_range(band);
     unsigned        prach_config_index = params.prach_config_index;
@@ -165,11 +186,7 @@ protected:
     pci_t    pci = test_rng::uniform_int<pci_t>();
     uint16_t zcz = test_rng::uniform_int<uint16_t>();
 
-    // Obtain PRACH configuration. Skip if the preamble format is invalid.
     prach_cfg = prach_configuration_get(fr, dplx_mode, prach_config_index);
-    if (prach_cfg.format == prach_format_type::invalid) {
-      GTEST_SKIP() << fmt::format("Ignored configuration index {}.", prach_config_index);
-    }
 
     // Make cell configuration.
     cell_pool = std::make_unique<du_cell_config_pool>(
@@ -261,7 +278,7 @@ TEST_P(prach_tester_vector, prach_sched_allocation)
 
 INSTANTIATE_TEST_SUITE_P(prach_scheduler_from_test_data,
                          prach_tester_vector,
-                         testing::ValuesIn(prach_scheduler_test_data),
+                         testing::ValuesIn(get_supported_test_cases()),
                          [](const testing::TestParamInfo<prach_tester_vector::ParamType>& info_) {
                            return fmt::format("duplex_mode_{}_pusch_scs_{}_prach_cfg_idx_{}",
                                               to_string(info_.param.dplx_mode),
