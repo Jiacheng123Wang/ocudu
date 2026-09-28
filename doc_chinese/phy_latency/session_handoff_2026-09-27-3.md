@@ -136,6 +136,9 @@
 | **⑩** | ★ **在修复后的 HEAD 上重飞一对**（⑤ 的修复是**代码** ⇒ `p87`/`p88` 不再是 HEAD 证据）：**空载 default（无需流量）+ 加压 stress（iperf3）** | 两条腿 | **待飞**（§6.148⑧）|
 | **⑩** | ✅ **已飞（2026-09-28）：`p89-n78-default-idle` + `p90-n78-stress`（HEAD `fd5fbd516a`）** ⇒ **审计 32 PASS / 0 FAIL / 0 RED ⇒ GREEN**、`leg_gate p90` **9/9**、V1 **1359.2 / 1416.1**；★ 修复空中确认：**负差值行 0**（修复前 42/80）、`refused=0`、`rebased=41206/21911`（§6.149）| 两条腿 | ✅ **完成** |
 | **⑪** | ★ **两项交付配置裁决（一页清单 `doc_chinese/phy_latency/delivery_config_decision_2026-09-28.md`）**：① `rv_sequence: [0,2,3,1]`（**+34.4% TCP**）；② `max_pusch_and_srs_concurrency: 2` 写进配置（**证据与出厂配置不一致**，V1 −13%）。建议与三处小改捆绑成**一次提交 + 一次重飞**（`p103` default / `p104` stress）| 裁决 | **待用户** |
+| **⑪** | ✅ **两项交付配置裁决已实施并取证**：`cell_cfg.pusch.rv_sequence: [0,2,3,1]` ＋ `expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency: 2` 已写入交付配置（parser rc=0 / round-trip 8/8 / 运行时 `configured`）；新配置的一对腿 **`p103`/`p104`**：V1 **1354.3 / 1420.4**、契约 9/9、crossings 0、**审计 32/0/0 GREEN**、`leg_gate p104` **9/9**（HEAD `ec380995ae`）| 裁决+取证 | ✅ **完成** |
+| **⑫** | ★★ **M2 已被同腿判决否掉（§6.150⑥）**：`p108` 的仪表行 "slow (>1 ms) receives 26 of 387 overlapped one = 7% (a coincidence predicts 4%; all receives 7%)" ⇒ 慢接收与阻塞窗口**无富集** ⇒ 阻塞不是原因，跨臂相关是**共症状**。⚠ 覆盖边界：窗口只含 `[wait_begin, wait_end]`，**不含**提交期与 GPU 执行期 | 分析 | ✅ 已判 |
+| **⑬** | ★★ **下一版仪表（M2b）**：每次提交记**三个窗口**（commit→wait_end / GPUStart→GPUEnd / wait），分别给重叠率 ⇒ 分辨"停顿在 GPU 执行里（访存争用）"/"在驱动提交期"/"都不在（上游另有共同原因）"| 小改 + 一条腿 | **待做** |
 | **⑫** | ★★ **接收尾部停顿的机制（§6.150⑥）**：读码已缩到三个候选（共享页 / 宿主阻塞 / 网格内存），**判决臂 M1 已存在**（`OCUDU_DFT_STAGE_INPUT=1`，Q25 为同一问题所造，默认关）：`LEG_CG_MODULES=dft+grid` + 该旋钮，对照 `p100`（0.073%）| 一条腿 | **待飞** |
 
 ### 3.3 两条候选（**用户此前裁定：LDPC→Metal 单独规划**）
