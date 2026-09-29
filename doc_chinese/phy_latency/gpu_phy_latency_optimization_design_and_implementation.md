@@ -11752,6 +11752,70 @@ arm14_signaller2  n=1 | idle-commit 1 (100%) mean wait=138.2us device-already-id
 
 `busy(union)=16910207.2us / window=139623495.2us = **12.1%** 设备占空比（p143 整腿）⇒ **设备 88% 的时间是闲的**。若 `merged_hop` 的 idle-commit 比例也接近这个量级，那"队列"解释就站不住 —— **"省一次提交"的收益就从 ~0 变成 ~209 µs**。
 
+### 6.182 ⚠⚠ **腿 p148 ×2：目标读数（Q9-F6）被"强杀"吃掉 —— 报告截断的缺陷已修**（2026-09-29）
+
+#### ① 现象：报告"看起来完整"，其实缺了尾巴
+
+两条腿（`p148-n78-q9f6` #1/#2）都以 `Could not stop application after 5 seconds. Forcing exit.` 结束。**大部分报告其实打印了**：
+
+| 报告族 | 出现 | 报告族 | 出现 |
+|---|---|---|---|
+| `[metal_stats]` | **55** ✓ | `[ul_gpu_pipeline]`（V1）| **2** ✓ |
+| `[ul_gpu_lane]` | **53** ✓ | **`Q9-F6`** | **0** ✗ |
+| `[mmse_time_sum]` | 2 ✓ | `[ce_sigma2]` | 0（本就可能空）|
+
+⇒ **这次飞腿的唯一目标 Q9-F6 一行都没出** ⇒ **两条腿都没回答它们被飞的理由**。
+
+#### ② 根因（代码）：`SIGKILL` 不跑 `atexit`
+
+`lib/support/signal_handling.cpp::signal_handler`：
+
+```cpp
+case SIGALRM:                                    // 中断后 5 秒
+  fmt::print(stderr, "Could not stop application after {} seconds. Forcing exit.\n", ...);
+  if (auto handler = cleanup_handler.exchange(nullptr)) { handler(signal); }
+  std::raise(SIGKILL);                           // ← 不可捕获、不 unwrap、不跑 atexit
+```
+
+**所有 `[metal_stats]` / `[ul_gpu_lane]` / `[phy_pipeline]` 都是 atexit 打的** ⇒ **排在后面的处理器（含 Q9-F6）永远不执行**。
+
+#### ③ 修复（已落地，`apps/gnb/gnb.cpp`）
+
+树上**本来就有**为这种情况准备的机制（`phy_pipeline_report.h` 的按需转储：*"a leg whose process cannot stop cleanly still yields its readings"*），它被接进了接收线程的 park/drop 路径，**但没接进关机路径 —— 而关机路径正是"停不住"时唯一会跑的那条**。
+
+```cpp
+static void cleanup_signal_handler(int signal) {
+  cleanup_signal_dispatcher.notify_signal(signal);
+  ocudulog::fetch_basic_logger("APP").error("Emergency flush of the logger");
+  (void)p0_dump_reports("forced exit", 0);   // ← 新增：min_interval=0 强制转储
+  ocudulog::flush();
+}
+```
+⇒ **下次被强杀时，探针读数会在 `SIGKILL` 之前落盘。**
+
+#### ④ "5 秒停不住"本身：**是应用的停止路径超时**，可以调
+
+`TERM_TIMEOUT_S` 来自 CMake（`CMakeLists.txt:423`，`-DEXIT_TIMEOUT=<秒>`；默认 5）。**增大它不会修复"报告丢失"**（那由 ③ 解决），只是让停止有机会跑完 ⇒ 若下次仍被强杀，**报告照样完整**（因为 ③ 会先转储）。
+
+#### ⑤ ⚠ 这次已有的读数里，Q9-F6 的原始素材其实露了一角
+
+`slowest executions` 段（不是 Q9-F6，但同源）里有：
+
+```
+label=merged_hop  slot=18148 exec=737.2us commit->start=176.2us idle_before=0.00ms
+label=merged_hop  slot=17439 exec=730.1us commit->start=165.1us idle_before=0.00ms
+label=ce_weights  slot=0     exec=749.5us commit->start=1626.6us idle_before=40214276.37ms
+label=ce_weights  slot=0     exec=747.4us commit->start=380.3us  idle_before=6.53ms
+```
+
+⇒ **`ce_weights` 的 `idle_before` 是 6–7 ms（设备已空闲很久），它的 `commit→start` 仍有 349–380 µs** —— 这是**"驱动延迟而非排队"的又一例证**（虽然只有尾部样本）。
+⚠ 但 `merged_hop` 的 `idle_before = 0.00ms`（提交时设备正忙）⇒ **两类样本都存在** ⇒ **必须有 Q9-F6 的统计才能判**。
+
+#### ⑥ 结论与下一步
+
+* **p148 ×2 的目标读数缺失 ⇒ 必须重跑**（用含 ③ 的二进制）；
+* **"Could not stop" 是真实缺陷，已修**（③）——它此前一直在**悄悄吃掉排在后面的探针**，只是恰好这次吃掉的是**唯一的目标读数**。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
