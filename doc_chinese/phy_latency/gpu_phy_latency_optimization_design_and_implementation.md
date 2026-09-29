@@ -10824,6 +10824,86 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p133-n78-abl-all --
 
 > 📌 本节对应的工作区改动：`lib/phy/metal/ocudu_metal_burst.{h,mm}`、`lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm`、`lib/phy/upper/channel_modulation/metal/ocudu_demod_metal_engine.mm`、`lib/phy/upper/channel_processors/metal/ocudu_equalizer_metal_engine.mm`、`lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_metal_mmse_engine.mm`（后三个各一行 `set_stage()`）。
 
+### 6.163 ⚠⚠⚠ **腿 `p133`–`p137` 的判决：覆盖度计数器**数错了东西**（我三次实现都错），已修好** —— 并给出**修订后的腿命令**
+
+**这五条腿（2026-09-29，`OCUDU_LANE_ABLATE=1 EVERY=8`，`_STAGE` = `all`/`front_end`/`ce`/`eq`/`demap` 各一条，`gpu` default，每条 100 ping + 30 s iperf3）**的结论分两半：
+
+#### ① 五条腿**证明了改造的价值**，也**证伪了我的计数器**
+
+| 腿 | `front_end` | `eq` | `demap` | `ce` |
+|---|---|---|---|---|
+| `p133` all | 150877 / **18860 (12.5%)** | 19237 / 2503 (13.0%) | **0 / 0** | **0 / 0** |
+| `p134` front_end | 114254 / **14281 (12.5%)** | 20269 / **0** | **0 / 0** | **0 / 0** |
+| `p135` ce | 135829 / **0** | 19402 / **0** | **0 / 0** | **0 / 0** |
+| `p136` eq | 132152 / **0** | 20253 / **2340 (11.6%)** | **0 / 0** | **0 / 0** |
+| `p137` demap | 110870 / **0** | 19272 / **0** | **0 / 0** | **0 / 0** |
+
+* ✅ **掩码本身是对的**：`front_end` 臂下前端 12.5%、`eq` 臂下前端 **0**；`eq` 臂下 eq 11.6–13.0%、`front_end` 臂下 eq **0**。**1-in-8 的比例也准**（理论 12.5%）。
+* ✅ **前端族（`p84` 的病根）现在可读了**：五条腿都读到 `front_end binds` **11–15 万**，`STAGE=front_end` 时真的消去 **12.5%** ⇒ **§6.161② 红旗 2 被彻底拆掉**。
+* ❌ **但 `demap` 和 `ce` 恒为 `0 / 0` —— 而这不是"没测到"，是计数器错了**：同一条腿的车道统计白纸黑字写着 `burst dispatches=19237 (equalizer=19237 demapper=19237 channel_estimator=38474)`、`demod_batch dispatches=19237`、`ce_sites reformat/pilots_lse/pilots_cfo=19237`。**派发明明发生了，计数器却说这个族从未被测量。**
+
+#### ② 根因（三层，逐层修掉；留下的是"判定必须在计数点做"）
+
+我最初把计数器做成 **`encoder()` 里"pipeline 变了"那个分支**的事件计数，理由是"空 kernel 就是在这里被换上的"。**这个位置从三个方向都是错的**：
+
+1. **它是"绑定事件"不是"派发事件"**：延迟路径（空口走的就是它）的派发是在 `flush_pending()` 里编码的，很多情况下 pipeline 早就是那个、**根本不发生重绑定** ⇒ 整族丢数（`binds=0`）。
+2. **绑定不知道自己在替谁干活**：merged 路上 **demapper 的 `encoder()` 会先跑 eq 的 flush**，于是那次绑定换的是 **eq 的 pipeline**，用绑定算出来的标志就答错了族 —— 实测就是 `STAGE=eq` 下 demapper 读到 **91.4%**（穿着 eq 的答案）、`STAGE=demap` 下读到 **0%**（穿着"下一个阶段"的答案）。**"绑定"与"族"不是一回事。**
+3. **阶段在开 encoder 之前就报了名，而那时 burst 还没开**：离线打印证据 —— 延迟路上**每一次 `set_stage(demapper)` 的 `s.cb` 都是 `nil`**（`demod_metal_engine::enqueue_burst_deferred()` 先 `set_stage` 后 `encoder()`），所以任何"在 set_stage 里算掩码"的实现都只能算出"没有臂"。
+
+**⇒ 定案：判定放在 `count_dispatch(which)` 里** —— 那是**唯一**同时握有"这条 cb 的掩码"（`ablate_mask_for_cb(bs.cb)`）与"这一派发属于哪一族"（调用参数）的地方。计数也就此变成**派发计数**，不再依赖任何绑定事件。
+
+**离线对齐证明（修复后）**：`pusch_demodulator_deferred_chain_test` 上
+
+| 掩码 | `eq` | `demap` | 判读 |
+|---|---|---|---|
+| `eq` | **85 / 85 (100%)** | 93 / **0** | ✅ 与 `burst dispatches` 的 `equalizer=85`、`demapper=93` **逐一对齐**，且不越界 |
+| `demap` | 85 / **0** | **93 / 93 (100%)** | ✅ 反向成立 |
+| `all` | 85 / 85 | 93 / 93 | ✅ |
+| `EVERY=8`（无 `_STAGE`） | 77 / 12 (**15.6%**) | 77 / 12 (**15.6%**) | ✅ ≈1/8 |
+
+外加：**前端族**在 D1 测试上 `front_end` 2/2、`STAGE=eq` 时前端 **103/103 保持 real**；**不设旋钮 ⇒ `Q9-F5` 一行都不打**（交付路径不变）。
+
+#### ③ ⚠ 五条腿的**窗口读数完全没有**：`OCUDU_METAL_GPU_TIME` 没带
+
+`p133`–`p137` 的 stderr 里是 `queue occupancy (Q9-F3): no GPU-time records - the probe is off` ⇒ **`merged_hop` / `merged_hop_ablated` 的窗口分布一条都没有**，而"族级账单"正是要靠它。**这不怪你** —— §6.162⑦ 的命令块里漏了这一项（**是我的命令写漏了**）。修复后的命令在 ④。
+
+**不过已有的 V1 读数仍然有价值**（`gpu` default、`stale=0`、五条腿都在 1350–1440 带内）：
+
+| 腿 | V1 中位 | `residency` 中位 |
+|---|---|---|
+| `p133` all | 1393.5 | 554.7 |
+| `p134` front_end | **1385.7** | 558.2 |
+| `p135` ce | **1427.4** | 633.2 |
+| `p136` eq | 1423.8 | 625.8 |
+| `p137` demap | 1425.6 | 635.5 |
+
+⚠ **只能当线索，不能当判决**：消去腿**不是能工作的链路**（CRC 掉、HARQ 重传、`residency` 与 V1 都被协议层反馈污染），所以"`ce`/`eq`/`demap` 三条比 `all`/`front_end` 高 ~35 µs"这种差**不能归给族**。判决要等带 `OCUDU_METAL_GPU_TIME=1` 的腿，看的是 **cb 自己的窗口分布**（`merged_hop` vs `merged_hop_ablated`），不是端到端 V1。
+
+#### ④ ★ 修订后的腿命令（**下次照这个飞**）
+
+```bash
+LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
+OCUDU_LANE_ABLATE=1 OCUDU_LANE_ABLATE_EVERY=8 \
+OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 \
+OCUDU_LANE_ABLATE_STAGE=all \
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p138-n78-abl-all --regime=default
+# 再按 STAGE=front_end / ce / eq / demap 各一条 → p139 / p140 / p141 / p142
+```
+
+**接手机之前核四行**：① `knob` 里有 `OCUDU_LANE_ABLATE=1` + `…_EVERY=8` + `…_STAGE=<族>`；② **`OCUDU_METAL_GPU_TIME=1`**（**这次别再漏**）；③ `[metal_ablate] ABLATION ON …`；④ 拼错族名会有 `names a stage that does not exist`。
+
+**判决读数（按重要性）**：
+1. `Q9-F5 ablation coverage` 四行 —— 每族 `binds` 应**与同腿 `burst dispatches` / `ce_sites` 同量级**（这是**本次修复的自检**：对不上说明计数器又错了，读数作废）；`ablated/binds ≈ 1/8`；
+2. `Q9-F3 per label` 里 `merged_hop` 与 `merged_hop_ablated` 的 `exec p50/p95/min/max` —— **族级账单 = 对照 − 该族臂**；
+3. **`front_end binds≠0` + 该臂窗口是否塌** ⇒ **`p84` 的判决**（塌 ⇒ §6.141 撤回；不塌 ⇒ 维持）。
+
+#### ⑤ 纪律（接 27；新增 28–30）
+
+28. ★★ **"消去/减法"的覆盖度计数器必须数在"派发点"，不能数在"绑定点"**：绑定点只知道"我换了 kernel"，不知道"这条派发是谁的"，而延迟路径还会让别人替它绑定（`p133`–`p137` 的 `demap`/`ce` 归零就是这么来的）。
+29. ★★ **计数器必须与独立读数对账**：本次的判据是"`binds` ↔ 车道自己的 `burst dispatches`/`ce_sites`"。**对不上就作废**，不要解释。
+30. ★ **阶段在 `set_stage()` 时报名时，burst 可能还没打开**（延迟路径先报名后开 encoder）⇒ **任何"在 set_stage 里做判定"的实现都会失败**；必须在 burst 已经开着、且族已知的那一刻做判定。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

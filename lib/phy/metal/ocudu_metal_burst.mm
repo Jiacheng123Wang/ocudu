@@ -171,6 +171,25 @@ struct burst_state {
   /// dispatch, i.e. AFTER the binding decision, so it cannot be the authority.
   shared_burst::stage current_stage = shared_burst::stage::other;
 
+  /// \name Q9-F5 (dev doc 6.163): WHO the next counted dispatch belongs to, and whether that family is the one
+  /// under test. ONE writer per dispatch: whoever encodes the dispatch declares itself here (the stages'
+  /// non-deferred path sets it with set_stage(); a deferred route sets it when it hands its dispatches over;
+  /// the front end sets it at its own binding site), and count_dispatch() reads it.
+  ///
+  /// WHY NOT A FLAG DERIVED FROM THE BINDING. Three implementations tried to work out the answer from
+  /// shared_burst::encoder()'s binding - which is where the no-op pipeline is really installed - and the five
+  /// legs p133-p137 measured why that cannot work: THE BINDING DOES NOT KNOW WHOSE DISPATCH IT IS. On the
+  /// merged route the demapper's encoder() call first runs the flush of the DEFERRED EQUALIZATION, so the
+  /// binding that happens there is the equalizer's; a flag written from the binding then answers for the
+  /// wrong family, and the legs read exactly that (equalizer binds=0 while its own `eq_batch sites` counted
+  /// 19237 dispatches; under STAGE=eq the demapper wore the equalizer's answer at 91.4%; under STAGE=demap
+  /// the demapper wore the NEW stage's answer at 0%). A coverage counter that can disagree with the lane's own
+  /// dispatch census is worse than no counter - removing exactly that class of doubt is why it exists
+  /// (dev doc 6.161(2)).
+  ///@{
+  bool stage_ablated = false;
+  ///@}
+
   ~burst_state()
   {
     // A thread that leaves with an open burst (an incomplete burst, or a stage that bailed out
@@ -482,6 +501,7 @@ bool ablation_for_cb(id<MTLCommandBuffer> cb, bool create)
   return on;
 }
 
+
 void forget_ablation_for_cb(id<MTLCommandBuffer> cb)
 {
   std::lock_guard<std::mutex> lock(g_ablate_mutex);
@@ -773,17 +793,21 @@ id<MTLComputeCommandEncoder> shared_burst::encoder(id<MTLComputePipelineState> p
     // delivery path does, which is the whole point of the arm (dev doc 6.132).
     //
     // Q9-F5 (dev doc 6.162): WHICH family this binding belongs to comes from the burst's current stage, which
-    // the stage itself set with set_stage() just before opening this encoder (the flush sites bind the
-    // deferred dispatches counted earlier, so `other` keeps the last named family - see mask_of_stage). The
-    // per-family counters are incremented HERE, at the one place the replacement actually happens, which is
-    // what makes them a coverage PROOF rather than a claim.
+    // the stage itself set with set_stage() just before opening this encoder. NOTE this binding is used ONLY
+    // to choose the pipeline: the COVERAGE counter does not read it, because a binding can be serving another
+    // stage's dispatches (dev doc 6.163 - see count_dispatch()).
     const unsigned    family  = mask_of_stage(s.current_stage);
     const bool        on      = ablation_for_cb(s.cb, /*create=*/true);
     const bool        covered = on && mask_covers(ablate_mask_for_cb(s.cb), family);
     const id<MTLComputePipelineState> ablate = covered ? ablation_pipeline_lazy() : nil;
-    if (family != 0u) {
-      ablate_coverage().count_bind(family, ablate != nil);
-    }
+    // NOTE: the flag this arm counts dispatches with is NOT written here. It has exactly ONE writer per
+    // route - set_stage() for the lane's stages, note_front_end_dispatch() for the front end - because this
+    // binding site can be serving ANOTHER stage's dispatches: on the merged route the binding that happens
+    // while the demapper opens its encoder is the flush of the DEFERRED equalization (the flush hook returns
+    // the equalizer's pipeline), so writing the family decision from here labelled demapper dispatches with
+    // the equalizer's answer. That is the defect the p133-p137 legs exposed and this comment prevents from
+    // coming back: three implementations tried to derive the flag from the binding, and the binding does not
+    // know whose dispatch it is.
     [s.enc setComputePipelineState:((ablate != nil) ? ablate : pipeline)];
     s.pipeline = pipeline;
   }
@@ -793,6 +817,14 @@ id<MTLComputeCommandEncoder> shared_burst::encoder(id<MTLComputePipelineState> p
 void shared_burst::note_front_end_dispatch(id<MTLCommandBuffer> cb, bool was_ablated)
 {
   (void)cb; // the family counter is process-wide: a per-buffer split is not available (see the header)
+  // The flag travels with the thread's burst, which is where the front end's OWN grid write is encoded: its
+  // dispatch never reaches shared_burst::encoder() (the engine owns that encoder), so the binding site cannot
+  // set the flag for it - this is that binding site.
+  state().current_stage   = stage::other;
+  state().stage_ablated   = was_ablated;
+  // ... and the front end is also the one family whose dispatch does NOT reach count_dispatch(): it is the
+  // engine's own encoder that writes the grid, and the engine never appends to the shared burst. So this is
+  // where its count is taken - one call per grid write, whatever route produced it (dev doc 6.163).
   ablate_coverage().count_bind(ablate_stage_front_end, was_ablated);
 }
 
@@ -955,8 +987,10 @@ unsigned shared_burst::ablate_mask_for_cb(id<MTLCommandBuffer> cb)
 
 void shared_burst::set_stage(stage which)
 {
-  state().current_stage = which;
+  burst_state& s  = state();
+  s.current_stage = which;
 }
+
 
 id<MTLComputePipelineState> shared_burst::ablation_noop()
 {
@@ -1934,6 +1968,22 @@ void shared_burst::count_dispatch(stage which)
   // calls do not name a family, and clearing would erase the family the next deferred binding needs.)
   if (which != stage::other) {
     bs.current_stage = which;
+  }
+  // Q9-F5 (dev doc 6.163): the coverage counter counts DISPATCHES, and it takes the ablation decision HERE,
+  // where both halves of the question are finally available at once - the burst's own mask, and the family
+  // this dispatch belongs to (which is this call's argument on every route).
+  //
+  // WHY THE DECISION CANNOT BE TAKEN EARLIER, which is what three implementations got wrong. A stage names
+  // itself with set_stage() BEFORE it opens its encoder, and on the deferred routes the burst is not even
+  // OPEN at that moment (`s.cb == nil`, measured on the offline chain: every `set_stage(demapper)` of the
+  // deferred path ran with a nil buffer, so the decision it computed was "no arm"), while the dispatches
+  // themselves are encoded much later, from the flush hook, into the burst the NEXT stage opened. The mask
+  // lives on the buffer; the family lives on the call; only here are the two in the same place. The five legs
+  // p133-p137 are the record of what a counter that guessed instead measured.
+  if ((bs.cb != nil) && (which != stage::other)) {
+    const unsigned family = mask_of_stage(which);
+    const bool     on     = ablation_for_cb(bs.cb, /*create=*/true);
+    ablate_coverage().count_bind(family, on && mask_covers(ablate_mask_for_cb(bs.cb), family));
   }
 #if defined(OCUDU_METAL_STATS)
   burst_stats_t& s = stats();

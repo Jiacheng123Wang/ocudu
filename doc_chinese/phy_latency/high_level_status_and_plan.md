@@ -194,6 +194,14 @@
 > ④ **离线自证（`pusch_demodulator_deferred_chain_test` + `dft_release_adopt_metal_test`）**：不设旋钮 ⇒ **5/5 PASS**；`=1`（全消去）⇒ 2 例 FAILED（空链路，符合既有判据）；**分族选择真的生效** —— `eq` ⇒ eq 67/67、demap **0/67**；`demap` ⇒ demap 2/2、eq **0/67**；`eq|demap` ⇒ 两条都 100%；**前端族**在 D1 测试上 `front_end` 2/2 且 `eq` 臂下 103/103 **保持 real**（阳性对照第一次能读在**同一族**上）；拼错的名字 ⇒ **WARNING + 按 `all` 处理**（宁可多消，不可静默不消）。`ctest -L phy -j 1` **203/203**。
 > ⑤ **下一步 = 一条腿（用户飞）**：`gpu` default 配方 + `OCUDU_LANE_ABLATE=1 EVERY=8` + `OCUDU_LANE_ABLATE_STAGE` 四值轮换（命令见开发文档 §6.162 ⑦）。**判决读数**：四臂的 `merged_hop_ablated` 窗口 p50/p95 与 `control` 的 `merged_hop` 对比，**且**每族的 `binds/ablated` 证明这一臂真的咬到了；前端族的 `binds≠0` 同时**判死/救活 `p84`**。
 > **不要再做**：C-A/C-B、拿合成离线臂的绝对单价与空口比、把"更慢 ⇒ 协议后果"直接写成结论（先做时间预算）。
+>
+> **2026-09-29 ⚠⚠⚠ `p133`–`p137` 跑完了（五条腿，`_STAGE` = all/front_end/ce/eq/demap）：掩码对了，但我的覆盖度计数器数错了东西 —— 已修好（开发文档 §6.163）** ——
+> ① ✅ **这五条腿证明了改造的价值**：`front_end binds` 每条 **11–15 万**（`STAGE=front_end` 时真消去 **12.5%**）、`STAGE=eq` 下前端 **0** ⇒ **`p84` 的病根（前端族无人计数）被拆掉**；1-in-8 比例也准。
+> ② ❌ **但 `demap`/`ce` 恒为 `0/0`，而同腿 `burst dispatches` 白纸黑字写着 `demapper=19237`、`channel_estimator=38474`** ⇒ **是计数器错了，不是没测到**。根因三层：**①** 我把它做成 `encoder()` 里"pipeline 变了"的**绑定**事件计数，而延迟路径（空口走的就是它）的派发在 `flush_pending()` 里编码、常常**不发生重绑定** ⇒ 整族丢数；**②** **绑定不知道自己在替谁干活** —— merged 路上 demapper 的 `encoder()` 会先跑 **eq 的 flush**，于是 `STAGE=eq` 下 demapper 读到 91.4%（穿 eq 的答案）、`STAGE=demap` 下读到 0%；**③** **`set_stage()` 时 burst 还没开**（延迟路先报名后开 encoder，实测 `s.cb == nil`）⇒ 在 `set_stage` 里做判定必然失败。
+> ③ ✅ **修法：判定放进 `count_dispatch(which)`** —— 那是唯一同时握有"这条 cb 的掩码"和"这一派发属于哪一族"的地方。**离线对齐**：`eq` 臂 85/85、`demap` **0**；`demap` 臂 93/93、`eq` **0**；`EVERY=8` 读 15.6%（≈1/8）；与 `burst dispatches` 的 `equalizer=85 / demapper=93` **逐一对齐**。`ctest -L phy -j 1` **203/203**。
+> ④ ⚠ **五条腿的窗口读数完全没有**：**`OCUDU_METAL_GPU_TIME` 没带**（`no GPU-time records - the probe is off`）—— **是我的命令块漏了这一项**。它们的 V1（1385.7–1427.4、`stale=0`）**只能当线索**：消去腿不是能工作的链路（CRC 掉/HARQ 重传），端到端 V1 被协议层反馈污染，**不能归因给族**。
+> ⑤ **修订后的腿命令（照这个飞）**：`OCUDU_LANE_ABLATE=1 OCUDU_LANE_ABLATE_EVERY=8 OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_LANE_ABLATE_STAGE=<族>`，`gpu` default，标签 `p138`（all）→ `p139`–`p142`（front_end/ce/eq/demap）；命令全文与判决读数见 §6.163 ④。
+> ⑥ **纪律新增 28–30**：消去计数器必须数在**派发点**（不是绑定点）；计数器必须与**独立读数**（`burst dispatches`/`ce_sites`）**对账**，对不上就作废；`set_stage()` 时 burst 可能还没开，判定必须在 burst 已开、族已知的那一刻做。
 
 >
 > **2026-09-26 追加：G2 已量化（腿 `p53-n78-tailmark`，开发文档 §6.97）** —— 一跳的宿主参与 **中位 94.0 µs**

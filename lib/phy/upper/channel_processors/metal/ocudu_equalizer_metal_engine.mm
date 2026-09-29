@@ -1740,6 +1740,8 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     // on the host for the channel estimates. A direct run needs neither the dispatch nor the barrier:
     // it reads the grid exactly where the gather would have read it.
     if (gather_run && !direct_grid) {
+      // Same family, same route (see the note below): the gather is a dispatch of THIS stage.
+      metal::shared_burst::set_stage(metal::shared_burst::stage::equalizer);
       wrapped_buffer b_grid = wrap_buffer(engine, gather_plan->grid.base, grid_view_bytes(gather_plan->grid));
       if (b_grid.buffer == nil ||
           !eq_encode_gather_dispatch(enc,
@@ -1768,6 +1770,13 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
 
     // A single-symbol run keeps the per-symbol kernel: it is the path every caller already
     // validates, while the batched kernel is the one that has to prove itself with a group.
+    // Q9-F5 (dev doc 6.163): this is the route the AIR legs take (the equalizer accumulates and hands its
+    // dispatches over through the flush hook), and it is the route on which the family name has to be set -
+    // the non-deferred branch above sets it too, next to its own encoder(), but on this route that branch
+    // never runs. Without this call the equalizer's dispatches kept whatever family was named last, which the
+    // p133-p137 legs measured as the DEMAPPER's answer under OCUDU_LANE_ABLATE_STAGE=eq (91.4% of the
+    // demapper's dispatches read as ablated while the equalizer read none).
+    metal::shared_burst::set_stage(metal::shared_burst::stage::equalizer);
     id<MTLComputePipelineState> run_pipeline = (n_run > 1) ? eq_resources().pipeline_batch : eq_resources().pipeline;
     // The estimates are bound at the buffer base and p.h_offset carries the run's first estimate:
     // the starts in the strides block are absolute within h_run_binding.buffer, and the kernel
