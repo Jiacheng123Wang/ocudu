@@ -11836,6 +11836,49 @@ label=ce_weights  slot=0     exec=747.4us commit->start=380.3us  idle_before=6.5
 * ③ 的 shutdown dump **保留**（覆盖另一类丢失）；
 * **`Could not stop` 的账**：由本探针的 O(n²) 引起，**已修**。
 
+### 6.183 ★★★ **腿 `p150-n78-q9f6` 判决：那 ~210 µs 是"排队"，不是"驱动延迟"** —— 合并提交省不到它（2026-09-29）
+
+**腿**：`OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1`，`gpu` default，**优雅退出**（`Forcing exit` = 0 ⇒ O(n²) 修复生效，报告完整）。
+
+#### ① 判决读数（Q9-F6，本探针第一次真正跑出来）
+
+```
+ce_weights     n= 19562 | idle-commit 0 (0%)     | busy-commit 19562  mean wait = 115.0us
+merged_hop     n= 19558 | idle-commit 0 (0%)     | busy-commit 19558  mean wait = 210.2us
+dft_front_end  n= 93325 | idle-commit 0 (0%)     | busy-commit 93325  mean wait =  59.5us
+late_handed    n=  3015 | idle-commit 1 (0.03%)  | busy-commit  3014  mean wait = 234.6us
+```
+
+**⇒ `idle-commit` = 0.00%（19558 次里 0 次）** ⇒ **每一次 `merged_hop` 提交时，都至少还有一条别的缓冲在执行。**
+
+#### ② 结论（回答用户 2026-09-29 的问题）
+
+| 问题 | 答案 |
+|---|---|
+| 那 209.9/210.2 µs 是排队还是驱动延迟？| ★ **排队**（idle-commit = 0%）|
+| 合并成一次提交能省下它吗？| ❌ **不能**。GPU 当时确实在忙，少一个队列条目不会让它更快 |
+| "2 个 commit 总计 200–300 µs"是必不可少的 overhead 吗？| ★ **是**（产能约束下的排队，不是可省的结构开销）|
+
+#### ③ ⚠ 顺带否掉我上一轮基于离线样本的推测
+
+离线 `dft_release_adopt_metal_test` 那两例，**队列为空、设备空闲 26–31 秒，提交后仍等 138/686 µs** ⇒ 我当时据此倾向"驱动延迟"。
+**本腿 19558 个真实样本给出 0%** ⇒ **离线那两例是伪影**（该测试的 lane 不带槽号、`idle_before` 计算跨了 4 万秒的窗口）。
+⇒ ★ **纪律 40**：**离线臂里"设备空闲"的判定可以荒谬**（本例 `idle_before = 40214276 ms ≈ 11 小时`，而进程只跑了几十秒）——**出现这种数量级就先当伪影处理**，别拿它下结论。
+
+#### ④ ★ 一个与"排队"并存、但需要解释的观察
+
+```
+gpu busy (back_end):  commits=42135 busy=10215175us  window=80603772us  ⇒ busy/window = 12.7%
+gpu busy (front_end): commits=93325 busy= 4394742us  window=77889792us  ⇒ busy/window =  5.6%
+```
+
+**设备整体只有 ~13% 的时间在执行**，可 `merged_hop` 的提交却"前面总有活"（idle-commit 0%）⇒ **这 87% 的空隙被谁占着？**
+它**不可能是 cb 的执行**（否则 busy 会同步上升）。剩下的候选只有：
+* **驱动/硬件在两次执行之间做的工作**（资源绑定、页表、同步）——**不计入 `busy`，但占住 GPU 的时间线**；
+* 或 `GPUStartTime` 与 `GPUEndTime` 之间的**窗口内夹进了别的队列的工作**（`busy` 是各 cb 窗口之和，会重复计数，但这里反映的是"时间被占"）。
+
+⇒ ★★ **这才是"470 µs 之谜"真正剩下的形状**：不是派发、不是算力、不是宿主、不是排队，**而是设备时间线里那 ~87% 没有被任何 cb 的 `start→end` 覆盖的部分** —— 它**没有仪表**，只能从"idle-commit = 0% 而 busy/window 只有 13%"这个**矛盾**里被反推出来。**下一个探针应该直接量它：两次执行之间的空隙里，设备的时钟在做什么**（例如：`commit→start` 与 `start→end` 的**比值**在同一队列上是否稳定、以及空隙是否与"前一条 cb 的 end 到本条 start"对齐）。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
