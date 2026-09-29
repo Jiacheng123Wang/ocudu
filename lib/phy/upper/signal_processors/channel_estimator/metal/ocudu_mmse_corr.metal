@@ -251,12 +251,28 @@ kernel void mmse_corr_a_rhp(device float* a [[buffer(0)]],
     const uint nout      = p.nf * 14u;
     const uint rhp_elems = nout * p.L;
     const uint wider     = (a_elems > rhp_elems) ? a_elems : rhp_elems;
+    // The threadgroup size this kernel is dispatched with, and therefore the base of the packing below.
+    // `gid_x` is the thread's position INSIDE its threadgroup (0..tpt-1) when the grid is one dimensional
+    // of threadgroups, which is the only way this kernel may be dispatched (see the warning above).
     const uint tpt       = 256u;
     const uint tgs_wide  = (wider + tpt - 1u) / tpt;
 
     const uint block = tgid / tgs_wide;
     const uint lane  = tgid % tgs_wide;
-    const uint i     = lane * tpt + (gid_x % tpt);
+    const uint i     = lane * tpt + (gid_x % tpt); // gid_x < tpt for a 1-D threadgroup grid
+    // A's blocks need `tgs_a` threadgroups, R_hp's need `tgs_r`; the grid is sized for the wider of the
+    // two, so the narrower matrix's blocks receive LANES THEY DO NOT NEED. Return before touching
+    // anything: an out-of-range lane would compute an out-of-range element index from `lane * tpt`,
+    // which lands in the NEXT system's slot rather than harmlessly past the end.
+    //
+    // This guard is also the reason a first version of this kernel measured SLOWER than the two it
+    // replaces: without it, A's blocks were each handed ceil(27216/256)=107 threadgroups instead of
+    // ceil(2916/256)=12, so 190 threadgroups per dispatch were launched, found nothing to do and
+    // returned - and their launch is not free (dev doc 6.177).
+    const uint my_tgs = (block < p.nof_systems) ? ((a_elems + tpt - 1u) / tpt) : ((rhp_elems + tpt - 1u) / tpt);
+    if (lane >= my_tgs) {
+        return;
+    }
 
     if (block < p.nof_systems) {
         // ---- A: the mmse_corr_a element, expression for expression ----------------------------------
