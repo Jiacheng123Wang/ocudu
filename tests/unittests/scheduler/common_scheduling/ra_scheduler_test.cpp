@@ -16,6 +16,8 @@
 #include "tests/unittests/scheduler/test_utils/dummy_test_components.h"
 #include "tests/unittests/scheduler/test_utils/indication_generators.h"
 #include "tests/unittests/scheduler/test_utils/scheduler_test_suite.h"
+#include "ocudu/ran/band_helper.h"
+#include "ocudu/ran/prach/prach_configuration.h"
 #include "ocudu/ran/prach/prach_time_mapping.h"
 #include "ocudu/ran/prach/ra_helper.h"
 #include "ocudu/scheduler/config/time_domain_resource_helper.h"
@@ -222,19 +224,17 @@ TEST_P(ra_scheduler_common_test, when_no_rach_indication_received_then_no_rar_al
   ASSERT_FALSE(grants_scheduled_in_next_slots(10));
 }
 
+/// Test suite for the configurations whose PRACH occasion t_id is counted in a coarser numerology than the cell slots.
+class ra_scheduler_coarser_prach_scs_test : public ra_scheduler_common_test
+{};
+
 /// \brief The RA-RNTI comes from the reported occasion slot index, not from the indication slot.
 ///
 /// The RAR is only matched if the scheduler and the tracker both take t_id from the occasion.
-TEST_P(ra_scheduler_common_test, when_occasion_slot_index_differs_from_rx_slot_then_ra_rnti_uses_the_occasion)
+TEST_P(ra_scheduler_coarser_prach_scs_test,
+       when_occasion_slot_index_differs_from_rx_slot_then_ra_rnti_uses_the_occasion)
 {
   handle_rach_indication(create_rach_indication(1));
-
-  // The t_id is counted in the PRACH subcarrier spacing, so it only differs from the indication slot when that is
-  // coarser than the cell's, which not every configuration under test provides.
-  const slot_point prach_slot_rx = next_slot_rx();
-  if (test_helper::compute_prach_occasion_slot_index(cell_cfg, prach_slot_rx) == prach_slot_rx.slot_index()) {
-    GTEST_SKIP() << "This PRACH configuration counts the t_id in the slot's own numerology, so the two coincide";
-  }
 
   for (unsigned slot_count = 0, max_slot_count = 1000; slot_count < max_slot_count and tracker.nof_msg3_acked() == 0;
        ++slot_count) {
@@ -362,25 +362,49 @@ TEST_P(ra_scheduler_common_test, when_crc_is_ko_then_msg3_retx_is_scheduled)
 }
 
 using tdd_fr1_30khz = tdd_pattern_profile_fr1_30khz;
-INSTANTIATE_TEST_SUITE_P(
-    ra_scheduler,
-    ra_scheduler_common_test,
-    ::testing::Values(
-        // FR1, FDD.
-        test_params{frequency_range::FR1, 2},
-        test_params{frequency_range::FR1, 4},
-        test_params{frequency_range::FR1, 4, std::nullopt, true},
-        // FR1, TDD.
-        test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU)},
-        test_params{frequency_range::FR1, 4, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU)},
-        test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDSU)},
-        test_params{frequency_range::FR1, 1, create_tdd_pattern(tdd_fr1_30khz::DSUU)},
-        test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU), true},
-        test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU), true, true},
-        test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_pattern_profile_fr1_30khz::DDDSU), true, true},
-        // FR2, TDD.
-        test_params{frequency_range::FR2, 1, create_tdd_pattern(tdd_pattern_profile_fr2_120khz::DDDSU)},
-        test_params{frequency_range::FR2, 1, create_tdd_pattern(tdd_pattern_profile_fr2_120khz::DDDSU), true}));
+
+static std::vector<test_params> get_test_params()
+{
+  return {// FR1, FDD.
+          test_params{frequency_range::FR1, 2},
+          test_params{frequency_range::FR1, 4},
+          test_params{frequency_range::FR1, 4, std::nullopt, true},
+          // FR1, TDD.
+          test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU)},
+          test_params{frequency_range::FR1, 4, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU)},
+          test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDSU)},
+          test_params{frequency_range::FR1, 1, create_tdd_pattern(tdd_fr1_30khz::DSUU)},
+          test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU), true},
+          test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU), true, true},
+          test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_pattern_profile_fr1_30khz::DDDSU), true, true},
+          // FR2, TDD.
+          test_params{frequency_range::FR2, 1, create_tdd_pattern(tdd_pattern_profile_fr2_120khz::DDDSU)},
+          test_params{frequency_range::FR2, 1, create_tdd_pattern(tdd_pattern_profile_fr2_120khz::DDDSU), true}};
+}
+
+/// Keeps the test cases whose PRACH occasion t_id is counted in a coarser numerology than the cell slots.
+static std::vector<test_params> get_coarser_prach_scs_test_params()
+{
+  std::vector<test_params> params               = get_test_params();
+  const auto               uses_cell_numerology = [](const test_params& p) {
+    const sched_cell_configuration_request_message req = ra_scheduler_common_test::get_sched_req(p);
+    const rach_config_common&                      rach_cfg = *req.ran.ul_cfg_common.init_ul_bwp.rach_cfg_common;
+    const prach_configuration prach_cfg = prach_configuration_get(band_helper::get_freq_range(req.ran.dl_carrier.band),
+                                                                  band_helper::get_duplex_mode(req.ran.dl_carrier.band),
+                                                                  rach_cfg.rach_cfg_generic.prach_config_index);
+    // The t_id of a long preamble is counted in the 15kHz reference numerology, and in the msg1 SCS otherwise.
+    const unsigned ref_numerology = is_long_preamble(prach_cfg.format) ? 0U : to_numerology_value(rach_cfg.msg1_scs);
+    return ref_numerology >= to_numerology_value(req.ran.ul_cfg_common.init_ul_bwp.generic_params.scs);
+  };
+  params.erase(std::remove_if(params.begin(), params.end(), uses_cell_numerology), params.end());
+  return params;
+}
+
+INSTANTIATE_TEST_SUITE_P(ra_scheduler, ra_scheduler_common_test, ::testing::ValuesIn(get_test_params()));
+
+INSTANTIATE_TEST_SUITE_P(ra_scheduler,
+                         ra_scheduler_coarser_prach_scs_test,
+                         ::testing::ValuesIn(get_coarser_prach_scs_test_params()));
 
 /// RA procedure in an NTN cell, where every DL-signalled UL transmission is delayed by the cell-specific Koffset.
 class ra_scheduler_ntn_test : public ra_scheduler_setup, public ::testing::Test
