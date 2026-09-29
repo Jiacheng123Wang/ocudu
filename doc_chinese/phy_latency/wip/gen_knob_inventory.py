@@ -200,6 +200,7 @@ def main():
     curated_new = {
         "OCUDU_LANE_ABLATE": "消去法总开关：各阶段的绑定换成 `lane_ablate_noop`（只换 kernel，网格/屏障/提交结构不变）",
         "OCUDU_LANE_ABLATE_EVERY": "**修饰符**（默认 1 = 每跳都消去；只在 `OCUDU_LANE_ABLATE=1` 时有意义）：`=8` = 每 8 跳消去 1 跳，全消去手机接不进来（p79）",
+        "OCUDU_LANE_ABLATE_STAGE": "**修饰符**（只在 `OCUDU_LANE_ABLATE=1` 时有意义）：只消去哪一**阶段族**——`front_end`/`ce`/`eq`/`demap`（`|` 或 `,` 组合），不设 = `all` = 历史行为；拼错的名字按 `all` 处理并打 WARNING。族级账单靠它，覆盖度看报告里的 `Q9-F5 ablation coverage`（开发文档 6.162）",
         "OCUDU_METAL_GPU_TIME": "**探针**：给每条 cb 装 GPU 时间戳（per-label 表的来源；验收腿一直带着它）",
         "OCUDU_UL_PHASE_SEGMENTS": "**探针**：上行相位分段读数（验收腿一直带着它）",
     }

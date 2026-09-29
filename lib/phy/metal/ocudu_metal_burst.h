@@ -100,6 +100,51 @@ public:
   /// asker (whoever asks first decides the buffer, and that is the whole mechanism).
   static bool ablate_cb(id<MTLCommandBuffer> cb);
 
+  /// \brief Whether THIS command buffer's arm asks for \p which to be replaced (dev doc 6.162).
+  ///
+  /// The stage-scoped form of ablate_cb(): the arm can now name ONE family (OCUDU_LANE_ABLATE_STAGE), and a
+  /// caller that owns its own encoder - the front end's DFT engine - has to ask about the family it is about
+  /// to bind rather than about the buffer as a whole. False on every delivery buffer.
+  static bool ablate_stage_for_cb(id<MTLCommandBuffer> cb, stage which);
+
+  /// The family mask this buffer's arm asked for (see ablate_stage_for_cb), or 0 for a delivery buffer.
+  static unsigned ablate_mask_for_cb(id<MTLCommandBuffer> cb);
+
+  /// The pseudo-stage that names the FRONT END's own grid write, for callers that own their encoder.
+  ///
+  /// WHY A PSEUDO-STAGE. The enum above describes what a stage APPENDED to the shared burst, and the front
+  /// end appends nothing - it produces the buffer the burst adopts. Its dispatches still belong to a family the
+  /// arm can single out, so the family needs a name; rather than put a value in `stage` that no encoder may
+  /// ever pass to set_stage(), the name lives here and is translated by the arm itself.
+  static stage front_end_stage()
+  {
+    return stage::other;
+  }
+
+  /// \brief Names the family the dispatches encoded from now on belong to (dev doc 6.162).
+  ///
+  /// Per thread, like the burst: a stage calls it immediately BEFORE opening its encoder, because that is
+  /// where the ablation arm decides which kernel to bind - count_dispatch() refreshes the same field, but it
+  /// runs next to the dispatch, i.e. after the binding. The deferred routes bind through the flush hook, where
+  /// the family last named (or counted) is the one the deferred dispatches belong to.
+  static void set_stage(stage which);
+
+  /// \brief Reports the FRONT END's own grid write to the ablation coverage counters (dev doc 6.162).
+  ///
+  /// The front end owns its encoder, so its dispatch never passes through the binding site above and cannot
+  /// be counted there. Without this call the family would print `binds=0` on every leg - which is exactly the
+  /// reading that made p84 uninterpretable (dev doc 6.161(2)): the arm was asked about a dispatch nobody had
+  /// ever counted. Called by the DFT engine at the one place it binds its own pipeline, with the answer it
+  /// bound.
+  ///
+  /// \note The counters are PROCESS-WIDE, not per command buffer. A per-buffer split was implemented first and
+  ///       removed once the offline D1 test showed it cannot be made sound on this platform: Metal recycles the
+  ///       command buffer OBJECTS (one address was committed 25 times in a single test run), so an
+  ///       address-keyed annotation reads back against a later encoding of a different hop. What a window can
+  ///       be attributed to is therefore the ARM's own label - `merged_hop_ablated` against `merged_hop`, which
+  ///       the occupancy report already splits by - and the counts below say what that arm covered.
+  static void note_front_end_dispatch(id<MTLCommandBuffer> cb, bool was_ablated);
+
   /// \brief The no-op pipeline the ABLATION arm binds, or nil when the knob is off (the delivery default).
   static id<MTLComputePipelineState> ablation_noop();
 

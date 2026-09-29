@@ -1879,6 +1879,7 @@ bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
     return true;
   }
   {
+    metal::shared_burst::set_stage(metal::shared_burst::stage::equalizer);
     id<MTLComputeCommandEncoder> enc = metal::shared_burst::encoder(eq_resources().pipeline);
     if (enc == nil) {
       return false;
@@ -1987,6 +1988,7 @@ bool equalizer_metal_engine::enqueue_burst_batch_at(const ch_est_binding& h,
   if ((engine == nullptr) || (nof_symbols == 0)) {
     return false;
   }
+  metal::shared_burst::set_stage(metal::shared_burst::stage::equalizer);
   id<MTLComputeCommandEncoder> enc = metal::shared_burst::encoder(eq_resources().pipeline_batch);
   if (enc == nil) {
     return false;

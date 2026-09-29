@@ -1077,6 +1077,7 @@ static id<MTLComputeCommandEncoder> stage_pipeline(mmse_engine_impl*          e,
     [s.enc setComputePipelineState:pipe];
     return s.enc;
   }
+  ocudu::metal::shared_burst::set_stage(ocudu::metal::shared_burst::stage::channel_estimator);
   id<MTLComputeCommandEncoder> enc = ocudu::metal::shared_burst::encoder(pipe);
   if (enc != nil) {
     s.enc = enc;

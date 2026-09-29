@@ -118,7 +118,13 @@ grep -ac "$(git -C /Users/jiachengwang/dev/ocudu rev-parse --short=10 HEAD)" /Us
 | `doc_chinese/phy_pipeline_gpu/wip/leg_gate.sh` | 输运行改**三档** |
 | `lib/phy/metal/ocudu_metal_queue.mm` | Q9-F3 报告加 **`max=`** 列与 **`slowest executions, by start→end`** 表（`idle_before` + `t+`；同一把钥匙 `OCUDU_METAL_GPU_TIME`）|
 | `doc_chinese/phy_latency/wip/dispatch_count_probe.mm` | ★ 新：离线派发普查（空 cb / 派发扫描 / 线程组 / 事件 / 跨队列等待 / RAW 链 / 有界竞争 / 实时页 / 批量化几何）—— **合成路已到头，读数见 §6.161④⑥⑦** |
-| `doc_chinese/phy_pipeline_gpu/wip/logs/gnb_gpu_p12*` | 本会话的腿：`p122`–`p132`（含两次 `p132`）|
+| `doc_chinese/phy_pipeline_gpu/wip/logs/gnb_gpu_p12*` | 本会话的腿：`p122`–`p132`（含两次 `p132`） |
+
+> **2026-09-29 后记（本 memo 定稿之后的工作，细节一律在开发文档，不在这里）**：§3.1 的 A/B **已裁决 = B**，并且**已实现**（开发文档 **§6.162**）：
+> 新增 `OCUDU_LANE_ABLATE_STAGE=front_end\|ce\|eq\|demap` + **按族的覆盖度计数器**（`[metal_stats] Q9-F5 ablation coverage`），离线自证完成、`ctest -L phy -j 1` **203/203**；
+> ⚠ 同节记了一条**被自己否掉的实现**（每条 cb 的窗口归属：Metal 回收 cb 对象 ⇒ 按地址的标注不可信，接口已整块删除）。
+> 涉及：`lib/phy/metal/ocudu_metal_burst.{h,mm}`、`lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm`，以及 eq/demap/CE 三个引擎各一行 `set_stage()`；**待飞的是腿（命令与判决读数在 §6.162 ⑦）**。
+> 本文件其余部分仍是**定稿时**的快照（未改）。
 
 ---
 

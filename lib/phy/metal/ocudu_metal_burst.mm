@@ -164,6 +164,13 @@ struct burst_state {
   bool ablate_this_burst  = false;
   bool ablate_this_decided = false;
 
+  /// Which STAGE's dispatches are being encoded right now (see ablate_stage_mask()): the ablation arm
+  /// replaces one family's kernels at a time (OCUDU_LANE_ABLATE_STAGE), and this is how the binding site
+  /// knows which family the pipeline it is about to bind belongs to. Set EXPLICITLY by each stage right
+  /// before it opens its encoder - `count_dispatch()` also refreshes it, but that call happens next to the
+  /// dispatch, i.e. AFTER the binding decision, so it cannot be the authority.
+  shared_burst::stage current_stage = shared_burst::stage::other;
+
   ~burst_state()
   {
     // A thread that leaves with an open burst (an incomplete burst, or a stage that bailed out
@@ -202,6 +209,11 @@ std::mutex                                    g_ablate_mutex;   ///< guards the 
 struct ablate_decision {
   bool     ablated = false;
   uint64_t ticket  = 0;
+  /// WHICH stage families this buffer's arm asked for (see ablate_stage_mask()). 0 on a delivery buffer.
+  /// Recorded per buffer rather than read from the environment at binding time because the arm is 1-in-N:
+  /// the delivery buffers of the same run must stay exactly what they were, and a later environment change
+  /// (the tests do move knobs inside one process) must not retroactively re-label a decided buffer.
+  unsigned mask = 0;
 };
 std::unordered_map<void*, ablate_decision> g_ablate_by_cb; ///< cbuf -> ablated?
 std::deque<std::pair<void*, uint64_t>>     g_ablate_order; ///< insertion order of the keys above
@@ -215,6 +227,198 @@ uint64_t                                   g_ablate_ticket = 0;
 /// Unbounded, those entries accumulate for a whole leg (~140k of them) and every one of them is a chance for
 /// a later buffer to inherit a decision nobody made for it.
 constexpr size_t ablate_table_max = 65536;
+
+/// \name Q9-F5 (dev doc 6.162): WHICH stage family the ablation arm is allowed to replace.
+///
+/// WHY IT EXISTS. Until this, the arm was all-or-nothing per command buffer: `OCUDU_LANE_ABLATE=1` bound
+/// EVERY stage's dispatches to the no-op kernel, which answers "is the price of this buffer a function of
+/// what its dispatches do at all" but not "which family pays it" - and the second question is the one an
+/// optimization can aim at. On the merged route the whole hop travels in ONE buffer whose 470.5us cannot be
+/// split by any existing instrument (Metal gives timestamps per command buffer only, and this device has no
+/// per-dispatch counter), so the family bill has to come from SUBTRACTION inside the delivery structure: the
+/// same buffer, the same grids, the same bindings, the same fences and the same commit, with ONE family's
+/// kernels replaced. Same key, same 1-in-N rule, so the delivery buffers of the same leg stay untouched.
+///
+/// The families are the four dispatch sources of a merged hop, i.e. the ones the dispatch census counted
+/// (front end 1.32/hop + lane burst 4.00/hop = 5.32, dev doc 6.161(5)):
+///   * `front_end` - the DFT engine's grid write, which owns its own encoder and asks through ablate_cb()
+///     (dev doc 6.140; before that it was the ONE dispatch of a hop the arm could not reach, and p83's
+///     "the window did not move" was uninterpretable for exactly that reason),
+///   * `ce`/`eq`/`demap` - the three stage families that encode through shared_burst::encoder().
+///
+/// A mask of 0 means "every family", which is what an arm that does not name one gets - i.e. the historical
+/// behaviour of every leg flown so far (p83, p84) is preserved bit for bit.
+///@{
+constexpr unsigned ablate_stage_front_end = 1u << 0u;
+constexpr unsigned ablate_stage_ce        = 1u << 1u;
+constexpr unsigned ablate_stage_eq        = 1u << 2u;
+constexpr unsigned ablate_stage_demap     = 1u << 3u;
+constexpr unsigned ablate_stage_all       = 0u; ///< the sentinel: no family named means every family
+
+/// The mask named by OCUDU_LANE_ABLATE_STAGE, read ONCE (the arm is decided per buffer, and a knob that moved
+/// under a running leg would make two buffers of one leg incomparable). Accepted spellings are the family
+/// names joined by '|' or ',', plus `all`; an unknown name is reported and treated as `all` - a leg that
+/// silently ablated nothing is worse than one that ablated everything, since the latter still shows up in the
+/// counters. The name of each family is the key the dev doc and the leg command use.
+unsigned parse_ablate_stage_mask()
+{
+  const char* env = std::getenv("OCUDU_LANE_ABLATE_STAGE");
+  if (env == nullptr) {
+    return ablate_stage_all;
+  }
+  unsigned    mask  = 0;
+  const char* p     = env;
+  bool        known = true;
+  while (*p != '\0') {
+    while ((*p == '|') || (*p == ',') || (*p == ' ')) {
+      ++p;
+    }
+    const char* start = p;
+    while ((*p != '\0') && (*p != '|') && (*p != ',') && (*p != ' ')) {
+      ++p;
+    }
+    const size_t len = static_cast<size_t>(p - start);
+    if (len == 0) {
+      continue;
+    }
+    const std::string name(start, len);
+    if (name == "all") {
+      mask = ablate_stage_all;
+    } else if (name == "front_end") {
+      mask |= ablate_stage_front_end;
+    } else if (name == "ce") {
+      mask |= ablate_stage_ce;
+    } else if (name == "eq") {
+      mask |= ablate_stage_eq;
+    } else if (name == "demap") {
+      mask |= ablate_stage_demap;
+    } else {
+      known = false;
+    }
+  }
+  if (!known) {
+    std::fprintf(stderr,
+                 "[metal_ablate] OCUDU_LANE_ABLATE_STAGE='%s' names a stage that does not exist "
+                 "(front_end|ce|eq|demap|all) - treating it as `all` so the arm cannot pass silently\n",
+                 env);
+  }
+  return mask;
+}
+
+unsigned ablate_stage_mask()
+{
+  static const unsigned mask = parse_ablate_stage_mask();
+  return mask;
+}
+
+/// Whether \p mask asks for \p which. A mask of 0 (`all`, and the unset default) asks for every family.
+bool mask_covers(unsigned mask, unsigned which)
+{
+  return (mask == ablate_stage_all) || ((mask & which) != 0u);
+}
+
+/// The mask a \c shared_burst::stage belongs to, for the binding site: \c other keeps the family last named
+/// by count_dispatch()/set_stage() - the deferred flush sites bind a pipeline for dispatches that were
+/// counted earlier, and `other` is also what the front end's own encoder reports (it is not on this route).
+unsigned mask_of_stage(shared_burst::stage which)
+{
+  switch (which) {
+    case shared_burst::stage::channel_estimator:
+      return ablate_stage_ce;
+    case shared_burst::stage::equalizer:
+      return ablate_stage_eq;
+    case shared_burst::stage::demapper:
+      return ablate_stage_demap;
+    case shared_burst::stage::other:
+    default:
+      return 0u;
+  }
+}
+
+/// The name of \p mask as the report and the leg commands spell it: `all` for 0, else the families joined by
+/// '+' in the order the census lists them.
+std::string ablate_mask_name(unsigned mask)
+{
+  if (mask == ablate_stage_all) {
+    return "all";
+  }
+  std::string name;
+  if ((mask & ablate_stage_front_end) != 0u) {
+    name += "front_end";
+  }
+  if ((mask & ablate_stage_ce) != 0u) {
+    name += (name.empty() ? "" : "+");
+    name += "ce";
+  }
+  if ((mask & ablate_stage_eq) != 0u) {
+    name += (name.empty() ? "" : "+");
+    name += "eq";
+  }
+  if ((mask & ablate_stage_demap) != 0u) {
+    name += (name.empty() ? "" : "+");
+    name += "demap";
+  }
+  return name.empty() ? "none" : name;
+}
+///@}
+
+/// \name Q9-F5 (dev doc 6.162): per-STAGE ablation counters - the coverage proof the arm never had.
+///
+/// THE DEFECT THIS CLOSES. `p84` read "every kernel replaced by a no-op and the buffer's window moved by
+/// 1.5%", and that reading was then used to argue that the price of the buffer has nothing to do with what
+/// its dispatches do. But nothing ever COUNTED the replacement: the only counter in the arm was the 1-in-N
+/// burst index, so "all the kernels were replaced" was a reading of the CODE, not of the run - and the two
+/// things that could falsify it (a dispatch that never passes through the binding site, a buffer whose
+/// decision was never asked) were exactly what dev doc 6.161(2) found: the positive control was read on a
+/// DIFFERENT label, and the front end's own buffer lost tens of microseconds while the buffer containing the
+/// same transforms lost 7.1. Coverage is now a number per family, printed next to the window distribution it
+/// is supposed to explain: a family whose `ablated` count is 0 while its window moved has NOT been measured.
+///@{
+struct ablate_coverage_t {
+  std::atomic<uint64_t> binds[4]{};   ///< bind events per family (one per dispatch on these routes)
+  std::atomic<uint64_t> ablated[4]{}; ///< of those, the ones that were really bound to the no-op kernel
+  /// How many command buffers the arm decided to ablate (one per ablated hop, not per dispatch). Printed so a
+  /// reader can divide the counts above by it and see the dispatches-per-buffer the arm actually worked on -
+  /// the number the window distribution has to be read against.
+  std::atomic<uint64_t> buffers{0};
+
+  static size_t index_of(unsigned which)
+  {
+    switch (which) {
+      case ablate_stage_front_end:
+        return 0;
+      case ablate_stage_ce:
+        return 1;
+      case ablate_stage_eq:
+        return 2;
+      case ablate_stage_demap:
+        return 3;
+      default:
+        return 4; // never stored: callers pass one family at a time
+    }
+  }
+
+  void count_bind(unsigned which, bool was_ablated)
+  {
+    const size_t i = index_of(which);
+    if (i >= 4) {
+      return;
+    }
+    binds[i].fetch_add(1, std::memory_order_relaxed);
+    if (was_ablated) {
+      ablated[i].fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+};
+
+ablate_coverage_t& ablate_coverage()
+{
+  // Deliberately leaked, like the other reports: this one is printed from an atexit handler, which can run
+  // after the static destructors of the translation unit that owns the counters.
+  static ablate_coverage_t* c = new ablate_coverage_t();
+  return *c;
+}
+///@}
 
 /// \brief Whether the burst ABOUT TO BE OPENED is an ablated one.
 ///
@@ -258,7 +462,14 @@ bool ablation_for_cb(id<MTLCommandBuffer> cb, bool create)
   }
   const bool     on     = ablate_next_burst();
   const uint64_t ticket = ++g_ablate_ticket;
-  g_ablate_by_cb[key]   = ablate_decision{on, ticket};
+  // The mask is recorded even on a delivery buffer (as 0), and the annotation is told either way: the report
+  // has to be able to say "this window carried these dispatches and NONE of them was ablated", which is the
+  // sentence p84 could not support.
+  const unsigned mask = on ? ablate_stage_mask() : 0u;
+  if (on) {
+    ablate_coverage().buffers.fetch_add(1, std::memory_order_relaxed);
+  }
+  g_ablate_by_cb[key] = ablate_decision{on, ticket, mask};
   g_ablate_order.emplace_back(key, ticket);
   while (g_ablate_order.size() > ablate_table_max) {
     const std::pair<void*, uint64_t> oldest = g_ablate_order.front();
@@ -390,6 +601,36 @@ void burst_stats_report()
                static_cast<unsigned long long>(s.eq_dispatches.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.demap_dispatches.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.ce_dispatches.load(std::memory_order_relaxed)));
+  // Q9-F5 (dev doc 6.162): the COVERAGE of the ablation arm, which is the number p84 never had. Printed only
+  // when the arm is on (a delivery run has nothing ablated, and a line of zeros there would be read as a
+  // reading), and per FAMILY: `binds` counts the dispatch bindings the arm saw for that family and `ablated`
+  // how many of them it really replaced. A family with `binds=0` was never reached - so a window that "did
+  // not move" for it says nothing, which is precisely the defect this counter removes.
+  const char* ablate_env = std::getenv("OCUDU_LANE_ABLATE");
+  if ((ablate_env != nullptr) && (std::strtoul(ablate_env, nullptr, 10) != 0)) {
+    ablate_coverage_t& c = ablate_coverage();
+    std::fprintf(stderr,
+                 "[metal_stats] Q9-F5 ablation coverage (stage mask=%s, every N=%s, ablated buffers=%llu): "
+                 "binds are dispatch bindings seen by the arm, ablated the ones really bound to the no-op "
+                 "kernel; read the windows against the `merged_hop_ablated` rows of the Q9-F3 table\n",
+                 ablate_mask_name(ablate_stage_mask()).c_str(),
+                 (std::getenv("OCUDU_LANE_ABLATE_EVERY") != nullptr) ? std::getenv("OCUDU_LANE_ABLATE_EVERY")
+                                                                     : "1",
+                 static_cast<unsigned long long>(c.buffers.load(std::memory_order_relaxed)));
+    const char* names[4] = {"front_end", "ce", "eq", "demap"};
+    for (size_t i = 0; i != 4; ++i) {
+      const uint64_t binds = c.binds[i].load(std::memory_order_relaxed);
+      const uint64_t abl   = c.ablated[i].load(std::memory_order_relaxed);
+      const double   pct   = (binds != 0u) ? (100.0 * static_cast<double>(abl) / static_cast<double>(binds)) : 0.0;
+      std::fprintf(stderr,
+                   "[metal_stats]   %-10s binds=%9llu ablated=%9llu (%.1f%%)%s\n",
+                   names[i],
+                   static_cast<unsigned long long>(binds),
+                   static_cast<unsigned long long>(abl),
+                   pct,
+                   (binds == 0u) ? "  <- NOT REACHED: this family was never measured by this arm" : "");
+    }
+  }
 }
 
 void burst_stats_commit()
@@ -530,12 +771,29 @@ id<MTLComputeCommandEncoder> shared_burst::encoder(id<MTLComputePipelineState> p
     // The ABLATION arm swaps only what the encoder BINDS: the bookkeeping (and therefore the stage
     // barriers, the fence structure and the dispatch grid each caller asks for) stays exactly what the
     // delivery path does, which is the whole point of the arm (dev doc 6.132).
-    const id<MTLComputePipelineState> ablate =
-        ablation_for_cb(s.cb, /*create=*/true) ? ablation_pipeline_lazy() : nil;
+    //
+    // Q9-F5 (dev doc 6.162): WHICH family this binding belongs to comes from the burst's current stage, which
+    // the stage itself set with set_stage() just before opening this encoder (the flush sites bind the
+    // deferred dispatches counted earlier, so `other` keeps the last named family - see mask_of_stage). The
+    // per-family counters are incremented HERE, at the one place the replacement actually happens, which is
+    // what makes them a coverage PROOF rather than a claim.
+    const unsigned    family  = mask_of_stage(s.current_stage);
+    const bool        on      = ablation_for_cb(s.cb, /*create=*/true);
+    const bool        covered = on && mask_covers(ablate_mask_for_cb(s.cb), family);
+    const id<MTLComputePipelineState> ablate = covered ? ablation_pipeline_lazy() : nil;
+    if (family != 0u) {
+      ablate_coverage().count_bind(family, ablate != nil);
+    }
     [s.enc setComputePipelineState:((ablate != nil) ? ablate : pipeline)];
     s.pipeline = pipeline;
   }
   return s.enc;
+}
+
+void shared_burst::note_front_end_dispatch(id<MTLCommandBuffer> cb, bool was_ablated)
+{
+  (void)cb; // the family counter is process-wide: a per-buffer split is not available (see the header)
+  ablate_coverage().count_bind(ablate_stage_front_end, was_ablated);
 }
 
 bool shared_burst::open()
@@ -669,6 +927,35 @@ void shared_burst::set_ablation_pipeline(id<MTLComputePipelineState> pipeline)
 bool shared_burst::ablate_cb(id<MTLCommandBuffer> cb)
 {
   return ablation_for_cb(cb, /*create=*/true);
+}
+
+bool shared_burst::ablate_stage_for_cb(id<MTLCommandBuffer> cb, stage which)
+{
+  if (!ablation_for_cb(cb, /*create=*/true)) {
+    return false;
+  }
+  // The decision's OWN mask, not the environment's: a buffer decided by an earlier 1-in-N draw under a
+  // different knob value has to keep the arm it was given (the unit tests move knobs inside one process).
+  //
+  // `other` IS the front end on this path, and that is not a pun: shared_burst::front_end_stage() documents
+  // why the family has no enumerator of its own, and the front end is the only caller that asks with it.
+  const unsigned family = (which == stage::other) ? ablate_stage_front_end : mask_of_stage(which);
+  return mask_covers(ablate_mask_for_cb(cb), family);
+}
+
+unsigned shared_burst::ablate_mask_for_cb(id<MTLCommandBuffer> cb)
+{
+  if (cb == nil) {
+    return 0u;
+  }
+  std::lock_guard<std::mutex> lock(g_ablate_mutex);
+  auto it = g_ablate_by_cb.find((__bridge void*)cb);
+  return (it != g_ablate_by_cb.end()) ? it->second.mask : 0u;
+}
+
+void shared_burst::set_stage(stage which)
+{
+  state().current_stage = which;
 }
 
 id<MTLComputePipelineState> shared_burst::ablation_noop()
@@ -1638,6 +1925,15 @@ void shared_burst::count_dispatch(stage which)
   burst_state& bs = state();
   if (bs.cb != nil) {
     ++bs.n;
+  }
+  // Q9-F5 (dev doc 6.162): the family name follows the dispatch, for the DEFERRED routes. A stage that
+  // accumulates its dispatches hands them over later, through the flush hook, and the binding decision for
+  // them happens there - where the only thing that still remembers which family they belong to is this field.
+  // It is also why the field is refreshed here and not only by set_stage(): the count call is the one site
+  // every dispatch already has. (`other` deliberately does not clear it: the estimator's own bookkeeping
+  // calls do not name a family, and clearing would erase the family the next deferred binding needs.)
+  if (which != stage::other) {
+    bs.current_stage = which;
   }
 #if defined(OCUDU_METAL_STATS)
   burst_stats_t& s = stats();

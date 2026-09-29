@@ -10742,6 +10742,88 @@ p116: tokens_early=signals:0,     by_event:0,     by_complete:36733   ← 对照
 
 > 📌 **本节的交接快照 = `session_handoff_2026-09-29-1.md`**（§0 现状 / §2 增量结论 / §3.1 的 A-B 裁决 / §4 纪律 21–26）。
 
+### 6.162 ★★★ **走 B：消去臂按阶段族可选 + 覆盖度计数器（用户裁决 2026-09-29）** —— 以及**一条被自己否掉的实现**（每 cb 窗口归属）
+
+**裁决**：`session_handoff_2026-09-29-1.md` §3.1 的唯一待裁决 = **A（真 kernel 按族离线 harness）还是 B（按阶段的空口消去臂）** ⇒ **用户选 B**。本节的读数是**离线自证**；空口读数要一条腿（⑦ 给了命令与判决读数）。
+
+#### ① 改了什么（三处，全部在探针里；旋钮关着时交付路径逐字节不变）
+
+| # | 位置 | 内容 |
+|---|---|---|
+| 1 | `lib/phy/metal/ocudu_metal_burst.{h,mm}` | **`OCUDU_LANE_ABLATE_STAGE`**（`front_end\|ce\|eq\|demap`，`\|`/`,` 可组合，不设 = `all`）：四族位掩码，**读一次**（臂是按 cb 决定的，跑到一半换旋钮会让同一条腿的两条 cb 不可比）；拼错的名字 ⇒ **WARNING + 按 `all`**（宁可多消，不可静默不消）|
+| 2 | 同上 + `ocudu_dft_metal_engine.mm` | **覆盖度计数器**（`binds` / `ablated`，按族）；`shared_burst::count_dispatch()` 顺带刷新"当前族"，`set_stage()` 由每个阶段在**开 encoder 之前**显式设置（绑定点要读它，而 `count_dispatch` 在派发旁边、即绑定**之后**才跑，不能当权威）；前端自己那条派发通过 `note_front_end_dispatch()` 计数 |
+| 3 | `ocudu_metal_burst.mm` 的 `[metal_stats]` 报告 | 新增 **`Q9-F5 ablation coverage`** 块（只在臂开着时打印）：每族 `binds=… ablated=… (…%)`，`binds==0` 直接标 **`NOT REACHED: this family was never measured by this arm`** |
+
+**四族 = 一跳 5.32 个派发的四个来源**（§6.161⑤ 的对账）：`front_end` = DFT 引擎自己的网格写（它**自己拥有 encoder**，走 `ablate_cb()`/`ablate_stage_for_cb()`，§6.140 之前这是**唯一**够不到的那一条）；`ce`/`eq`/`demap` = 通过 `shared_burst::encoder()` 编码的三个阶段族。
+
+**族名怎么来的（要点）**：阶段在开 encoder 前调 `set_stage()`，绑定点把这个族名与**该 cb 自己那份掩码**比较，只有掩码覆盖它才绑空 kernel。**"该 cb 自己那份掩码"是关键**：1-in-N 之下，同一条腿的**交付** cb 必须原样不动，而"环境变量此刻是什么"不能用来回溯改变一个已经决定过的 cb（单测会在一个进程里换旋钮）。
+⚠ `shared_burst::front_end_stage()` 返回 `stage::other` —— 这不是双关：`stage` 枚举描述的是"某个阶段往共享 burst 里追加了什么"，而前端**什么都不追加**（它生产出被采纳的那条 cb），所以它的族名不能放进那个枚举（否则会有人把 `other` 传给 `set_stage()`）；名字由 `front_end_stage()` 承载，映射在臂内部完成。
+
+#### ② ⚠⚠ **自我更正：每 cb 的窗口归属做不出来，已整块删除**
+
+第一版给每条 cb 标注"这个窗里含哪些族、其中几个真的被换掉了、掩码是什么"，做法是：臂里一张以 cb 地址为键的表 + 一个回调让队列在 `arm_gpu_time()` 时把标注拷进 occupancy 记录。**离线一跑就露馅**：同一族同一掩码的 cb 在报告里读成 `arm=control dispatches 22..#abl=22`，而真正被消去的那 69 条读成 `control`。
+
+**根因（平台事实，值得记）**：**Metal 回收命令缓冲对象**。同一次测试运行里，同一个地址被提交了 **25 次**（`0x87be00000`）。于是：
+* 按地址存的"决定"会在交付路径上被**清掉**（`forget_ablation()` 就在 `arm_gpu_time()` **之前**一行跑），所以"提交时再问一次"读到的是**空**；
+* 改成"丢弃前主动推送"也不行 —— 记录是在**完成处理器**里才写入的（GPU 完成后），推送时表里还没有那条记录；
+* 改成"完成处理器里回查"更不行 —— 那时表里的条目**已经被后来那一跳的编码覆盖**（这就是 `total` 在同一个地址上从 1 涨到 3 的原因）。
+
+⇒ **接口（队列侧的 annotation 结构、回调、每 cb 标注表、`occupancy_record` 的新字段）已全部删除，不留死代码。** 窗口归属改用**消去臂自己的 label**：`merged_hop_ablated` vs `merged_hop`，Q9-F3 的分标签表**本来就分开打印**⇒ 四臂的窗口分布从同一个 label 表的对应行读，族账单 = "四臂各自的窗口分布 + 每族的覆盖度计数"。**代价**：读不到"这一条 cb 里有 11 个派发"这种逐 cb 细节 —— 而它对判读不必要。
+
+#### ③ 离线自证（`pusch_demodulator_deferred_chain_test` + `dft_release_adopt_metal_test`）
+
+| 臂 | 读数 | 判读 |
+|---|---|---|
+| **不设旋钮**（对照） | `5/5 PASS`，报告里**没有** `Q9-F5` 行 | ✅ **关着时交付路径逐字节不变**（新增代码全在 `OCUDU_METAL_STATS` + 旋钮之内）|
+| `OCUDU_LANE_ABLATE=1`（EVERY=1，掩码 `all`） | **2 例 FAILED**（空链路，与 §6.132 的判据一致）；`ablated buffers=69`；eq **67/67**、demap **2/2** | ✅ 臂咬到了（`eq` 是 `max_run` 批，67 次绑定对应 48 条 equalizer cb + 19 次落进 merged 路）|
+| `OCUDU_LANE_ABLATE_STAGE=eq` | eq **67/67**、demap **0/67** | ✅ **掩码真的在选族**（`demap` 的 67 次绑定全部保持 real）|
+| `OCUDU_LANE_ABLATE_STAGE=demap` | demap **2/2**、eq **0/67** | ✅ 反向对照成立 |
+| `OCUDU_LANE_ABLATE_STAGE=eq\|demap` | 两条都 **100%** | ✅ 组合语义正确（`ablate_mask_name` 打印 `eq+demap`）|
+| `OCUDU_LANE_ABLATE_STAGE=front_end`（D1 测试） | `front_end` **2/2**（另有部分运行 60/60、103/103） | ✅ **阳性对照第一次能读在同一族上** —— §6.161② 红旗 2 的病根 |
+| `OCUDU_LANE_ABLATE_STAGE=eq`（D1 测试，反向） | `front_end` **103/103 real**、eq 0 | ✅ 前端族没有被误消 |
+| `OCUDU_LANE_ABLATE_STAGE=bogus` | WARNING + 按 `all` 处理，`binds` 与全消一致 | ✅ 拼错不会静默变成"什么都没消"|
+| `ctest -L phy -j 1` | **203/203** | ✅（一次 `Bus error` 是**我并发重链 `gnb`** 造成的，单独重跑 2.11 s 通过 —— 见 ⑥ 纪律 27）|
+
+**⚠ 一个仍在的口径提醒**：`ce` 族在这两条离线测试里都是 `binds=0`（这两条链**不走** burst 路的 CE 引擎）⇒ **空口腿上必须看到 `ce binds≠0`**，否则那条腿的 `ce` 臂什么都没测到（这正是计数器存在的意义）。
+
+#### ④ 与 `p84` 的关系（判死/救活的条件）
+
+`p84` 的结论是"这条 cb 的价钱与它做什么无关 ⇒ 这一线没有杠杆"（§6.141）。**本节不推翻它，只让它可以被判**：
+* 若腿上 `front_end binds≠0`（即消去**真的到达**被采纳块里的前端派发）**而** `merged_hop_ablated` 的窗口分布与对照相同 ⇒ **`p84` 成立、§6.141 维持**，结构线关闭；
+* 若 `front_end binds≠0` **而窗口明显塌**（或反过来：`binds=0` ⇒ 覆盖不到）⇒ **`p84` 作废、§6.141 撤回**，"减派发/减访存"重新成为有历史战绩支撑的方向（14 符号合 1 派发 = V1 −38.7%）。
+
+#### ⑤ 未改的东西（明确写下来，免得后来者去猜）
+
+* `OCUDU_LANE_ABLATE` / `OCUDU_LANE_ABLATE_EVERY` 的**语义与默认值不变**（`=1` + 不设 `_STAGE` ⇒ 与 `p83`/`p84` 逐位同款）；
+* 交付路径：不设旋钮时 `ablate_next_burst()` 直接返回、`count_bind` 不被调用、报告不打 `Q9-F5` 行；
+* **不碰** `ocudu_metal_queue.mm`（这一轮为它加过又被整块撤掉，最终 `git diff` 里**没有它** —— 这是 ② 的直接结果）。
+
+#### ⑥ 纪律（接 §4 新增 27）
+
+27. ★ **腿期/测试期不要并发构建**：一次 `ctest -L phy -j 1` 里 `port_channel_estimator_metal_mmse_unit_test_ta_chain` 报 `Bus error`，而**单独重跑通过**（2.11 s）—— 原因是我在测试跑的同时重链了 `gnb`（同一棵树、同一个 `build/`）。读数取信之前先确认没有别的进程在写这棵树。
+
+#### ⑦ 空口腿（待飞；用户操作）—— 分四条臂，或一条臂内轮换
+
+**一条腿一份掩码**（最干净、不用学新东西），四份掩码各飞一条 `gpu` default 腿；想省腿就**一条腿内 1-in-8 轮换**（把四次运行合并，但四个族的样本都只有 1/8）：
+
+```bash
+# 每条腿 = 一个掩码值；推荐顺序：先 all 复现历史，再单族
+LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
+OCUDU_LANE_ABLATE=1 OCUDU_LANE_ABLATE_EVERY=8 \
+OCUDU_LANE_ABLATE_STAGE=all \
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p133-n78-abl-all --regime=default
+# 然后 STAGE=front_end / ce / eq / demap 各一条（标签 p134…p137）
+```
+
+接手机**之前**核三行：① `knob` 行里有 `OCUDU_LANE_ABLATE=1`、`…_EVERY=8`、`…_STAGE=<族>`；② `[metal_ablate] ABLATION ON …`；③ 若某族名字拼错，会有 `[metal_ablate] … names a stage that does not exist`（**出现即停下改命令**）。
+
+**判决读数**（一条腿的报告里）：
+1. `[metal_stats] Q9-F5 ablation coverage` 的四行 —— **每族 `binds≠0`**（尤其 `ce`），`ablated/binds` 应为 **1/8 左右**（`EVERY=8`），全部为 0 ⇒ 这条腿没量到东西；
+2. `[metal_stats] queue occupancy (Q9-F3) per label` 里的 **`merged_hop`（对照）与 `merged_hop_ablated`（臂）两行** —— 比较 `exec p50 / p95 / min`；**族级账单 = 对照减去该族臂**；
+3. `[metal_stats] burst … (equalizer=… demapper=… channel_estimator=…)` 与 `[ul_rx_wait]`/契约照旧（**臂腿不是能工作的链路**，CRC 会掉、契约可能红 —— 这与 §6.132 的既有口径一致，**不要**拿它判交付）。
+
+> 📌 本节对应的工作区改动：`lib/phy/metal/ocudu_metal_burst.{h,mm}`、`lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm`、`lib/phy/upper/channel_modulation/metal/ocudu_demod_metal_engine.mm`、`lib/phy/upper/channel_processors/metal/ocudu_equalizer_metal_engine.mm`、`lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_metal_mmse_engine.mm`（后三个各一行 `set_stage()`）。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

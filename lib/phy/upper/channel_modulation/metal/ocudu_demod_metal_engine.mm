@@ -596,6 +596,7 @@ bool demod_metal_engine::enqueue_burst(const void* symbols,
   }
   // The encoder switches the compute pipeline, which inserts the memory barrier that orders this
   // stage after the equalization encoded before it in the same command buffer.
+  metal::shared_burst::set_stage(metal::shared_burst::stage::demapper);
   id<MTLComputeCommandEncoder> enc = metal::shared_burst::encoder(demod_resources().pipeline);
   if (enc == nil) {
     return false;
@@ -632,6 +633,7 @@ bool demod_metal_engine::enqueue_burst_deferred(const void* symbols,
   // would flush this engine's hook, i.e. one dispatch per symbol, which is what the batching is here
   // to avoid.
   if (metal::shared_burst::flush_hook_context() != engine) {
+    metal::shared_burst::set_stage(metal::shared_burst::stage::demapper);
     if (metal::shared_burst::encoder(demod_resources().pipeline) == nil) {
       return false;
     }

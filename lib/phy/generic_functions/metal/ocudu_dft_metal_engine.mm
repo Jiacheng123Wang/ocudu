@@ -915,11 +915,19 @@ struct dft_engine_impl {
   id<MTLCommandBuffer>         open_cb  = nil;
   id<MTLComputeCommandEncoder> open_enc = nil;
   uint64_t                     open_transforms = 0;
-  /// Whether the OPEN block belongs to the ABLATION arm (OCUDU_LANE_ABLATE, dev doc 6.140): decided once,
-  /// when the buffer is created, and read at every dispatch of it. The front end owns its OWN encoder (it
-  /// hands the buffer over still open), so it cannot learn the answer from shared_burst::encoder() the way
-  /// the estimator, the equalizer and the demapper do - it has to ASK, and asking decides the buffer for
-  /// every other asker too (one process-wide, buffer-keyed table).
+  /// Whether the OPEN block's own grid write belongs to the ABLATION arm (OCUDU_LANE_ABLATE, dev doc 6.140):
+  /// decided once, when the buffer is created, and read at every dispatch of it. The front end owns its OWN
+  /// encoder (it hands the buffer over still open), so it cannot learn the answer from shared_burst::encoder()
+  /// the way the estimator, the equalizer and the demapper do - it has to ASK, and asking decides the buffer
+  /// for every other asker too (one process-wide, buffer-keyed table).
+  ///
+  /// Since dev doc 6.162 the question is per FAMILY, and the front end is its own family
+  /// (shared_burst::front_end_stage(): these dispatches never pass through shared_burst::encoder(), so the arm
+  /// has no enumerator of its own for them). The question is "does this buffer's arm ask for the FRONT END",
+  /// because a buffer carrying a lane stage's dispatches has to keep them real while the front end's own write
+  /// is replaced - and the other way round. dev doc 6.161(2) is why the distinction had to be made: p84's "the
+  /// window did not move" could not be interpreted because nobody had ever counted which of a hop's dispatches
+  /// the arm had actually reached.
   bool open_ablated = false;
   ///@}
 
@@ -1067,8 +1075,12 @@ static void encode_grid_write_dispatch(dft_engine_impl*                       e,
   // 466.5us), which is exactly the reading that cannot be interpreted: the dispatch it was asking about was
   // not ablated. Same grid, same threadgroup size, same bindings; only the kernel is a no-op.
   const id<MTLComputePipelineState> ablate_pipe = shared_burst::ablation_noop();
-  [enc setComputePipelineState:((e->open_ablated && (ablate_pipe != nil)) ? ablate_pipe
-                                                                         : dft_resources().pipeline)];
+  const bool                         ablated     = e->open_ablated && (ablate_pipe != nil);
+  // Q9-F5 (dev doc 6.162): the coverage counter and the per-buffer annotation for the family the arm cannot
+  // reach through shared_burst::encoder() - this dispatch is the front end's own, and until it is counted the
+  // report cannot tell "the arm replaced it" from "the arm never saw it".
+  shared_burst::note_front_end_dispatch(e->open_cb, ablated);
+  [enc setComputePipelineState:(ablated ? ablate_pipe : dft_resources().pipeline)];
   [enc setBuffer:b_in offset:0 atIndex:0];
   [enc setBuffer:b_out offset:0 atIndex:1];
   [enc setBuffer:e->buf_tw offset:0 atIndex:2];
@@ -1467,7 +1479,7 @@ static bool encode_into(dft_engine_impl*                                 e,
   // the same engine, the same grid write and the same `dft_front_end` label, so a buffer that skipped the
   // question would make that label a mixture of ablated and delivery buffers. The answer is dropped again
   // in commit_front_end(), which is the only place that commits a buffer this function created.
-  e->open_ablated = shared_burst::ablate_cb(cmd_buf);
+  e->open_ablated = shared_burst::ablate_stage_for_cb(cmd_buf, shared_burst::front_end_stage());
   return true;
 }
 
@@ -1940,7 +1952,7 @@ bool dft_metal_engine::begin_block()
   // The ABLATION arm's decision for this block (dev doc 6.140), taken as soon as the buffer exists: the
   // front end encodes its grid write itself, so it has to ASK - and asking first is what makes the answer
   // the same one the lane's commit will read for the same buffer.
-  engine->open_ablated = shared_burst::ablate_cb(engine->open_cb);
+  engine->open_ablated = shared_burst::ablate_stage_for_cb(engine->open_cb, shared_burst::front_end_stage());
   // Q9-F4: a new block starts with an empty deferral. Nothing can be pending here (every end of a block
   // flushes or clears), and clearing anyway is what keeps a deferred transform from one block out of the
   // next one's encoder - the one way this mechanism could silently write a grid of the wrong slot.
@@ -2503,8 +2515,9 @@ bool dft_metal_engine::submit_at(
   // same engine's own encoder and it commits under the same `dft_front_end` label, so an arm that covered
   // one and not the other would split that label's population into two kinds of buffer.
   const id<MTLComputePipelineState> ablate_pipe = shared_burst::ablation_noop();
-  [enc setComputePipelineState:((engine->open_ablated && (ablate_pipe != nil)) ? ablate_pipe
-                                                                              : dft_resources().pipeline)];
+  const bool                         ablated     = engine->open_ablated && (ablate_pipe != nil);
+  shared_burst::note_front_end_dispatch(engine->open_cb, ablated);
+  [enc setComputePipelineState:(ablated ? ablate_pipe : dft_resources().pipeline)];
   [enc setBuffer:b_in offset:0 atIndex:0];
   [enc setBuffer:b_out offset:0 atIndex:1];
   [enc setBuffer:engine->buf_tw offset:0 atIndex:2];
