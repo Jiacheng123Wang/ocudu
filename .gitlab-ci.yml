@@ -661,13 +661,11 @@ promotion:
 # when the Dockerfile itself changes.
 build-fuzz-image:
   extends: .docker-builder
-  stage: deploy
+  stage: ci
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: $ON_MR
       changes:
         - tests/fuzz/Dockerfile
-    - when: manual
-      allow_failure: true
   variables:
     NAME: fuzz-deps
     CONTEXT: ${CI_PROJECT_DIR}
