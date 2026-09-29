@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
 # SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
-
 ########################################################################
 # Prevent in-tree builds
 ########################################################################
@@ -84,6 +83,7 @@ option(ENABLE_GPROF          "Enable gprof"                                 OFF)
 option(FORCE_DEBUG_INFO      "Add debug information to Release build"       OFF)
 option(ENABLE_OCUDU_TRACY   "Enable using the tracy profiler if available" OFF)
 option(ENABLE_SPLIT_DWARF    "Emit split DWARF (.dwo) objects to cut linker memory use" OFF)
+option(ENABLE_RELATIVE_PATHS "Remap source dir to . in debug info and __FILE__" OFF)
 if (BUILD_TESTING)
     if (${CMAKE_BUILD_TYPE} STREQUAL "Debug")
         option(TEST_GDB_PRINTERS  "Enable tests for GDB pretty printers"  OFF)
@@ -275,6 +275,18 @@ if (ENABLE_SPLIT_DWARF)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -gsplit-dwarf")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -gsplit-dwarf")
 endif (ENABLE_SPLIT_DWARF)
+
+# Keep absolute source paths out of objects so ccache can share them across checkouts.
+if (ENABLE_RELATIVE_PATHS)
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-ffile-prefix-map=${PROJECT_SOURCE_DIR}=." HAVE_FILE_PREFIX_MAP)
+    if (HAVE_FILE_PREFIX_MAP)
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffile-prefix-map=${PROJECT_SOURCE_DIR}=.")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffile-prefix-map=${PROJECT_SOURCE_DIR}=.")
+    else ()
+        message(WARNING "ENABLE_RELATIVE_PATHS requested but -ffile-prefix-map is not supported by the compiler")
+    endif ()
+endif (ENABLE_RELATIVE_PATHS)
 
 if (ENABLE_GCOV)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fprofile-arcs -ftest-coverage")
