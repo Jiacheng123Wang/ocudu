@@ -11977,6 +11977,46 @@ gpu busy (front_end): commits=93325 busy= 4394742us  window=77889792us  ⇒ busy
 
 ⇒ ★★ **"同一条 cb 内多个 encoder + 内存屏障"是把相邻阶段串起来的正确形态**（Metal 对同 cb 内的 encoder 边界提供顺序保证，而这棵树里 `shared_burst` 已经在用它）。**它比"合成一个大 kernel"风险低得多**（不必合并代码，只合并提交与屏障边界），而**这正是 §6.184 与本节联合指向的方向**。
 
+### 6.186 **"把 ce_weights 与 merged_hop 放进同一条 cb"：路径已存在（`burst`），但 `merged` 没有兑现它自己的设计**（2026-09-29）
+
+#### ① 代码给出了"一次提交"的确切开关
+
+```cpp
+// ocudu_metal_mmse_engine.mm :3897
+const bool fuse = (e->lane_order == ce_lane_order::burst) && !wait_for_completion;
+st = begin_weights_stage(e, first_pipe, fuse, &adopted_held);          // :3898
+```
+而 `begin_stage(fuse = true)` 走的是：
+```cpp
+s.enc   = ocudu::metal::shared_burst::encoder(first_pipeline);   // ← 共享 burst，不提交
+s.burst = (s.enc != nil);
+```
+⇒ **`fuse=true` ⇒ 权重阶段的派发进入共享 burst，由 lane 提交一次**（`end_stage_async` 对 `s.burst` 直接 return，不 commit）。
+
+#### ② ★ 但 `lane_order` 的默认是 `merged`，而它**没有兑现自己的设计**
+
+`ce_lane_order_from_env()` 的注释写着（默认 `merged`）：
+
+> *"the whole deferred hop - the extraction, the weights, and then the equalization and the demapping - is ONE submission, so the receiving chain's control plane has exactly one commit per reception … it is what the count reads: **cbs/lane 1.00 (max 1)**, mmse_ce commits per hop **1.000**, lane gap 0."*
+
+**而 p150 实测是 2 次提交**（`ce_weights n=19562` + `merged_hop n=19558`），因为 `fuse` 对 `merged` 为 **false** ⇒ 权重走了 `begin_stage(fuse=false)` 的"自己的 cb + 提交"（`:1225`）。
+⇒ ★ **`merged` 的设计意图（1 次提交）与它的实现（2 次）不一致** —— 而 `p143`–`p150` 所有腿读到的 `cbs/lane = 2.00` 就是这个不一致的量。
+
+#### ③ ⚠ 为什么"直接把 fuse 打开"不行（时序）
+
+`fuse=true` 要求 **lane 的共享 burst 已经打开**（`shared_burst::encoder()` 只是往"当前线程已开的 burst"里加派发）。而按 §6.180 推出的顺序 **CE 先跑、lane 后跑** ⇒ **CE 权重阶段执行时，lane 的 burst 还不存在**，此时 `encoder()` 会**自己开一条**（`burst_ensure_open`）⇒ **不是合并，反而可能多一条 cb**。
+
+⇒ ★ **合并只能取反方向**：**让 lane 承接 CE 的缓冲**（即 `merged` 路线本来要做的"hold + adopt"），而不是让 CE 加入 lane 的。**这正是 `hold_for_weights` / `adopted_held` 那一套机制的用途**，而它当前**没有被走到**（`adopted_held=false` ⇒ `begin_weights_stage` 落到 `begin_stage(fuse=false)`）。
+
+#### ④ 下一步（明确的实施方向）
+
+**让 `merged` 真正走"hold + adopt"** —— 需要查清 `adopted_held` 为什么是 false：
+* `begin_weights_stage` 的第一分支要求 `(e->held_cb != nil) && !fuse`；
+* ⇒ 要么 `e->held_cb == nil`（抽取没有 hold 住缓冲），要么 `fuse` 为 true（但它是 false）；
+* ⇒ **查 `hold_for_weights` 的生产者**（`build_pilots_lse` 侧）为何没有留下 `held_cb`。
+
+**判据（实施后）**：`mmse_ce commits` 应从 **1.000/跳** 变为 **0**（权重不再自己提交），`cbs/lane` 从 **2.00 → 1.00**，而 **Q9-F3 的 `merged_hop` exec 不应显著变差**（§6.178 的占用率教训：合并**提交**不应改变各 kernel 的并行度——这与"合成一个大 kernel"不同）。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
