@@ -11599,6 +11599,67 @@ CE 的 6.05 个派发里，`corr_a`（1.43/跳）与 `corr_rhp`（1.43/跳）是
 1. **CE 结案**：把"CE 的编排账"（④ 的表）作为结论入档，`OCUDU_CE_CORR_MERGED` 保留为**已验证的正确实现 + 负收益**，不再优化；
 2. **把"黑盒定价"的方法用到 DFT 那一族**（唯一有量级的地方：39 µs/边界 × 一跳 10 个派发 ≈ 390 µs，与 §6.166 的 ~376 µs 空洞吻合）⇒ **在那里做同样的"同内核/同工作量/只改派发数"测量**，判据是 **`DFT 族的每线程组成本`** —— 这直接对着那 470 µs。
 
+### 6.179 ★★★ **地图修正：一跳是 2 次 commit；`dft_front_end`（46.6 µs）是 plain 路的，不属于一跳**（2026-09-29，用户追问）
+
+**用户追问**：*"从 IQ 到 LLR 整个 pipeline 上，总共是 3 个 commit，不是 2 个？我记得前面有讨论，尽管 dft_front_end 有 dispatching，但是是等到后面一起 commit 的。"*
+
+#### ① 代码级确认：交棒路径上**前端不提交**（用户记忆正确）
+
+`dft_metal_engine.mm::release_block()` 的收尾写着：
+
+```
+// NOT commit_front_end(): no commit, no front-end fence signal, no front-end chain publication, no
+// dft commit counter. The caller submits this buffer, and everything a commit owes moves with it.
+```
+
+⇒ **交棒的块由 lane 提交，标签 `merged_hop`**。而标签用的队列也不同：`arm_gpu_time(..., queue_kind::front_end, "dft_front_end")` vs `merged_hop` 的 **back_end**。
+
+#### ② `dft_front_end n=164233` 的来源：**plain 路**（数字吻合到 7/164226）
+
+```
+hand-over route carried : 399014 transforms (70.8%),  batched = 28501
+the plain route         : 164226 transforms
+dft_front_end 的 n      : 164233
+```
+
+⇒ ★ **`dft_front_end` = plain 路（PRACH/SRS/PUCCH 等不走 lane 的通道），每变换一条 cb、自己提交。** 它的 `exec p50 = 46.6 µs` 是**单变换的 plain cb**（与 §6.126 的"1 组 = 46.7 µs"一致），**不是一跳的前端成本**。
+⇒ **一跳的前端 DFT 在 `merged_hop` 里面**：交棒批派发 **28501 / 19291 = 1.48 次/跳**（每次 14 个变换）。
+
+#### ③ ★ 一跳的真实 cb 清单（修正后的地图）
+
+| commit | 标签 | 队列 | 每跳 | wait p50 | exec p50 |
+|---|---|---|---|---|---|
+| **1** | `ce_weights`（`busy split` 里叫 `ch_wt`）| back_end | 1.00 | 36.2 | **37.1** |
+| **2** | `merged_hop` | back_end | 1.00 | 209.9 | **470.1** |
+| （不属于一跳）| `dft_front_end` | front_end | 8.51（plain 路）| 45.9 | 46.6 |
+| （不算交棒的跳）| `late_handed` | back_end | 0.48 | 282.6 | 50.2 |
+
+⇒ **一跳 = 2 个 commit**（CE + lane），与用户的记忆一致；**3 条 cb 那张表把别的通道算进来了**。
+
+#### ④ ⚠ 这修正了我上一节的一处分析（+145 µs 的"悖论"消失）
+
+§6.178④ 里我写"设备窗口 679.9 µs 比宿主段 `t2f` 534.8 µs 还长 145 µs ⇒ 不可能"——**那个悖论是我自己造的**：我把 `merged_hop` 的 `wait+exec`（**设备侧、从 commit 起算**）与 `t2f`（**宿主侧、从 IQ 起算到 FFT 结束**）相减，**两条不同来源、不同起点的时间段**。
+⇒ 修正后的关系是**接续**而非包含：
+
+```
+IQ ──[等样点 ~476]──[前端交棒+宿主提交]──┬── CE 的 cb（37.1，可与 lane 并行）
+                                          └── lane 的 cb：wait 209.9 + exec 470.1
+                                              （exec 里含前端交棒批派发 1.48 次 + eq + demap + CE 的 2 个派发）
+```
+
+#### ⑤ 校准方案因此要改写（这正是用户要的"先校准仪器"）
+
+**不再做"四路径笼统相减"**，而是**逐条 cb、同一段时间、两个来源**：
+
+| 恒等式 | 宿主侧 | 设备侧 | 应该 |
+|---|---|---|---|
+| **Ⅰ** | `ce_end − start`（绝对差）| — | == `t2f + ce`（恒等，验探针）|
+| **Ⅱ** | `ce 段 = ce_end − t2f_end` = 63.4 | `ce_weights` 的 `start→end` = 37.1 | 宿主段 ⊇ 设备窗口，差 = 宿主提交 + 未覆盖部分 |
+| **Ⅲ** | `eq_demap = 788.0` | `merged_hop` 的 `start→end` = 470.1 | 同上，差 = `commit→start`(209.9) + 宿主在段内的其他工作 |
+| **Ⅳ** | `V1 = 1407.0` | — | ≈ `ce_end − start` + `eq_demap` + ldpc |
+
+**判据**：每条的两边**必须是同一条 cb / 同一跳**，且**残差要能被已知量解释**（如 Ⅲ 的 318 µs 应 ≈ 209.9 的 `commit→start` + ~108 的宿主）；**解释不了的部分才是"未解之谜"的新证据**。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
