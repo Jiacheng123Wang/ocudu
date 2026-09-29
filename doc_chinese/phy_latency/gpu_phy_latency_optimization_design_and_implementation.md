@@ -11157,6 +11157,49 @@ const auto rx_call_end = now();      // 1340
 2. **查 A1 未命中的原因**（打印键的逐字段比较），命中后用 CE 单测确认 `apply()` 路径的数值与 flat 一致；
 3. **B + A1 一起飞腿**（`OCUDU_CE_WEIGHTS_TILE=1 OCUDU_CE_MATRIX_CACHE=1`），**对 baseline `wip/ce_refactor_baseline.md`** 判：契约 9/9 → `stale=0` → V1 → **`ce` 段** → `ce_weights` exec → `defer_wait`；**不看 `merged_hop`**（已证与内容无关）。
 
+### 6.170 **A1/`[ce_sigma2]` 的"未验证"查清了：不是代码 bug，是单测不走那条路**（2026-09-29）
+
+§6.169③ 记的两个疑点（缓存不命中、`[ce_sigma2]` 不打印）**根因同一个，而且都不是缺陷**：
+
+#### ① 取证（`OCUDU_CE_CACHE_DEBUG`）
+
+```
+[ce_cache_dbg] usable=0 valid=0 same=0 | L=36/0 nout=504/0 sys=1/0 blk=17/0 y_scatter=0 matrix=0
+（连续 8 条完全相同）
+```
+⇒ **几何在跳间是完全恒定的**（`L=36 / nout=504 / sys=1 / blk=17` 一字不变）—— 这正是缓存能成立的前提，而且它**与 §6.167③ 的 `corr` 1.4348 次/跳互为印证**。
+⇒ 但 `usable=0`，而 `usable = 缓存开 && !matrix && (corr != nullptr) && (nof_y_scatter == 0)` 里其余三项都满足 ⇒ **卡在 `corr == nullptr`**。
+
+**为什么 `corr` 是空**：离线单测走的是 `run_weights_only()` / `run()` 入口（CE 的单测把 A 在 host 侧建好再喂进来），**这两个入口根本不带 `corr_stage`** ⇒ 缓存对它**不适用**。
+**`[ce_sigma2]` 是同一个原因**：`note_sigma2()` 挂在 `correlation_stage()` 里，而加在 `correlation_stage()` 内的一次性诊断 **`[ce_cs_dbg]` 同样一条都不打印** ⇒ **该函数在单测里从未被走到**。
+
+#### ② 结论（对两项改动的意义）
+
+| 项 | 状态 |
+|---|---|
+| **B（`mmse_weights_tile`）** | ✅ 离线可验（它就是 weights 步），已验：NMSE 逐位相同、默认 203/203 |
+| **A1（几何键缓存）** | ⚠ **离线不可验，必须靠空口腿** —— 空口上 `corr` 必经（设备建矩阵），命中路径（`mmse_engine::apply()`）才会被走到 |
+| **`[ce_sigma2]`** | ⚠ 同上，空口腿才会出现 |
+
+⇒ **§6.169③ 里"A1 的收益目前是零"这句话要更正**：不是"收益是零"，而是**在这条离线路径上不适用**；它的收益只能在空口上读。
+
+#### ③ 由此得到的一条纪律（新增 32）
+
+32. ★★ **"离线验不了"要先区分是"缺陷"还是"路径不适用"**：本次两个疑点都指向同一个函数空洞（`correlation_stage()` 不在单测路径上）。判据是**在被怀疑的函数里加一次性诊断**（`[ce_cs_dbg]` 一条不打印 ⇒ 函数未被执行），而不是继续改代码。**改动只有在它自己的路径上才能被验**。
+
+#### ④ 下一步
+
+**A1 + B 一起飞腿**（两者都是空口才可读）：
+```bash
+LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
+OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 \
+OCUDU_CE_WEIGHTS_TILE=1 OCUDU_CE_MATRIX_CACHE=1 \
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p144-n78-cebA1 --regime=default
+```
+**判据（对 `wip/ce_refactor_baseline.md`）**：契约 9/9 → `stale=0` → V1 中位不退化 → **`ce` 段下降** → `ce_weights` exec 下降 → `defer_wait` → ★ **`[ce_sigma2]` 的 max/min 给出"慢变量"的实际尺度**（这正是用户要记的那本账）。
+**不看 `merged_hop`**（§6.164 已证与内容无关）。
+**注意**：Test 8 的 0.39 dB 差异只在 M 单测出现，空口判据不含它。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

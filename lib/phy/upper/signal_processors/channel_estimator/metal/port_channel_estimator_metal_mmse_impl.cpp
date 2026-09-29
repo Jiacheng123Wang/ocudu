@@ -3803,6 +3803,29 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(const metal::mmse_engine
         (mc.ncomb == corr->ncomb) && (mc.nf == corr->nf) && (mc.a_stride == corr->a_l_stride) &&
         (mc.r_stride == corr->r_stride) && (mc.fd_hz == corr->fd_hz) && (mc.tau_rms_s == corr->tau_rms_s) &&
         (mc.ts == corr->ts) && (mc.scs_hz == corr->scs_hz);
+    // OCUDU_CE_CACHE_DEBUG prints the key comparison once per hop. It earned its place: it is how the
+    // offline test showed that the geometry is CONSTANT across hops (L/nout/systems/blocks identical) while
+    // `usable` was false - i.e. that the cache was not missing, it was NOT APPLICABLE on that route, because
+    // the unit test reaches the engine through run_weights_only()/run(), which carry no corr_stage at all
+    // (dev doc 6.170). The air route is the one this cache is for.
+    if (std::getenv("OCUDU_CE_CACHE_DEBUG") != nullptr) {
+      std::fprintf(stderr,
+                   "[ce_cache_dbg] usable=%d valid=%d same=%d | L=%u/%u nout=%u/%u sys=%u/%u blk=%u/%u "
+                   "y_scatter=%u matrix=%d\n",
+                   usable ? 1 : 0,
+                   mc.valid ? 1 : 0,
+                   same ? 1 : 0,
+                   L,
+                   mc.L,
+                   nout,
+                   mc.nout,
+                   nof_systems,
+                   mc.nof_systems,
+                   nof_blocks,
+                   mc.nof_blocks,
+                   nof_y_scatter,
+                   matrix ? 1 : 0);
+    }
     if (usable && same) {
       cache_hit = true;
       ++mc.hits;
