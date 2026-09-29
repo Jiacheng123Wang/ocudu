@@ -447,6 +447,9 @@ void f1ap_du_impl::handle_initiating_message(const init_msg_s& msg)
     case msg_types::trp_info_request:
       handle_trp_information_request(msg.value.trp_info_request());
       break;
+    case msg_types::e_c_id_meas_initiation_request:
+      handle_e_cid_measurement_initiation_request(msg.value.e_c_id_meas_initiation_request());
+      break;
     case msg_types::positioning_info_request:
       handle_positioning_information_request(msg.value.positioning_info_request());
       break;
@@ -594,6 +597,27 @@ void f1ap_du_impl::handle_positioning_information_request(const asn1::f1ap::posi
   du_mng.get_ue_handler(ue->context.ue_index)
       .schedule_async_task(
           launch_async<f1ap_du_positioning_information_exchange_procedure>(msg, du_mng.get_positioning_handler(), *ue));
+}
+
+void f1ap_du_impl::handle_e_cid_measurement_initiation_request(const asn1::f1ap::e_c_id_meas_initiation_request_s& msg)
+{
+  using namespace asn1::f1ap;
+
+  logger.info("du_ue={}: Declining ECIDMeasurementInitiationRequest. Cause: The gNB-DU does not measure the E-CID "
+              "quantities",
+              msg->gnb_du_ue_f1ap_id);
+
+  f1ap_message f1ap_msg;
+  f1ap_msg.pdu.set_unsuccessful_outcome().load_info_obj(ASN1_F1AP_ID_E_C_ID_MEAS_INITIATION);
+  e_c_id_meas_initiation_fail_s& fail = f1ap_msg.pdu.unsuccessful_outcome().value.e_c_id_meas_initiation_fail();
+
+  fail->gnb_cu_ue_f1ap_id               = msg->gnb_cu_ue_f1ap_id;
+  fail->gnb_du_ue_f1ap_id               = msg->gnb_du_ue_f1ap_id;
+  fail->lmf_ue_meas_id                  = msg->lmf_ue_meas_id;
+  fail->ran_ue_meas_id                  = msg->ran_ue_meas_id;
+  fail->cause.set_radio_network().value = cause_radio_network_opts::meas_not_supported_for_the_obj;
+
+  tx_pdu_notifier->on_new_message(f1ap_msg);
 }
 
 std::optional<gnb_cu_ue_f1ap_id_t> f1ap_du_impl::get_gnb_cu_ue_f1ap_id(const du_ue_index_t& ue_index) const
