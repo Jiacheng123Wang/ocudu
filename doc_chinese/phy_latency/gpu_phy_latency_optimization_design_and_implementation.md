@@ -10963,6 +10963,60 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p138-n78-abl-all --
 31. ★★ **消去臂的协议层读数（吞吐 / CRC-OK / MAC PDU 大小 / TB 数）不能用来比较"族"**：消去**哪个**环节，决定了 **gNB 看不看得见信道变坏** —— 破坏 CE/前端 ⇒ 降 MCS、减授权（`p139` 平均 PDU 2043 B、载荷 19.7 MB），破坏 demap ⇒ gNB 看不见、不降码率（`p142` 3247 B、56.5 MB）。**这是仪器的系统性偏差，不是族的价值**。族与族之间只能比**同一个臂内**"对照 cb vs 消去 cb"的**窗口**（§6.163④ 的读数 2）。
 
 
+### 6.165 ★★ **把"IQ → CE"读成一个数**（新探针；用户指示"先补这一刀再动 CE 的代数"）—— 以及它与 470 µs 的对账口径
+
+**用户的指示（2026-09-29）**：接受 §6.164 之后的三条 CE 重构方向（A 缓存不依赖接收信号的中间量 / B 矩阵乘的访存图样 / C 串行链重叠），但**动手之前**先加一个探针：**测"CE 完成后，从 IQ 开始总共花了多少时间"** —— 理由是那 **470 µs 仍未解**，而**已知 DFT 的 Metal 时间只有 ~50 µs 量级** ⇒ 要**分段测总耗时**，与已有的分段模块测量**互相印证**，再深挖。
+
+#### ① 为什么这不是"再加一个点"，而是"把已有的三个点加起来"
+
+`ul_pipeline_probe` **早就有**三个打点（全部 `high_resolution_clock`，**同一原点**）：
+
+| 打点 | 位置 | 语义 |
+|---|---|---|
+| `record_start(slot)` | `lower_phy_baseband_processor.cpp:1322` | **IQ 到达**（用 `last_rx_timestamp` 反推槽号；注释明确：记录在 `receive()` 返回**之前**，所以**等待样点的时间也算在内**）|
+| `record_t2f_end(slot)` | `puxch_processor_impl.cpp:228/249` | **整槽时频段结束**（"whole-slot OFDM demodulation (FFT) has just finished"）|
+| `record_ce_end(slot)` | `pusch_processor_impl.cpp:357` | **估计器结束** |
+
+⇒ **`start → t2f` + `t2f → ce` 就是"IQ → CE 完成"**，三个数一直在采（空口腿每条 **9709–16016** 个配对样本）。
+
+**缺的不是测量，是"和"**：三段是**三个独立的序列**，报告按三段分别打中位数 ⇒ 读者要的"这一跳从 IQ 到出估计花了多少"从来没有作为一个读数存在过，只能**把三个中位数相加** —— 而**中位数之和不是和的中位数**（三段的分位点落在不同样本上）。这正是用户要的那一刀。
+
+#### ② 加了什么（两条序列 + 一段对账）
+
+* **`paired iq2ce (start -> ce, whole front)`** = `t2f_ns + ce_ns`，**按跳求和**，取在**配对总体**上（配对本身已经校验过三个地标同属一跳：`find_fresh` 的容差 + 槽号）；
+* **`paired iq2eqdem (start -> eq_demap)`** = `t2f_ns + eqdem_ns` ⇒ **IQ → LLR 就绪**；
+* **`Q9-G2 account`** 一行：`iq2ce 中位 = t2f 中位 + ce 中位`，并并排给出 `lane residency` / `busy` 中位与**"宿主+等待占 iq2ce 的比例"**。
+
+**口径（写死在注释里，免得日后混用）**：两条和都是**宿主墙钟**（与 `record_start` 同源）⇒ 与 `residency`、宿主地标表可比，**不可**与 `merged_hop`（设备时间）直接比。
+
+#### ③ 这一刀怎么回答"470 µs 之谜"（预登记的读法与判据）
+
+空口腿上应当同时读到**四个同一跳的数**（都已在报告里）：
+
+| # | 读数 | 来源 | 量级（历史）|
+|---|---|---|---|
+| a | `iq2ce` 中位 | ★ 新探针 | **待读**（预期 ≈ 600 µs：t2f 538 + ce 62）|
+| b | `merged_hop` exec p50 | `[metal_stats] Q9-F3 per label` | **≈470 µs** |
+| c | 前端批派发 cb 执行 | `[ul_gpu_lane] dft` / `late_handed` | **≈47–51 µs** |
+| d | 宿主参与 | `[ul_gpu_lane] paired` 的头/尾 | **≈94 µs** |
+
+**判据（三条，互相印证）**：
+1. **`iq2ce` 是否 ≈ `t2f + ce` 逐跳成立**（不是中位数相加的巧合）⇒ 探针自检；
+2. **`residency`（≈555–635 µs）与 `iq2ce` 的差** ⇒ 有多少是**设备窗口之外**的时间（宿主/等待/唤醒）。若 `iq2ce ≈ residency` ⇒ 这一段基本全在设备窗口里；若 `iq2ce ≫ residency` ⇒ **差额在宿主侧**，而且是可以被归因掉的一块；
+3. ★ **`merged_hop`（470）− 前端批派发（50）− 车道 4 个派发（≈47 按 §6.65 合计）≈ 370 µs 的空洞** —— 这正是 §6.161 用消去法**已经证明"与 kernel 内容无关"**的那一段。新探针的作用是**从宿主侧独立地圈住它**：若 `iq2ce` 与 `merged_hop` 同量级而宿主参与只有 ~94 µs ⇒ **两条独立路径都指向"窗口里有 ~370 µs 既不是算力也不是宿主"**，那么它就只能是**设备侧的排队/驻留/依赖解析**那一类，方向随之明确（而这正与 §6.161① 的候选表 d/e 吻合）。
+
+#### ④ 离线验证的边界（诚实记下）
+
+`dft_release_adopt_metal_test` **跑不出这条序列**：它的 41 条 lane **都不带槽号**（`slot named=0, not named=41`），配对直接落在 `no lane for the slot` ⇒ 报告打 **`no samples`**（**不是 0**，不会伪装成读数）。⇒ **这条序列的空口自证只能靠腿**；离线能证的是"报告结构正确、缺样本时明说"。
+
+#### ⑤ 飞腿命令
+
+```bash
+LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p143-n78-iq2ce --regime=default
+```
+
+**这是一条交付配置的腿**（**不带** `OCUDU_LANE_ABLATE`）⇒ 契约/`stale` 照常判；读 `[ul_gpu_lane] Q9-G2 account` 那三行 + `paired iq2ce` 序列，再与同腿的 `[metal_stats]` 窗口并排看 ③ 的判据 3。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
