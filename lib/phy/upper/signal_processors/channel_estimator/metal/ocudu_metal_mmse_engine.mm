@@ -494,6 +494,8 @@ struct mmse_engine_impl {
   // K0-d: the analytic correlation matrices A and R_hp (optional, same metallib).
   id<MTLComputePipelineState>    corr_a_pipe   = nil;
   id<MTLComputePipelineState>    corr_rhp_pipe = nil;
+  /// O1 (dev doc 6.174): A and R_hp in ONE dispatch (optional - a metallib without it keeps the two).
+  id<MTLComputePipelineState>    corr_merged_pipe = nil;
   // K0-a: the estimator's input stage - pilot extraction, LSE, CFO (optional, same metallib).
   id<MTLComputePipelineState>    pilots_lse_pipe   = nil;
   id<MTLComputePipelineState>    pilots_cfo_pipe   = nil;
@@ -633,6 +635,16 @@ struct mmse_engine_impl {
     return (v == 0u) ? 1u : ((v > 64u) ? 64u : v);
   }
   static unsigned corr_repeat() { return stage_repeat("OCUDU_CE_CORR_REPEAT"); }
+  /// \brief Whether A and R_hp are built in ONE dispatch (OCUDU_CE_CORR_MERGED=1, dev doc 6.174).
+  ///
+  /// A knob rather than a replacement, because the two boundaries it removes are priced on air at ~39us
+  /// each (p72/p73/p74) while the same boundary costs ~1.6us off-line, and a claim that large has to be
+  /// read on a leg. The merged kernel reproduces both expressions, so only the ISSUE changes.
+  static bool corr_merged_enabled()
+  {
+    static const bool value = (std::getenv("OCUDU_CE_CORR_MERGED") != nullptr);
+    return value;
+  }
   /// \brief Whether K1b runs the threadgroup-memory flavor (OCUDU_CE_WEIGHTS_TILE=1, dev doc 6.168).
   ///
   /// A KNOB rather than a straight replacement, because the two flavors must be comparable ON AIR: the
@@ -2202,6 +2214,14 @@ bool mmse_engine::init(const char* metallib_path)
                                                               options:MTLPipelineOptionNone
                                                            reflection:nil
                                                                 error:&err];
+    // O1 (dev doc 6.174): the merged kernel, when this metallib carries it.
+    id<MTLFunction> corr_merged_fn = [e->library newFunctionWithName:@"mmse_corr_a_rhp"];
+    if (corr_merged_fn != nil) {
+      e->corr_merged_pipe = [e->device newComputePipelineStateWithFunction:corr_merged_fn
+                                                                   options:MTLPipelineOptionNone
+                                                                reflection:nil
+                                                                     error:&err];
+    }
   }
   // ARC-managed; no explicit release.
   return e->inv_pipe != nil && e->weights_pipe != nil && e->apply_pipe != nil;
@@ -2734,6 +2754,43 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
     }
     [enc setBuffer:sig_buf.buf offset:sig_buf.offset atIndex:2];
   }
+  // O1 (dev doc 6.174): ONE dispatch for both matrices when asked for. The knob is checked here rather
+  // than at the pipeline choice because the encoder binds the pipeline that goes with the grid, and the
+  // two grids differ in size - the merged one covers the union of A's Ls*Ls and R_hp's nout*L.
+  if (mmse_engine_impl::corr_merged_enabled() && (e->corr_merged_pipe != nil)) {
+    // The grid is the UNION of the two matrices' widths with one extra gid.y for A (see the kernel):
+    // gid.y == 0 is A, gid.y in [1, nof_systems] is R_hp's system gid.y - 1.
+    const NSUInteger union_elems = (a_per_sys > rhp_per_sys) ? a_per_sys : rhp_per_sys;
+    enc                          = stage_pipeline(e, s, e->corr_merged_pipe);
+    [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:0];
+    [enc setBuffer:rhp_buf.buf offset:rhp_buf.offset atIndex:1];
+    [enc setBytes:&p length:sizeof(p) atIndex:2];
+    // buffer(3) must be bound even when the kernel does not read it: MSL leaves an unbound device
+    // pointer undefined, and the A kernel reads scalars[p.sigma2_slot] whenever sigma2_from_device
+    // says so. Same rule as the two-kernel route above (see its own note).
+    if (c.sigma2_dev != nullptr) {
+      mmse_engine_impl::mapped sig_buf = e->wrap(c.sigma2_dev, 4 * sizeof(float));
+      if (sig_buf.buf == nil) {
+        return false;
+      }
+      [enc setBuffer:sig_buf.buf offset:sig_buf.offset atIndex:3];
+    }
+    for (unsigned rep = 0; rep != mmse_engine_impl::corr_repeat(); ++rep) {
+      // BOTH counters, because both matrices are built by this one dispatch: the site census is what the
+      // legs read to know what ran, and it has to keep answering "A was built" and "R_hp was built".
+      ce_site_diag().corr_a.fetch_add(1, std::memory_order_relaxed);   // dev doc 6.61
+      ce_site_diag().corr_rhp.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
+      // ALWAYS dispatchThreadgroups() here, whatever corr_uniform() says: this kernel's second grid
+      // dimension carries the MATRIX, and dispatchThreads() with a 1-D threadgroup does not tile it -
+      // gid.y would stay 0 and every matrix but the first would never be built (measured off-line; see
+      // the kernel's own warning). The padding dispatchThreadgroups() adds is already guarded.
+      const NSUInteger tgs = (union_elems + 255u) / 256u;
+      [enc dispatchThreadgroups:MTLSizeMake(tgs, nof_systems + 1u, 1)
+          threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    }
+    return true;
+  }
+
   for (unsigned rep = 0; rep != mmse_engine_impl::corr_repeat(); ++rep) {
     if (mmse_engine_impl::corr_uniform()) {
       // EXPERIMENT (OCUDU_CE_CORR_UNIFORM=1): whole threadgroups instead of non-uniform ones.
@@ -2765,7 +2822,6 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
       [enc dispatchThreads:MTLSizeMake(rhp_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }
   }
-
   return true;
 }
 

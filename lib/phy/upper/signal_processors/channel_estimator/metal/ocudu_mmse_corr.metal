@@ -197,3 +197,109 @@ kernel void mmse_corr_r_hp(device float* r_hp [[buffer(0)]],
     // written elsewhere in the buffer (measured: 2916 of 27216 non-zero, 2916 = L * L).
     r_sys[(ulong)o * p.Ls + col] = rt * rf;
 }
+
+// ---------------------------------------------------------------------------------------------------
+// O1 (dev doc 6.174): A and R_hp in ONE dispatch.
+//
+// WHY. The two kernels above have identical shapes - same parameter block, same second grid
+// dimension (the system), one thread per output element - and their outputs are INDEPENDENT: A is
+// L*L per system, R_hp is (nout*L) per system, and neither reads what the other writes. Dispatched
+// separately they cost two dispatch boundaries per correlation build, and the air legs price a
+// boundary at ~39us (p72/p73/p74: merged_hop 468.7 -> 703.4us as the front end's 14 transforms went
+// from 1 dispatch to 7, with the threadgroup count unchanged) against the ~1.6us the same boundary
+// costs off-line - a 24x gap that no measurement of the boundary itself explains, which is exactly
+// why removing one is worth trying.
+//
+// HOW. One flat grid over [0, Ls*Ls + nout*L) with the system as the second dimension: an index
+// below a_elems is an A element (and the pad inside Ls*Ls keeps the blockdiag identity, as the A
+// kernel does), one above it is an R_hp element. Every thread computes exactly what its own kernel
+// above computes, with the same expressions, so the two destinations end up bit-identical to the two
+// dispatches' result - "one dispatch" here changes WHEN the work is issued, not what is computed.
+//
+// \note The grids differ in size (Ls*Ls against nout*L), so the dispatch covers the union and the
+//       guard below is that union's bound. Both original kernels already guard their own index, and
+//       this one reproduces both guards: the pad of A is still written, which is what the inversion
+//       reads.
+kernel void mmse_corr_a_rhp(device float* a [[buffer(0)]],
+                            device float* r_hp [[buffer(1)]],
+                            constant mmse_corr_params& p [[buffer(2)]],
+                            device const float* scalars [[buffer(3)]],
+                            uint2 gid [[thread_position_in_grid]])
+{
+    // THE SECOND GRID DIMENSION CARRIES THE MATRIX, not the system: gid.y == 0 is A (one lane per
+    // system), gid.y in [1, nof_systems] is R_hp's system gid.y - 1.
+    //
+    // \warning THIS KERNEL MUST BE DISPATCHED WITH dispatchThreadgroups(), NOT dispatchThreads(). With a
+    //          1-D threadgroup (256,1,1) and a 2-D grid, dispatchThreads() does NOT tile the second
+    //          dimension: gid.y stays 0 and every row but the first is never executed - measured on the
+    //          offline harness, where the merged kernel then left A's whole first system untouched (the
+    //          buffer kept its previous contents). dispatchThreadgroups() tiles both dimensions with the
+    //          grid the caller gives, and both guards below already tolerate the padding it adds.
+    //
+    // WHY IT IS NOT ONE FLAT RANGE OVER BOTH. The first version laid A's Ls*Ls elements and R_hp's
+    // nout*L elements end to end in gid.x, with gid.y still meaning "the system". That reads well until
+    // the grids are wrapped into threadgroups: A's row is Ls*Ls wide and R_hp's is nout*L, so after the
+    // wrap the two matrices' system boundaries no longer coincide, and the harness measured the
+    // consequence - R_hp came out byte-identical while A's SECOND system kept the values that were in
+    // the buffer before the dispatch (128 elements, the tail of A's slot). A missing write is the worst
+    // kind of defect to find on air, so the layout is now one that cannot express it: each matrix owns
+    // its own gid.y slice and indexes its systems from zero.
+    const uint Ls      = (p.Ls != 0u) ? p.Ls : p.L;
+    const uint a_elems = Ls * Ls;
+    const uint nout    = p.nf * 14u;
+
+    if (gid.y == 0u) {
+        // ---- A: the mmse_corr_a element, expression for expression ----------------------------------
+        if (gid.x >= a_elems) {
+            return;
+        }
+        device float* a_sys = a + (ulong)gid.y * p.a_sys;
+        const uint    i     = gid.x;
+        const uint    row   = i / Ls;
+        const uint    col   = i % Ls;
+        if ((row >= p.L) || (col >= p.L)) {
+            a_sys[(ulong)row * Ls + col] = (row == col) ? 1.0f : 0.0f;
+            return;
+        }
+        const uint t1 = row / p.npf;
+        const uint f1 = row % p.npf;
+        const uint t2 = col / p.npf;
+        const uint f2 = col % p.npf;
+
+        const int   dt = (int)p.dmrs_slots[t1] - (int)p.dmrs_slots[t2];
+        const float rt = mmse_rt_corr((float)abs(dt) * p.ts, p.fd_hz);
+
+        const int   df = (int)mmse_corr_pilot_subcarrier(p, f1) - (int)mmse_corr_pilot_subcarrier(p, f2);
+        const float rf = mmse_rf_corr((float)abs(df) * p.scs_hz, p.tau_rms_s);
+
+        const float sigma2 = (p.sigma2_from_device != 0u) ? scalars[p.sigma2_slot] : p.sigma2;
+        float       v      = rt * rf;
+        if (row == col) {
+            v += sigma2 + p.ridge;
+        }
+        a_sys[(ulong)row * p.Ls + col] = v;
+        return;
+    }
+
+    // ---- R_hp: the mmse_corr_r_hp element, expression for expression --------------------------------
+    const uint sys = gid.y - 1u;
+    if ((sys >= p.nof_systems) || (gid.x >= nout * p.L)) {
+        return;
+    }
+    device float* r_sys = r_hp + (ulong)sys * p.r_sys;
+    const uint    i     = gid.x;
+    const uint    o     = i / p.L;
+    const uint    col   = i % p.L;
+    const uint    sym   = o / p.nf;
+    const uint    sc    = o % p.nf;
+    const uint    t2    = col / p.npf;
+    const uint    f2    = col % p.npf;
+
+    const int   dt = (int)sym - (int)p.dmrs_slots[t2];
+    const float rt = mmse_rt_corr((float)abs(dt) * p.ts, p.fd_hz);
+
+    const int   df = (int)sc - (int)mmse_corr_pilot_subcarrier(p, f2);
+    const float rf = mmse_rf_corr((float)abs(df) * p.scs_hz, p.tau_rms_s);
+
+    r_sys[(ulong)o * p.Ls + col] = rt * rf;
+}

@@ -211,6 +211,7 @@ int main(int argc, char** argv)
     id<MTLComputePipelineState> p_apply_lse  = pipeline("mmse_apply_lse");
     id<MTLComputePipelineState> p_corr_a     = pipeline("mmse_corr_a");
     id<MTLComputePipelineState> p_corr_rhp   = pipeline("mmse_corr_r_hp");
+    id<MTLComputePipelineState> p_corr_merged = pipeline("mmse_corr_a_rhp");
     id<MTLComputePipelineState> p_reformat   = pipeline("mmse_reformat");
     // The equalizer and the demapper live in their own libraries; they are OPTIONAL here (a checkout
     // that has not built them still gets the CE table).
@@ -880,6 +881,137 @@ int main(int argc, char** argv)
                   enc_1,
                   enc_16,
                   (enc_16 - enc_1) / 15.0);
+    }
+
+    // O1 (dev doc 6.174): the merged correlation kernel against the two it replaces, BYTE FOR BYTE.
+    //
+    // This is the arm that decides whether "one dispatch" changed anything it was not allowed to change.
+    // Both destinations are read back from the device and compared element by element; a single differing
+    // float means the merged kernel is not the same computation, and the knob must not be flown.
+    if (p_corr_merged != nil && p_corr_a != nil && p_corr_rhp != nil) {
+      const geometry   g3{};
+      const NSUInteger a_elems3 = static_cast<NSUInteger>(g3.L()) * g3.L();
+      const NSUInteger r_elems3 = static_cast<NSUInteger>(g3.nout()) * g3.L();
+      corr_params      c4{};
+      c4.nof_systems        = g3.systems();
+      c4.npt                = g3.npt;
+      c4.npf                = g3.npf();
+      c4.ncomb              = g3.ncomb;
+      c4.nf                 = g3.nf();
+      c4.L                  = g3.L();
+      c4.Ls                 = g3.L();
+      c4.a_sys              = g3.L() * g3.L();
+      c4.r_sys              = g3.nout() * g3.L();
+      c4.ts                 = 1.0F / (15e3F * 14.0F);
+      c4.scs_hz             = 15e3F;
+      c4.fd_hz              = 300.0F;
+      c4.tau_rms_s          = 370e-9F;
+      c4.sigma2             = 0.01F;
+      c4.ridge              = 1e-6F;
+      c4.sigma2_from_device = 0;
+      c4.sigma2_slot        = 0;
+      c4.dmrs_slots[0]      = 2;
+      c4.dmrs_slots[1]      = 7;
+      c4.dmrs_slots[2]      = 11;
+      // pilot_re holds the pilot positions WITHIN one PRB - at most 12 - while npf (18) counts them
+      // across the hop's DM-RS symbols. Filling npf of them wrote past the array and corrupted the stack
+      // (the harness aborted before printing anything, with no diagnostic).
+      for (uint32_t i = 0; i != 12u && i != g3.ncomb; ++i) {
+        c4.pilot_re[i] = i * 2u; // comb 2, the air leg's pattern
+      }
+      // Fill the inputs with a deterministic pattern so a wrong index shows up as a difference.
+      float* af = static_cast<float*>(b_a.contents);
+      for (NSUInteger i = 0; i != big / sizeof(float); ++i) {
+        af[i] = static_cast<float>((i * 2654435761u) % 1000u) / 1000.0F;
+      }
+      const auto run_two = [&]() {
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:p_corr_a];
+        [enc setBuffer:b_a offset:0 atIndex:0];
+        [enc setBytes:&c4 length:sizeof(c4) atIndex:1];
+        [enc dispatchThreads:MTLSizeMake(a_elems3, c4.nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc setComputePipelineState:p_corr_rhp];
+        [enc setBuffer:b_rhp offset:0 atIndex:0];
+        [enc setBytes:&c4 length:sizeof(c4) atIndex:1];
+        [enc dispatchThreads:MTLSizeMake(r_elems3, c4.nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+      };
+      const auto run_merged = [&]() {
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:p_corr_merged];
+        [enc setBuffer:b_a offset:0 atIndex:0];
+        [enc setBuffer:b_rhp offset:0 atIndex:1];
+        [enc setBytes:&c4 length:sizeof(c4) atIndex:2];
+        // Same grid AND the same dispatch call the engine uses: the wider of the two matrices, plus one
+        // gid.y for A. dispatchThreadgroups(), because dispatchThreads() with a 1-D threadgroup does not
+        // tile the second grid dimension.
+        const NSUInteger wider = (a_elems3 > r_elems3) ? a_elems3 : r_elems3;
+        const NSUInteger tgs_m = (wider + 255u) / 256u;
+        [enc dispatchThreadgroups:MTLSizeMake(tgs_m, c4.nof_systems + 1u, 1)
+            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+      };
+      run_two();
+      std::vector<float> a_two(static_cast<size_t>((a_elems3 + 64) * c4.nof_systems));
+      std::vector<float> r_two(static_cast<size_t>((r_elems3 + 64) * c4.nof_systems));
+      std::memcpy(a_two.data(), b_a.contents, a_two.size() * sizeof(float));
+      std::memcpy(r_two.data(), b_rhp.contents, r_two.size() * sizeof(float));
+      std::memset(b_a.contents, 0, a_two.size() * sizeof(float));
+      std::memset(b_rhp.contents, 0, r_two.size() * sizeof(float));
+      run_merged();
+      std::vector<float> a_m(static_cast<size_t>((a_elems3 + 64) * c4.nof_systems));
+      std::vector<float> r_m(static_cast<size_t>((r_elems3 + 64) * c4.nof_systems));
+      std::memcpy(a_m.data(), b_a.contents, a_m.size() * sizeof(float));
+      std::memcpy(r_m.data(), b_rhp.contents, r_m.size() * sizeof(float));
+      size_t diff_a = 0;
+      size_t diff_r = 0;
+      for (size_t i = 0; i != a_two.size(); ++i) {
+        if (a_two[i] != a_m[i]) {
+          ++diff_a;
+        }
+      }
+      for (size_t i = 0; i != r_two.size(); ++i) {
+        if (r_two[i] != r_m[i]) {
+          ++diff_r;
+        }
+      }
+      // WHERE the differences are, when there are any: an index inside Ls*Ls is an element of A and a
+      // count of 128 (2 systems x 64) points at the PAD, which is the one region where the two routes
+      // could legitimately disagree (the pad is written by the caller on the two-kernel route).
+      {
+        size_t shown = 0;
+        for (size_t i = 0; (i != a_two.size()) && (shown != 4); ++i) {
+          if (a_two[i] != a_m[i]) {
+            const size_t sys = i / (a_elems3 + 64);
+            const size_t in  = i % (a_elems3 + 64);
+            std::printf("[O1]   A diff at i=%zu (system %zu, within-system %zu): two=%.9g merged=%.9g  "
+                        "Ls*Ls=%lu L=%u\n",
+                        i,
+                        sys,
+                        in,
+                        static_cast<double>(a_two[i]),
+                        static_cast<double>(a_m[i]),
+                        static_cast<unsigned long>(g3.L() * g3.L()),
+                        g3.L());
+            ++shown;
+          }
+        }
+      }
+      std::printf("\n[O1] merged corr kernel vs the two it replaces (systems=%u, L=%u): "
+                  "A differs in %zu of %zu, R_hp in %zu of %zu -> %s\n",
+                  c4.nof_systems,
+                  g3.L(),
+                  diff_a,
+                  a_two.size(),
+                  diff_r,
+                  r_two.size(),
+                  ((diff_a == 0) && (diff_r == 0)) ? "BYTE-IDENTICAL" : "DIFFERENT (do not fly the knob)");
     }
 
     std::printf("\nRead it against the hop: the legs' merged_hop is ~534 us/lane, of which the CE's own\n"
