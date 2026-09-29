@@ -10568,6 +10568,32 @@ p116: tokens_early=signals:0,     by_event:0,     by_complete:36733   ← 对照
 **★ 仪器缺口与下一步（要真正裁决 GPU 侧，只需补一小段探针）**：设备侧确实存在**罕见的 5–10× 执行时间**（`p130`：`merged_hop` exec max **4651** vs p50 457 µs、`ce_weights` max **751** vs 41.6、前端 max 242–251 vs 47），但现有 Q9-F3 报告**只记录"最慢的等待（commit→start）"及其 slot**，**不记录"最慢的执行（start→end）"在何时/哪一跳** ⇒ 无法判断那些 10× 执行是否落在长空闲之后。**✅ 已实施（2026-09-29，`ocudu_metal_queue.mm`）**：在 Q9-F3 报告里加了 **"slowest executions, by start→end"** 表，每行 = `label + slot + exec(start→end) + commit→start + idle_before（该条开始前"任何被探队列都没在执行"的时长，复用 union walk 的 frontier 现成算出来）+ t+（相对首条记录提交时刻的腿内偏移）`。**同一把钥匙**（`OCUDU_METAL_GPU_TIME=1`；不开探针时没有记录、一行不打印 ⇒ 交付路径逐字节不变）。**离线冒烟**：`OCUDU_METAL_GPU_TIME=1 ./build/lib/phy/generic_functions/metal/dft_release_adopt_metal_test` 真打出该表（如 `label=lane_burst exec=598.4us commit->start=65.5us idle_before=0.29ms t+=0.1s`），`ctest -L phy` 全绿。⚠ **一个坑**：该 harness **不在 `cmake --build build` 的默认目标里**（要 `--target dft_release_adopt_metal_test` 才重链）⇒ 只看默认构建会以为"已重编"，实测第一次冒烟就是旧二进制（无新行）。
 **判读（腿侧，一条就够）**：看那 8 条 exec 最大项 —— **exec 5–10× 且 `idle_before` 是几百 ms/秒级 ⇒ GPU 冷启动成立**（修法：保温/周期小派发）；**exec 5–10× 但 `idle_before` 只有几百 µs（即处在忙段里）⇒ 是争用/收尾事件**（与 ⑧ 检验 2 的"收尾时间簇"一致），不必为睡眠做改动。
 
+#### ⑨ `p132-n78-exec`（新表首读，2026-09-29）：**8 条最慢的设备执行全部"开工时 GPU 正忙" ⇒ GPU 冷启动被否**；7/8 落在 iperf3 密集段
+
+**腿状态**（HEAD `aa10f6706b`，knobs 只有 `OCUDU_METAL_GPU_TIME=1` ⇒ D1 按默认武装）：契约 **9 of 9**、**`[ul_dft_wait] no samples`**（再次印证交棒已开）、`gaps=0`、`stale=0`、PRACH **1**、PHR +10..11 dB、输运 **健康**（`dl_tx_call>1ms` = **1/200106 = 0.0005%**）；V1 中位 **1430.5**（p95 1563.1）；`leg_gate` **8 of 8**、A1-2 **5 of 5**（顺带：这条腿**还清了审计 default 侧在当前 HEAD 上的账**）。
+
+**流量时间轴**（`.log` 逐跳）：**10–50 s = ping 段**（5–94 跳/10 s、TBS 中位 ≈530 B）；**50–100 s = iperf3 段**（**6000 跳/10 s = 600 跳/s**、TBS 中位 ≈3.3 KB）。
+
+**★ 新表（`slowest executions`）首读**：
+
+| exec | `idle_before` | `t+` | 段 |
+|---|---|---|---|
+| **1342.0 µs** | **0.10 ms** | 74.5 s | iperf3 |
+| 1010.9 | **0.00** | 76.2 | iperf3 |
+| 1003.0 | **0.09** | 84.7 | iperf3 |
+| 914.0 | 0.08 | 10.4 | ping |
+| 909.2 | 0.04 | 89.8 | iperf3 |
+| 840.0 | **0.00** | 76.4 | iperf3 |
+| 839.0 | **0.00** | 89.9 | iperf3 |
+| 825.1 | **0.00** | 90.3 | iperf3 |
+
+* ★ **八条全部 `idle_before` ≤ 0.10 ms** —— 它们**开工的那一刻，被探队列上已经有东西在执行**。冷启动要求的是**几百 ms–秒级的空闲**，这里连 0.1 ms 都没有 ⇒ **GPU 冷启动被否**（这正是用户提出该假设时我们缺的那条读数）。
+* ★ **7/8 落在 iperf3 密集段**（`t+` 74–90 s；唯一 ping 段那条 `idle_before` 也是 0.08 ms）⇒ 慢执行住在**忙段**里。
+* **量级**：`merged_hop` exec **p50 469.3 / p95 493.7 / max 1342.0 µs** ⇒ 最慢 8 条是 **1.76–2.86×**；小缓冲的相对离群更大：`ce_weights` max **749.2**（p50 42.5 ⇒ **17.6×**）、`dft_front_end` max **383.0**（p50 46.6 ⇒ **8.2×**）。**等待**的最大值也在忙段（`dft_front_end` wait max 1399.9、`ce_weights` 1823.2、`merged_hop` 1012.5 µs）。
+* 另一条否证：本腿**最长的 GPU 空洞 2674.3 ms**，紧跟其后的是一条 **`dft_front_end`（plain/PRACH 路）**——"睡醒"之后并不是慢跳。
+
+**⇒ 结论**：设备侧的 2–3×（小缓冲 8–18×）**发生在忙段，且开始时 GPU 已在执行** ⇒ 机制是**争用/共驻留**，不是 GPU 冷启动；与宿主侧三条检验（⑦ 密度↔时延负相关、⑧ 空闲间隔不预测时延、尾巴落在收尾窗口）**方向一致**。**这条假设结案**：现在**没有**任何证据支持"保温/防降频"式改动。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
