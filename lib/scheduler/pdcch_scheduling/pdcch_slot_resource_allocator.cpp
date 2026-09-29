@@ -75,20 +75,28 @@ bool pdcch_slot_allocator::cancel_last_pdcch(cell_slot_resource_allocator& slot_
   }
   auto& last_rec = records.back();
 
-  if (not slot_alloc.result.dl.dl_pdcchs.empty() and last_rec.pdcch_ctx == &slot_alloc.result.dl.dl_pdcchs.back().ctx) {
-    slot_alloc.result.dl.dl_pdcchs.pop_back();
-  } else if (not slot_alloc.result.dl.ul_pdcchs.empty() and
-             last_rec.pdcch_ctx == &slot_alloc.result.dl.ul_pdcchs.back().ctx) {
-    slot_alloc.result.dl.ul_pdcchs.pop_back();
-  } else {
+  const bool is_dl_pdcch =
+      not slot_alloc.result.dl.dl_pdcchs.empty() and last_rec.pdcch_ctx == &slot_alloc.result.dl.dl_pdcchs.back().ctx;
+  const bool is_ul_pdcch = not is_dl_pdcch and not slot_alloc.result.dl.ul_pdcchs.empty() and
+                           last_rec.pdcch_ctx == &slot_alloc.result.dl.ul_pdcchs.back().ctx;
+  if (not is_dl_pdcch and not is_ul_pdcch) {
     return false;
   }
 
-  // Clear allocation on resource grid.
+  // Read the resources taken by the PDCCH while its PDU is still alive.
   const sched_coreset_config& cs_cfg   = *last_rec.cs_cfg;
   const crb_index_list_span pdcch_crbs = cs_cfg.candidate_crbs(dfs_tree.back().ncce, last_rec.pdcch_ctx->cces.aggr_lvl);
-  ofdm_symbol_range         symbols{0, (uint8_t)cs_cfg.cfg().duration()};
-  slot_alloc.dl_res_grid.clear(last_rec.pdcch_ctx->bwp_cfg->scs, symbols, pdcch_crbs);
+  const ofdm_symbol_range   symbols{0, (uint8_t)cs_cfg.cfg().duration()};
+  const subcarrier_spacing  scs = last_rec.pdcch_ctx->bwp_cfg->scs;
+
+  if (is_dl_pdcch) {
+    slot_alloc.result.dl.dl_pdcchs.pop_back();
+  } else {
+    slot_alloc.result.dl.ul_pdcchs.pop_back();
+  }
+
+  // Clear allocation on resource grid.
+  slot_alloc.dl_res_grid.clear(scs, symbols, pdcch_crbs);
 
   dfs_tree.pop_back();
   records.pop_back();
