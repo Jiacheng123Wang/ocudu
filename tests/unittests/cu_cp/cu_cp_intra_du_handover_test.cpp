@@ -978,7 +978,7 @@ public:
                                                        /*max_nof_dus*/ 8,
                                                        /*max_nof_ues*/ 1})
   {
-    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b");
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b", "MVP-FUNC-SVCS-16-1");
   }
 };
 

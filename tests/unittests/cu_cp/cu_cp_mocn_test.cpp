@@ -4,6 +4,7 @@
 
 #include "cu_cp_test_environment.h"
 #include "test_doubles/mock_amf.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/e1ap/e1ap_cu_cp_test_messages.h"
 #include "tests/test_doubles/f1ap/f1ap_test_message_validators.h"
 #include "tests/test_doubles/f1ap/f1ap_test_messages.h"
@@ -50,6 +51,7 @@ public:
                                                  /*max_nof_drbs_per_ue*/ 8,
                                                  /*amf_config*/ make_amf_test_config()})
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-RANS-16-1");
   }
 };
 

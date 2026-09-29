@@ -4,6 +4,7 @@
 
 #include "cu_cp_test_environment.h"
 #include "test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/f1ap/f1ap_test_message_validators.h"
 #include "tests/test_doubles/f1ap/f1ap_test_messages.h"
 #include "tests/test_doubles/ngap/ngap_test_message_validators.h"
@@ -474,6 +475,8 @@ public:
 
 TEST_F(cu_cp_setup_admission_limit_test, when_initial_ul_rrc_message_is_rejected_by_admission_then_ue_is_released)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-1");
+
   ASSERT_TRUE(send_initial_ul_rrc_message_and_await_ue_context_release_command());
 
   // Admission rejection must not progress into NGAP Initial UE Message flow.
@@ -500,6 +503,8 @@ TEST_F(cu_cp_setup_admission_limit_test, when_initial_ul_rrc_message_is_rejected
 TEST_F(cu_cp_setup_admission_limit_test,
        when_du_disconnects_while_ue_context_release_is_in_flight_then_teardown_does_not_crash)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   ASSERT_TRUE(send_initial_ul_rrc_message_and_await_ue_context_release_command());
 
   // Do not inject the F1AP UE Context Release Complete: the release transaction is left in flight.
@@ -516,6 +521,8 @@ TEST_F(cu_cp_setup_admission_limit_test,
 TEST_F(cu_cp_setup_admission_limit_test,
        when_rrc_reject_wait_time_is_not_configured_then_rrc_reject_has_no_wait_time_ie)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-1");
+
   // rrc_reject_wait_time is optional and left unset in the default configuration.
   ASSERT_FALSE(get_cu_cp_cfg().rrc.rrc_reject_wait_time.has_value());
 
@@ -548,6 +555,7 @@ public:
                                            /*enable_xnc_peer*/ false,
                                            /*rrc_reject_wait_time*/ std::chrono::seconds{reject_wait_time_s}})
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-1");
   }
 };
 
