@@ -445,6 +445,9 @@ struct mmse_engine_impl {
   // barrier's synchronization" as the cause of K1's ~2us-per-pivot cost. See ocudu_mmse_inv.metal.
   id<MTLComputePipelineState>    inv_memnone_pipe = nil;
   id<MTLComputePipelineState>    weights_pipe = nil;
+  /// B (dev doc 6.168): the same product with A^-1 hoisted into threadgroup memory. Optional: a metallib
+  /// that predates the kernel leaves the flat one as the only route (the availability check below).
+  id<MTLComputePipelineState>    weights_tile_pipe = nil;
   id<MTLComputePipelineState>    apply_pipe  = nil;
   /// K2 over the LSE (lever C of dev doc 6.61): the same h = W . y, with the pilot rows read from the
   /// least-squares pilots instead of from the y slots the scatter builds. OPTIONAL on purpose - a
@@ -630,6 +633,16 @@ struct mmse_engine_impl {
     return (v == 0u) ? 1u : ((v > 64u) ? 64u : v);
   }
   static unsigned corr_repeat() { return stage_repeat("OCUDU_CE_CORR_REPEAT"); }
+  /// \brief Whether K1b runs the threadgroup-memory flavor (OCUDU_CE_WEIGHTS_TILE=1, dev doc 6.168).
+  ///
+  /// A KNOB rather than a straight replacement, because the two flavors must be comparable ON AIR: the
+  /// new one is bit-identical by construction (same k order, same separate multiply and add), and the way
+  /// to prove that is a pair of legs, not an argument. Off leaves the delivery path exactly as it was.
+  static bool weights_tile_enabled()
+  {
+    static const bool value = (std::getenv("OCUDU_CE_WEIGHTS_TILE") != nullptr);
+    return value;
+  }
   /// \brief Whether the correlation kernels are dispatched as WHOLE threadgroups (OCUDU_CE_CORR_UNIFORM).
   ///
   /// The two correlation kernels use dispatchThreads() (non-uniform threadgroups), while K1 and the
@@ -2029,6 +2042,17 @@ bool mmse_engine::init(const char* metallib_path)
                                                            options:MTLPipelineOptionNone
                                                         reflection:nil
                                                              error:&err];
+  // B (dev doc 6.168). Loaded when the metallib carries it; the RUN decides whether to use it (see
+  // weights_tile_enabled()). Not required for init to succeed: an older metallib must not brick the run.
+  {
+    id<MTLFunction> wgt_tile_fn = [e->library newFunctionWithName:@"mmse_weights_tile"];
+    if (wgt_tile_fn != nil) {
+      e->weights_tile_pipe = [e->device newComputePipelineStateWithFunction:wgt_tile_fn
+                                                                    options:MTLPipelineOptionNone
+                                                                 reflection:nil
+                                                                      error:&err];
+    }
+  }
   e->apply_pipe = [e->device newComputePipelineStateWithFunction:app_fn
                                                          options:MTLPipelineOptionNone
                                                       reflection:nil
@@ -4417,13 +4441,38 @@ bool encode_weights_only(mmse_engine_impl*                  e,
     }
   }
 
-  enc = stage_pipeline(e, st, e->weights_pipe);
+  // B (dev doc 6.168): the tile flavor when the knob asks for it AND the metallib has it. The fallback is
+  // the flat kernel, so a stale metallib degrades to the delivery behavior instead of failing.
+  bool use_weights_tile = mmse_engine_impl::weights_tile_enabled() && (e->weights_tile_pipe != nil);
+  enc = stage_pipeline(e, st, use_weights_tile ? e->weights_tile_pipe : e->weights_pipe);
   [enc setBuffer:rp_buf.buf offset:rp_buf.offset atIndex:0];
   [enc setBuffer:ai_buf.buf offset:ai_buf.offset atIndex:1];
   [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:2];
   [enc setBytes:&wparams length:sizeof(wparams) atIndex:3];
-  // One thread per output element: nof_systems * ceil(nout * L / 128) threadgroups.
-  {
+  if (use_weights_tile) {
+    // L is bounded by the kernel's threadgroup buffer (mmse_weights_tile_max). MEASURED, not assumed
+    // (2026-09-29): the live configurations reach L=72 exactly (51 PRB / block 3 PRB / 4 DM-RS, nout=504),
+    // and corr_stage validates only `npt <= 4` and `npf == nof_pilots * ncomb` - so the bound below is the
+    // one thing standing between a configuration this kernel was not sized for and a silent write past the
+    // threadgroup buffer. A run that trips it falls back to the flat kernel rather than corrupting memory.
+    if (L > 72u) {
+      static std::atomic<bool> warned{false};
+      if (!warned.exchange(true)) {
+        std::fprintf(stderr,
+                     "[ce_weights_tile] L=%u exceeds the kernel's threadgroup buffer (72) - falling back to "
+                     "the flat kernel. This is a CONFIGURATION the tile flavor was never sized for.\n",
+                     L);
+      }
+      use_weights_tile = false;
+    }
+    // One threadgroup per 128 output ROWS of one system (not per 128 flattened elements): the threadgroup
+    // shares that system's A^-1, and 128 consecutive rows of one system are exactly what the cooperative
+    // load and the row walk want. ceil, so a nout that is not a multiple of 128 still covers every row.
+    const NSUInteger row_blocks = (static_cast<NSUInteger>(nout) + 127u) / 128u;
+    [enc dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>(nof_systems) * row_blocks, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+  } else {
+    // One thread per output element: nof_systems * ceil(nout * L / 128) threadgroups.
     const NSUInteger w_tgs = (static_cast<NSUInteger>(nout) * static_cast<NSUInteger>(L) + 127) / 128;
     [enc dispatchThreadgroups:MTLSizeMake(nof_systems * w_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
   }
