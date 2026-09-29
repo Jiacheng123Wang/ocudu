@@ -729,7 +729,7 @@ TEST_F(cu_cp_connectivity_test, when_the_du_deletes_a_cell_then_its_ues_are_rele
 
 TEST_F(cu_cp_connectivity_test, when_du_connection_is_lost_then_connected_ues_are_released)
 {
-  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9", "MVP-ARCH-INTF-11");
 
   // Run NG setup to completion.
   run_ng_setup();
@@ -781,6 +781,8 @@ TEST_F(cu_cp_connectivity_test, when_du_connection_is_lost_then_connected_ues_ar
 
 TEST_F(cu_cp_connectivity_test, when_new_e1_setup_request_is_received_and_ng_is_setup_then_e1_setup_is_accepted)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-11");
+
   // Run NG setup to completion.
   run_ng_setup();
 
@@ -803,6 +805,8 @@ TEST_F(cu_cp_connectivity_test, when_new_e1_setup_request_is_received_and_ng_is_
 
 TEST_F(cu_cp_connectivity_test, when_max_nof_cu_ups_connected_reached_then_cu_cp_rejects_new_cu_up_connections)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-11");
+
   // Run NG setup to completion.
   run_ng_setup();
 
@@ -821,6 +825,8 @@ TEST_F(
     cu_cp_connectivity_test,
     when_max_nof_cu_ups_connected_reached_and_cu_up_connection_drops_then_cu_up_is_removed_from_cu_cp_and_new_cu_up_connection_is_accepted)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-11");
+
   // Run NG setup to completion.
   run_ng_setup();
 
@@ -845,6 +851,8 @@ TEST_F(
 TEST_F(cu_cp_connectivity_test,
        when_e1_release_request_is_received_and_no_ues_are_connected_then_release_response_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-11");
+
   // Run NG setup to completion.
   run_ng_setup();
 
@@ -879,6 +887,8 @@ TEST_F(cu_cp_connectivity_test,
 TEST_F(cu_cp_connectivity_test,
        when_e1_release_request_is_received_and_ues_are_connected_then_ues_are_released_and_release_response_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-11");
+
   // Run NG setup to completion.
   run_ng_setup();
 
@@ -937,7 +947,7 @@ TEST_F(cu_cp_connectivity_test,
 
 TEST_F(cu_cp_connectivity_test, when_ng_f1_e1_are_setup_then_ues_can_attach)
 {
-  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9", "MVP-ARCH-INTF-11");
 
   // Run NG setup to completion.
   run_ng_setup();
@@ -989,6 +999,8 @@ TEST_F(cu_cp_connectivity_test, when_ng_f1_e1_are_setup_then_ues_can_attach)
 
 TEST_F(cu_cp_connectivity_test, when_e1_is_not_setup_then_new_ues_are_rejected)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-11");
+
   // Run NG setup to completion.
   run_ng_setup();
 
