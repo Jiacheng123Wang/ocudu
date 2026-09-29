@@ -37,6 +37,17 @@ protected:
     cu_notifier.f1ap_ul_msgs.clear();
   }
 
+  /// Runs slots until the cell resumes scheduling and the DU manager has marked it as active.
+  bool run_until_cell_is_active(du_cell_index_t cell_index = to_du_cell_index(0))
+  {
+    if (not run_until([this, cell_index]() { return phy.cells[cell_index].last_dl_res.has_value(); })) {
+      return false;
+    }
+    // The DU manager only flags the cell as active one hop after the MAC cell start completes.
+    workers.flush_pending_control_tasks();
+    return true;
+  }
+
   /// \brief Processes pending test thread tasks until \c cond is met or the timeout elapses.
   ///
   /// Unlike \c run_until, it does not dispatch slot indications, so it can be used while the DU has no cell
@@ -162,7 +173,7 @@ TEST_F(du_high_connectivity_test, when_f1_connection_is_lost_then_ues_are_remove
   // Add UE
   du_hi->get_pdu_handler().handle_rx_data_indication(
       test_helpers::create_ccch_message(next_slot.without_hyper_sfn(), to_rnti(0x4601)));
-  this->run_until([this]() { return not cu_notifier.f1ap_ul_msgs.empty(); });
+  ASSERT_TRUE(this->run_until([this]() { return not cu_notifier.f1ap_ul_msgs.empty(); }));
   ASSERT_EQ(cu_notifier.f1ap_ul_msgs.size(), 1);
   ASSERT_TRUE(
       test_helpers::is_init_ul_rrc_msg_transfer_valid(cu_notifier.f1ap_ul_msgs.rbegin()->second, to_rnti(0x4601)));
@@ -171,14 +182,18 @@ TEST_F(du_high_connectivity_test, when_f1_connection_is_lost_then_ues_are_remove
   // Signal a temporary F1 connection loss. The DU should retry the connection.
   cu_notifier.set_f1_channel_state(false);
   cu_notifier.set_f1_channel_state(true);
-  run_until([this]() { return not cu_notifier.f1ap_ul_msgs.empty(); });
+  ASSERT_TRUE(run_until([this]() { return not cu_notifier.f1ap_ul_msgs.empty(); }));
   cu_notifier.f1ap_ul_msgs.clear();
   test_logger.info("STATUS: DU successfully retried F1 Setup after connection loss.");
+
+  // The F1 Setup Request is sent before the cells are restarted, and a UL-CCCH that reaches a stopped cell is
+  // dropped without retry.
+  ASSERT_TRUE(run_until_cell_is_active());
 
   // Add new UE
   du_hi->get_pdu_handler().handle_rx_data_indication(
       test_helpers::create_ccch_message(next_slot.without_hyper_sfn(), to_rnti(0x4602)));
-  this->run_until([this]() { return not cu_notifier.f1ap_ul_msgs.empty(); });
+  ASSERT_TRUE(this->run_until([this]() { return not cu_notifier.f1ap_ul_msgs.empty(); }));
   ASSERT_EQ(cu_notifier.f1ap_ul_msgs.size(), 1);
   ASSERT_TRUE(
       test_helpers::is_init_ul_rrc_msg_transfer_valid(cu_notifier.f1ap_ul_msgs.rbegin()->second, to_rnti(0x4602)));
