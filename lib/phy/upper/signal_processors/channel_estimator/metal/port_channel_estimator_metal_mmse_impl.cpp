@@ -1275,6 +1275,10 @@ bool port_channel_estimator_metal_mmse_impl::build_correlation_matrices_device(
   c.fd_hz            = stats.fd_hz;
   c.tau_rms_s        = stats.tau_rms_s;
   c.sigma2           = stats.sigma2;
+  // A1 (dev doc 6.169): THIS is the noise loading the matrices are built with, so this is where the
+  // spread that the reuse window trades against is measured. It used to be sampled from
+  // corr_stage::sigma2 at the call site, which read 0 because this field is not filled on every route.
+  note_sigma2(stats.sigma2);
   for (unsigned k = 0; k != npt; ++k) {
     c.dmrs_slots[k] = dmrs_slot_symbols[k];
   }
@@ -3790,9 +3794,8 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(const metal::mmse_engine
   bool cache_hit = false;
   {
     mmse_matrix_cache& mc = matrix_cache();
-    const float        sigma2_now =
-        (corr != nullptr) ? corr->sigma2 : ((corr_edge != nullptr) ? corr_edge->sigma2 : 0.0F);
-    note_sigma2(sigma2_now);
+    // Sampled in correlation_stage(), where the real loading is known (see the note there).
+    const float sigma2_now = (corr != nullptr) ? corr->sigma2 : 0.0F;
     const bool usable = matrix_cache_enabled() && !matrix && (corr != nullptr) && (nof_y_scatter == 0);
     const bool same =
         mc.valid && (mc.L == L) && (mc.nout == nout) && (mc.nof_systems == nof_systems) &&
