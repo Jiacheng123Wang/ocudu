@@ -154,9 +154,9 @@ std::vector<rrc_plmn_ran_area_cell_t> rrc_du_impl::get_ran_area_cells()
 {
   // Map PLMN IDs to their cells.
   std::map<plmn_identity, std::vector<nr_cell_identity>> plmn_to_cells;
-  for (const auto& [cell_id, cell_info] : cell_info_db) {
+  for (const auto& [cgi, cell_info] : cell_info_db) {
     for (const auto& plmn : cell_info.plmn_identity_list) {
-      plmn_to_cells[plmn].push_back(cell_id);
+      plmn_to_cells[plmn].push_back(cgi.nci);
     }
   }
 
@@ -175,13 +175,13 @@ std::vector<rrc_plmn_ran_area_cell_t> rrc_du_impl::get_ran_area_cells()
 void rrc_du_impl::store_cell_info_db(const std::map<nr_cell_global_id_t, rrc_cell_info>& cell_infos)
 {
   for (const auto& [cgi, cell_info] : cell_infos) {
-    cell_info_db.insert_or_assign(cgi.nci, cell_info);
+    cell_info_db.insert_or_assign(cgi, cell_info);
   }
 }
 
-void rrc_du_impl::remove_cell_info(nr_cell_identity nci)
+void rrc_du_impl::remove_cell_info(const nr_cell_global_id_t& cgi)
 {
-  cell_info_db.erase(nci);
+  cell_info_db.erase(cgi);
 }
 
 std::optional<std::chrono::system_clock::time_point> rrc_du_impl::get_ref_time_r16(const byte_buffer& encoded,
@@ -356,7 +356,7 @@ rrc_ue_interface* rrc_du_impl::add_ue(const rrc_ue_creation_message& msg)
   ue_cfg.force_reestablishment_fallback = cfg.force_reestablishment_fallback;
   ue_cfg.force_resume_fallback          = cfg.force_resume_fallback;
   ue_cfg.rrc_procedure_guard_time_ms    = cfg.rrc_procedure_guard_time_ms;
-  ue_cfg.meas_timings                   = cell_info_db.at(msg.cell.cgi.nci).meas_timings;
+  ue_cfg.meas_timings                   = cell_info_db.at(msg.cell.cgi).meas_timings;
   ue_cfg.rrc_reject_wait_time           = cfg.rrc_reject_wait_time;
 
   // Copy RRC cell and add SSB ARFCN.
@@ -367,8 +367,8 @@ rrc_ue_interface* rrc_du_impl::add_ue(const rrc_ue_creation_message& msg)
   }
   rrc_cell_context rrc_cell   = msg.cell;
   rrc_cell.ssb_arfcn          = ue_cfg.meas_timings.front().freq_and_timing.value().carrier_freq;
-  rrc_cell.timers             = cell_info_db.at(msg.cell.cgi.nci).timers;
-  rrc_cell.plmn_identity_list = cell_info_db.at(msg.cell.cgi.nci).plmn_identity_list;
+  rrc_cell.timers             = cell_info_db.at(msg.cell.cgi).timers;
+  rrc_cell.plmn_identity_list = cell_info_db.at(msg.cell.cgi).plmn_identity_list;
 
   // Add RRC UE to RRC DU adapter.
   rrc_ue_rrc_du_adapters.emplace(ue_index, rrc_ue_rrc_du_adapter{get_rrc_du_connection_event_handler()});

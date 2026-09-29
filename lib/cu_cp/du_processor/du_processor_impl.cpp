@@ -335,7 +335,7 @@ du_config_update_result du_processor_impl::handle_du_config_update(const du_conf
       continue;
     }
     removed_cells.push_back(cell.cgi.nci);
-    rrc->remove_cell_info(cell.cgi.nci);
+    rrc->remove_cell_info(cell.cgi);
     for (cu_cp_ue* ue : ue_mng.find_ues(cfg.du_index, cell.pci.value())) {
       release_ue_of_removed_cell(*ue);
     }

@@ -402,3 +402,50 @@ TEST_F(cu_cp_mocn_test, when_ngs_f1_e1_are_setup_and_ue_selects_second_plmn_then
   ASSERT_EQ(report.ues.size(), 1);
   ASSERT_EQ(report.ues[0].rnti, crnti);
 }
+
+TEST_F(cu_cp_mocn_test, when_cells_of_different_plmns_share_an_nci_then_ue_is_routed_to_the_amf_of_its_cell)
+{
+  // Run NG setup to completion.
+  run_ng_setup();
+
+  // Setup DU with one cell per PLMN. The NCI is only unique within a PLMN, so both cells may use the same one.
+  test_helpers::served_cell_item_info cell_a;
+  test_helpers::served_cell_item_info cell_b;
+  cell_b.plmn_id  = plmn_identity::parse("99902").value();
+  cell_b.pci      = 1;
+  cell_b.sib1_str = test_helpers::create_sib1_hex_string(cell_b.plmn_id);
+  ASSERT_EQ(cell_a.nci, cell_b.nci);
+
+  auto ret = connect_new_du();
+  ASSERT_TRUE(ret.has_value());
+  unsigned du_idx = ret.value();
+  ASSERT_TRUE(this->run_f1_setup(du_idx, int_to_gnb_du_id(0x11), {cell_a, cell_b}));
+
+  // Setup CU-UP.
+  ret = connect_new_cu_up();
+  ASSERT_TRUE(ret.has_value());
+  unsigned cu_up_idx = ret.value();
+  ASSERT_TRUE(this->run_e1_setup(cu_up_idx));
+
+  // Create UE in cell A.
+  gnb_du_ue_f1ap_id_t du_ue_f1ap_id = int_to_gnb_du_ue_f1ap_id(0);
+  rnti_t              crnti         = to_rnti(0x4601);
+  get_du(du_idx).push_ul_pdu(test_helpers::generate_init_ul_rrc_message_transfer(du_ue_f1ap_id, crnti, cell_a.plmn_id));
+  f1ap_message f1ap_pdu;
+  ASSERT_TRUE(this->wait_for_f1ap_tx_pdu(du_idx, f1ap_pdu));
+  ASSERT_TRUE(test_helpers::is_valid_dl_rrc_message_transfer_with_msg4(f1ap_pdu));
+
+  // UE selects the only PLMN of cell A.
+  byte_buffer pdu = test_helpers::pack_ul_dcch_msg(test_helpers::create_rrc_setup_complete(1));
+  get_du(du_idx).push_rrc_ul_dcch_message(du_ue_f1ap_id, srb_id_t::srb1, std::move(pdu));
+
+  // CU-CP should send the Initial UE Message to the AMF of cell A's PLMN.
+  ngap_message ngap_pdu;
+  ASSERT_FALSE(this->wait_for_ngap_tx_pdu(ngap_pdu, std::chrono::milliseconds{100}, 1))
+      << "Initial UE Message was sent to the AMF of cell B's PLMN";
+  ASSERT_TRUE(this->wait_for_ngap_tx_pdu(ngap_pdu, std::chrono::milliseconds{1000}, 0))
+      << "CU-CP did not send the Initial UE Message to the AMF of cell A's PLMN";
+  ASSERT_TRUE(test_helpers::is_valid_init_ue_message(ngap_pdu)) << "Invalid Initial UE Message";
+  const auto& user_loc_info = ngap_pdu.pdu.init_msg().value.init_ue_msg()->user_location_info.user_location_info_nr();
+  ASSERT_EQ(user_loc_info.nr_cgi.plmn_id.to_number(), cell_a.plmn_id.to_bcd());
+}
