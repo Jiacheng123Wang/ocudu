@@ -4118,6 +4118,23 @@ static bool encode_run(mmse_engine_impl*     e,
   // covers the whole hop, which is what takes the hop's submission count to one. Nothing is published as
   // pending: there is no submission of the engine's to collect, exactly as in \c burst order, and the
   // caller completes the hop through complete_fused_burst() (see the impl's pending_fused_burst).
+  // ONE-SHOT DIAGNOSTIC (dev doc 6.188): the three values that decide whether this hop takes the
+  // adopt path (ONE submission) or falls through to end_stage_async() (TWO). Leg p151 measured
+  // `ce_weights n=19885` and `ce_held n=1`, i.e. the adopt path was NOT taken even though the extraction
+  // did hold its buffer - so one of these three is not what the code reads as it looks.
+  if (std::getenv("OCUDU_CE_HOLD_DEBUG") != nullptr) {
+    static std::atomic<unsigned> dbg3{0};
+    if (dbg3.fetch_add(1, std::memory_order_relaxed) < 4) {
+      std::fprintf(stderr,
+                   "[ce_hold_dbg] ADOPT-CHECK: lane_order=%d (merged=%d) adopted_held=%d held_cb=%s "
+                   "st.cb=%s\n",
+                   static_cast<int>(e->lane_order),
+                   static_cast<int>(metal::ce_lane_order::merged),
+                   adopted_held ? 1 : 0,
+                   (e->held_cb != nil) ? "set" : "nil",
+                   (st.cb != nil) ? "set" : "nil");
+    }
+  }
   if ((e->lane_order == metal::ce_lane_order::merged) && adopted_held) {
     [st.enc endEncoding];
     // Arm the back-end stage fence BEFORE handing the buffer over, exactly as the event order does
