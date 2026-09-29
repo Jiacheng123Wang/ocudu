@@ -65,7 +65,8 @@ byte_buffer ocudu::ocucp::generate_valid_nrppa_e_cid_measurement_initiation_requ
 }
 
 byte_buffer ocudu::ocucp::generate_valid_nrppa_e_cid_measurement_initiation_request_with_periodic_aoa(
-    lmf_ue_meas_id_t lmf_ue_meas_id)
+    lmf_ue_meas_id_t                                                     lmf_ue_meas_id,
+    const std::vector<asn1::nrppa::meas_quantities_value_opts::options>& other_quantities)
 {
   asn1::nrppa::nr_ppa_pdu_c pdu;
 
@@ -84,6 +85,12 @@ byte_buffer ocudu::ocucp::generate_valid_nrppa_e_cid_measurement_initiation_requ
   quantities_item.meas_quantities_value                = asn1::nrppa::meas_quantities_value_opts::angle_of_arrival_nr;
 
   req->meas_quantities.push_back(meas_quantities_item_container);
+
+  for (auto quantity : other_quantities) {
+    asn1::protocol_ie_single_container_s<asn1::nrppa::meas_quantities_item_ies_o> other_container;
+    other_container->meas_quantities_item().meas_quantities_value = quantity;
+    req->meas_quantities.push_back(other_container);
+  }
 
   return pack_into_pdu(pdu, "ECIDMeasInitiationRequest");
 }

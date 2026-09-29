@@ -143,7 +143,8 @@ f1ap_e_cid_measurement_initiation_procedure::create_e_cid_measurement_result()
   } else if (transaction_sink.failed()) {
     const e_c_id_meas_initiation_fail_s& fail = transaction_sink.failure();
 
-    logger.warning("{}: Procedure failed. Cause: {}", logger_prefix, get_cause_str(fail->cause));
+    // A declined measurement is a normal outcome. The caller decides how to report it.
+    logger.info("{}: Procedure failed. Cause: {}", logger_prefix, get_cause_str(fail->cause));
 
     res = make_unexpected(e_cid_measurement_failure_t{uint_to_lmf_ue_meas_id(fail->lmf_ue_meas_id),
                                                       uint_to_ran_ue_meas_id(fail->ran_ue_meas_id),

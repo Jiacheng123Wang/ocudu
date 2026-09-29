@@ -1059,6 +1059,29 @@ TEST_F(
       << "Periodic E-CID Measurement Report was not received";
 }
 
+/// The LMF may ask for NR Angle of Arrival together with quantities the CU-CP reports from the RRC measurement
+/// reports. The gNB-DU paces the angle of arrival, so the CU-CP leaves that quantity out and keeps reporting the rest.
+TEST_F(cu_cp_nrppa_test, when_periodic_e_cid_measurement_requests_aoa_and_rsrp_then_e_cid_measurement_reports_are_send)
+{
+  // Attach UE.
+  ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
+
+  // Inject measurement report.
+  ASSERT_TRUE(
+      send_rrc_measurement_report(test_ues.at(du_ue_id)->cu_ue_id.value(), test_ues.at(du_ue_id)->du_ue_id.value()));
+
+  // Inject E-CID measurement initiation request and await E-CID measurement initiation response.
+  ASSERT_TRUE(send_e_cid_measurement_initiation_request_and_await_e_cid_measurement_initiation_response(
+      test_ues.at(du_ue_id),
+      generate_valid_nrppa_e_cid_measurement_initiation_request_with_periodic_aoa(
+          lmf_ue_meas_id, {asn1::nrppa::meas_quantities_value_opts::ss_rsrp})));
+
+  // Await periodic measurement report.
+  ASSERT_TRUE(tick_until(
+      std::chrono::milliseconds{500}, [this]() { return await_e_cid_measurement_report(); }, false))
+      << "Periodic E-CID Measurement Report was not received";
+}
+
 TEST_F(cu_cp_nrppa_test, when_e_cid_termination_command_is_received_then_periodic_e_cid_measurement_reports_are_stopped)
 {
   // Attach UE.
@@ -1152,6 +1175,40 @@ TEST_F(cu_cp_nrppa_test, when_du_rejects_the_e_cid_request_then_lmf_receives_e_c
   ASSERT_TRUE(send_f1ap_e_cid_measurement_initiation_failure());
 
   ASSERT_TRUE(test_helpers::is_valid_e_cid_meas_initiation_failure(get_nrppa_pdu(ngap_pdu)));
+}
+
+/// The gNB-DU may decline a quantity that the gNB-CU can serve in part. The LMF then gets the quantities the RRC
+/// measurement reports provide, instead of a failure.
+TEST_F(cu_cp_nrppa_test, when_du_rejects_the_e_cid_request_then_the_other_quantities_are_still_reported)
+{
+  // Attach UE.
+  ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
+
+  // Inject measurement report, so that the gNB-CU has an RRC-sourced result.
+  ASSERT_TRUE(
+      send_rrc_measurement_report(test_ues.at(du_ue_id)->cu_ue_id.value(), test_ues.at(du_ue_id)->du_ue_id.value()));
+
+  report_fatal_error_if_not(not this->get_amf().try_pop_rx_pdu(ngap_pdu), "there are still NGAP messages to pop");
+  report_fatal_error_if_not(not this->get_du(du_idx).try_pop_dl_pdu(f1ap_pdu), "there are still F1AP DL messages");
+
+  // The LMF asks for the NR Angle of Arrival and for SS-RSRP.
+  get_amf().push_tx_pdu(generate_valid_dl_ue_associated_nrppa_transport_message(
+      test_ues.at(du_ue_id),
+      generate_valid_nrppa_e_cid_measurement_initiation_request(
+          lmf_ue_meas_id,
+          {{nrppa_meas_quantities_item{nrppa_meas_quantities_value::angle_of_arrival_nr}},
+           {nrppa_meas_quantities_item{nrppa_meas_quantities_value::ss_rsrp}}})));
+  ASSERT_TRUE(this->wait_for_f1ap_tx_pdu(du_idx, f1ap_pdu));
+
+  // The gNB-DU declines the measurement.
+  ASSERT_TRUE(send_f1ap_e_cid_measurement_initiation_failure());
+
+  // The LMF still gets a response with the RRC-sourced quantity.
+  asn1::nrppa::nr_ppa_pdu_c nrppa_pdu = get_nrppa_pdu(ngap_pdu);
+  ASSERT_EQ(nrppa_pdu.type().value, asn1::nrppa::nr_ppa_pdu_c::types_opts::successful_outcome);
+
+  const auto& resp = nrppa_pdu.successful_outcome().value.e_c_id_meas_initiation_resp();
+  ASSERT_GT(resp->e_c_id_meas_result.measured_results.size(), 0);
 }
 
 //----------------------------------------------------------------------------------//

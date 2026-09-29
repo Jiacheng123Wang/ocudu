@@ -12,6 +12,7 @@
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/ran/plmn_identity.h"
 #include "ocudu/support/async/coroutine.h"
+#include <algorithm>
 
 using namespace ocudu;
 using namespace ocucp;
@@ -82,11 +83,23 @@ void e_cid_measurement_initiation_procedure::operator()(coro_context<async_task<
       CORO_EARLY_RETURN();
     }
 
-    // The gNB-DU paces the NR Angle of Arrival reporting, so periodic AoA needs the E-CID Measurement Report
-    // procedure, which is not supported yet.
+    // The gNB-DU paces the NR Angle of Arrival reporting, so periodic reporting of this quantity needs the E-CID
+    // Measurement Report procedure over F1AP. Leave the quantity out and report the other requested ones.
     if (aoa_requested) {
+      logger.info("ue={}: \"{}\". Periodic NR Angle of Arrival reporting is not supported. The quantity is not "
+                  "reported",
+                  ue_index,
+                  name());
+    }
+
+    // Fail only when the gNB-CU cannot report any of the requested quantities.
+    if (std::none_of(e_cid_meas_init_request.meas_quantities.begin(),
+                     e_cid_meas_init_request.meas_quantities.end(),
+                     [](const nrppa_meas_quantities_item& item) {
+                       return is_rrc_sourced_meas_quantity(item.meas_quantities_value);
+                     })) {
       logger.warning(
-          "ue={}: Stopping \"{}\". Periodic NR Angle of Arrival reporting is not supported", ue_index, name());
+          "ue={}: Stopping \"{}\". No requested measurement quantity can be reported periodically", ue_index, name());
       send_failure(nrppa_cause_radio_network_t::requested_item_not_supported);
       CORO_EARLY_RETURN();
     }
@@ -208,7 +221,8 @@ void e_cid_measurement_initiation_procedure::get_measurement_result()
 void e_cid_measurement_initiation_procedure::handle_du_measurement_outcome()
 {
   if (!du_meas_outcome.has_value()) {
-    logger.warning("ue={}: The gNB-DU could not initiate the E-CID measurement", ue_index);
+    // The procedure continues with the quantities that the RRC measurement reports provide.
+    logger.info("ue={}: The gNB-DU did not initiate the E-CID measurement", ue_index);
     return;
   }
 

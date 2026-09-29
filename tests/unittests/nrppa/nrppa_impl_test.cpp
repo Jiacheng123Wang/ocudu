@@ -359,8 +359,9 @@ TEST_F(nrppa_impl_test, when_ue_has_no_rrc_measurements_then_aoa_result_carries_
   ASSERT_EQ(resp->e_c_id_meas_result.serving_cell_id.ng_ra_ncell.nr_cell_id().to_number(), serving_cell_id.nci.value());
 }
 
-/// Periodic NR Angle of Arrival needs the E-CID Measurement Report procedure, which is not supported yet.
-TEST_F(nrppa_impl_test, when_periodic_aoa_is_requested_then_request_is_rejected)
+/// Periodic NR Angle of Arrival needs the E-CID Measurement Report procedure, which is not supported yet. The LMF
+/// requests no other quantity here, so the gNB-CU can report nothing and fails the procedure.
+TEST_F(nrppa_impl_test, when_only_periodic_aoa_is_requested_then_request_is_rejected)
 {
   cu_cp_notifier.ue_notifier  = &ue_notifier;
   ue_notifier.serving_cell_id = serving_cell_id;
@@ -392,4 +393,24 @@ TEST_F(nrppa_impl_test, when_no_measurements_are_available_then_failure_cause_in
   ASSERT_EQ(fail->cause.type().value, asn1::nrppa::cause_c::types_opts::radio_network);
   ASSERT_EQ(fail->cause.radio_network().value,
             asn1::nrppa::cause_radio_network_opts::requested_item_temporarily_not_available);
+}
+
+/// The LMF may request a quantity the gNB-CU cannot report periodically. The gNB-CU reports the other quantities
+/// instead of failing the whole procedure.
+TEST_F(nrppa_impl_test, when_periodic_aoa_is_requested_with_rrc_quantities_then_the_other_quantities_are_reported)
+{
+  cu_cp_notifier.ue_notifier  = &ue_notifier;
+  ue_notifier.serving_cell_id = serving_cell_id;
+  nrppa.get_nrppa_du_context_handler().handle_du_addition(ue_notifier.get_du_index(), f1ap_notifier);
+
+  nrppa.get_nrppa_message_handler().handle_new_nrppa_pdu(
+      generate_valid_nrppa_e_cid_measurement_initiation_request_with_periodic_aoa(
+          uint_to_lmf_ue_meas_id(1), {asn1::nrppa::meas_quantities_value_opts::ss_rsrp}),
+      std::variant<cu_cp_ue_index_t, cu_cp_amf_index_t>{ue_index});
+
+  // The gNB-DU paces the angle of arrival, so no F1AP request is sent for the periodic measurement.
+  ASSERT_FALSE(f1ap_notifier.e_cid_measurement_requested);
+
+  asn1::nrppa::nr_ppa_pdu_c pdu = unpack_nrppa_pdu(cu_cp_notifier.last_ul_nrppa_pdu);
+  ASSERT_EQ(pdu.type().value, asn1::nrppa::nr_ppa_pdu_c::types_opts::successful_outcome);
 }
