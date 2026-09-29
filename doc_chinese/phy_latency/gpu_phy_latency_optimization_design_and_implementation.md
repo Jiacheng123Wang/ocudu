@@ -12566,6 +12566,41 @@ LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml OCUDU_METAL_GPU_TIME=1 OCUDU_UL
 
 **纪律 47**：**一条被修好的仪器必须自带交叉验证**——`iq2eqdem` 与 `[ul_gpu_pipeline]` 量的是同一个跨度，所以"两者相等"是一个可以在**每条腿**上免费重跑的自检；只有求和正确时它才成立（本次 +0.01%）。
 
+### 6.200 ★★ **`paired eq_demap` 到底装了什么**：它的两个端点都是**宿主地标**，而内容**不是**"均衡+解映射"（用户提问；2026-09-30）
+
+#### ① 端点（读码，不是名字）
+
+| 端 | 位置 | 语义 |
+|---|---|---|
+| **起点** | `pusch_processor_impl.cpp:357` `record_ce_end(slot)` | 注释原文：*"The channel estimator has finished … End timestamp of the channel estimation phase segment (and **start of the equalization+demodulation one**)"* |
+| **终点** | `pusch_decoder_impl.cpp:360` `record_ldpc_start(slot)` | 紧接在 LDPC 解码之前 ⇒ **LLR 就绪** |
+| 计算 | `ul_pipeline_probe.h:351` `eqdem_ns = now − ce_end` | 两者都是**宿主墙钟** |
+
+#### ② ★ 两个让它名不副实的性质
+
+1. **起点是"宿主返回"，不是"设备完成"**：估计器走的是 deferred 路，`sync_device_estimates()` **只在 `ul_capture::enabled()`（调试抓取）时才调** ⇒ `ce_end` 记录时，估计器的设备工作**可能还在飞**；
+2. **融合结构下 lane 的那条 cb 装着整条管线**（§6.195：DFT 14 变换 + 抽取 + eq + demap 同处 `merged_hop`）⇒ "估计器宿主返回之后的一切"**必然把前端也包进来**。
+
+#### ③ 内容（`p153` 实测，各项都有独立出处）
+
+```
+eq_demap 809.3 µs
+├─ 宿主：估计器返回 → 车道首条 cb 提交（解调器建参/编码/提交）   ≈172   ← 809.3 − residency 637.2
+└─ 车道首条 cb 提交 → 末条 cb 完成（residency）                637.2
+   ├─ 设备忙（两条 cb 窗口的并集）                              501.8
+   │  ├─ merged_hop 窗口            469.1  ← 里面装：**前端 DFT 14 变换 + CE 抽取 + eq + demap**（kernel ≈61）
+   │  │                                       旁证：`dft carried GPU start→end` 中位 **483.5**（同一条 cb 的另一把尺子）
+   │  └─ ce_weights 窗口             41.5  ← 里面装：CE 相关矩阵（corr_a/corr_r_hp）+ 权重（kernel ≈24）
+   └─ 排队 / 间隙                                               ≈135
+```
+
+⇒ ★ **相位里"名字所指的那两个模块"只占 3.3 µs**（eq 1.9 + demap 1.4，§6.190 离线；空口 census 也是各 **1 次派发/跳**）。
+⇒ 因此 **`eq_demap` 是一个"包含关系"读数，不是模块读数**：要问 eq/demap 自己的价钱，用 §6.190（离线微基准）与 census（1 派发/跳）；
+要问"估计器之后这一段总共花了多少"，才是它。
+⇒ 这也解释了 `eq_demap / residency = 1.124`（>1）：相位比车道自己的生命期还长 12%，因为它的起点在车道第一条 cb 提交**之前**。
+
+**纪律 48**：**引用一个相位读数前先写清它的两个端点在哪一行代码**——`t2f`/`ce`/`eqdem` 三个名字里，只有 `ce` 的起点与终点落在同一个模块内部；`eqdem` 是"剩余段"，`t2f` 是"等样点 + 前端"。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
