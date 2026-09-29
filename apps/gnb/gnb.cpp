@@ -105,6 +105,22 @@ static void cleanup_signal_handler(int signal)
 {
   cleanup_signal_dispatcher.notify_signal(signal);
   ocudulog::fetch_basic_logger("APP").error("Emergency flush of the logger");
+  // DUMP THE P0 READINGS BEFORE THE FORCED EXIT (dev doc 6.182).
+  //
+  // This handler is the last code that runs: signal_handling.cpp raises SIGKILL right after it, and
+  // SIGKILL neither unwinds nor runs atexit handlers - so every `[metal_stats]` / `[ul_gpu_lane]` /
+  // `[phy_pipeline]` line, all of which are printed from atexit, is lost. Measured on legs p148 #1 and
+  // #2: the report stopped in the middle of the queue-occupancy block, and the probe the leg was flown
+  // for (Q9-F6) never printed at all - the leg produced no answer to the question it existed for.
+  //
+  // The registry already exists for exactly this situation (include/ocudu/phy/phy_pipeline_report.h: a
+  // leg whose process cannot stop cleanly still yields its readings). It was wired into the receive
+  // thread's park/drop paths but not into the shutdown path, which is the one that fires when the
+  // stop itself is what hangs.
+  //
+  // min_interval_ms = 0 forces the dump: a "recently printed" report is not a reason to lose the last
+  // one, and this path runs at most once per process.
+  (void)p0_dump_reports("forced exit", 0);
   ocudulog::flush();
 }
 
