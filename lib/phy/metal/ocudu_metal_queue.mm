@@ -965,33 +965,55 @@ void shared_queue_stats_report()
       size_t  busy_commits = 0;   ///< committed while at least one other buffer ran
       double  sum_busy_us  = 0.0;
     };
+    // The two sorted tables the walk below needs. Both are built once, outside the per-record loop.
+    std::vector<uint64_t> ends;
+    ends.reserve(records.size());
+    for (const shared_queue_state::occupancy_record& r : records) {
+      if (r.end_ns != 0) {
+        ends.push_back(r.end_ns);
+      }
+    }
+    std::sort(ends.begin(), ends.end());
+    std::vector<size_t> by_start(records.size());
+    for (size_t i = 0; i != records.size(); ++i) {
+      by_start[i] = i;
+    }
+    std::sort(by_start.begin(), by_start.end(), [&records](size_t lhs, size_t rhs) {
+      return records[lhs].start_ns < records[rhs].start_ns;
+    });
+    std::vector<uint64_t> frontier_before(records.size(), 0);
+    {
+      uint64_t frontier = 0;
+      for (size_t k = 0; k != by_start.size(); ++k) {
+        const shared_queue_state::occupancy_record& r = records[by_start[k]];
+        frontier_before[by_start[k]]                  = frontier;
+        if (r.end_ns > frontier) {
+          frontier = r.end_ns;
+        }
+      }
+    }
+
     std::map<std::string, label_idle> by_idle;
     for (const shared_queue_state::occupancy_record& cm : records) {
       if ((cm.commit_ns == 0) || (cm.start_ns == 0) || (cm.end_ns == 0)) {
         continue;
       }
-      size_t active = 0;
-      for (const shared_queue_state::occupancy_record& other : records) {
-        if ((&other == &cm) || (other.end_ns == 0)) {
-          continue;
-        }
-        if (other.end_ns > cm.commit_ns) {
-          ++active;
-        }
-      }
+      // O(log n) instead of a nested scan: the number of records still executing at `cm.commit_ns` is
+      // `n - lower_bound(ends, commit_ns + 1)`, minus this record itself when it is among them. The nested
+      // version cost ~4.5e10 comparisons on a leg's ~212k records, never finished inside the shutdown's
+      // 5-second alarm, and that SIGKILL is what truncated legs p148 #1/#2 and p149 - the dump added to
+      // cleanup_signal_handler() could not help, because the kill arrived while a REPORTER was running.
+      const size_t still  = static_cast<size_t>(ends.end() - std::lower_bound(ends.begin(), ends.end(), cm.commit_ns + 1));
+      const size_t active = (still > 0) ? (still - ((cm.end_ns > cm.commit_ns) ? 1u : 0u)) : 0u;
       label_idle&       st = by_idle[(cm.label != nullptr) ? cm.label : "?"];
       const double      wait_us =
           (cm.start_ns > cm.commit_ns) ? (static_cast<double>(cm.start_ns - cm.commit_ns) / 1e3) : 0.0;
       ++st.n;
       // `idle_before_ns` is indexed the same way `records` is built below (start order); this walk is
       // separate and uses the record's own start against the union frontier recomputed here.
-      uint64_t frontier = 0;
-      for (const shared_queue_state::occupancy_record& prev : records) {
-        if ((prev.start_ns != 0) && (prev.start_ns < cm.start_ns) && (prev.end_ns > frontier)) {
-          frontier = prev.end_ns;
-        }
-      }
-      const double idle_us = (cm.start_ns > frontier) ? (static_cast<double>(cm.start_ns - frontier) / 1e3) : 0.0;
+      const uint64_t frontier = frontier_before[static_cast<size_t>(&cm - records.data())];
+      const double   idle_us =
+          (cm.start_ns > frontier) ? (static_cast<double>(cm.start_ns - frontier) / 1e3) : 0.0;
       if (active == 0) {
         ++st.idle_commits;
         st.sum_idle_us += idle_us;
