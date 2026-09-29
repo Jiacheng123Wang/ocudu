@@ -1069,6 +1069,104 @@ int main(int argc, char** argv)
                   (one < two) ? (two - one) : (one - two));
     }
 
+    // WHY THE MERGED KERNEL IS SLOWER - the occupancy hypothesis (dev doc 6.178).
+    //
+    // After the padding guard and the threadgroup grid were fixed the merged kernel is still ~3.7us slower
+    // than the two it replaces, while launching FEWER threadgroups of a slightly worse fill. That leaves
+    // the kernel's own parallelism: two code paths and more index arithmetic in one kernel can raise the
+    // register footprint, and a lower occupancy makes threadgroups overlap less - each one then costs more.
+    //
+    // THAT is measurable without Xcode: the cost PER THREADGROUP is the slope of the window against the
+    // number of threadgroups launched. Two kernels doing the same per-threadgroup work, launched the same
+    // way, with different slopes means different occupancy. `maxTotalThreadsPerThreadgroup` is printed too
+    // (it is the pipeline's own limit, not the achieved occupancy, but it is a free reading).
+    if (p_corr_a != nil && p_corr_merged != nil) {
+      const geometry   g8{};
+      const NSUInteger a8 = static_cast<NSUInteger>(g8.L()) * g8.L();
+      const NSUInteger r8 = static_cast<NSUInteger>(g8.nout()) * g8.L();
+      corr_params      c8{};
+      c8.npf                = g8.npf();
+      c8.ncomb              = g8.ncomb;
+      c8.nf                 = g8.nf();
+      c8.L                  = g8.L();
+      c8.Ls                 = g8.L();
+      c8.a_sys              = g8.L() * g8.L();
+      c8.r_sys              = g8.nout() * g8.L();
+      c8.ts                 = 1.0F / (15e3F * 14.0F);
+      c8.scs_hz             = 15e3F;
+      c8.fd_hz              = 300.0F;
+      c8.tau_rms_s          = 370e-9F;
+      c8.sigma2             = 0.01F;
+      c8.ridge              = 1e-6F;
+      c8.sigma2_from_device = 0;
+      c8.sigma2_slot        = 0;
+      c8.dmrs_slots[0]      = 2;
+      c8.dmrs_slots[1]      = 7;
+      c8.dmrs_slots[2]      = 11;
+      const NSUInteger tgs_a8 = (a8 + 255u) / 256u;
+
+      const auto slope_of = [&](bool merged) -> std::pair<double, double> {
+        // (slope per threadgroup, intercept) from launches of 1x / 2x / 4x the same 8 systems.
+        // CAP THE SYSTEMS. 32 systems of R_hp need 32 * 27216 * 4B = 3.48 MB, and the split arm writes
+        // A into the same 4 MB buffer as well - the first version of this arm ran past the end and its
+        // "base" reading (45 us) was the cost of the fault, not of the kernel. 4x is 1.4 MB of writes in
+        // total, which fits with room to spare.
+        double t[3];
+        uint32_t mults[3] = {1u, 2u, 4u};
+        for (unsigned k = 0; k != 3; ++k) {
+          std::vector<double> v;
+          for (unsigned round = 0; round != 15; ++round) {
+            id<MTLCommandBuffer> cb = [q commandBuffer];
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            if (merged) {
+              c8.nof_systems = 1u; // set below
+              [enc setComputePipelineState:p_corr_merged];
+            } else {
+              [enc setComputePipelineState:p_corr_a];
+            }
+            const uint32_t systems = 4u * mults[k]; // 4 / 8 / 16 systems: 1.74 MB of R_hp at most
+            c8.nof_systems         = merged ? systems : 1u;
+            if (merged) {
+              [enc setBuffer:b_a offset:0 atIndex:0];
+              [enc setBuffer:b_rhp offset:0 atIndex:1];
+              [enc setBytes:&c8 length:sizeof(c8) atIndex:2];
+              [enc dispatchThreadgroups:MTLSizeMake((r8 + 255u) / 256u * 2u * systems, 1, 1)
+                  threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            } else {
+              c8.nof_systems = systems;
+              [enc setBuffer:b_a offset:0 atIndex:0];
+              [enc setBytes:&c8 length:sizeof(c8) atIndex:1];
+              [enc dispatchThreadgroups:MTLSizeMake(tgs_a8, systems, 1)
+                  threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            }
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            v.push_back((cb.GPUEndTime - cb.GPUStartTime) * 1e6);
+          }
+          std::sort(v.begin(), v.end());
+          t[k] = v[v.size() / 2];
+        }
+        // slope from the 1x -> 4x endpoints, in us per launched threadgroup
+        const double tg1 = static_cast<double>(merged ? ((r8 + 255u) / 256u * 2u * 4u) : (tgs_a8 * 4u));
+        const double tg4 = static_cast<double>(merged ? ((r8 + 255u) / 256u * 2u * 16u) : (tgs_a8 * 16u));
+        return {(t[2] - t[0]) / (tg4 - tg1), t[0]};
+      };
+
+      const auto [slope_a, base_a] = slope_of(false);
+      const auto [slope_m, base_m] = slope_of(true);
+      std::printf("\n[OCCUPANCY] cost per launched threadgroup (slope over 8/16/32 systems):\n");
+      std::printf("     mmse_corr_a      : %.4f us/threadgroup   (base %.3f us)\n", slope_a, base_a);
+      std::printf("     mmse_corr_a_rhp  : %.4f us/threadgroup   (base %.3f us)\n", slope_m, base_m);
+      std::printf("     => the merged kernel's threadgroups cost %.2fx as much%s\n",
+                  (slope_a > 0.0) ? (slope_m / slope_a) : 0.0,
+                  (slope_m > slope_a * 1.3) ? "  <- OCCUPANCY HYPOTHESIS SUPPORTED"
+                                            : "  <- occupancy is NOT the explanation");
+      std::printf("     pipeline limits: corr_a maxThreads=%lu, corr_a_rhp maxThreads=%lu\n",
+                  static_cast<unsigned long>(p_corr_a.maxTotalThreadsPerThreadgroup),
+                  static_cast<unsigned long>(p_corr_merged.maxTotalThreadsPerThreadgroup));
+    }
+
     // O1 (dev doc 6.174): the merged correlation kernel against the two it replaces, BYTE FOR BYTE.
     //
     // This is the arm that decides whether "one dispatch" changed anything it was not allowed to change.
