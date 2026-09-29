@@ -303,6 +303,12 @@ V4 ✅ `cbs/lane=2.00 (max=2)`、crossings `0.00+0.00`（`p47` 的诊断臂 3.00
   `LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml`、手机**发**、CN **收**、
   `iperf3 -c <phone> -R -b 40M -P 4 -t 240`（**`-R` 不能省**，否则变成下行负载——见 §5.9.128 ①）、
   `run_leg.sh gpu <label> --regime=stress`，诊断腿另加 `OCUDU_UL_PHASE_SEGMENTS=1`。
+  * ⚠ **命令本身的两个坑（2026-09-29 用户实操踩到）**：① `-c` **自带参数**，所以 `iperf3 -c 10 10.45.0.2` 会去连主机名 `10`（后面那个地址被当成多余位置参数）——正确写法是 `iperf3 -c 10.45.0.2 …`；
+    ② 手机侧必须是**服务端**（`iperf3 -s`，端口 5201，且 app 在前台）。
+  * ★ **排障顺序（ping 通但 iperf3 不通时）**：**(a)** 先证明 TCP 通不通 —— `timeout 3 bash -c 'cat < /dev/null > /dev/tcp/<phone>/5201' && echo OPEN || echo CLOSED`；
+    **(b)** 去掉 `-R` 跑 `iperf3 -c <phone> -t 5`（这是**下行**数据，但能证明控制连接与服务端正常）；**(c)** 再加 `-R` 跑 10 s；
+    **(d)** 若控制连接正常而 `-R` 不工作（部分手机 app 的服务端不会主动发），**交换角色**：CN 侧 `iperf3 -s`、**手机侧当客户端** `iperf3 -c 10.45.0.1 -t 240 -P 4 -b 40M` —— 数据方向仍是**手机→CN = 上行**，只是不再依赖 app 的反向发送。
+  * ℹ **没有 iperf3 也能飞 `default` 腿**：ping 的**回显应答本身就是上行流量**（会产生 PUSCH 跳），默认配方 §3.2 本来就只有 10 s 上行 iperf3；对"读新执行表/看空闲间隔"这类目的，ping-only 腿反而**空闲更多、更适合**。
 * ⚠ **`leg_gate.sh` 只用于加压腿**：它的两条 `VALIDITY` 判据（`UL >= 2.0 Mbit/s`、`占槽 >= 50%`）
   是给重上行腿预登记的，用在默认腿上必然双红（§4.4）。默认腿用 `milestone_audit.sh`（它按**工况**选腿与判据）。
 
