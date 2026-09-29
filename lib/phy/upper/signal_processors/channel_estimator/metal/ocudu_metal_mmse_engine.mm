@@ -4144,7 +4144,16 @@ static bool encode_run(mmse_engine_impl*     e,
     // stale generation. Inside the same buffer nothing waits - the lane's stages are ordered by being
     // encoded after ours.
     (void)signal_stage_fence_for_burst(st.cb);
+    // ONE-SHOT COUNTERS (dev doc 6.189): the adopt branch was ENTERED (ADOPT-CHECK printed 4/4 on p152)
+    // and `ce_weights_fb` never appeared in the label table, yet `ce_weights` counted ~1/hop - so either
+    // this call succeeds and something ELSE commits a buffer labelled ce_weights, or it fails and the
+    // fallback still ends up labelled ce_weights. These two counters settle it. NOTE: the first version of
+    // this diagnostic called adopt() a SECOND time to count the result, which would have adopted a buffer
+    // and then run the real call again on the same state - a diagnostic must not change what it measures.
+    static std::atomic<uint64_t> n_adopt_ok{0};
+    static std::atomic<uint64_t> n_adopt_fb{0};
     if (!ocudu::metal::shared_burst::adopt(st.cb)) {
+      ++n_adopt_fb;
       // The lane already had a burst open (another engine on this thread got there first): fall back to
       // committing this one, or the hop's dispatches would never be submitted.
       ocudu::metal::shared_queue::arm_gpu_time(st.cb, ocudu::metal::shared_queue::queue_kind::back_end, "ce_weights_fb");
@@ -4153,6 +4162,16 @@ static bool encode_run(mmse_engine_impl*     e,
       mmse_stats_commit();
       ocudu::metal::gpu_lane_probe::register_commit(st.cb, WEIGHTS_STAGE);
     } else {
+      ++n_adopt_ok;
+      if (std::getenv("OCUDU_CE_HOLD_DEBUG") != nullptr) {
+        const uint64_t total = n_adopt_ok.load(std::memory_order_relaxed) + n_adopt_fb.load(std::memory_order_relaxed);
+        if ((total % 4096u) == 0u) {
+          std::fprintf(stderr,
+                       "[ce_hold_dbg] ADOPT RESULT: adopted=%llu fell_back=%llu\n",
+                       static_cast<unsigned long long>(n_adopt_ok.load(std::memory_order_relaxed)),
+                       static_cast<unsigned long long>(n_adopt_fb.load(std::memory_order_relaxed)));
+        }
+      }
       // THIS is where an estimator's dispatches join the lane's burst on the merged route, and the burst's
       // dispatch census has to be told: the counting in end_stage()/end_stage_async() happens only when
       // `s.burst` is already true, and on THIS route the buffer was not a burst yet at that point - it was
