@@ -12017,6 +12017,57 @@ s.burst = (s.enc != nil);
 
 **判据（实施后）**：`mmse_ce commits` 应从 **1.000/跳** 变为 **0**（权重不再自己提交），`cbs/lane` 从 **2.00 → 1.00**，而 **Q9-F3 的 `merged_hop` exec 不应显著变差**（§6.178 的占用率教训：合并**提交**不应改变各 kernel 的并行度——这与"合成一个大 kernel"不同）。
 
+### 6.187 ★★★ **定位完成：hold 机制生效，但权重阶段采用 `held_cb` 后仍自己提交** —— 第 2 次提交的真正来源（2026-09-29）
+
+**腿**：`p151-n78-hold`（`OCUDU_CE_HOLD_DEBUG=1`，`gpu` default）。用户顺手纠正了我命令里的一个笔误：`LEG_CONFIG` 必须是 `.yml`（`.txt` 会报错）。
+
+#### ① 诊断读数（否掉了我的 `geom.ok` 嫌疑）
+
+```
+[ce_hold_dbg] hold=1 <- hold_env=1 device_builds_pilots=1 !ls_check=1 !host_scalars=1 (geom.ok=1 device_ls=1)
+[ce_hold_dbg] extraction HELD -> held_cb set (lane_order=3)
+（4 次打印上限内，两行都是 4/4）
+hold=0 : 0 次    extraction NOT held : 0 次    held_cb CLOSED : 1 次
+```
+
+⇒ ★ **`hold_for_weights` 的四个条件全部满足**（`geom.ok=1`、`device_ls=1`）⇒ **我上一轮"`geom.ok`/`contiguous` 断了"的推断被否掉**。
+⇒ ★ **抽取确实 hold 住了缓冲**（`extraction HELD` ×4，`NOT held` 0 次）。
+
+#### ② 真正的断点（读码 + 诊断一致）
+
+`begin_weights_stage()` 采用 held 缓冲时：
+
+```cpp
+stage_encoder st;
+st.cb      = e->held_cb;
+st.enc     = held_enc;
+st.burst   = false;        // ★ 关键：标志是 false
+e->held_cb = nil;          // "this stage owns the commit now"
+*adopted   = true;
+return st;
+```
+
+而 `end_stage_async()`：
+
+```cpp
+if (s.burst) { ...; return true; }   // 只有 burst=true 才【不提交】
+[s.enc endEncoding];
+arm_gpu_time(s.cb, queue_kind::back_end, "ce_weights");
+[s.cb commit];                        // ★ 无条件提交
+e->pending_cb = s.cb;
+```
+
+⇒ ★★ **`st.burst = false` ⇒ 权重阶段（在自己的 held 缓冲上开第二个 encoder）仍然提交** ⇒ **`ce_weights` 每次跳一次** ⇒ **一跳 2 次提交**。
+⇒ 而 `merged` 的设计注释写的是 *"one submission … cbs/lane 1.00 (max 1), mmse_ce commits per hop 1.000"* —— **实现与设计差这一个标志。**
+
+#### ③ 修复方向（下一刀，方向已明确）
+
+**让采用-held 的那条路径不自己提交**，把提交交给 lane。两个可行形态：
+* **(a) 最小改动**：在 `end_stage_async` 里，对"adopted 了 held 缓冲"的形态**跳过 commit**（把那句无条件提交改为"仅当不是 adopted 形态"），并让 lane 的提交覆盖它 —— 需要它**已经**是 lane 会提交的那条 cb（即 §6.186③ 的"lane 承接 CE 的缓冲"）。
+* **(b) 用现成标志**：`begin_weights_stage` 在采用 held 时置 `st.burst = true`（语义上"这条 cb 的提交归 lane"），但**必须同时确认** `end_stage_async` 的 burst 分支对 `s.cb`／probe 登记的副作用是可接受的（它现在会 `count_dispatch` 并**不登记 GPU-time probe**）。
+
+**判据（修复后的一条腿）**：`mmse_ce commits` 应从 **19887（≈1/跳）→ ~0**、`cbs/lane` 从 **2.00 → 1.00**、而 **Q9-F3 的 `merged_hop` exec 不应显著变差**（§6.178 教训：合并**提交**不该改变各 kernel 的并行度）。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
