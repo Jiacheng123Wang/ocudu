@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "lib/nrppa/nrppa_impl.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/nrppa/nrppa_test_message_validators.h"
 #include "tests/test_doubles/nrppa/nrppa_test_messages.h"
 #include "ocudu/adt/format.h"
@@ -253,6 +254,8 @@ TEST_F(nrppa_impl_test, when_the_du_is_removed_then_positioning_information_requ
 
 TEST_F(nrppa_impl_test, when_e_cid_meas_initiation_request_for_unknown_ue_is_received_then_failure_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   cu_cp_notifier.ue_notifier = nullptr;
 
   nrppa.get_nrppa_message_handler().handle_new_nrppa_pdu(
@@ -265,6 +268,8 @@ TEST_F(nrppa_impl_test, when_e_cid_meas_initiation_request_for_unknown_ue_is_rec
 
 TEST_F(nrppa_impl_test, when_aoa_is_requested_on_demand_then_f1ap_e_cid_request_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   cu_cp_notifier.ue_notifier  = &ue_notifier;
   ue_notifier.serving_cell_id = serving_cell_id;
   nrppa.get_nrppa_du_context_handler().handle_du_addition(ue_notifier.get_du_index(), f1ap_notifier);
@@ -282,6 +287,8 @@ TEST_F(nrppa_impl_test, when_aoa_is_requested_on_demand_then_f1ap_e_cid_request_
 
 TEST_F(nrppa_impl_test, when_f1ap_returns_aoa_then_e_cid_initiation_response_carries_it)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   cu_cp_notifier.ue_notifier  = &ue_notifier;
   ue_notifier.serving_cell_id = serving_cell_id;
   nrppa.get_nrppa_du_context_handler().handle_du_addition(ue_notifier.get_du_index(), f1ap_notifier);
@@ -310,6 +317,8 @@ TEST_F(nrppa_impl_test, when_f1ap_returns_aoa_then_e_cid_initiation_response_car
 
 TEST_F(nrppa_impl_test, when_f1ap_e_cid_request_fails_then_e_cid_initiation_failure_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   cu_cp_notifier.ue_notifier  = &ue_notifier;
   ue_notifier.serving_cell_id = serving_cell_id;
   nrppa.get_nrppa_du_context_handler().handle_du_addition(ue_notifier.get_du_index(), f1ap_notifier);
@@ -326,6 +335,8 @@ TEST_F(nrppa_impl_test, when_f1ap_e_cid_request_fails_then_e_cid_initiation_fail
 
 TEST_F(nrppa_impl_test, when_aoa_is_requested_but_the_du_has_no_context_then_request_is_rejected)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   cu_cp_notifier.ue_notifier  = &ue_notifier;
   ue_notifier.serving_cell_id = serving_cell_id;
 
@@ -341,6 +352,8 @@ TEST_F(nrppa_impl_test, when_aoa_is_requested_but_the_du_has_no_context_then_req
 /// The UE has reported no RRC measurements, so the serving cell is taken from the cell the UE camps on.
 TEST_F(nrppa_impl_test, when_ue_has_no_rrc_measurements_then_aoa_result_carries_the_serving_cell_id)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   cu_cp_notifier.ue_notifier  = &ue_notifier;
   ue_notifier.serving_cell_id = serving_cell_id;
   ASSERT_FALSE(ue_notifier.meas_results.has_value());
@@ -363,6 +376,8 @@ TEST_F(nrppa_impl_test, when_ue_has_no_rrc_measurements_then_aoa_result_carries_
 /// requests no other quantity here, so the gNB-CU can report nothing and fails the procedure.
 TEST_F(nrppa_impl_test, when_only_periodic_aoa_is_requested_then_request_is_rejected)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   cu_cp_notifier.ue_notifier  = &ue_notifier;
   ue_notifier.serving_cell_id = serving_cell_id;
   nrppa.get_nrppa_du_context_handler().handle_du_addition(ue_notifier.get_du_index(), f1ap_notifier);
@@ -379,6 +394,8 @@ TEST_F(nrppa_impl_test, when_only_periodic_aoa_is_requested_then_request_is_reje
 /// the quantity is unsupported.
 TEST_F(nrppa_impl_test, when_no_measurements_are_available_then_failure_cause_invites_a_retry)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   cu_cp_notifier.ue_notifier  = &ue_notifier;
   ue_notifier.serving_cell_id = serving_cell_id;
 
@@ -399,6 +416,8 @@ TEST_F(nrppa_impl_test, when_no_measurements_are_available_then_failure_cause_in
 /// instead of failing the whole procedure.
 TEST_F(nrppa_impl_test, when_periodic_aoa_is_requested_with_rrc_quantities_then_the_other_quantities_are_reported)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   cu_cp_notifier.ue_notifier  = &ue_notifier;
   ue_notifier.serving_cell_id = serving_cell_id;
   nrppa.get_nrppa_du_context_handler().handle_du_addition(ue_notifier.get_du_index(), f1ap_notifier);

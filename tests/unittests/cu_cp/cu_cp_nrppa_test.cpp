@@ -958,6 +958,8 @@ TEST_F(
     cu_cp_nrppa_test,
     when_valid_e_cid_measurement_initiation_request_is_received_but_no_measurements_are_available_then_e_cid_measurement_initiation_failure_is_send)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   // Attach UE.
   ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
 
@@ -970,6 +972,8 @@ TEST_F(
     cu_cp_nrppa_test,
     when_valid_e_cid_measurement_initiation_request_with_only_unsupported_measurement_quantities_is_received_then_e_cid_measurement_initiation_failure_is_send)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   // Attach UE.
   ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
 
@@ -985,6 +989,8 @@ TEST_F(
 TEST_F(cu_cp_nrppa_test,
        when_valid_e_cid_measurement_initiation_request_is_received_then_e_cid_measurement_initiation_response_is_send)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   // Attach UE.
   ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
 
@@ -1001,6 +1007,8 @@ TEST_F(
     cu_cp_nrppa_test,
     when_multiple_valid_e_cid_measurement_initiation_requests_are_received_then_e_cid_measurement_initiation_responses_are_send)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   // Attach UE.
   ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
 
@@ -1021,6 +1029,8 @@ TEST_F(
     cu_cp_nrppa_test,
     when_periodic_e_cid_measurement_is_requested_but_no_measurements_are_available_then_e_cid_measurement_reports_are_not_send)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   // Attach UE.
   ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
 
@@ -1041,6 +1051,8 @@ TEST_F(
     cu_cp_nrppa_test,
     when_periodic_e_cid_measurement_is_requested_and_measurements_are_available_then_e_cid_measurement_reports_are_send)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   // Attach UE.
   ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
 
@@ -1063,6 +1075,8 @@ TEST_F(
 /// reports. The gNB-DU paces the angle of arrival, so the CU-CP leaves that quantity out and keeps reporting the rest.
 TEST_F(cu_cp_nrppa_test, when_periodic_e_cid_measurement_requests_aoa_and_rsrp_then_e_cid_measurement_reports_are_send)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   // Attach UE.
   ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
 
@@ -1084,6 +1098,8 @@ TEST_F(cu_cp_nrppa_test, when_periodic_e_cid_measurement_requests_aoa_and_rsrp_t
 
 TEST_F(cu_cp_nrppa_test, when_e_cid_termination_command_is_received_then_periodic_e_cid_measurement_reports_are_stopped)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   // Attach UE.
   ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
 
@@ -1113,6 +1129,8 @@ TEST_F(cu_cp_nrppa_test, when_e_cid_termination_command_is_received_then_periodi
 
 TEST_F(cu_cp_nrppa_test, when_e_cid_termination_command_for_unknown_ue_is_received_then_command_is_ignored)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   // Attach UE.
   ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
 
@@ -1132,6 +1150,8 @@ TEST_F(cu_cp_nrppa_test, when_e_cid_termination_command_for_unknown_ue_is_receiv
 
 TEST_F(cu_cp_nrppa_test, when_on_demand_aoa_is_requested_then_f1ap_e_cid_request_is_sent_to_the_du)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   // Attach UE.
   ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
 
@@ -1141,6 +1161,8 @@ TEST_F(cu_cp_nrppa_test, when_on_demand_aoa_is_requested_then_f1ap_e_cid_request
 
 TEST_F(cu_cp_nrppa_test, when_du_reports_aoa_then_lmf_receives_e_cid_measurement_initiation_response_with_aoa)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   constexpr uint16_t azimuth_aoa = 1800;
 
   // Attach UE.
@@ -1167,6 +1189,8 @@ TEST_F(cu_cp_nrppa_test, when_du_reports_aoa_then_lmf_receives_e_cid_measurement
 
 TEST_F(cu_cp_nrppa_test, when_du_rejects_the_e_cid_request_then_lmf_receives_e_cid_measurement_initiation_failure)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   // Attach UE.
   ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
 
@@ -1181,6 +1205,8 @@ TEST_F(cu_cp_nrppa_test, when_du_rejects_the_e_cid_request_then_lmf_receives_e_c
 /// measurement reports provide, instead of a failure.
 TEST_F(cu_cp_nrppa_test, when_du_rejects_the_e_cid_request_then_the_other_quantities_are_still_reported)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
+
   // Attach UE.
   ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
 
@@ -1404,6 +1430,8 @@ TEST_F(cu_cp_nrppa_test, when_trp_information_is_not_available_then_positioning_
 
 TEST_F(cu_cp_nrppa_test, when_valid_measurement_responses_are_received_from_the_dus_then_response_is_forwarded_to_lmf)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-3-b");
+
   // Handle TRP information procedure.
   ASSERT_TRUE(run_successful_trp_information_procedure());
 
@@ -1456,6 +1484,8 @@ TEST_F(cu_cp_nrppa_test, when_valid_measurement_responses_are_received_from_the_
 
 TEST_F(cu_cp_nrppa_test, when_valid_measurement_failures_are_received_from_the_dus_then_failure_is_forwarded_to_lmf)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-3-b");
+
   // Handle TRP information procedure.
   ASSERT_TRUE(run_successful_trp_information_procedure());
 
@@ -1507,6 +1537,8 @@ TEST_F(
     cu_cp_nrppa_test,
     when_at_least_one_valid_positioning_measurement_response_is_received_from_the_dus_then_response_is_forwarded_to_lmf)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-3-b");
+
   // Inject TRP information request and await F1AP TRP information request.
   ASSERT_TRUE(send_nrppa_trp_information_request());
   // Await F1AP TRP information request on DU 1.
@@ -1614,6 +1646,8 @@ TEST_F(cu_cp_nrppa_test,
 
 TEST_F(cu_cp_nrppa_test, when_trp_information_is_not_available_then_measurement_failure_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-3-b");
+
   // Inject measurement request and await measurement failure.
   ASSERT_TRUE(send_measurement_request_and_await_measurement_failure());
 }
@@ -1624,6 +1658,8 @@ TEST_F(cu_cp_nrppa_test, when_trp_information_is_not_available_then_measurement_
 
 TEST_F(cu_cp_nrppa_test, when_measurement_requests_for_multiple_ues_are_received_then_responses_are_forwarded_to_lmf)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-3-b");
+
   // Handle TRP information procedure.
   ASSERT_TRUE(run_successful_trp_information_procedure());
 

@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "f1ap_cu_test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/f1ap/f1ap_test_message_validators.h"
 #include "tests/test_doubles/f1ap/f1ap_test_messages.h"
 #include "ocudu/adt/format.h"
@@ -31,6 +32,7 @@ protected:
   f1ap_cu_e_cid_measurement_initiation_test() :
     f1ap_cu_test(f1ap_configuration{.proc_timeout = e_cid_procedure_timeout})
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-1");
   }
 
   e_cid_measurement_request_t make_request(cu_cp_ue_index_t         ue_index,
