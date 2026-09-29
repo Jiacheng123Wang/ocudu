@@ -4,6 +4,7 @@
 
 #include "du_processor_test_helpers.h"
 #include "lib/cu_cp/du_processor/du_processor_factory.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/unittests/cu_cp/test_helpers.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/cu_cp/cu_cp_configuration_helpers.h"
@@ -165,6 +166,8 @@ du_processor_test::du_processor_test() :
 
   du_cfg_mgr{cu_cp_cfg.node.gnb_id, config_helpers::get_supported_plmns(cu_cp_cfg.ngap.ngaps)}
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   test_logger.set_level(ocudulog::basic_levels::debug);
   cu_cp_logger.set_level(ocudulog::basic_levels::debug);
   ocudulog::init();

@@ -4,6 +4,7 @@
 
 #include "f1ap_cu_test_helpers.h"
 #include "lib/f1ap/cu_cp/ue_context/f1ap_cu_ue_context.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/utils/test_rng.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/f1ap/f1ap_ue_id_types.h"
@@ -34,6 +35,8 @@ class f1ap_cu_ue_context_test : public ::testing::Test
 protected:
   f1ap_cu_ue_context_test()
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
     f1ap_logger.set_level(ocudulog::basic_levels::debug);
     ocudulog::init();
   }

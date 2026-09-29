@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "cu_cp_test_environment.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/e1ap/e1ap_cu_cp_test_messages.h"
 #include "tests/test_doubles/e1ap/e1ap_test_message_validators.h"
 #include "tests/test_doubles/f1ap/f1ap_test_message_validators.h"
@@ -206,6 +207,8 @@ TEST_F(cu_cp_connectivity_test, when_amf_connection_is_lost_then_connected_ues_a
 TEST_F(cu_cp_connectivity_test,
        when_amf_connection_is_lost_and_gnb_cu_configuration_update_times_out_then_cell_deactivation_completes)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   // This test reproduces an std::bad_optional_access exception in log after GNBCU Configuration Update timeout.
   run_ng_setup();
 
@@ -234,6 +237,8 @@ TEST_F(cu_cp_connectivity_test,
 TEST_F(cu_cp_connectivity_test,
        when_amf_reconnects_and_gnb_cu_configuration_update_times_out_then_cell_activation_completes)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   // This test reproduces an std::bad_optional_access exception in log after GNBCU Configuration Update timeout.
   run_ng_setup();
 
@@ -271,6 +276,8 @@ TEST_F(cu_cp_connectivity_test,
 
 TEST_F(cu_cp_connectivity_test, when_amf_connection_is_lost_and_ue_release_times_out_then_cell_deactivation_completes)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   // This test reproduces a bug where cell_deactivation_routine would hang forever.
   // The scenario is:
   // 1. AMF initiates UE release (F1AP UE Context Release in progress)
@@ -335,6 +342,8 @@ TEST_F(cu_cp_connectivity_test, when_amf_connection_is_lost_and_ue_release_times
 
 TEST_F(cu_cp_connectivity_test, when_amf_connection_is_lost_then_all_ue_releases_are_started_in_parallel)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   // This test verifies that cell_deactivation_routine releases all UEs in parallel, not sequentially.
   // All F1AP UE Context Release Commands should be sent out before any response is received.
   // If releases were sequential, only one command would be sent at a time, waiting for the response
@@ -418,6 +427,8 @@ TEST_F(cu_cp_connectivity_test, when_amf_connection_is_lost_then_all_ue_releases
 
 TEST_F(cu_cp_connectivity_test, when_new_f1_setup_request_is_received_and_ng_is_setup_then_f1_setup_is_accepted)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   // Run NG setup to completion.
   run_ng_setup();
 
@@ -457,6 +468,8 @@ TEST_F(cu_cp_connectivity_test, when_new_f1_setup_request_is_received_and_ng_is_
 
 TEST_F(cu_cp_connectivity_test, when_one_cell_of_a_du_has_an_unsupported_plmn_then_only_that_cell_is_not_activated)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   // Run NG setup to completion.
   run_ng_setup();
 
@@ -493,6 +506,8 @@ TEST_F(cu_cp_connectivity_test, when_one_cell_of_a_du_has_an_unsupported_plmn_th
 
 TEST_F(cu_cp_connectivity_test, when_dus_with_duplicate_du_ids_connect_then_f1_setup_is_rejected)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   // Run NG setup to completion.
   run_ng_setup();
 
@@ -528,6 +543,8 @@ TEST_F(cu_cp_connectivity_test, when_dus_with_duplicate_du_ids_connect_then_f1_s
 
 TEST_F(cu_cp_connectivity_test, when_a_du_with_non_matching_gnb_id_connects_then_f1_setup_is_rejected)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   // Run NG setup to completion.
   run_ng_setup();
 
@@ -551,6 +568,8 @@ TEST_F(cu_cp_connectivity_test, when_a_du_with_non_matching_gnb_id_connects_then
 
 TEST_F(cu_cp_connectivity_test, when_f1_setup_request_meas_timing_omits_freq_and_timing_then_f1_setup_is_rejected)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   // Run NG setup to completion.
   run_ng_setup();
 
@@ -578,6 +597,8 @@ TEST_F(cu_cp_connectivity_test, when_f1_setup_request_meas_timing_omits_freq_and
 
 TEST_F(cu_cp_connectivity_test, when_max_nof_dus_connected_reached_then_cu_cp_rejects_new_du_connections)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   for (unsigned idx = 0; idx < this->get_test_env_params().max_nof_dus; idx++) {
     auto ret = connect_new_du();
     ASSERT_TRUE(ret.has_value());
@@ -595,6 +616,8 @@ TEST_F(
     cu_cp_connectivity_test,
     when_max_nof_dus_connected_reached_and_du_connection_drops_then_du_is_removed_from_cu_cp_and_new_du_connection_is_accepted)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   // Run NG setup to completion.
   run_ng_setup();
 
@@ -618,6 +641,8 @@ TEST_F(
 
 TEST_F(cu_cp_connectivity_test, when_ng_setup_is_not_successful_then_f1_setup_is_accepted_with_no_cell_activated)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   // Enqueue AMF NG Setup Response as an auto reply to CU-CP.
   ngap_message ng_setup_fail = generate_ng_setup_failure();
   get_amf().enqueue_next_tx_pdu(ng_setup_fail);
@@ -642,6 +667,8 @@ TEST_F(cu_cp_connectivity_test, when_ng_setup_is_not_successful_then_f1_setup_is
 
 TEST_F(cu_cp_connectivity_test, when_amf_connects_after_f1_setup_then_the_cells_of_the_du_are_activated)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   // Simulate an AMF that is not reachable yet.
   get_amf().drop_connection();
   ASSERT_TRUE(get_cu_cp().start());
@@ -671,6 +698,8 @@ TEST_F(cu_cp_connectivity_test, when_amf_connects_after_f1_setup_then_the_cells_
 
 TEST_F(cu_cp_connectivity_test, when_the_du_deletes_a_cell_then_its_ues_are_released)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   run_ng_setup();
 
   auto ret = connect_new_du();
@@ -700,6 +729,8 @@ TEST_F(cu_cp_connectivity_test, when_the_du_deletes_a_cell_then_its_ues_are_rele
 
 TEST_F(cu_cp_connectivity_test, when_du_connection_is_lost_then_connected_ues_are_released)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   // Run NG setup to completion.
   run_ng_setup();
 
@@ -906,6 +937,8 @@ TEST_F(cu_cp_connectivity_test,
 
 TEST_F(cu_cp_connectivity_test, when_ng_f1_e1_are_setup_then_ues_can_attach)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   // Run NG setup to completion.
   run_ng_setup();
 

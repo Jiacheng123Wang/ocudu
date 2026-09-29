@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "f1ap_cu_test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/f1ap/f1ap_test_messages.h"
 #include "tests/test_doubles/utils/test_rng.h"
 #include "ocudu/adt/format.h"
@@ -27,6 +28,8 @@ gnb_cu_ue_f1ap_id_t ocudu::ocucp::generate_random_gnb_cu_ue_f1ap_id()
 
 f1ap_cu_test::f1ap_cu_test(const f1ap_configuration& f1ap_cfg)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   test_logger.set_level(ocudulog::basic_levels::debug);
   f1ap_logger.set_level(ocudulog::basic_levels::debug);
   ocudulog::init();
