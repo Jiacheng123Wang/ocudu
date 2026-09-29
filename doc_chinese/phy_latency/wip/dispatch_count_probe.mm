@@ -55,6 +55,31 @@ kernel void noop_kernel(device float* out [[buffer(0)]],
 }
 )";
 
+/// A memory-bound kernel with the air chain's shape at the air chain's sizes: each dispatch reads the whole
+/// input (46 KB, the slot's IQ) and sweeps the whole grid (64 KB, 612 subcarriers x 14 symbols x 8 bytes).
+/// Chained on the SAME buffers, five of them are the hop's data-dependency chain (front end writes the grid,
+/// the estimator/equalizer/demapper read and write it); on SEPARATE buffers they are independent dispatches
+/// of the same size. The difference is what the dependency costs - the candidate the per-dispatch prices
+/// cannot see.
+NSString* const sweep_source = @R"(
+#include <metal_stdlib>
+using namespace metal;
+kernel void sweep_kernel(device const float* in  [[buffer(0)]],
+                         device float*       grid [[buffer(1)]],
+                         constant uint&      n_in [[buffer(2)]],
+                         constant uint&      n_grid [[buffer(3)]],
+                         uint                i    [[thread_position_in_grid]])
+{
+  if (i >= n_grid) { return; }
+  float acc = 0.0f;
+  // One pass over the whole input per output element is NOT what the real kernels do; this reads a slice of
+  // it, which keeps the traffic per dispatch close to the grid's own size (read + write).
+  const uint base = (i * 7u) % n_in;
+  acc += in[base] + in[(base + 1u) % n_in] + in[(base + 2u) % n_in] + in[(base + 3u) % n_in];
+  grid[i] = acc * 0.25f;
+}
+)";
+
 struct sample {
   double gpu_us  = 0.0;
   double host_us = 0.0;
@@ -164,6 +189,62 @@ int main()
     std::printf("\n-- the air hop's dispatch count, no-op content --\n");
     run_arm(5, 1, 0, "no-op: 5 dispatches (one hop's appx count)");
     run_arm(5, 4, 0, "no-op: 5 dispatches x 4 threadgroups");
+
+    // ---- the memory-bound chain: 5 dispatches at the air chain's sizes -------------------------------
+    // Same kernel, same sizes; only the buffers differ. CHAINED = all five read/write ONE input and ONE grid
+    // (the hop's data dependency), SEPARATE = five private buffer pairs (no dependency). If CHAINED is much
+    // more expensive, the ~470us is memory-dependency serialisation, and the treatment is fewer passes over
+    // the grid - not fewer dispatches.
+    id<MTLLibrary>            slib = [device newLibraryWithSource:sweep_source options:nil error:&err];
+    id<MTLFunction>           sfn  = (slib != nil) ? [slib newFunctionWithName:@"sweep_kernel"] : nil;
+    id<MTLComputePipelineState> spipe = (sfn != nil) ? [device newComputePipelineStateWithFunction:sfn error:&err] : nil;
+    if (spipe == nil) {
+      std::printf("sweep kernel unavailable: %s\n", [[err localizedDescription] UTF8String]);
+    } else {
+      constexpr unsigned n_in   = 11520 * 4;  // the slot's samples as floats: 46 KB
+      constexpr unsigned n_grid = 612 * 14 * 8; // the grid as floats: 64 KB
+      id<MTLBuffer> in_shared   = [device newBufferWithLength:n_in * sizeof(float) options:MTLResourceStorageModePrivate];
+      id<MTLBuffer> grid_shared = [device newBufferWithLength:n_grid * sizeof(float) options:MTLResourceStorageModePrivate];
+      std::vector<id<MTLBuffer>> in_priv, grid_priv;
+      for (unsigned d = 0; d != 5; ++d) {
+        in_priv.push_back([device newBufferWithLength:n_in * sizeof(float) options:MTLResourceStorageModePrivate]);
+        grid_priv.push_back([device newBufferWithLength:n_grid * sizeof(float) options:MTLResourceStorageModePrivate]);
+      }
+      const unsigned tg   = (n_grid + threads_per_tg - 1) / threads_per_tg;
+      auto run_sweep = [&](bool chained, const char* what) {
+        std::vector<double> gpu, host;
+        for (unsigned i = 0; i != nof_warmup + nof_runs; ++i) {
+          id<MTLCommandBuffer>          cb  = [queue commandBuffer];
+          id<MTLComputeCommandEncoder>  enc = [cb computeCommandEncoder];
+          [enc setComputePipelineState:spipe];
+          unsigned ni = n_in, ng = n_grid;
+          for (unsigned d = 0; d != 5; ++d) {
+            [enc setBuffer:(chained ? in_shared : in_priv[d]) offset:0 atIndex:0];
+            [enc setBuffer:(chained ? grid_shared : grid_priv[d]) offset:0 atIndex:1];
+            [enc setBytes:&ni length:sizeof(ni) atIndex:2];
+            [enc setBytes:&ng length:sizeof(ng) atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake(tg, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads_per_tg, 1, 1)];
+          }
+          [enc endEncoding];
+          const auto t0 = std::chrono::steady_clock::now();
+          [cb commit];
+          [cb waitUntilCompleted];
+          const auto t1 = std::chrono::steady_clock::now();
+          if (i >= nof_warmup) {
+            gpu.push_back((cb.GPUEndTime - cb.GPUStartTime) * 1e6);
+            host.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
+          }
+        }
+        std::printf("%-42s gpu median %8.1f us   host median %8.1f us\n", what, median(gpu), median(host));
+        std::fflush(stdout);
+      };
+      std::printf("\n-- 5 memory-bound dispatches at the air chain's sizes (46 KB in / 64 KB grid) --\n");
+      run_sweep(true, "5 chained (same in+grid: dependency)");
+      run_sweep(false, "5 separate (own in+grid: no dep)");
+      for (unsigned d : {1u, 5u}) {
+        (void)d;
+      }
+    }
   }
   return 0;
 }
