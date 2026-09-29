@@ -1538,8 +1538,17 @@ metal::ce_lane_order port_channel_estimator_metal_mmse_impl::ce_lane_order_from_
   // DEFAULT merged (S13-P3, flipped 2026-09-20): the whole deferred hop - the extraction, the weights,
   // and then the equalization and the demapping - is ONE submission, so the receiving chain's control
   // plane has exactly one commit per reception and the host does not take part in the middle of the lane
-  // at all. That is the goal's control-plane half (design document 5.8.2, P3), and it is what the count
-  // reads: cbs/lane 1.00 (max 1), mmse_ce commits per hop 1.000, lane gap 0.
+  // at all. That is the goal's control-plane half (design document 5.8.2, P3).
+  //
+  // \note CORRECTION (dev doc 6.189/6.196, leg p150, 2026-09-29): the count this comment used to quote as
+  //       the PROOF - "cbs/lane 1.00 (max 1), mmse_ce commits per hop 1.000, lane gap 0" - is NOT what the
+  //       merged route reads on air. It reads cbs/lane = 2.00: the extraction + the weights really do ride
+  //       the lane's burst (one commit), but the hop pays a SECOND one for the correlation matrices, which
+  //       `flush_correlations_fenced()` commits on a chain of its own (`arm_gpu_time("ce_weights")` is
+  //       issued at BOTH sites, mmse_engine :1151/:1224 and :2960, which is why one label covers two
+  //       commits per hop). The intent above is therefore not yet met, and the reason is a fence that
+  //       needs a command-buffer boundary - not the state machine. What is left to fix is this comment,
+  //       not the route: the two commits are each carrying a real ordering promise.
   //
   // It was implemented and verified on air a session earlier and deliberately left off by default,
   // because its price is latency: the merged submission cannot start the equalizer until the whole hop

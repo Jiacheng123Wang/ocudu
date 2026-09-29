@@ -48,6 +48,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -160,6 +161,36 @@ struct demod_params {             // demod_params (ocudu_demod.metal)
   uint32_t llr_stride;
 };
 static_assert(sizeof(demod_params) == 24, "");
+
+/// Per-symbol strides of the batched equalizer (equalize_strides in ocudu_equalizer.metal). The
+/// per-symbol starts are what make a run's symbols addressable when they are not evenly spaced; an
+/// arm that lays its buffer out densely sets them to k * nof_re, which is exactly the layout the
+/// lane's direct-grid path produces.
+struct equalize_strides_h {
+  uint32_t nof_symbols;
+  uint32_t h_stride;
+  uint32_t eq_stride;
+  uint32_t nv_stride;
+  uint32_t h_starts[14];
+  uint32_t y_starts[14];
+};
+static_assert(sizeof(equalize_strides_h) == 4 * sizeof(uint32_t) + 2 * 14 * sizeof(uint32_t), "");
+
+/// The air interface's shape as every eq/demod arm uses it: MMSE, 1 Tx layer, 1 Rx port, unit scalings.
+static equalize_params make_eq_params(uint32_t nof_re, uint32_t nof_ports, uint32_t nof_layers)
+{
+  equalize_params ep{};
+  ep.nof_re         = nof_re;
+  ep.nof_ports      = nof_ports;
+  ep.nof_layers     = nof_layers;
+  ep.algo           = 1; // MMSE
+  ep.noise_var      = 0.1F;
+  ep.tx_scaling     = 1.0F;
+  ep.h_scaling      = 1.0F;
+  ep.h_offset       = 0;
+  ep.h_layer_stride = nof_re;
+  return ep;
+}
 
 // ---- the production geometry ---------------------------------------------------------------------
 
@@ -305,6 +336,42 @@ int main(int argc, char** argv)
         bind(enc);
         for (uint32_t r = 0; r != n; ++r) {
           [enc dispatchThreads:MTLSizeMake(n_threads, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpt, 1, 1)];
+        }
+        [enc endEncoding];
+      };
+      {
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        encode(cb, 20);
+        [cb commit];
+        [cb waitUntilCompleted];
+      }
+      double best = 1e30;
+      for (unsigned round = 0; round != 3; ++round) {
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        encode(cb, reps);
+        [cb commit];
+        [cb waitUntilCompleted];
+        best = std::min(best, (cb.GPUEndTime - cb.GPUStartTime) * 1e6 / static_cast<double>(reps));
+      }
+      return best;
+    };
+
+    /// \brief The same measurement for a dispatch with an ARBITRARY grid (the equalizer's and the
+    ///        demapper's real shape is two-dimensional: (nof_re, nof_symbols)).
+    ///
+    /// It exists because \c time_it_threads can only express a 1-D grid, and a 1-D grid is NOT the same
+    /// dispatch when the kernel reads \c thread_position_in_grid.y: the lane's batched equalizer and
+    /// demapper are both 2-D, and the difference is not cosmetic - the (256,1,1) threadgroup tiles the
+    /// grid per dimension, so a 2-D grid pays a partial threadgroup PER SYMBOL ROW while a 1-D grid pays
+    /// it once. Which of the two the device actually charges for is measured below, not assumed.
+    const auto time_it_grid = [&](id<MTLComputePipelineState> pipe, MTLSize grid, MTLSize tg,
+                                  void (^bind)(id<MTLComputeCommandEncoder>)) -> double {
+      const auto encode = [&](id<MTLCommandBuffer> cb, uint32_t n) {
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:pipe];
+        bind(enc);
+        for (uint32_t r = 0; r != n; ++r) {
+          [enc dispatchThreads:grid threadsPerThreadgroup:tg];
         }
         [enc endEncoding];
       };
@@ -679,6 +746,278 @@ int main(int argc, char** argv)
             });
           }
           std::printf("%-34u %12u %14.3f %14.3f\n", re, re, eq_us, dem_us);
+        }
+      }
+    }
+
+    // ---- 2026-09-30: EQ/DEMAP PARALLELISM AT THE LANE'S OWN GEOMETRY ------------------------------
+    //
+    // WHY THE ARMS ABOVE ARE NOT ENOUGH. They time ONE-DIMENSIONAL dispatches of the PER-SYMBOL kernels
+    // (grid = nof_re threads, one symbol). The lane dispatches the BATCHED kernels over a 2-D grid.
+    // p150's counters give the real shape: `eq_batch flushes=19558 symbols=234686 runs=19558
+    // batched=19558 max_run=12` and `demod_batch flushes=19558 symbols=234686 dispatches=19558
+    // max_run=12` over 19558 hops - i.e. ONE equalizer dispatch and ONE demapper dispatch per hop, each
+    // carrying 12 OFDM symbols, grid (nof_re, 12) with a (256,1,1) threadgroup. Three questions follow
+    // from the code, and none of them can be answered by the 1-D arms:
+    //   (1) TILING: how many lanes does that grid launch, and how many of them do work? A (256,1,1)
+    //       threadgroup tiles a 2-D grid once per dimension, so if the partial threadgroup is padded,
+    //       the waste is paid once per SYMBOL ROW - i.e. it is a function of the grant.
+    //   (2) SHAPE: the same 7344 useful threads as a single 1-D row - one partial threadgroup per
+    //       dispatch instead of twelve - costs what?
+    //   (3) SATURATION: how many threads does a dispatch need before it stops being launch-bound and
+    //       starts being throughput-bound? That number decides whether ANY grant can fill the device
+    //       with ONE dispatch, which is the premise the multi-lane direction rests on.
+    {
+      id<MTLComputePipelineState> p_eq_b  = from_lib(eq_lib, "equalize_mxn_batch");
+      id<MTLComputePipelineState> p_eq_1d = from_lib(eq_lib, "equalize_mxn");
+      id<MTLComputePipelineState> p_dm    = from_lib(dm_lib, "demod_soft");
+      if ((p_eq_b == nil) || (p_eq_1d == nil) || (p_dm == nil)) {
+        std::printf("\n(eq/demod parallelism arms skipped: a metallib or a kernel is missing)\n");
+      }
+      else {
+        const NSUInteger big_p = 4u << 20;
+        id<MTLBuffer>    b_hp  = [device newBufferWithLength:big_p options:MTLResourceStorageModeShared];
+        id<MTLBuffer>    b_yp  = [device newBufferWithLength:big_p options:MTLResourceStorageModeShared];
+        id<MTLBuffer>    b_eqp = [device newBufferWithLength:big_p options:MTLResourceStorageModeShared];
+        id<MTLBuffer>    b_nvp = [device newBufferWithLength:big_p options:MTLResourceStorageModeShared];
+        id<MTLBuffer>    b_llp = [device newBufferWithLength:big_p options:MTLResourceStorageModeShared];
+        id<MTLBuffer>    b_tg  = [device newBufferWithLength:16u << 20 options:MTLResourceStorageModeShared];
+        id<MTLBuffer>    b_cnt = [device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+        std::memset(b_hp.contents, 0, big_p);
+        std::memset(b_yp.contents, 0, big_p);
+        for (NSUInteger i = 0; i != big_p / sizeof(float); ++i) {
+          static_cast<float*>(b_nvp.contents)[i] = 0.1F;
+        }
+
+        // ---- (1) TILING: what a (grid, threadgroup) pair ACTUALLY launches ----
+        //
+        // The rule "threadgroups = ceil(grid / tg) per dimension, the last one partial" is a MODEL of
+        // dispatchThreads, and every derived number below rests on it, so it is measured rather than
+        // quoted. This kernel records one record per lane THAT EXECUTES; a lane Metal never starts
+        // writes nothing, so the record count is exactly the number of lanes the dispatch spends, and
+        // `threads_per_threadgroup` says whether the partial threadgroup was shrunk (non-uniform) or
+        // padded (uniform).
+        NSString* probe_src = @R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+kernel void tg_probe(device uint* out [[buffer(0)]],
+                     device atomic_uint* cnt [[buffer(1)]],
+                     uint2 gid  [[thread_position_in_grid]],
+                     uint2 tgid [[threadgroup_position_in_grid]],
+                     uint2 lpos [[thread_position_in_threadgroup]],
+                     uint2 tgsz [[threads_per_threadgroup]]) {
+  const uint slot = atomic_fetch_add_explicit(cnt, 1u, memory_order_relaxed);
+  out[slot * 6 + 0] = tgid.x;
+  out[slot * 6 + 1] = tgid.y;
+  out[slot * 6 + 2] = gid.x;
+  out[slot * 6 + 3] = gid.y;
+  out[slot * 6 + 4] = lpos.x;
+  out[slot * 6 + 5] = tgsz.x;
+}
+)MSL";
+        id<MTLComputePipelineState> p_probe = nil;
+        {
+          NSError*       perr = nil;
+          id<MTLLibrary> plib = [device newLibraryWithSource:probe_src options:nil error:&perr];
+          if (plib == nil) {
+            std::printf("\n(tiling probe could not be compiled: %s)\n", perr.localizedDescription.UTF8String);
+          }
+          else {
+            id<MTLFunction> pfn = [plib newFunctionWithName:@"tg_probe"];
+            p_probe = (pfn != nil) ? [device newComputePipelineStateWithFunction:pfn error:&perr] : nil;
+          }
+        }
+
+        const auto tile_of = [&](MTLSize grid, MTLSize tg, uint64_t* launched, uint64_t* groups,
+                                 uint64_t* max_gid_x, uint64_t* min_tgsz, uint64_t* max_tgsz) {
+          *launched = *groups = *max_gid_x = *max_tgsz = 0;
+          *min_tgsz = 1u << 30;
+          if (p_probe == nil) {
+            return;
+          }
+          *static_cast<uint32_t*>(b_cnt.contents) = 0;
+          id<MTLCommandBuffer>         cb  = [q commandBuffer];
+          id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+          [enc setComputePipelineState:p_probe];
+          [enc setBuffer:b_tg offset:0 atIndex:0];
+          [enc setBuffer:b_cnt offset:0 atIndex:1];
+          [enc dispatchThreads:grid threadsPerThreadgroup:tg];
+          [enc endEncoding];
+          [cb commit];
+          [cb waitUntilCompleted];
+          const uint32_t n = *static_cast<uint32_t*>(b_cnt.contents);
+          const uint32_t* r = static_cast<const uint32_t*>(b_tg.contents);
+          std::vector<uint64_t> keys;
+          keys.reserve(n);
+          for (uint32_t i = 0; i != n; ++i) {
+            keys.push_back((static_cast<uint64_t>(r[i * 6 + 1]) << 32) | r[i * 6 + 0]);
+            *max_gid_x = std::max<uint64_t>(*max_gid_x, r[i * 6 + 2]);
+            *min_tgsz  = std::min<uint64_t>(*min_tgsz, r[i * 6 + 5]);
+            *max_tgsz  = std::max<uint64_t>(*max_tgsz, r[i * 6 + 5]);
+          }
+          std::sort(keys.begin(), keys.end());
+          *launched = n;
+          *groups   = static_cast<uint64_t>(std::unique(keys.begin(), keys.end()) - keys.begin());
+        };
+
+        std::printf("\n=== EQ/DEMAP PARALLELISM (the lane's own geometry; p150: 1 eq + 1 demap dispatch "
+                    "per hop, 12 symbols each) ===\n");
+        std::printf("threadgroup limits: max threads per threadgroup = %lu (per dimension %lu x %lu x %lu)\n",
+                    static_cast<unsigned long>(p_eq_b.maxTotalThreadsPerThreadgroup),
+                    static_cast<unsigned long>(device.maxThreadsPerThreadgroup.width),
+                    static_cast<unsigned long>(device.maxThreadsPerThreadgroup.height),
+                    static_cast<unsigned long>(device.maxThreadsPerThreadgroup.depth));
+        if (p_probe != nil) {
+          std::printf("\n[tiling] what dispatchThreads actually launches (grid, tg -> lanes spent vs "
+                      "lanes doing work)\n");
+          std::printf("%-18s %-14s %10s %10s %8s %12s %10s %7s %7s\n", "grid", "tg", "launched",
+                      "useful", "ratio", "threadgroups", "max_gid.x", "tgsz.lo", "tgsz.hi");
+          const std::pair<const char*, MTLSize> grids[] = {
+              {"(612,12) 51PRB", MTLSizeMake(612, 12, 1)},
+              {"(300,12) 25PRB", MTLSizeMake(300, 12, 1)},
+              {"(24,12) 2PRB", MTLSizeMake(24, 12, 1)},
+              {"(3300,14) 275PRB", MTLSizeMake(3300, 14, 1)},
+              {"(7344,1) flat", MTLSizeMake(7344, 1, 1)},
+              {"(3300,1) one row", MTLSizeMake(3300, 1, 1)},
+          };
+          for (const auto& gsel : grids) {
+            const MTLSize tgs[] = {MTLSizeMake(256, 1, 1), MTLSizeMake(128, 1, 1), MTLSizeMake(64, 1, 1)};
+            for (const MTLSize& tg : tgs) {
+              uint64_t launched = 0, groups = 0, mgx = 0, lo = 0, hi = 0;
+              tile_of(gsel.second, tg, &launched, &groups, &mgx, &lo, &hi);
+              const uint64_t useful = static_cast<uint64_t>(gsel.second.width) * gsel.second.height;
+              std::printf("%-18s (%3lu,1,1) %10llu %10llu %8.3f %12llu %10llu %7llu %7llu\n",
+                          gsel.first,
+                          static_cast<unsigned long>(tg.width),
+                          static_cast<unsigned long long>(launched),
+                          static_cast<unsigned long long>(useful),
+                          static_cast<double>(launched) / static_cast<double>(useful),
+                          static_cast<unsigned long long>(groups),
+                          static_cast<unsigned long long>(mgx),
+                          static_cast<unsigned long long>(lo),
+                          static_cast<unsigned long long>(hi));
+            }
+          }
+        }
+
+        // ---- (2) THE LANE'S REAL SHAPE, and the same work as one 1-D row ----
+        //
+        // The 1-D arm is the SAME kernel body (L=1/P=1 => the single-layer path) over the SAME bytes: the
+        // batch kernel's per-symbol strides make its addresses contiguous, so a 1-D arm with
+        // nof_re = nof_re*n_sym reads h, y, eq and nv at exactly the offsets the 2-D arm does. The only
+        // difference between the two rows is how the grid is cut into threadgroups.
+        const auto eq_2d = [&](uint32_t re, uint32_t n_sym, MTLSize tg) -> double {
+          equalize_params ep = make_eq_params(re, 1, 1);
+          equalize_strides_h st{};
+          st.nof_symbols = n_sym;
+          st.h_stride    = re;
+          st.eq_stride   = re;
+          st.nv_stride   = re;
+          for (uint32_t k = 0; k != n_sym; ++k) {
+            st.h_starts[k] = k * re;
+            st.y_starts[k] = k * re;
+          }
+          return time_it_grid(p_eq_b, MTLSizeMake(re, n_sym, 1), tg, ^(id<MTLComputeCommandEncoder> e) {
+            [e setBuffer:b_hp offset:0 atIndex:0];
+            [e setBuffer:b_yp offset:0 atIndex:1];
+            [e setBuffer:b_eqp offset:0 atIndex:2];
+            [e setBuffer:b_nvp offset:0 atIndex:3];
+            [e setBytes:&ep length:sizeof(ep) atIndex:4];
+            [e setBuffer:b_nvp offset:0 atIndex:5];
+            [e setBytes:&st length:sizeof(st) atIndex:6];
+          });
+        };
+        const auto dm_2d = [&](uint32_t re, uint32_t n_sym, MTLSize tg) -> double {
+          demod_params dp{};
+          dp.nof_symbols = n_sym;
+          dp.nof_re      = re;
+          dp.mod         = 0; // QPSK
+          dp.sym_stride  = re;
+          dp.nv_stride   = re;
+          dp.llr_stride  = 2 * re;
+          return time_it_grid(p_dm, MTLSizeMake(re, n_sym, 1), tg, ^(id<MTLComputeCommandEncoder> e) {
+            [e setBuffer:b_eqp offset:0 atIndex:0];
+            [e setBuffer:b_nvp offset:0 atIndex:1];
+            [e setBuffer:b_llp offset:0 atIndex:2];
+            [e setBytes:&dp length:sizeof(dp) atIndex:3];
+          });
+        };
+        const auto eq_1d = [&](uint32_t threads) -> double {
+          equalize_params ep = make_eq_params(threads, 1, 1);
+          return time_it_threads(p_eq_1d, threads, 256, ^(id<MTLComputeCommandEncoder> e) {
+            [e setBuffer:b_hp offset:0 atIndex:0];
+            [e setBuffer:b_yp offset:0 atIndex:1];
+            [e setBuffer:b_eqp offset:0 atIndex:2];
+            [e setBuffer:b_nvp offset:0 atIndex:3];
+            [e setBytes:&ep length:sizeof(ep) atIndex:4];
+            [e setBuffer:b_nvp offset:0 atIndex:5];
+          });
+        };
+        const auto dm_1d = [&](uint32_t threads) -> double {
+          demod_params dp{};
+          dp.nof_symbols = 1;
+          dp.nof_re      = threads;
+          dp.mod         = 0;
+          dp.sym_stride  = 1;
+          dp.nv_stride   = 1;
+          dp.llr_stride  = 2 * threads;
+          return time_it_threads(p_dm, threads, 256, ^(id<MTLComputeCommandEncoder> e) {
+            [e setBuffer:b_eqp offset:0 atIndex:0];
+            [e setBuffer:b_nvp offset:0 atIndex:1];
+            [e setBuffer:b_llp offset:0 atIndex:2];
+            [e setBytes:&dp length:sizeof(dp) atIndex:3];
+          });
+        };
+
+        std::printf("\n[lane shape] one hop = 12 data OFDM symbols of one grant; grid (12*prb, 12) at "
+                    "tg 256, vs the same work as one 1-D row\n");
+        std::printf("%-16s %8s %10s %12s %12s %12s %12s %10s\n", "grant", "nof_re", "threads",
+                    "eq 2-D us", "eq 1-D us", "dm 2-D us", "dm 1-D us", "us/hop");
+        for (uint32_t prb : {2u, 25u, 51u, 100u, 275u}) {
+          const uint32_t re  = 12u * prb;
+          const uint32_t nth = re * 12u;
+          const double   e2  = eq_2d(re, 12, MTLSizeMake(256, 1, 1));
+          const double   e1  = eq_1d(nth);
+          const double   d2  = dm_2d(re, 12, MTLSizeMake(256, 1, 1));
+          const double   d1  = dm_1d(nth);
+          std::printf("%-16u %8u %10u %12.3f %12.3f %12.3f %12.3f %10.3f\n", prb, re, nth, e2, e1, d2, d1,
+                      e2 + d2);
+        }
+
+        std::printf("\n[threadgroup width] 51 PRB (612 x 12) at every tg width; the row is the same "
+                    "dispatch and the same work\n");
+        std::printf("%-16s %14s %14s %14s\n", "tg width", "eq_batch us", "demod us", "sum us");
+        for (NSUInteger w : {32ul, 64ul, 128ul, 256ul, 512ul, 1024ul}) {
+          const MTLSize tg = MTLSizeMake(w, 1, 1);
+          const double  e  = eq_2d(612, 12, tg);
+          const double  d  = dm_2d(612, 12, tg);
+          std::printf("%-16lu %14.3f %14.3f %14.3f\n", static_cast<unsigned long>(w), e, d, e + d);
+        }
+
+        // ---- (3) SATURATION: where does a dispatch stop being launch-bound? ----
+        //
+        // The slope is the answer: a flat row means the device has spare lanes (the dispatch price is
+        // the launch, not the work) and a linear row means the lanes are the limit. Read the knee - the
+        // thread count where the slope turns - as "the device is full".
+        std::printf("\n[saturation] 1-D grids of the real kernels, QPSK / 1 layer / 1 port; "
+                    "ns/thread is the marginal price of one more lane\n");
+        std::printf("%12s %12s %12s %14s %12s %14s\n", "threads", "eq us", "eq ns/thr", "dm us",
+                    "dm ns/thr", "note");
+        for (uint32_t nth : {1u, 32u, 612u, 2448u, 7344u, 12240u, 22032u, 39168u, 46200u}) {
+          const double e  = eq_1d(nth);
+          const double d  = dm_1d(nth);
+          const char*  nt = "";
+          if (nth == 612u) {
+            nt = "51 PRB x 1 sym";
+          }
+          else if (nth == 7344u) {
+            nt = "51 PRB x 12 sym";
+          }
+          else if (nth == 46200u) {
+            nt = "275 PRB x 14 sym";
+          }
+          std::printf("%12u %12.3f %12.4f %14.3f %12.4f %14s\n", nth, e, e * 1000.0 / nth, d,
+                      d * 1000.0 / nth, nt);
         }
       }
     }

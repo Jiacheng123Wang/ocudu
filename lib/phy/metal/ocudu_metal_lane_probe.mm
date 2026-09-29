@@ -341,7 +341,9 @@ struct lane_stats_t {
   ///       and with the host-side landmark table - NOT with `merged_hop`, which is device time.
   ///@{
   std::vector<double> paired_iq2ce_us;  ///< start -> t2f + t2f -> ce: IQ arrival to the estimator's end
-  std::vector<double> paired_iq2eqdem_us; ///< start -> t2f + t2f -> eq_demap: IQ arrival to LLR-ready
+  /// start -> t2f + t2f -> ce + ce -> eqdem: IQ arrival to LLR-ready. Must agree with the [ul_gpu_pipeline]
+  /// series (V1) - same start, same instant, only the pairing population differs (dev doc 6.196).
+  std::vector<double> paired_iq2eqdem_us;
   ///@}
 };
 
@@ -626,7 +628,19 @@ void gpu_lane_probe::note_phase_sample(uint64_t slot, int64_t t2f_ns, int64_t ce
   // rather than adding medians in the report is what makes "IQ -> CE" a reading instead of an arithmetic
   // hope: the parts of a median are not the median of the parts.
   s.paired_iq2ce_us.push_back(static_cast<double>(t2f_ns + ce_ns) / 1e3);
-  s.paired_iq2eqdem_us.push_back(static_cast<double>(t2f_ns + eqdem_ns) / 1e3);
+  // IQ -> LLR-ready is ALL THREE segments: t2f (IQ arrival -> the slot's FFT), ce (FFT -> the estimator)
+  // and eqdem (the estimator -> the LLRs). This line used to add only t2f + eqdem, silently dropping the
+  // `ce` segment: the value it printed was IQ->LLR MINUS the estimator's own phase, while its name and its
+  // comment claimed IQ->LLR (dev doc 6.196). The arithmetic, not the measurement, was wrong - the three
+  // segments are recorded correctly - and the evidence is self-contained: on p150 the printed 1362.5 equals
+  // the independent [ul_gpu_pipeline] median 1426.6 minus `ce` 62.2 = 1364.4.
+  //
+  // With the three segments the sum IS the span [ul_gpu_pipeline] records (same `start`, same instant, see
+  // the class comment of ul_pipeline_probe::record_ldpc_start), so the two series cross-check each other -
+  // which is what makes this the strongest self-test the probe has. Kept as its own series (rather than
+  // deleted) exactly for that check: it only includes hops whose lane pairing succeeded, V1 includes every
+  // attempt.
+  s.paired_iq2eqdem_us.push_back(static_cast<double>(t2f_ns + ce_ns + eqdem_ns) / 1e3);
   if (row.residency_us > 0.0) {
     s.paired_busy_ratio.push_back(row.busy_us / row.residency_us);
     s.paired_eqdem_ratio.push_back((static_cast<double>(eqdem_ns) / 1e3) / row.residency_us);
@@ -1245,7 +1259,9 @@ void gpu_lane_probe::report()
     // the number the ~470us question is actually about, and it is taken per hop (the sum), not by adding
     // medians. The parts are printed beside it so a reader never has to hold two reports in their head.
     print_series("paired iq2ce (start -> ce, whole front)", paired_iq2ce);
-    print_series("paired iq2eqdem (start -> eq_demap)", paired_iq2eqdem);
+    // The label says what the sum NOW is: all three segments, i.e. the same span [ul_gpu_pipeline] prints
+    // as V1. Before 2026-09-30 it said "start -> eq_demap" while the sum dropped `ce` (dev doc 6.196).
+    print_series("paired iq2eqdem (start -> llr ready, whole front)", paired_iq2eqdem);
     if (!paired_iq2ce.empty()) {
       const auto med = [](std::vector<double> v) {
         if (v.empty()) {
