@@ -1260,6 +1260,93 @@ int main(int argc, char** argv)
                       : "  <- a queued buffer does NOT start until the running one ends");
     }
 
+    // HOW BIG MUST A GRID BE BEFORE THE DEVICE STOPS OVERLAPPING? (dev doc 6.185)
+    //
+    // The previous arm used 768 threadgroups per buffer and the device overlapped two such buffers at ratio
+    // 0.526. But a hop's dispatches range from a dozen threadgroups (corr_a) to hundreds (the front end's
+    // 14 transforms), and the sweep question is whether the overlap is a property of the DEVICE or of the
+    // grid being small enough to leave room. It matters because "the two lane chains did not overlap" (p76
+    // vs p72: same merged_hop exec at concurrency 1 and 2, but wait 54.4 vs 206.5) is only explained if a
+    // large grid stops the second buffer from starting.
+    //
+    // Sweep the number of systems per buffer from 1 to 256 (12 to 3072 threadgroups) and report
+    // together/serial. 0.5 = fully overlapped, 1.0 = fully serialized.
+    if (p_corr_a != nil) {
+      const geometry   gA{};
+      const NSUInteger aA = static_cast<NSUInteger>(gA.L()) * gA.L();
+      corr_params      cA{};
+      cA.npt                = gA.npt;
+      cA.npf                = gA.npf();
+      cA.ncomb              = gA.ncomb;
+      cA.nf                 = gA.nf();
+      cA.L                  = gA.L();
+      cA.Ls                 = gA.L();
+      cA.a_sys              = gA.L() * gA.L();
+      cA.r_sys              = gA.nout() * gA.L();
+      cA.ts                 = 1.0F / (15e3F * 14.0F);
+      cA.scs_hz             = 15e3F;
+      cA.fd_hz              = 300.0F;
+      cA.tau_rms_s          = 370e-9F;
+      cA.sigma2             = 0.01F;
+      cA.ridge              = 1e-6F;
+      cA.sigma2_from_device = 0;
+      cA.sigma2_slot        = 0;
+      cA.dmrs_slots[0]      = 2;
+      cA.dmrs_slots[1]      = 7;
+      cA.dmrs_slots[2]      = 11;
+      const NSUInteger tgsA = (aA + 255u) / 256u;
+
+      std::printf("\n[OVERLAP-SWEEP] two buffers of mmse_corr_a, serial vs together, by grid size:\n");
+      std::printf("     systems   threadgroups/buf   serial(us)   together(us)   ratio\n");
+      for (uint32_t sys : {1u, 4u, 16u, 64u, 256u}) {
+        cA.nof_systems        = sys;
+        const auto issueA     = [&](id<MTLCommandBuffer> cb, NSUInteger off) {
+          id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+          [enc setComputePipelineState:p_corr_a];
+          [enc setBuffer:b_a offset:off atIndex:0];
+          [enc setBytes:&cA length:sizeof(cA) atIndex:1];
+          [enc dispatchThreadgroups:MTLSizeMake(tgsA, sys, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+          [enc endEncoding];
+        };
+        double ser = 1e30;
+        double tog = 1e30;
+        for (unsigned round = 0; round != 9; ++round) {
+          double t = CFAbsoluteTimeGetCurrent();
+          {
+            id<MTLCommandBuffer> x = [q commandBuffer];
+            issueA(x, 0);
+            [x commit];
+            [x waitUntilCompleted];
+            id<MTLCommandBuffer> y = [q commandBuffer];
+            issueA(y, static_cast<NSUInteger>(sys) * aA * sizeof(float));
+            [y commit];
+            [y waitUntilCompleted];
+          }
+          ser = std::min(ser, (CFAbsoluteTimeGetCurrent() - t) * 1e6);
+
+          t = CFAbsoluteTimeGetCurrent();
+          {
+            id<MTLCommandBuffer> x = [q commandBuffer];
+            id<MTLCommandBuffer> y = [q commandBuffer];
+            issueA(x, 0);
+            issueA(y, static_cast<NSUInteger>(sys) * aA * sizeof(float));
+            [x commit];
+            [y commit];
+            [x waitUntilCompleted];
+            [y waitUntilCompleted];
+          }
+          tog = std::min(tog, (CFAbsoluteTimeGetCurrent() - t) * 1e6);
+        }
+        std::printf("  %8u   %14lu   %10.1f   %12.1f   %6.3f%s\n",
+                    sys,
+                    static_cast<unsigned long>(tgsA * sys),
+                    ser,
+                    tog,
+                    tog / ser,
+                    (tog / ser < 0.9) ? "  overlap" : "  serialized");
+      }
+    }
+
     // O1 (dev doc 6.174): the merged correlation kernel against the two it replaces, BYTE FOR BYTE.
     //
     // This is the arm that decides whether "one dispatch" changed anything it was not allowed to change.
