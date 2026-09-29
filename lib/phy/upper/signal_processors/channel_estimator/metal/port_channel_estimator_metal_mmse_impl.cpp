@@ -1853,6 +1853,25 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // (measured on air in phase P2). OCUDU_CE_HOLD_EXTRACTION=0 is the phase's rollback and its A/B arm.
       st.hold_for_weights  = hold_extraction_for_weights() && device_builds_pilots && !ls_check_enabled() &&
                             !host_reads_device_scalars();
+      // ONE-SHOT DIAGNOSTIC (dev doc 6.187, remove once the answer is in): WHICH of the four conditions
+      // decides whether the hop commits ONE estimator submission or two. The design (ce_lane_order_from_env)
+      // says `merged` is one submission per hop; the legs read two (`ce_weights` + `merged_hop`), so one of
+      // these four is false and nothing in the report says which.
+      if (std::getenv("OCUDU_CE_HOLD_DEBUG") != nullptr) {
+        static std::atomic<unsigned> dbg{0};
+        if (dbg.fetch_add(1, std::memory_order_relaxed) < 4) {
+          std::fprintf(stderr,
+                       "[ce_hold_dbg] hold=%d <- hold_env=%d device_builds_pilots=%d !ls_check=%d "
+                       "!host_scalars=%d (geom.ok=%d device_ls=%d)\n",
+                       st.hold_for_weights ? 1 : 0,
+                       hold_extraction_for_weights() ? 1 : 0,
+                       device_builds_pilots ? 1 : 0,
+                       !ls_check_enabled() ? 1 : 0,
+                       !host_reads_device_scalars() ? 1 : 0,
+                       geom.ok ? 1 : 0,
+                       device_ls_enabled() ? 1 : 0);
+        }
+      }
       st.fd_filter         = fd_filter.data();
       st.fd_filter_bytes   = sizeof(fd_filter);
       st.fd_filter_len     = fd_filter_len;

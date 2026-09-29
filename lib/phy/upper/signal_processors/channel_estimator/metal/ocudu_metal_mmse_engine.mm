@@ -1253,6 +1253,15 @@ static bool close_held_buffer(mmse_engine_impl* e)
   }
   id<MTLCommandBuffer> cb = e->held_cb;
   e->held_cb              = nil;
+  // ONE-SHOT DIAGNOSTIC (dev doc 6.187): a held buffer closed HERE is a hop that paid the second
+  // submission after all - the hold happened, and then something closed it before the weights could open
+  // their second encoder on it. Printed apart from the "not held" line so the two are never confused.
+  if (std::getenv("OCUDU_CE_HOLD_DEBUG") != nullptr) {
+    static std::atomic<unsigned> dbg{0};
+    if (dbg.fetch_add(1, std::memory_order_relaxed) < 4) {
+      std::fprintf(stderr, "[ce_hold_dbg] held_cb CLOSED by close_held_buffer (committed as ce_held)\n");
+    }
+  }
   ocudu::metal::shared_queue::arm_gpu_time(cb, ocudu::metal::shared_queue::queue_kind::back_end, "ce_held");
   ocudu::metal::shared_queue::note_commit_order(cb);
   [cb commit];
@@ -2613,7 +2622,24 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   if (s.hold_for_weights && (e->lane_order != metal::ce_lane_order::burst)) {
     [st.enc endEncoding];
     e->held_cb = st.cb;
+    if (std::getenv("OCUDU_CE_HOLD_DEBUG") != nullptr) {
+      static std::atomic<unsigned> dbg{0};
+      if (dbg.fetch_add(1, std::memory_order_relaxed) < 4) {
+        std::fprintf(stderr, "[ce_hold_dbg] extraction HELD -> held_cb set (lane_order=%d)\n",
+                     static_cast<int>(e->lane_order));
+      }
+    }
     return true;
+  }
+  if (std::getenv("OCUDU_CE_HOLD_DEBUG") != nullptr) {
+    static std::atomic<unsigned> dbg2{0};
+    if (dbg2.fetch_add(1, std::memory_order_relaxed) < 4) {
+      std::fprintf(stderr,
+                   "[ce_hold_dbg] extraction NOT held: hold_for_weights=%d lane_order=%d -> commits its own "
+                   "cb (this is the SECOND submission per hop)\n",
+                   s.hold_for_weights ? 1 : 0,
+                   static_cast<int>(e->lane_order));
+    }
   }
   return end_stage(e, st, true, ocudu::metal::gpu_lane_probe::stage::channel_estimator,
                    /*signal_extraction_fence=*/true);
