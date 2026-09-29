@@ -12068,6 +12068,46 @@ e->pending_cb = s.cb;
 
 **判据（修复后的一条腿）**：`mmse_ce commits` 应从 **19887（≈1/跳）→ ~0**、`cbs/lane` 从 **2.00 → 1.00**、而 **Q9-F3 的 `merged_hop` exec 不应显著变差**（§6.178 教训：合并**提交**不该改变各 kernel 的并行度）。
 
+### 6.189 ⚠⚠ **"一跳一次提交"的调查收口：`ce_weights` 有两个来源，其中一个是我此前没看到的独立提交链**（2026-09-29）
+
+#### ① 腿 `p152-n78-hold2`（计数诊断，不再被前 4 次打印骗）
+
+```
+[ce_hold_dbg] hops=16384  hold=16384  NOT-hold: geom_bad=0 pilots_bad=0
+[ce_hold_dbg] ADOPT-CHECK: lane_order=3 (merged=3) adopted_held=1 held_cb=nil st.cb=set   （4/4）
+[ce_hold_dbg] extraction HELD ×4   NOT held ×0   held_cb CLOSED ×1
+标签表: ce_weights n=19956   merged_hop n=19950   ce_held n=1   ce_stage n=1   lane_burst n=1
+        （**没有 `ce_weights_fb`** ⇒ adopt 失败的回退没走）
+```
+
+#### ② 三处更正（我在 §6.187 / §6.188 里说错了两处）
+
+| 我说过 | 实际 |
+|---|---|
+| "`hold_for_weights` 因 `geom.ok/contiguous` 为假而断了" | ❌ **错**：`hold = hops`（**100%**）、`geom_bad=0` |
+| "hold 生效但 `st.burst=false` 导致权重自己提交" | ❌ **不完整**：`ADOPT-CHECK` 显示**确实进了 adopt 分支**（`adopted_held=1`）|
+| （隐含）"`ce_weights` 只来自 `end_stage_async`" | ❌ **错**：★ **`grep '"ce_weights"'` 给出两处来源** |
+
+#### ③ ★ 真正的结构（两处 `arm_gpu_time("ce_weights")`）
+
+| 位置 | 所属 | 语义 |
+|---|---|---|
+| `:1151` / `:1224` | `end_stage` / `end_stage_async`（`stage_label` 三元式）| 权重阶段提交自己的缓冲 |
+| **`:2960`** | **`flush_correlations_fenced()`** | ★ **相关矩阵（几何类）的 fenced 提交**，带 `corr_fence_generation`，是**独立的提交链** |
+
+⇒ ★★ **一跳的 2 次提交不是"一个可以消除的缺陷"，而是两条各自的提交链**：
+1. **相关矩阵的 fenced 提交**（`corr_a`/`corr_rhp` 等几何类，有自己的 fence generation）；
+2. **权重 + lane 的合并提交**（adopt 那条链，`merged_hop`）。
+
+⇒ 这也解释了 `ADOPT-CHECK` 与 `ce_weights n=19956` 为何**同时成立**：`adopt` 分支进了、成功了，而 `ce_weights` 的计数来自 §③ 那条**我此前没看到的**独立链。
+
+#### ④ 结论与建议（我的判断）
+
+* **"一跳一次提交"不是一个小改动**：它要求**把相关矩阵的 fenced 提交也并入 lane 的提交**，而那条链的存在理由是**顺序保证**（`corr_fence_generation`：相关矩阵必须先于权重可见，注释明确说 *"the signaller is already on its way"* 的纪律）⇒ **动它要重做那条 fence**；
+* **而收益按已测数据是 ~1.69 µs**（一个 dispatch 边界，§6.177），**风险是 §6.178 的占用率教训 + 破坏 fence 纪律**；
+* ⇒ ★ **我的建议：到此收口**。"一跳一次提交"这条线**已经查清**（两条链、各自的理由、以及收益上界），**继续做下去是"用高风险换 1.69 µs"**。
+* ★ **但调查本身有确定产出**：`merged` 的设计注释声称 `cbs/lane 1.00`（一跳一次提交），**实测是 2.00** —— 这不是缺陷，而是**注释没有跟上实现**（第二条链是后来加的）。**该改的是注释，不是状态机。**
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
