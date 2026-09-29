@@ -883,6 +883,145 @@ int main(int argc, char** argv)
                   (enc_16 - enc_1) / 15.0);
     }
 
+    // O1 TIMING (dev doc 6.175): what ONE dispatch boundary is worth on the CE's own chain, measured at
+    // fixed geometry with the same inputs - the pair the air legs p146/p147 could not provide, because
+    // their corr rates differed by 9% (the very quantity under test).
+    //
+    // The three layouts below issue the SAME work: A's grid and R_hp's grid, both for the same systems.
+    //   * "two dispatches"  - mmse_corr_a then mmse_corr_r_hp, as the delivery path does;
+    //   * "one dispatch"    - mmse_corr_a_rhp over the union;
+    //   * "one, repeated"   - the merged kernel N times, to get a slope rather than a single difference.
+    // The reading is the median of many runs (the `gpu busy` union is noisy: dev doc 6.65 measured -130us
+    // per dispatch on it), and the per-hop figure is the difference divided by the correlation builds the
+    // hop performs (corr_repeat * 1.43 at the air geometry, rounded to the measured 1.40-1.53 range).
+    if (p_corr_merged != nil && p_corr_a != nil && p_corr_rhp != nil) {
+      const geometry   g5{};
+      const NSUInteger a5 = static_cast<NSUInteger>(g5.L()) * g5.L();
+      const NSUInteger r5 = static_cast<NSUInteger>(g5.nout()) * g5.L();
+      corr_params      c5{};
+      c5.nof_systems        = g5.systems();
+      c5.npt                = g5.npt;
+      c5.npf                = g5.npf();
+      c5.ncomb              = g5.ncomb;
+      c5.nf                 = g5.nf();
+      c5.L                  = g5.L();
+      c5.Ls                 = g5.L();
+      c5.a_sys              = g5.L() * g5.L();
+      c5.r_sys              = g5.nout() * g5.L();
+      c5.ts                 = 1.0F / (15e3F * 14.0F);
+      c5.scs_hz             = 15e3F;
+      c5.fd_hz              = 300.0F;
+      c5.tau_rms_s          = 370e-9F;
+      c5.sigma2             = 0.01F;
+      c5.ridge              = 1e-6F;
+      c5.sigma2_from_device = 0;
+      c5.sigma2_slot        = 0;
+      c5.dmrs_slots[0]      = 2;
+      c5.dmrs_slots[1]      = 7;
+      c5.dmrs_slots[2]      = 11;
+      for (uint32_t i = 0; i != 12u && i != g5.ncomb; ++i) {
+        c5.pilot_re[i] = i * 2u;
+      }
+      const NSUInteger wide5 = (a5 > r5) ? a5 : r5;
+      const NSUInteger tgs5  = (wide5 + 255u) / 256u;
+
+      const auto time_two = [&]() -> double {
+        std::vector<double> v;
+        for (unsigned round = 0; round != 21; ++round) {
+          id<MTLCommandBuffer> cb = [q commandBuffer];
+          id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+          [enc setComputePipelineState:p_corr_a];
+          [enc setBuffer:b_a offset:0 atIndex:0];
+          [enc setBytes:&c5 length:sizeof(c5) atIndex:1];
+          [enc dispatchThreads:MTLSizeMake(a5, c5.nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+          [enc setComputePipelineState:p_corr_rhp];
+          [enc setBuffer:b_rhp offset:0 atIndex:0];
+          [enc setBytes:&c5 length:sizeof(c5) atIndex:1];
+          [enc dispatchThreads:MTLSizeMake(r5, c5.nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+          [enc endEncoding];
+          [cb commit];
+          [cb waitUntilCompleted];
+          v.push_back((cb.GPUEndTime - cb.GPUStartTime) * 1e6);
+        }
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+      }();
+      const auto time_one = [&](uint32_t reps) -> double {
+        std::vector<double> v;
+        for (unsigned round = 0; round != 21; ++round) {
+          id<MTLCommandBuffer> cb = [q commandBuffer];
+          id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+          [enc setComputePipelineState:p_corr_merged];
+          [enc setBuffer:b_a offset:0 atIndex:0];
+          [enc setBuffer:b_rhp offset:0 atIndex:1];
+          [enc setBytes:&c5 length:sizeof(c5) atIndex:2];
+          for (uint32_t k = 0; k != reps; ++k) {
+            [enc dispatchThreadgroups:MTLSizeMake(tgs5 * 2u * c5.nof_systems, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+          }
+          [enc endEncoding];
+          [cb commit];
+          [cb waitUntilCompleted];
+          v.push_back((cb.GPUEndTime - cb.GPUStartTime) * 1e6);
+        }
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+      };
+      const double one = time_one(1u);
+      const double one8 = time_one(8u);
+      std::printf("\n[O1-time] the SAME correlation work, at fixed geometry, median of 21 runs:\n");
+      std::printf("     two dispatches (corr_a + corr_r_hp) : %8.3f us\n", time_two);
+      std::printf("     one dispatch  (corr_a_rhp)          : %8.3f us\n", one);
+      std::printf("     one dispatch x8 (slope check)       : %8.3f us  -> %.3f us per merged dispatch\n",
+                  one8,
+                  one8 / 8.0);
+      std::printf("=> merged-vs-split (DIFFERENT code, so this is not the boundary alone): %.3f us\n",
+                  time_two - one);
+
+      // THE PURE BOUNDARY: the SAME kernel, the SAME total work, only how many dispatches carry it.
+      // This is the control the figure above cannot be: it holds the kernel's code constant, so the
+      // difference is the boundary and nothing else.
+      const auto time_same_kernel = [&](uint32_t dispatches) -> double {
+        std::vector<double> v;
+        const NSUInteger per = (a5 + dispatches - 1u) / dispatches;
+        for (unsigned round = 0; round != 21; ++round) {
+          id<MTLCommandBuffer> cb = [q commandBuffer];
+          id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+          for (uint32_t d = 0; d != dispatches; ++d) {
+            NSUInteger lo = d * per;
+            NSUInteger hi = std::min<NSUInteger>(a5, lo + per);
+            if (hi <= lo) {
+              break;
+            }
+            [enc setComputePipelineState:p_corr_a];
+            [enc setBuffer:b_a offset:0 atIndex:0];
+            [enc setBytes:&c5 length:sizeof(c5) atIndex:1];
+            // One threadgroup per slice: `take` threadgroups of 1 thread each is not what the kernel
+            // wants, so each dispatch covers its own slice with its own grid - the same kernel, issued
+            // twice instead of once.
+            [enc dispatchThreadgroups:MTLSizeMake((hi - lo + 255u) / 256u, c5.nof_systems, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+          }
+          [enc endEncoding];
+          [cb commit];
+          [cb waitUntilCompleted];
+          v.push_back((cb.GPUEndTime - cb.GPUStartTime) * 1e6);
+        }
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+      };
+      const double k1 = time_same_kernel(1u);
+      const double k2 = time_same_kernel(2u);
+      const double k4 = time_same_kernel(4u);
+      std::printf("[O1-time] PURE boundary, SAME kernel and same work, %lu elements split into "
+                  "1/2/4 dispatches: %.3f / %.3f / %.3f us -> %.3f us per boundary\n",
+                  static_cast<unsigned long>(a5),
+                  k1,
+                  k2,
+                  k4,
+                  (k2 - k1));
+    }
+
     // O1 (dev doc 6.174): the merged correlation kernel against the two it replaces, BYTE FOR BYTE.
     //
     // This is the arm that decides whether "one dispatch" changed anything it was not allowed to change.
