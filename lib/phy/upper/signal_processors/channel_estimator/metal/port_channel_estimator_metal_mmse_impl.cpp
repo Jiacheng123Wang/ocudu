@@ -1278,7 +1278,6 @@ bool port_channel_estimator_metal_mmse_impl::build_correlation_matrices_device(
   // A1 (dev doc 6.169): THIS is the noise loading the matrices are built with, so this is where the
   // spread that the reuse window trades against is measured. It used to be sampled from
   // corr_stage::sigma2 at the call site, which read 0 because this field is not filled on every route.
-  note_sigma2(stats.sigma2);
   for (unsigned k = 0; k != npt; ++k) {
     c.dmrs_slots[k] = dmrs_slot_symbols[k];
   }
@@ -2113,6 +2112,11 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                  rel,
                  device_sigma2_valid ? 1 : 0);
   }
+  // A1 (dev doc 6.171): the noise loading the matrices are built with, sampled where every route passes.
+  // It used to hang off correlation_stage(), which is NOT on every route - measured on leg p144, where that
+  // function never ran and the spread report therefore never printed at all. A reading that only exists on
+  // some routes is not a reading.
+  note_sigma2(sigma2 / std::max(pilots_power, 1e-30F));
   float sigma2_rel_perturbed = sigma2 / std::max(pilots_power, 1e-30F);
   // TEMPORARY EXPERIMENT: does a relative change of the size a device-side reduction would introduce
   // (tree summation instead of the host's sequential one, ~1e-7 in float) reach the published dumps?
