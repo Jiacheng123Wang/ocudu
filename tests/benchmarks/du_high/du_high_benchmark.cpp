@@ -91,24 +91,28 @@ struct bench_params {
 
 static void usage(const char* prog, const bench_params& params)
 {
-  fmt::print("Usage: {} [-R repetitions] [-U nof. ues] [-D Duplex mode] [-d DL bytes per slot] [-u UL BSR] [-r Max RBs "
-             "per UE DL grant] [-a CPU affinity] [-p F1-U PDU size] [-P Policy scheduler type]\n",
-             prog);
+  fmt::print(
+      "Usage: {} [-R repetitions] [-U nof. ues] [-D Duplex mode] [-d DL bytes per slot] [-u UL BSR] [-r Max RBs "
+      "per UE DL grant] [-a CPU affinity] [-p F1-U PDU size] [-P Policy scheduler type] [-t Scheduler tracing]\n",
+      prog);
   fmt::print("\t-R Repetitions [Default {}]\n", params.nof_repetitions);
   fmt::print("\t-U Nof. DU UEs for each simulation (e.g. \"1,5,10\" would run three benchmarks with 1, 5 and 10 UEs) "
              "[Default {}]\n",
              params.nof_ues);
   fmt::print("\t-D Duplex mode (FDD/TDD) [Default {}]\n", to_string(params.dplx_mode));
   fmt::print("\t-d Number of bytes pushed to the DU DL F1-U interface every slot. Setting this value to 0 will "
-             "disable DL Tx. [Default {}]\n",
+             "disable DL Tx. Values above {} Mbps are clamped. [Default {}]\n",
+             MAX_F1U_DL_BITRATE_PER_PORT_BPS / 1000000,
              params.dl_bytes_per_slot);
   fmt::print("\t-u Size of the UL Buffer status report to push for UL Tx. Setting this value to 0 will disable UL Tx. "
              "[Default {}]\n",
              params.ul_bsr_bytes);
-  fmt::print("\t-r Max RBs per UE DL grant per slot [Default 275]\n");
+  fmt::print("\t-r Max RBs per UE DL grant per slot [Default {}]\n", params.max_dl_rb_grant);
   fmt::print("\t-a \"du_cell\" cores that the benchmark should use [Default \"no CPU affinity\"]\n");
   fmt::print("\t-p F1-U PDU size used [Default {}]\n", params.pdu_size);
-  fmt::print("\t-P Policy scheduler the bechmark should use (\"time_rr\", \"time_qos\") [Default \"time_rr\"]\n");
+  fmt::print("\t-P Policy scheduler the benchmark should use (\"time_rr\", \"time_qos\") [Default \"{}\"]\n",
+             std::holds_alternative<time_qos_scheduler_config>(params.strategy_cfg) ? "time_qos" : "time_rr");
+  fmt::print("\t-t Enable scheduler tracing (\"true\", \"false\") [Default {}]\n", params.sched_trace_enabled);
   fmt::print("\t-h Show this message\n");
 }
 
@@ -157,18 +161,8 @@ static void parse_args(int argc, char** argv, bench_params& params)
         params.max_dl_rb_grant = std::strtol(optarg, nullptr, 10);
         break;
       case 'a': {
-        std::string optstr{optarg};
-        params.du_cell_cores.clear();
-        if (optstr.find(",") != std::string::npos) {
-          size_t pos = optstr.find(",");
-          while (pos != std::string::npos) {
-            params.du_cell_cores.push_back(std::strtol(optstr.substr(0, pos).c_str(), nullptr, 10));
-            optstr = optstr.substr(pos + 1);
-            pos    = optstr.find(",");
-          }
-        } else {
-          params.du_cell_cores.resize(1, (unsigned)std::strtol(optstr.c_str(), nullptr, 10));
-        }
+        params.du_cell_cores = tokenize(
+            optarg, [](const std::string& token) -> unsigned { return std::strtol(token.c_str(), nullptr, 10); });
       } break;
       case 'p':
         params.pdu_size = units::bytes{(unsigned)std::strtol(optarg, nullptr, 10)};
@@ -1328,18 +1322,6 @@ static void configure_main_thread(span<const unsigned> du_cell_cores)
 {
   pthread_t self = pthread_self();
 
-  int prio_level = ::sched_get_priority_max(SCHED_FIFO);
-  if (prio_level == -1) {
-    fmt::print("Warning: Unable to get the max thread priority. Falling back to normal priority.\n");
-    return;
-  }
-  // set priority to -1 less than RT to avoid interfering with kernel.
-  ::sched_param sch{prio_level - 1};
-  if (::pthread_setschedparam(self, SCHED_FIFO, &sch)) {
-    fmt::print("Warning: Unable to set the test thread priority to max. Falling back to normal priority.\n");
-    return;
-  }
-
   // Set main test thread to use same cores as du_cell.
   if (not du_cell_cores.empty()) {
     ::cpu_set_t cpuset;
@@ -1350,8 +1332,18 @@ static void configure_main_thread(span<const unsigned> du_cell_cores)
     int ret;
     if ((ret = ::pthread_setaffinity_np(self, sizeof(cpuset), &cpuset)) != 0) {
       fmt::print("Warning: Unable to set affinity for test thread. Cause: '{}'\n", ::strerror(ret));
-      return;
     }
+  }
+
+  int prio_level = ::sched_get_priority_max(SCHED_FIFO);
+  if (prio_level == -1) {
+    fmt::print("Warning: Unable to get the max thread priority. Falling back to normal priority.\n");
+    return;
+  }
+  // set priority to -1 less than RT to avoid interfering with kernel.
+  ::sched_param sch{prio_level - 1};
+  if (::pthread_setschedparam(self, SCHED_FIFO, &sch)) {
+    fmt::print("Warning: Unable to set the test thread priority to max. Falling back to normal priority.\n");
   }
 }
 
