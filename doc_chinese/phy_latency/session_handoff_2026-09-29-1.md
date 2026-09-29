@@ -11,7 +11,7 @@
 
 ## 0. 一句话现状
 
-**身份三连**（任何飞腿/取证前先核）：`git log -1` = `build/hashes.h` = `gnb` 内嵌戳 = **`2051ca1340`**；**工作区干净、无 gNB 在跑**；`ctest -L phy` 串行 **203/203**（最后一次**树内** C++ 改动 = Q9-F3 加 `slowest executions` 表）。
+**身份三连**（任何飞腿/取证前先核）：本 memo 定稿时 = **`2051ca1340`**（其后**只有本 memo 自己的文档提交**，并已按纪律重打戳重链）⇒ **以 §3.3 的三条命令读到的当时 HEAD 为准**；**工作区干净、无 gNB 在跑**；`ctest -L phy` 串行 **203/203**（最后一次**树内** C++ 改动 = Q9-F3 加 `slowest executions` 表）。
 
 **★ 唯一待裁决 = §3.1 的 A/B**：那 **470 µs/跳**（`merged_hop`）到底由哪些**阶段族**贡献 —— 走 **B（按阶段的空口消去臂，推荐）** 还是 **A（真 kernel 的按族离线 harness）**。
 
@@ -91,7 +91,7 @@ git -C /Users/jiachengwang/dev/ocudu log --oneline -1
 grep build_hash /Users/jiachengwang/dev/ocudu/build/hashes.h
 grep -ac "$(git -C /Users/jiachengwang/dev/ocudu rev-parse --short=10 HEAD)" /Users/jiachengwang/dev/ocudu/build/apps/gnb/gnb
 ```
-三者必须一致（**本会话每次提交后都重打过戳**）。⚠ 本 memo 的两次提交之后 HEAD 已前进 ⇒ **`p132`（`aa10f6706b`）不再算"跑在 HEAD 上"**，这正是 3.2-2 需要新腿的原因。
+三者必须一致（**本会话每次提交后都重打过戳**）。⚠ 本 memo 自身的文档提交已让 HEAD 前进一步 ⇒ **`p132`（`aa10f6706b`）不再算"跑在 HEAD 上"**，这正是 3.2-2 需要一条新腿的原因；飞腿前用上面三条命令核当时的真实 HEAD（本会话每次提交后都已重打戳）。
 
 ---
 
