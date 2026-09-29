@@ -64,7 +64,7 @@ kernel void noop_kernel(device float* out [[buffer(0)]],
 NSString* const sweep_source = @R"(
 #include <metal_stdlib>
 using namespace metal;
-kernel void sweep_kernel(device const float* in   [[buffer(0)]],
+kernel void sweep_kernel(device float*       in   [[buffer(0)]],
                          device float*       grid [[buffer(1)]],
                          constant uint&      n_in [[buffer(2)]],
                          constant uint&      n_grid [[buffer(3)]],
@@ -73,7 +73,10 @@ kernel void sweep_kernel(device const float* in   [[buffer(0)]],
 {
   if (i >= n_grid) { return; }
   float acc = 0.0f;
-  if (mode == 0u) {
+  if (mode == 2u) {
+    // WRITER: writes the input, the way the radio's DMA does while the chain below reads it.
+    in[i % n_in] = static_cast<float>(i) * 0.5f;
+  } else if (mode == 0u) {
     // PRODUCER: reads the input, writes the grid (the front end's shape).
     const uint base = (i * 7u) % n_in;
     acc += in[base] + in[(base + 1u) % n_in] + in[(base + 2u) % n_in] + in[(base + 3u) % n_in];
@@ -315,6 +318,116 @@ int main()
       run_raw(true, "RAW chain + a competing lane streaming");
       std::printf("\n-- the same RAW chain with NO-OP content (the ablation question) --\n");
       run_arm(5, 1, 0, "(no-op 5 dispatches, for comparison: no raw edge)");
+
+      // ---- ARM 1: BOUNDED interference from another queue -------------------------------------------
+      // The earlier attempt used a thread that hammered commits and read a SMALLER window, which is not
+      // interpretable. This one is bounded and deterministic: K whole chains are committed to the other
+      // queue BEFORE the measured chain, nothing else runs, and the measured chain's own window and host
+      // time are what a neighbouring lane costs.
+      auto build_chain = [&](id<MTLCommandBuffer> cb, unsigned ni, unsigned ng, unsigned mode0, unsigned mode_rest) {
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:spipe];
+        for (unsigned d = 0; d != 5; ++d) {
+          unsigned m = (d == 0) ? mode0 : mode_rest;
+          [enc setBuffer:in_shared offset:0 atIndex:0];
+          [enc setBuffer:grid_shared offset:0 atIndex:1];
+          [enc setBytes:&ni length:sizeof(ni) atIndex:2];
+          [enc setBytes:&ng length:sizeof(ng) atIndex:3];
+          [enc setBytes:&m length:sizeof(m) atIndex:4];
+          [enc dispatchThreadgroups:MTLSizeMake((ng + threads_per_tg - 1) / threads_per_tg, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(threads_per_tg, 1, 1)];
+        }
+        [enc endEncoding];
+      };
+      auto run_interference = [&](unsigned nof_competitors, unsigned nof_writers, const char* what) {
+        std::vector<double> gpu, host;
+        for (unsigned i = 0; i != nof_warmup + nof_runs; ++i) {
+          id<MTLCommandBuffer> last_other = nil;
+          for (unsigned k = 0; k != nof_competitors; ++k) {
+            id<MTLCommandBuffer> ccb = [other commandBuffer];
+            build_chain(ccb, n_in, n_grid, 0, 1);
+            [ccb commit];
+            last_other = ccb;
+          }
+          for (unsigned w = 0; w != nof_writers; ++w) {
+            id<MTLCommandBuffer> wcb = [other commandBuffer];
+            id<MTLComputeCommandEncoder> wenc = [wcb computeCommandEncoder];
+            [wenc setComputePipelineState:spipe];
+            [wenc setBuffer:in_shared offset:0 atIndex:0];
+            [wenc setBuffer:grid_shared offset:0 atIndex:1];
+            unsigned ni = n_in, ng = n_grid, m2 = 2;
+            [wenc setBytes:&ni length:sizeof(ni) atIndex:2];
+            [wenc setBytes:&ng length:sizeof(ng) atIndex:3];
+            [wenc setBytes:&m2 length:sizeof(m2) atIndex:4];
+            [wenc dispatchThreadgroups:MTLSizeMake((n_in + threads_per_tg - 1) / threads_per_tg, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(threads_per_tg, 1, 1)];
+            [wenc endEncoding];
+            [wcb commit];
+            last_other = wcb;
+          }
+          id<MTLCommandBuffer> cb = [queue commandBuffer];
+          build_chain(cb, n_in, n_grid, 0, 1);
+          const auto t0 = std::chrono::steady_clock::now();
+          [cb commit];
+          [cb waitUntilCompleted];
+          const auto t1 = std::chrono::steady_clock::now();
+          if (last_other != nil) {
+            [last_other waitUntilCompleted];
+          }
+          if (i >= nof_warmup) {
+            gpu.push_back((cb.GPUEndTime - cb.GPUStartTime) * 1e6);
+            host.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
+          }
+        }
+        std::printf("%-46s gpu median %8.1f us   host median %8.1f us\n", what, median(gpu), median(host));
+        std::fflush(stdout);
+      };
+      std::printf("\n-- ARM 1: bounded interference from the other queue (5-dispatch RAW chain) --\n");
+      run_interference(0, 0, "idle GPU");
+      run_interference(1, 0, "+1 competing chain (~130us of work)");
+      run_interference(4, 0, "+4 competing chains");
+      std::printf("\n-- ARM 3: live input pages (the radio's writer) --\n");
+      run_interference(0, 8, "+8 writers over the input");
+      run_interference(0, 64, "+64 writers over the input");
+
+      // ---- ARM 2: batching geometry ----------------------------------------------------------------
+      // The air's equalizer/demapper run as ONE dispatch over max_run=12 symbols (2184 RE each) and the
+      // front end as ONE dispatch over 14 transforms. Same kernel here, sized like those batches: the grid
+      // grows with the symbols batched, so the per-dispatch price at the batched geometry is readable.
+      std::printf("\n-- ARM 2: one dispatch at the batched geometry (grid = 612 SC x symbols x 8B) --\n");
+      const unsigned tg_of[3] = {1u, 2u, 12u};
+      for (unsigned s : tg_of) {
+        char label[96];
+        std::snprintf(label, sizeof(label), "1 dispatch, grid for %u symbol(s)", s);
+        // reuse the sized helper through run_interference's chain builder by measuring a 5-dispatch chain
+        // is not what we want here: measure a ONE-dispatch buffer of that size.
+        std::vector<double> gpu, host;
+        for (unsigned i = 0; i != nof_warmup + nof_runs; ++i) {
+          const unsigned ng = 612u * s * 8u;
+          id<MTLCommandBuffer>         cb  = [queue commandBuffer];
+          id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+          [enc setComputePipelineState:spipe];
+          unsigned ni = n_in, m = 0;
+          [enc setBuffer:in_shared offset:0 atIndex:0];
+          [enc setBuffer:grid_shared offset:0 atIndex:1];
+          [enc setBytes:&ni length:sizeof(ni) atIndex:2];
+          [enc setBytes:&ng length:sizeof(ng) atIndex:3];
+          [enc setBytes:&m length:sizeof(m) atIndex:4];
+          [enc dispatchThreadgroups:MTLSizeMake((ng + threads_per_tg - 1) / threads_per_tg, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(threads_per_tg, 1, 1)];
+          [enc endEncoding];
+          const auto t0 = std::chrono::steady_clock::now();
+          [cb commit];
+          [cb waitUntilCompleted];
+          const auto t1 = std::chrono::steady_clock::now();
+          if (i >= nof_warmup) {
+            gpu.push_back((cb.GPUEndTime - cb.GPUStartTime) * 1e6);
+            host.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
+          }
+        }
+        std::printf("%-46s gpu median %8.1f us   host median %8.1f us\n", label, median(gpu), median(host));
+        std::fflush(stdout);
+      }
     }
   }
   return 0;
