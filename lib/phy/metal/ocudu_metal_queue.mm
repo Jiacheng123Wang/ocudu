@@ -941,6 +941,92 @@ void shared_queue_stats_report()
                      (holes[i].label != nullptr) ? holes[i].label : "?",
                      static_cast<unsigned long long>(holes[i].has_slot ? holes[i].slot : 0));
       }
+
+  // ★ IS THE `commit -> start` WAIT A QUEUE, OR IS IT THE DRIVER? (dev doc 6.181)
+  //
+  // The question this answers, and why nothing else could: `merged_hop` waits 209.9us while `ce_weights`
+  // waits 36.2us, on ONE queue, in one hop. If the first wait is a QUEUE - work committed earlier still
+  // running - then removing a submission cannot save anything, because the device was busy anyway. If it
+  // is the DRIVER/HARDWARE latency from `commit` to the first instruction with the queue EMPTY, then
+  // collapsing two submissions into one is worth that latency, which is the largest unexplained number in
+  // this whole investigation.
+  //
+  // The two are told apart by counting, for each committed buffer, how many OTHER buffers were still
+  // executing when it was committed: `end_ns > commit_ns`. Zero of them PLUS a long `idle_before` (how
+  // long nothing at all was executing) means the device was idle and the wait was not a queue. Both
+  // numbers are already in the records - this prints their joint distribution instead of a median.
+  {
+    struct label_idle {
+      size_t  n            = 0;
+      size_t  idle_commits = 0; ///< committed while NOTHING else was executing
+      double  sum_idle_us  = 0.0; ///< of those, how long the device had already been idle
+      double  max_idle_us  = 0.0;
+      double  sum_idle_wait_us = 0.0; ///< the WAIT of the idle-committed ones (not of all of them)
+      size_t  busy_commits = 0;   ///< committed while at least one other buffer ran
+      double  sum_busy_us  = 0.0;
+    };
+    std::map<std::string, label_idle> by_idle;
+    for (const shared_queue_state::occupancy_record& cm : records) {
+      if ((cm.commit_ns == 0) || (cm.start_ns == 0) || (cm.end_ns == 0)) {
+        continue;
+      }
+      size_t active = 0;
+      for (const shared_queue_state::occupancy_record& other : records) {
+        if ((&other == &cm) || (other.end_ns == 0)) {
+          continue;
+        }
+        if (other.end_ns > cm.commit_ns) {
+          ++active;
+        }
+      }
+      label_idle&       st = by_idle[(cm.label != nullptr) ? cm.label : "?"];
+      const double      wait_us =
+          (cm.start_ns > cm.commit_ns) ? (static_cast<double>(cm.start_ns - cm.commit_ns) / 1e3) : 0.0;
+      ++st.n;
+      // `idle_before_ns` is indexed the same way `records` is built below (start order); this walk is
+      // separate and uses the record's own start against the union frontier recomputed here.
+      uint64_t frontier = 0;
+      for (const shared_queue_state::occupancy_record& prev : records) {
+        if ((prev.start_ns != 0) && (prev.start_ns < cm.start_ns) && (prev.end_ns > frontier)) {
+          frontier = prev.end_ns;
+        }
+      }
+      const double idle_us = (cm.start_ns > frontier) ? (static_cast<double>(cm.start_ns - frontier) / 1e3) : 0.0;
+      if (active == 0) {
+        ++st.idle_commits;
+        st.sum_idle_us += idle_us;
+        st.sum_idle_wait_us += wait_us;
+        st.max_idle_us = std::max(st.max_idle_us, idle_us);
+      } else {
+        ++st.busy_commits;
+        st.sum_busy_us += wait_us;
+      }
+    }
+    if (!by_idle.empty()) {
+      std::fprintf(stderr,
+                   "[metal_stats] Q9-F6 commit -> start: was the device BUSY (a queue) or IDLE (driver "
+                   "latency)? 'idle' = committed while no other probed buffer was executing\n");
+      for (const auto& kv : by_idle) {
+        const label_idle& st = kv.second;
+        if (st.n == 0) {
+          continue;
+        }
+        std::fprintf(stderr,
+                     "[metal_stats]   %-16s n=%7zu | idle-commit %5zu (%4.0f%%) mean wait=%8.1fus "
+                     "device-already-idle mean=%8.1fus max=%8.1fus | busy-commit %5zu mean wait=%8.1fus\n",
+                     kv.first.c_str(),
+                     st.n,
+                     st.idle_commits,
+                     100.0 * static_cast<double>(st.idle_commits) / static_cast<double>(st.n),
+                     (st.idle_commits != 0) ? (st.sum_idle_wait_us / static_cast<double>(st.idle_commits)) : 0.0,
+                     (st.idle_commits != 0) ? (st.sum_idle_us / static_cast<double>(st.idle_commits)) : 0.0,
+                     st.max_idle_us,
+                     st.busy_commits,
+                     (st.busy_commits != 0) ? (st.sum_busy_us / static_cast<double>(st.busy_commits)) : 0.0);
+      }
+    }
+  }
+
     }
   }
   // GPU busy time, measured on the command buffers themselves (GPUStartTime/GPUEndTime in their
