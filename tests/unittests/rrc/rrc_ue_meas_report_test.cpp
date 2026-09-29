@@ -5,6 +5,7 @@
 #include "lib/rrc/ue/rrc_measurement_types_asn1_converters.h"
 #include "rrc_ue_test_helpers.h"
 #include "rrc_ue_test_messages.h"
+#include "tests/ocudu_test_requirements.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/ul_dcch_msg_ies.h"
 #include <gtest/gtest.h>
@@ -88,6 +89,8 @@ protected:
 
 TEST_F(rrc_ue_packed_meas_config, cond_meas_true_returns_non_empty_without_mutating_context)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   // Baseline: pack the regular (non-CHO) config and record its length.
   byte_buffer regular_packed = rrc_ue->get_packed_meas_config();
 

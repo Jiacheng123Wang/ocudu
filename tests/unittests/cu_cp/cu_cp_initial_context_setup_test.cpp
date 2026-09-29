@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "cu_cp_test_environment.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/e1ap/e1ap_cu_cp_test_messages.h"
 #include "tests/test_doubles/f1ap/f1ap_test_message_validators.h"
 #include "tests/test_doubles/f1ap/f1ap_test_messages.h"
@@ -436,7 +437,10 @@ TEST_F(cu_cp_initial_context_setup_test,
 class cu_cp_initial_context_setup_with_cho_trigger_test : public cu_cp_initial_context_setup_test
 {
 public:
-  cu_cp_initial_context_setup_with_cho_trigger_test() : cu_cp_initial_context_setup_test(make_params()) {}
+  cu_cp_initial_context_setup_with_cho_trigger_test() : cu_cp_initial_context_setup_test(make_params())
+  {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+  }
 
 private:
   static cu_cp_test_env_params make_params()

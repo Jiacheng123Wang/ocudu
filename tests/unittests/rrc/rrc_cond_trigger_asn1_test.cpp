@@ -21,6 +21,8 @@ using namespace ocucp;
 /// cond_event_a3 encodes a3_offset, hysteresis, and time_to_trigger.
 TEST(cond_trigger_asn1, cond_event_a3_encodes_correctly)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   rrc_cond_trigger_cfg cfg;
   cfg.rs_type = rrc_nr_rs_type::ssb;
 
@@ -45,6 +47,8 @@ TEST(cond_trigger_asn1, cond_event_a3_encodes_correctly)
 /// cond_event_a4 encodes a4_thres_r17, hysteresis_r17, and time_to_trigger_r17.
 TEST(cond_trigger_asn1, cond_event_a4_encodes_correctly)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   rrc_cond_trigger_cfg cfg;
   cfg.rs_type = rrc_nr_rs_type::ssb;
 
@@ -69,6 +73,8 @@ TEST(cond_trigger_asn1, cond_event_a4_encodes_correctly)
 /// cond_event_a5 encodes a5_thres1, a5_thres2, hysteresis, and time_to_trigger.
 TEST(cond_trigger_asn1, cond_event_a5_encodes_correctly)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   rrc_cond_trigger_cfg cfg;
   cfg.rs_type = rrc_nr_rs_type::ssb;
 
@@ -99,7 +105,7 @@ TEST(cond_trigger_asn1, cond_event_a5_encodes_correctly)
 /// hysteresis (10 m steps), and time_to_trigger.
 TEST(cond_trigger_asn1, cond_event_d1_encodes_correctly)
 {
-  OCUDU_TEST_REQUIREMENTS("CU-NTN-MOB-3");
+  OCUDU_TEST_REQUIREMENTS("CU-NTN-MOB-3", "MVP-FUNC-MOB-15");
 
   rrc_cond_trigger_cfg cfg;
   cfg.rs_type = rrc_nr_rs_type::ssb;
@@ -132,7 +138,7 @@ TEST(cond_trigger_asn1, cond_event_d1_encodes_correctly)
 /// Layout (6 bytes, MSB first): [1-bit sign][23-bit lat][24-bit lon_enc]
 TEST(cond_trigger_asn1, cond_event_d1_ref_location_bytes)
 {
-  OCUDU_TEST_REQUIREMENTS("CU-NTN-MOB-3");
+  OCUDU_TEST_REQUIREMENTS("CU-NTN-MOB-3", "MVP-FUNC-MOB-15");
 
   struct test_vector {
     reference_location     loc;
@@ -178,7 +184,7 @@ TEST(cond_trigger_asn1, cond_event_d1_ref_location_bytes)
 /// cond_event_t1 encodes t1_thres_r17 (10 ms units since 1900) and dur_r17 (100 ms steps).
 TEST(cond_trigger_asn1, cond_event_t1_encodes_correctly)
 {
-  OCUDU_TEST_REQUIREMENTS("CU-NTN-MOB-3");
+  OCUDU_TEST_REQUIREMENTS("CU-NTN-MOB-3", "MVP-FUNC-MOB-15");
 
   // 2025-01-01T00:00:00 UTC = 1735689600 seconds since Unix epoch.
   constexpr time_t   t_unix          = 1735689600;
@@ -206,6 +212,8 @@ TEST(cond_trigger_asn1, cond_event_t1_encodes_correctly)
 /// and time_to_trigger.
 TEST(cond_trigger_asn1, cond_event_d2_encodes_correctly)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   rrc_cond_trigger_cfg cfg;
   cfg.rs_type = rrc_nr_rs_type::ssb;
 

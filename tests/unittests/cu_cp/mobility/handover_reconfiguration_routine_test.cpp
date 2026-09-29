@@ -4,6 +4,7 @@
 
 #include "lib/cu_cp/routines/mobility/handover_reconfiguration_routine.h"
 #include "mobility_test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "ocudu/adt/byte_buffer.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ran/cu_cp_types.h"
@@ -18,7 +19,7 @@ using namespace ocucp;
 class handover_reconfiguration_routine_test : public mobility_test
 {
 protected:
-  handover_reconfiguration_routine_test() {}
+  handover_reconfiguration_routine_test() { OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-c"); }
 
   void create_ues(bool procedure_outcome, unsigned transaction_id_)
   {

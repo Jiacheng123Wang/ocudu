@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
+#include "tests/ocudu_test_requirements.h"
 #include "tests/unittests/ngap/ngap_test_helpers.h"
 #include "tests/unittests/ngap/ngap_test_messages.h"
 #include "ocudu/adt/format.h"
@@ -18,6 +19,8 @@ using namespace ocucp;
 /// Test successful handover preparation procedure.
 TEST_F(ngap_test, when_source_gnb_handover_preparation_triggered_then_ho_command_received)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-4");
+
   // Setup UE context
   cu_cp_ue_index_t ue_index = create_ue();
   run_dl_nas_transport(ue_index); // needed to allocate AMF UE id.
@@ -65,6 +68,8 @@ TEST_F(ngap_test, when_source_gnb_handover_preparation_triggered_then_ho_command
 /// REQUIRED carries at least one item (TS 38.413 section 9.2.3.1).
 TEST_F(ngap_test, when_ue_has_no_pdu_session_then_handover_preparation_is_declined)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-4");
+
   // Setup UE context. No PDU session is added to the UP manager.
   cu_cp_ue_index_t ue_index = create_ue();
   run_dl_nas_transport(ue_index); // needed to allocate AMF UE id.
@@ -92,6 +97,8 @@ TEST_F(ngap_test, when_ue_has_no_pdu_session_then_handover_preparation_is_declin
 /// it can point the source CU-UP at them (TS 38.413 section 9.3.4.10).
 TEST_F(ngap_test, when_handover_command_reports_forwarding_tunnels_then_they_are_forwarded_to_the_cu_cp)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-4");
+
   cu_cp_ue_index_t ue_index = create_ue();
   run_dl_nas_transport(ue_index);
 
@@ -140,6 +147,8 @@ TEST_F(ngap_test, when_handover_command_reports_forwarding_tunnels_then_they_are
 /// one currently serving the UE.
 TEST_F(ngap_test, when_target_plmn_differs_from_serving_plmn_then_handover_required_uses_target_plmn)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-4");
+
   // Setup UE context. The UE is served under the test PLMN (see ngap_test constructor and create_ue()).
   cu_cp_ue_index_t ue_index = create_ue();
   run_dl_nas_transport(ue_index); // needed to allocate AMF UE id.
@@ -200,6 +209,8 @@ TEST_F(ngap_test, when_target_plmn_differs_from_serving_plmn_then_handover_requi
 /// admission instead of allocating DRB IDs blind to the source's own configuration.
 TEST_F(ngap_test, when_source_gnb_handover_preparation_triggered_then_drb_to_qos_flow_mapping_is_reported)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-4");
+
   cu_cp_ue_index_t ue_index = create_ue();
   run_dl_nas_transport(ue_index);
 
@@ -245,6 +256,8 @@ TEST_F(ngap_test, when_source_gnb_handover_preparation_triggered_then_drb_to_qos
 /// target can set up forwarding tunnels for them (TS 38.413 sections 9.3.1.29 and 9.3.1.33).
 TEST_F(ngap_test, when_source_gnb_handover_preparation_triggered_then_dl_data_forwarding_is_proposed)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-4");
+
   cu_cp_ue_index_t ue_index = create_ue();
   run_dl_nas_transport(ue_index);
 

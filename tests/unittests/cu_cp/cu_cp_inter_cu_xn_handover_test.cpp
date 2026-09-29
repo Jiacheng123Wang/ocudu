@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "cu_cp_test_environment.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/e1ap/e1ap_cu_cp_test_messages.h"
 #include "tests/test_doubles/e1ap/e1ap_test_message_validators.h"
 #include "tests/test_doubles/f1ap/f1ap_test_message_validators.h"
@@ -41,6 +42,8 @@ public:
                             /* enable rrc inactive */ false,
                             /* enable xnc peer */ true})
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-3", "MVP-FUNC-MOB-1-e");
+
     // Run NG setup to completion.
     run_ng_setup();
 

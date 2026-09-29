@@ -387,6 +387,8 @@ TEST_F(cell_meas_manager_test, when_invalid_cell_config_update_received_then_con
 
 TEST_F(cell_meas_manager_test, when_t312_is_configured_then_meas_obj_has_t312_and_report_cfg_has_t312)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-14");
+
   create_default_manager(100);
 
   cu_cp_ue_index_t ue_index = ue_mng.add_ue(uint_to_cu_cp_du_index(0));
@@ -434,6 +436,8 @@ TEST_F(cell_meas_manager_test, when_t312_is_configured_then_meas_obj_has_t312_an
 
 TEST_F(cell_meas_manager_test, cho_single_frequency_generates_correct_nci_to_meas_id_mapping)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   create_cho_manager_single_frequency();
 
   cu_cp_ue_index_t ue_index = ue_mng.add_ue(uint_to_cu_cp_du_index(0));
@@ -466,6 +470,8 @@ TEST_F(cell_meas_manager_test, cho_single_frequency_generates_correct_nci_to_mea
 
 TEST_F(cell_meas_manager_test, cho_multi_frequency_generates_separate_meas_ids_per_nci)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   create_cho_manager_multi_frequency();
 
   cu_cp_ue_index_t ue_index = ue_mng.add_ue(uint_to_cu_cp_du_index(0));
@@ -505,6 +511,8 @@ TEST_F(cell_meas_manager_test, cho_multi_frequency_generates_separate_meas_ids_p
 
 TEST_F(cell_meas_manager_test, cho_multi_trigger_creates_cross_product_meas_ids)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   create_cho_manager_multi_trigger();
 
   cu_cp_ue_index_t ue_index = ue_mng.add_ue(uint_to_cu_cp_du_index(0));
@@ -539,6 +547,8 @@ TEST_F(cell_meas_manager_test, cho_multi_trigger_creates_cross_product_meas_ids)
 
 TEST_F(cell_meas_manager_test, cho_empty_candidate_list_includes_all_neighbors)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   create_cho_manager_single_frequency();
 
   cu_cp_ue_index_t ue_index = ue_mng.add_ue(uint_to_cu_cp_du_index(0));
@@ -559,6 +569,8 @@ TEST_F(cell_meas_manager_test, cho_empty_candidate_list_includes_all_neighbors)
 
 TEST_F(cell_meas_manager_test, cho_invalid_candidate_pci_filters_correctly)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   create_cho_manager_single_frequency();
 
   cu_cp_ue_index_t ue_index = ue_mng.add_ue(uint_to_cu_cp_du_index(0));
@@ -579,6 +591,8 @@ TEST_F(cell_meas_manager_test, cho_invalid_candidate_pci_filters_correctly)
 
 TEST_F(cell_meas_manager_test, cho_a5_inter_frequency_includes_serving_cell_meas_obj)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   create_cho_manager_a5_inter_frequency();
 
   cu_cp_ue_index_t ue_index = ue_mng.add_ue(uint_to_cu_cp_du_index(0));
@@ -728,7 +742,7 @@ TEST_F(cell_meas_manager_test, when_ntn_update_refers_to_unknown_neighbour_then_
 
 TEST_F(cell_meas_manager_test, when_cho_meas_config_requested_then_ntn_neighbour_info_is_included)
 {
-  OCUDU_TEST_REQUIREMENTS("CU-NTN-MOB-1");
+  OCUDU_TEST_REQUIREMENTS("CU-NTN-MOB-1", "MVP-FUNC-MOB-15");
 
   create_cho_manager_single_frequency();
 
@@ -912,6 +926,8 @@ TEST_F(cell_meas_manager_test, when_neighbor_relation_references_unknown_cell_th
 
 TEST_F(cell_meas_manager_test, when_cell_config_is_updated_again_then_cho_config_has_no_duplicate_cells)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   create_cho_manager_single_frequency();
 
   cu_cp_ue_index_t ue_index = ue_mng.add_ue(uint_to_cu_cp_du_index(0));

@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "cu_cp_test_environment.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/e1ap/e1ap_cu_cp_test_messages.h"
 #include "tests/test_doubles/e1ap/e1ap_test_message_validators.h"
 #include "tests/test_doubles/f1ap/f1ap_test_message_validators.h"
@@ -454,6 +455,8 @@ public:
 
 TEST_F(cu_cp_intra_du_handover_test, when_ue_context_setup_fails_then_ho_fails)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b");
+
   // Inject Measurement Report and await F1AP UE Context Setup Request.
   ASSERT_TRUE(send_rrc_measurement_report_and_await_ue_context_setup_request());
 
@@ -467,6 +470,8 @@ TEST_F(cu_cp_intra_du_handover_test, when_ue_context_setup_fails_then_ho_fails)
 
 TEST_F(cu_cp_intra_du_handover_test, when_bearer_context_modification_fails_then_ho_fails)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b");
+
   // Inject Measurement Report and await F1AP UE Context Setup Request.
   ASSERT_TRUE(send_rrc_measurement_report_and_await_ue_context_setup_request());
 
@@ -495,6 +500,8 @@ TEST_F(cu_cp_intra_du_handover_test, when_bearer_context_modification_fails_then
 
 TEST_F(cu_cp_intra_du_handover_test, when_rrc_reconfiguration_fails_then_ho_fails)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b");
+
   // Inject Measurement Report and await F1AP UE Context Setup Request.
   ASSERT_TRUE(send_rrc_measurement_report_and_await_ue_context_setup_request());
 
@@ -517,6 +524,8 @@ TEST_F(cu_cp_intra_du_handover_test, when_rrc_reconfiguration_fails_then_ho_fail
 
 TEST_F(cu_cp_intra_du_handover_test, when_ho_succeeds_then_source_ue_is_removed)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b");
+
   // Check that the metrics report doesn't contain a requested/successful handover execution.
   auto report = this->get_cu_cp().get_metrics_handler().request_metrics_report();
   ASSERT_EQ(report.mobility.nof_handover_executions_requested, 0U);
@@ -566,6 +575,7 @@ public:
       return req;
     }())
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b");
   }
 };
 
@@ -605,6 +615,8 @@ TEST_F(cu_cp_intra_du_handover_initial_context_setup_location_reporting_test,
 TEST_F(cu_cp_intra_du_handover_test,
        when_cell_change_reporting_configured_then_location_report_is_sent_immediately_and_after_ho)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b");
+
   // Configure cell change location reporting.
   get_amf().push_tx_pdu(
       generate_location_reporting_control_message_with_cell_change(amf_ue_id, ue_ctx->ran_ue_id.value()));
@@ -641,6 +653,8 @@ TEST_F(cu_cp_intra_du_handover_test,
 
 TEST_F(cu_cp_intra_du_handover_test, when_ho_fails_and_ue_is_gone_then_source_and_target_ue_are_removed)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b");
+
   // Inject Measurement Report and await F1AP UE Context Setup Request.
   ASSERT_TRUE(send_rrc_measurement_report_and_await_ue_context_setup_request());
 
@@ -675,6 +689,8 @@ TEST_F(cu_cp_intra_du_handover_test, when_ho_fails_and_ue_is_gone_then_source_an
 
 TEST_F(cu_cp_intra_du_handover_test, when_ho_fails_then_reestablishment_to_source_ue_succeeds)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b");
+
   // Inject Measurement Report and await F1AP UE Context Setup Request.
   ASSERT_TRUE(send_rrc_measurement_report_and_await_ue_context_setup_request());
 
@@ -702,6 +718,8 @@ TEST_F(cu_cp_intra_du_handover_test, when_ho_fails_then_reestablishment_to_sourc
 
 TEST_F(cu_cp_intra_du_handover_test, when_ho_fails_then_reestablishment_to_target_ue_succeeds)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b");
+
   // Inject Measurement Report and await F1AP UE Context Setup Request.
   ASSERT_TRUE(send_rrc_measurement_report_and_await_ue_context_setup_request());
 
@@ -960,6 +978,7 @@ public:
                                                        /*max_nof_dus*/ 8,
                                                        /*max_nof_ues*/ 1})
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b");
   }
 };
 

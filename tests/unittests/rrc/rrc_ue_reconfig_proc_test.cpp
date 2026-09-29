@@ -4,6 +4,7 @@
 
 #include "rrc_ue_test_helpers.h"
 #include "rrc_ue_test_messages.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/f1ap/f1ap_test_messages.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/dl_dcch_msg.h"
@@ -69,6 +70,8 @@ TEST_F(rrc_ue_reconfig, when_reconfig_complete_received_proc_successful)
 // RRCReconfiguration measConfig when the request carries one.
 TEST_F(rrc_ue_reconfig, when_meas_gap_cfg_in_request_then_outer_cho_rrc_message_includes_it)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   // Build a packed measGapConfig (gapFR2 setup, offset=10, mgl=ms6, mgrp=ms20, mgta=ms0).
   asn1::rrc_nr::meas_gap_cfg_s asn1_gap;
   asn1_gap.gap_fr2_present = true;
@@ -112,6 +115,8 @@ TEST_F(rrc_ue_reconfig, when_meas_gap_cfg_in_request_then_outer_cho_rrc_message_
 
 TEST_F(rrc_ue_reconfig, when_no_meas_gap_cfg_in_request_then_outer_cho_rrc_message_omits_it)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   rrc_reconfiguration_procedure_request req;
   req.cho_candidates = std::vector<cu_cp_ue_cho_candidate>{};
   req.meas_cfg       = generate_dummy_meas_config();

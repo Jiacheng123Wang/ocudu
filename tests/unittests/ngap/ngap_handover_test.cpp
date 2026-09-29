@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ngap_test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/unittests/ngap/ngap_test_messages.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ngap/ngap_handover.h"
@@ -17,6 +18,8 @@ using namespace ocucp;
 /// Test successful handover preparation procedure
 TEST_F(ngap_test, when_ue_missing_then_handover_preparation_procedure_fails)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-4");
+
   ngap_handover_preparation_request request = {};
   request.ue_index                          = uint_to_ue_index(0);
 
