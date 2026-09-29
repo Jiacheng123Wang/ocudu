@@ -1864,7 +1864,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         static std::atomic<uint64_t> n_hops{0};
         static std::atomic<uint64_t> n_hold{0};
         static std::atomic<uint64_t> n_geom_bad{0};
-        static std::atomic<uint64_t> n_not_contig{0};
+        static std::atomic<uint64_t> n_pilots_bad{0};
         n_hops.fetch_add(1, std::memory_order_relaxed);
         if (st.hold_for_weights) {
           n_hold.fetch_add(1, std::memory_order_relaxed);
@@ -1872,17 +1872,17 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
           if (!geom.ok) {
             n_geom_bad.fetch_add(1, std::memory_order_relaxed);
           }
-          if (!contiguous) {
-            n_not_contig.fetch_add(1, std::memory_order_relaxed);
+          if (!device_builds_pilots) {
+            n_pilots_bad.fetch_add(1, std::memory_order_relaxed);
           }
         }
         if ((n_hops.load(std::memory_order_relaxed) % 4096u) == 0u) {
           std::fprintf(stderr,
-                       "[ce_hold_dbg] hops=%llu hold=%llu geom_bad=%llu not_contiguous=%llu\n",
+                       "[ce_hold_dbg] hops=%llu hold=%llu NOT-hold: geom_bad=%llu pilots_bad=%llu\n",
                        static_cast<unsigned long long>(n_hops.load(std::memory_order_relaxed)),
                        static_cast<unsigned long long>(n_hold.load(std::memory_order_relaxed)),
                        static_cast<unsigned long long>(n_geom_bad.load(std::memory_order_relaxed)),
-                       static_cast<unsigned long long>(n_not_contig.load(std::memory_order_relaxed)));
+                       static_cast<unsigned long long>(n_pilots_bad.load(std::memory_order_relaxed)));
         }
       }
       st.fd_filter         = fd_filter.data();
