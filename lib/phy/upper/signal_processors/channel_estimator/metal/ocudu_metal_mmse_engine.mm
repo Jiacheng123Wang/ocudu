@@ -69,6 +69,13 @@ struct ce_site_diag_t {
   std::atomic<uint64_t> corr_a{0};     // encode_corr: the A (Gram) matrix, K1
   std::atomic<uint64_t> corr_rhp{0};   // encode_corr: R_hp
   std::atomic<uint64_t> scatter{0};    // encode_scatter: the pilot scatter
+  /// O1 (dev doc 6.175): dispatches that built BOTH matrices at once (OCUDU_CE_CORR_MERGED). Counted
+  /// apart from corr_a/corr_rhp because those two are incremented by BOTH routes - the merged dispatch
+  /// builds A and R_hp, so it must still answer "A was built" and "R_hp was built" for the censuses that
+  /// read them - and leg p146 proved what that costs: with only corr_a/corr_rhp in the report, a merged
+  /// leg and a split leg are indistinguishable (1.40/1.40 either way), so the leg could not say whether
+  /// the knob it was flown for had done anything at all.
+  std::atomic<uint64_t> corr_merged{0};
 };
 
 ce_site_diag_t& ce_site_diag()
@@ -79,16 +86,17 @@ ce_site_diag_t& ce_site_diag()
 }
 
 /// The site names as the report prints them, in report order.
-static const char* ce_site_names[] = {"reformat", "pilots_lse", "pilots_cfo", "corr_a", "corr_rhp", "scatter"};
+static const char* ce_site_names[] = {"reformat", "pilots_lse", "pilots_cfo", "corr_a", "corr_rhp", "scatter",
+                                      "merged"};
 
 void ce_site_report()
 {
   const ce_site_diag_t& d = ce_site_diag();
   const std::atomic<uint64_t>* const sites[] = {&d.reformat, &d.pilots_lse, &d.pilots_cfo,
-                                                &d.corr_a,   &d.corr_rhp,   &d.scatter};
+                                                &d.corr_a,   &d.corr_rhp,   &d.scatter,  &d.corr_merged};
   uint64_t total = 0;
   std::fprintf(stderr, "[metal_stats] ce_sites");
-  for (unsigned i = 0; i != 6; ++i) {
+  for (unsigned i = 0; i != 7; ++i) {
     const uint64_t n = sites[i]->load(std::memory_order_relaxed);
     total += n;
     std::fprintf(stderr, " %s=%llu", ce_site_names[i], static_cast<unsigned long long>(n));
@@ -2778,8 +2786,9 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
     for (unsigned rep = 0; rep != mmse_engine_impl::corr_repeat(); ++rep) {
       // BOTH counters, because both matrices are built by this one dispatch: the site census is what the
       // legs read to know what ran, and it has to keep answering "A was built" and "R_hp was built".
-      ce_site_diag().corr_a.fetch_add(1, std::memory_order_relaxed);   // dev doc 6.61
-      ce_site_diag().corr_rhp.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
+      ce_site_diag().corr_a.fetch_add(1, std::memory_order_relaxed);      // dev doc 6.61
+      ce_site_diag().corr_rhp.fetch_add(1, std::memory_order_relaxed);    // dev doc 6.61
+      ce_site_diag().corr_merged.fetch_add(1, std::memory_order_relaxed); // O1: ONE dispatch, both matrices
       // ONE dimension of threadgroups, always: the kernel decodes (matrix, system) from the threadgroup
       // index, so neither the driver's mapping of a second dimension nor the dispatch type can change
       // which work items exist. Two earlier layouts depended on that mapping and both left part of A
