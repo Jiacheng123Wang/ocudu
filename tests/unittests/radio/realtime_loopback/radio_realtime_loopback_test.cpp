@@ -460,7 +460,7 @@ TEST_P(RealtimeLoopbackRadioFixture, ReceiveAfterTransmitSamplesRunOut)
 
   // Attempt to read for 100 ms. When the transmitted samples run out, the receive calls should still return without
   // errors, even if the buffer contents are not valid.
-  baseband_gateway_receiver::metadata rx_md;
+  baseband_gateway_receiver::metadata rx_md = {};
   while (rx_md.ts < start_time + radio_config.sampling_rate_Hz / 10) {
     rx_md = receiver.receive(rx_buffer.get_writer());
   }

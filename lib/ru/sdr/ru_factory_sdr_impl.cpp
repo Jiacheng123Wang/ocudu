@@ -25,6 +25,13 @@ static std::unique_ptr<radio_session> create_radio_session(task_executor&       
     return nullptr;
   }
 
+  if (config.log_level == ocudulog::basic_levels::debug) {
+    factory = create_radio_metrics_decorator_factory(std::move(factory), config.log_level);
+  }
+  if (!factory) {
+    return nullptr;
+  }
+
   if (!factory->get_configuration_validator().is_configuration_valid(config)) {
     report_error("Invalid radio configuration.");
   }
