@@ -1857,19 +1857,32 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // decides whether the hop commits ONE estimator submission or two. The design (ce_lane_order_from_env)
       // says `merged` is one submission per hop; the legs read two (`ce_weights` + `merged_hop`), so one of
       // these four is false and nothing in the report says which.
+      // COUNTERS, not a first-N print (dev doc 6.188): the first version printed the first four hops,
+      // which all read `hold=1 geom.ok=1` - and that made the mechanism look sound while `ce_weights
+      // n=19885` said the weights still committed everywhere. A distribution cannot be read off a prefix.
       if (std::getenv("OCUDU_CE_HOLD_DEBUG") != nullptr) {
-        static std::atomic<unsigned> dbg{0};
-        if (dbg.fetch_add(1, std::memory_order_relaxed) < 4) {
+        static std::atomic<uint64_t> n_hops{0};
+        static std::atomic<uint64_t> n_hold{0};
+        static std::atomic<uint64_t> n_geom_bad{0};
+        static std::atomic<uint64_t> n_not_contig{0};
+        n_hops.fetch_add(1, std::memory_order_relaxed);
+        if (st.hold_for_weights) {
+          n_hold.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          if (!geom.ok) {
+            n_geom_bad.fetch_add(1, std::memory_order_relaxed);
+          }
+          if (!contiguous) {
+            n_not_contig.fetch_add(1, std::memory_order_relaxed);
+          }
+        }
+        if ((n_hops.load(std::memory_order_relaxed) % 4096u) == 0u) {
           std::fprintf(stderr,
-                       "[ce_hold_dbg] hold=%d <- hold_env=%d device_builds_pilots=%d !ls_check=%d "
-                       "!host_scalars=%d (geom.ok=%d device_ls=%d)\n",
-                       st.hold_for_weights ? 1 : 0,
-                       hold_extraction_for_weights() ? 1 : 0,
-                       device_builds_pilots ? 1 : 0,
-                       !ls_check_enabled() ? 1 : 0,
-                       !host_reads_device_scalars() ? 1 : 0,
-                       geom.ok ? 1 : 0,
-                       device_ls_enabled() ? 1 : 0);
+                       "[ce_hold_dbg] hops=%llu hold=%llu geom_bad=%llu not_contiguous=%llu\n",
+                       static_cast<unsigned long long>(n_hops.load(std::memory_order_relaxed)),
+                       static_cast<unsigned long long>(n_hold.load(std::memory_order_relaxed)),
+                       static_cast<unsigned long long>(n_geom_bad.load(std::memory_order_relaxed)),
+                       static_cast<unsigned long long>(n_not_contig.load(std::memory_order_relaxed)));
         }
       }
       st.fd_filter         = fd_filter.data();
