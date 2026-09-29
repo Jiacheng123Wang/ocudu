@@ -23,6 +23,8 @@ class cu_cp_write_replace_warning_test : public cu_cp_test_environment, public :
 public:
   cu_cp_write_replace_warning_test() : cu_cp_test_environment(cu_cp_test_env_params{})
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-5", "CU-GEN-1");
+
     run_ng_setup();
 
     // Connect and setup a DU.
@@ -332,6 +334,8 @@ public:
 
   cu_cp_write_replace_warning_mapped_cell_id_test() : cu_cp_test_environment(make_params())
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-5", "CU-GEN-1");
+
     run_ng_setup();
 
     std::optional<unsigned> ret = connect_new_du();
@@ -426,6 +430,8 @@ public:
       return p;
     }())
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-5", "CU-GEN-1");
+
     run_ng_setup();
     std::optional<unsigned> ret = connect_new_du();
     EXPECT_TRUE(ret.has_value());
@@ -519,7 +525,12 @@ TEST_F(cu_cp_write_replace_warning_segmented_test, when_maximum_length_message_i
 class cu_cp_write_replace_warning_no_du_test : public cu_cp_test_environment, public ::testing::Test
 {
 public:
-  cu_cp_write_replace_warning_no_du_test() : cu_cp_test_environment(cu_cp_test_env_params{}) { run_ng_setup(); }
+  cu_cp_write_replace_warning_no_du_test() : cu_cp_test_environment(cu_cp_test_env_params{})
+  {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-5", "CU-GEN-1");
+
+    run_ng_setup();
+  }
 
 protected:
   ngap_message ngap_pdu;

@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "cu_cp_test_environment.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/e1ap/e1ap_cu_cp_test_messages.h"
 #include "tests/test_doubles/e1ap/e1ap_test_message_validators.h"
 #include "tests/test_doubles/f1ap/f1ap_test_message_validators.h"
@@ -1180,6 +1181,8 @@ TEST_F(cu_cp_rrc_inactive_test, when_ue_resumes_after_rna_update_resume_then_sec
 
 TEST_F(cu_cp_rrc_inactive_test, when_dl_data_notification_for_unknown_ue_is_received_then_no_paging_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BAS-16-1-a");
+
   // Connect UE with RRC Inactive support.
   connect_ue_with_rrc_inactive_support();
 
@@ -1197,6 +1200,8 @@ TEST_F(cu_cp_rrc_inactive_test, when_dl_data_notification_for_unknown_ue_is_rece
 
 TEST_F(cu_cp_rrc_inactive_test, when_dl_data_notification_for_inactive_ue_is_received_then_paging_is_sent_to_du)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BAS-16-1-a");
+
   // Connect UE with RRC Inactive support.
   connect_ue_with_rrc_inactive_support();
 
@@ -1217,6 +1222,8 @@ TEST_F(
     cu_cp_rrc_inactive_test,
     when_dl_nas_transport_for_inactive_ue_is_received_then_paging_is_sent_to_du_and_after_successful_resume_dl_nas_transport_is_forwarded_to_ue)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BAS-16-1-a");
+
   // Connect UE with RRC Inactive support.
   connect_ue_with_rrc_inactive_support();
 
@@ -1243,6 +1250,8 @@ TEST_F(
     cu_cp_rrc_inactive_test,
     when_multiple_dl_nas_transports_for_inactive_ue_are_received_then_paging_is_only_sent_once_and_after_successful_resume_dl_nas_transports_are_forwarded_to_ue)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BAS-16-1-a");
+
   // Connect UE with RRC Inactive support.
   connect_ue_with_rrc_inactive_support();
 
@@ -1273,6 +1282,8 @@ TEST_F(
 
 TEST_F(cu_cp_rrc_inactive_test, when_ran_paging_timer_expires_then_ue_release_is_requested)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BAS-16-1-a");
+
   // Connect UE with RRC Inactive support.
   connect_ue_with_rrc_inactive_support();
 

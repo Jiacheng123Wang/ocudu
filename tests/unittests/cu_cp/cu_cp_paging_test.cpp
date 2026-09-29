@@ -24,6 +24,8 @@ class cu_cp_paging_test : public cu_cp_test_environment, public ::testing::Test
 public:
   cu_cp_paging_test() : cu_cp_test_environment(cu_cp_test_env_params{})
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BAS-16-1-a");
+
     // Run NG setup to completion.
     run_ng_setup();
   }
@@ -356,7 +358,12 @@ public:
   /// Tracking area the paging message pages.
   static constexpr tac_t paged_tac = 7;
 
-  cu_cp_paging_mapped_cell_id_test() : cu_cp_test_environment(make_params()) { run_ng_setup(); }
+  cu_cp_paging_mapped_cell_id_test() : cu_cp_test_environment(make_params())
+  {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BAS-16-1-a");
+
+    run_ng_setup();
+  }
 
 protected:
   /// Both cells report the same Mapped Cell ID, so that one identity names the area the two of them cover.

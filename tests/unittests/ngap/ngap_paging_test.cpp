@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ngap_test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/asn1/ngap/ngap_pdu_contents.h"
 #include "ocudu/ran/five_g_s_tmsi.h"
@@ -202,6 +203,8 @@ protected:
 /// Test handling of valid paging message with optional fields.
 TEST_F(ngap_paging_test, when_valid_paging_message_received_message_is_forwarded)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BAS-16-1-a");
+
   // Inject paging message.
   ngap_message paging_msg = generate_valid_minimal_paging_message();
   ngap->handle_message(paging_msg);
@@ -213,6 +216,8 @@ TEST_F(ngap_paging_test, when_valid_paging_message_received_message_is_forwarded
 /// Test handling of valid paging message with optional fields.
 TEST_F(ngap_paging_test, when_valid_paging_message_with_optional_values_received_message_is_forwarded)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BAS-16-1-a");
+
   // Inject paging message.
   ngap_message paging_msg = generate_valid_paging_message();
   ngap->handle_message(paging_msg);
@@ -225,6 +230,8 @@ TEST_F(ngap_paging_test, when_valid_paging_message_with_optional_values_received
 TEST_F(ngap_paging_test,
        when_paging_message_with_invalid_ue_paging_id_received_message_is_not_forwarded_and_error_indication_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BAS-16-1-a");
+
   // Inject paging message.
   ngap_message paging_msg = generate_invalid_paging_message();
   ngap->handle_message(paging_msg);
@@ -237,6 +244,8 @@ TEST_F(ngap_paging_test,
 TEST_F(ngap_paging_test,
        when_paging_message_with_invalid_tai_list_received_message_is_not_forwarded_and_error_indication_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BAS-16-1-a");
+
   // Inject paging message.
   ngap_message paging_msg = generate_valid_paging_message();
   // Set invalid PLMN in TAI list for paging.
@@ -253,6 +262,8 @@ TEST_F(
     ngap_paging_test,
     when_paging_message_with_invalid_recommended_cell_list_received_message_is_not_forwarded_and_error_indication_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BAS-16-1-a");
+
   // Inject paging message.
   ngap_message paging_msg = generate_valid_paging_message();
   // Set invalid PLMN in TAI list for paging.

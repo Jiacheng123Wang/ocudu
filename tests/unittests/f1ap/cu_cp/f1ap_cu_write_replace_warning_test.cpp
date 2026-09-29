@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "f1ap_cu_test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/f1ap/f1ap_test_messages.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/f1ap_pdu_contents.h"
@@ -18,7 +19,10 @@ const std::chrono::milliseconds warning_procedure_timeout{100};
 class f1ap_cu_write_replace_warning_test : public f1ap_cu_test
 {
 protected:
-  f1ap_cu_write_replace_warning_test() : f1ap_cu_test(f1ap_configuration{.proc_timeout = warning_procedure_timeout}) {}
+  f1ap_cu_write_replace_warning_test() : f1ap_cu_test(f1ap_configuration{.proc_timeout = warning_procedure_timeout})
+  {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-5", "CU-GEN-1");
+  }
 
   f1ap_write_replace_warning_request make_request()
   {
