@@ -41,6 +41,8 @@ public:
                             /* enable rrc inactive */ true,
                             enable_xnc_peer})
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-10");
+
     // Run NG setup to completion.
     run_ng_setup();
 

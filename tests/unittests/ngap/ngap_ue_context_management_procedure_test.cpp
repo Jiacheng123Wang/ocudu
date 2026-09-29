@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ngap_test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/utils/test_rng.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/asn1/ngap/ngap_pdu_contents.h"
@@ -256,6 +257,8 @@ TEST_F(ngap_ue_context_management_procedure_test,
 TEST_F(ngap_ue_context_management_procedure_test,
        when_rrc_inactive_transition_report_transmission_is_not_requested_then_report_is_not_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-10");
+
   // Test preamble.
   cu_cp_ue_index_t ue_index = this->start_procedure();
 
@@ -283,6 +286,8 @@ TEST_F(ngap_ue_context_management_procedure_test,
 TEST_F(ngap_ue_context_management_procedure_test,
        when_rrc_inactive_transition_report_transmission_is_requested_then_report_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-10");
+
   // Test preamble.
   cu_cp_ue_index_t ue_index = this->start_procedure();
 

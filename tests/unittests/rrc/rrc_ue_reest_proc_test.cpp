@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "rrc_ue_test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ran/cu_cp_types.h"
 #include <gtest/gtest.h>
@@ -28,6 +29,8 @@ protected:
 /// Test the RRC Reestablishment
 TEST_F(rrc_ue_reest, when_invalid_reestablishment_request_received_then_rrc_setup_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   receive_invalid_reestablishment_request(0, to_rnti(0x4601));
 
   // check if the RRC Setup Request was generated
@@ -44,6 +47,8 @@ TEST_F(rrc_ue_reest, when_invalid_reestablishment_request_received_then_rrc_setu
 /// Test the RRC Reestablishment
 TEST_F(rrc_ue_reest, when_valid_reestablishment_request_received_but_security_context_not_found_then_rrc_setup_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   receive_valid_reestablishment_request(1, to_rnti(0x4601));
 
   // check if the RRC Setup Request was generated
@@ -60,6 +65,8 @@ TEST_F(rrc_ue_reest, when_valid_reestablishment_request_received_but_security_co
 /// Test the RRC Reestablishment
 TEST_F(rrc_ue_reest, when_reestablishment_request_with_cause_recfg_fail_received_then_rrc_setup_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   cu_cp_ue_index_t old_ue_index = uint_to_ue_index(0);
   add_ue_reestablishment_context(old_ue_index);
   receive_valid_reestablishment_request_with_cause_recfg_fail(1, to_rnti(0x4601));
@@ -79,6 +86,8 @@ TEST_F(rrc_ue_reest, when_reestablishment_request_with_cause_recfg_fail_received
 TEST_F(rrc_ue_reest,
        when_valid_reestablishment_request_for_same_du_received_then_rrc_reestablishment_with_old_ue_index_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   cu_cp_ue_index_t old_ue_index = uint_to_ue_index(0);
   add_ue_reestablishment_context(old_ue_index);
   receive_valid_reestablishment_request(1, to_rnti(0x4601));
@@ -94,6 +103,8 @@ TEST_F(rrc_ue_reest,
 
 TEST_F(rrc_ue_reest, when_no_local_context_matches_then_context_is_retrieved_from_peer)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   // No local UE context is added, so the context can only come from a peer NG-RAN node (TS 38.423 section 8.2.4).
   add_retrievable_ue_context();
 
@@ -122,6 +133,8 @@ TEST_F(rrc_ue_reest, when_no_local_context_matches_then_context_is_retrieved_fro
 
 TEST_F(rrc_ue_reest, when_context_cannot_be_retrieved_from_peer_then_rrc_setup_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   // No local context and no peer that can supply one, e.g. no Xn-C peer serves the failure cell.
   receive_valid_reestablishment_request(1, to_rnti(0x4601));
 
@@ -138,6 +151,8 @@ TEST_F(rrc_ue_reest, when_context_cannot_be_retrieved_from_peer_then_rrc_setup_s
 
 TEST_F(rrc_ue_reest, when_reestablishment_is_rejected_locally_then_no_context_is_retrieved_from_peer)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   // A local context exists but cannot be reestablished from. Asking a peer for it would be pointless, and would delay
   // the RRC Setup fallback while the UE's T301 runs.
   cu_cp_ue_index_t old_ue_index = uint_to_ue_index(0);

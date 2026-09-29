@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "lib/xnap/procedures/retrieve_ue_context_asn1_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "ocudu/asn1/xnap/common.h"
 #include "ocudu/xnap/xnap_message.h"
 #include <gtest/gtest.h>
@@ -42,6 +43,8 @@ static asn1::xnap::retrieve_ue_context_request_s make_asn1_reest_request()
 
 TEST(retrieve_ue_context_asn1_helpers_test, reestablishment_request_is_converted_from_asn1)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   xnap_message msg;
   msg.pdu.set_init_msg();
   msg.pdu.init_msg().load_info_obj(ASN1_XNAP_ID_RETRIEVE_UE_CONTEXT);
@@ -62,6 +65,8 @@ TEST(retrieve_ue_context_asn1_helpers_test, reestablishment_request_is_converted
 
 TEST(retrieve_ue_context_asn1_helpers_test, resume_request_is_converted_from_asn1)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-10");
+
   asn1::xnap::retrieve_ue_context_request_s asn1_request = make_asn1_reest_request();
 
   // Replace the identity with an RRC Resume one, which carries an I-RNTI and the cell the UE accessed here.
@@ -92,6 +97,8 @@ TEST(retrieve_ue_context_asn1_helpers_test, resume_request_is_converted_from_asn
 
 TEST(retrieve_ue_context_asn1_helpers_test, request_for_an_e_utra_cell_is_rejected)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   asn1::xnap::retrieve_ue_context_request_s asn1_request              = make_asn1_reest_request();
   asn1_request->ue_context_id.rrrc_reest().fail_cell_pci.set_e_utra() = 42;
 
@@ -115,6 +122,8 @@ static xnap_retrieve_ue_context_request make_reest_request()
 
 TEST(retrieve_ue_context_asn1_helpers_test, reestablishment_request_survives_a_conversion_round_trip)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   const xnap_retrieve_ue_context_request request = make_reest_request();
 
   xnap_message msg;
@@ -139,6 +148,8 @@ TEST(retrieve_ue_context_asn1_helpers_test, reestablishment_request_survives_a_c
 
 TEST(retrieve_ue_context_asn1_helpers_test, resume_request_survives_a_conversion_round_trip)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-10");
+
   xnap_retrieve_ue_context_request request;
   request.ue_context_id = xnap_ue_context_id_for_rrc_resume{
       .i_rnti = short_i_rnti_t::from_uint(0x1234).value(), .allocated_c_rnti = to_rnti(0x4602), .access_pci = 7};
@@ -170,6 +181,8 @@ TEST(retrieve_ue_context_asn1_helpers_test, resume_request_survives_a_conversion
 
 TEST(retrieve_ue_context_asn1_helpers_test, response_survives_a_conversion_round_trip)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-10", "CU-GEN-3");
+
   xnap_retrieve_ue_context_response response;
   response.success = true;
   response.guami = guami_t{.plmn = plmn_identity::test_value(), .amf_set_id = 1, .amf_pointer = 1, .amf_region_id = 1};

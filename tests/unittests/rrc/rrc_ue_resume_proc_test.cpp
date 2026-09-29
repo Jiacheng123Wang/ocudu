@@ -4,6 +4,7 @@
 
 #include "rrc_ue_test_helpers.h"
 #include "rrc_ue_test_messages.h"
+#include "tests/ocudu_test_requirements.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ran/cu_cp_types.h"
 #include <gtest/gtest.h>
@@ -31,6 +32,8 @@ protected:
 /// rather than refresh keys derived from an unselected algorithm.
 TEST_F(rrc_ue_resume, when_resume_request_received_without_security_context_then_ue_released)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-10");
+
   receive_setup_request();
   ASSERT_EQ(get_srb0_pdu_type(), asn1::rrc_nr::dl_ccch_msg_type_c::c1_c_::types::rrc_setup);
   receive_setup_complete();

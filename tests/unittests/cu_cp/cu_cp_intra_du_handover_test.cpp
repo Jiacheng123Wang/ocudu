@@ -689,7 +689,7 @@ TEST_F(cu_cp_intra_du_handover_test, when_ho_fails_and_ue_is_gone_then_source_an
 
 TEST_F(cu_cp_intra_du_handover_test, when_ho_fails_then_reestablishment_to_source_ue_succeeds)
 {
-  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b");
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b", "CU-GEN-3");
 
   // Inject Measurement Report and await F1AP UE Context Setup Request.
   ASSERT_TRUE(send_rrc_measurement_report_and_await_ue_context_setup_request());
@@ -718,7 +718,7 @@ TEST_F(cu_cp_intra_du_handover_test, when_ho_fails_then_reestablishment_to_sourc
 
 TEST_F(cu_cp_intra_du_handover_test, when_ho_fails_then_reestablishment_to_target_ue_succeeds)
 {
-  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b");
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-a", "MVP-FUNC-MOB-1-b", "CU-GEN-3");
 
   // Inject Measurement Report and await F1AP UE Context Setup Request.
   ASSERT_TRUE(send_rrc_measurement_report_and_await_ue_context_setup_request());

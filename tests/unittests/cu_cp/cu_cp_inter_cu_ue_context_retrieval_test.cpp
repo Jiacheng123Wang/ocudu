@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/e1ap/e1ap_cu_cp_test_messages.h"
 #include "tests/test_doubles/f1ap/f1ap_test_message_validators.h"
 #include "tests/test_doubles/f1ap/f1ap_test_messages.h"
@@ -199,6 +200,8 @@ public:
 
 TEST_F(cu_cp_inter_cu_ue_context_retrieval_test, when_peer_serves_failure_cell_then_ue_context_is_retrieved_over_xn)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   ue_sends_rrc_reest_request(xnc_peer_served_pci);
 
   // No local context matches, so the peer serving that PCI must be asked for it.
@@ -216,6 +219,8 @@ TEST_F(cu_cp_inter_cu_ue_context_retrieval_test, when_peer_serves_failure_cell_t
 
 TEST_F(cu_cp_inter_cu_ue_context_retrieval_test, when_context_is_retrieved_then_bearers_are_setup_and_path_is_switched)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   ASSERT_TRUE(retrieve_ue_context());
   ASSERT_TRUE(ue_sends_rrc_reest_complete());
 
@@ -301,6 +306,8 @@ TEST_F(cu_cp_inter_cu_ue_context_retrieval_test, when_context_is_retrieved_then_
 
 TEST_F(cu_cp_inter_cu_ue_context_retrieval_test, when_peer_rejects_retrieval_then_fallback_to_rrc_setup)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   ue_sends_rrc_reest_request(xnc_peer_served_pci);
   ASSERT_TRUE(this->wait_for_xnap_tx_pdu(xnc_peer_idx, xnap_pdu));
 
@@ -313,6 +320,8 @@ TEST_F(cu_cp_inter_cu_ue_context_retrieval_test, when_peer_rejects_retrieval_the
 
 TEST_F(cu_cp_inter_cu_ue_context_retrieval_test, when_no_peer_serves_failure_cell_then_no_retrieval_is_attempted)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   // The UE reports a cell outside the peer's served cell list, which leaves the peer unresolved.
 
   ue_sends_rrc_reest_request(xnc_peer_served_pci + 1);
@@ -329,7 +338,10 @@ TEST_F(cu_cp_inter_cu_ue_context_retrieval_test, when_no_peer_serves_failure_cel
 class cu_cp_inter_cu_ue_context_retrieval_resume_test : public cu_cp_inter_cu_ue_context_retrieval_test
 {
 public:
-  cu_cp_inter_cu_ue_context_retrieval_resume_test() : cu_cp_inter_cu_ue_context_retrieval_test(true) {}
+  cu_cp_inter_cu_ue_context_retrieval_resume_test() : cu_cp_inter_cu_ue_context_retrieval_test(true)
+  {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-10");
+  }
 
   /// Builds a Short-I-RNTI the way the peer would have allocated it, from the node identifier its gNB ID carries.
   uint64_t make_peer_i_rnti(uint32_t ue_ref = 0) const
