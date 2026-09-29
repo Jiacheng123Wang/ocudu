@@ -718,6 +718,170 @@ int main(int argc, char** argv)
                   prb, gs.L(), gs.nout(), corr_a, corr_rhp, apply);
     }
 
+    // ==============================================================================================
+    // A1 + A2 (dev doc 6.173): WHAT A DISPATCH COSTS ON THE GPU SIDE, and how much of it is the
+    // DEPENDENCY between dispatches. The question the orchestration line turns on.
+    //
+    // The 1.4us "floor" this file has been quoting is measured from the CPU: `dispatchThreadgroups` only
+    // writes a record into the command buffer, and the wall clock the CPU then sees is the whole round
+    // trip. It cannot separate "the host wrote a record" from "the GPU started a grid, resolved its
+    // dependencies and bound its resources" - and the front end's own numbers say the second part is
+    // where the money is: 14 threadgroups in ONE dispatch cost 443us on air against 47us off-line, i.e.
+    // +30.5us per threadgroup, while a dispatch with a dozen fewer threadgroups costs almost nothing.
+    //
+    // A1 - THE HOST'S OWN ENCODE. `time_encode` (below, same shape as the one this file already has)
+    // encodes N dispatches and times ONLY the CPU, with no commit and no wait inside the timer. If this
+    // is sub-microsecond per dispatch, then the 5-14us a leg saves per removed dispatch is NOT the
+    // host's, and the whole of it is on the device side.
+    //
+    // A2 - THE DEVICE SIDE, SPLIT INTO "INDEPENDENT" AND "CHAINED". The same kernel (mmse_corr_a, whose
+    // grid is L x L and whose cost is a few microseconds of real work) is dispatched N times in ONE
+    // command buffer, in two layouts:
+    //   * INDEPENDENT - each dispatch writes its own slice of the destination, so the GPU may run them
+    //                   concurrently: the slope is what N dispatches cost when nothing orders them;
+    //   * CHAINED     - every dispatch writes the SAME slice, so each one reads what the previous one
+    //                   wrote: the slope is what N dispatches cost when each must wait for the last.
+    // The DIFFERENCE of the two slopes is the price of one link in a dependency chain - the number the
+    // merge (6 dispatches -> 1) is trying to buy, and the one nothing in this project has ever measured.
+    // ==============================================================================================
+    if (p_corr_a != nil) {
+      const geometry   g2{};
+      const NSUInteger a_elems = static_cast<NSUInteger>(g2.L()) * g2.L();
+      corr_params      c3{};
+      c3.nof_systems        = 1;
+      c3.npt                = g2.npt;
+      c3.npf                = g2.npf();
+      c3.ncomb              = g2.ncomb;
+      c3.nf                 = g2.nf();
+      c3.L                  = g2.L();
+      c3.Ls                 = g2.L();
+      c3.a_sys              = g2.L() * g2.L();
+      c3.r_sys              = g2.nout() * g2.L();
+      c3.ts                 = 1.0F / (15e3F * 14.0F);
+      c3.scs_hz             = 15e3F;
+      c3.fd_hz              = 300.0F;
+      c3.tau_rms_s          = 370e-9F;
+      c3.sigma2             = 0.01F;
+      c3.ridge              = 1e-6F;
+      c3.sigma2_from_device = 0;
+      c3.sigma2_slot        = 0;
+
+      // A2 (dev doc 6.173): N dispatches of the SAME kernel in ONE command buffer, two layouts that
+      // differ ONLY in where they write - which is what decides whether the hardware may overlap them.
+      //
+      // The first version of this arm got both layouts wrong and produced a reading that could not be
+      // true (a flat 67us for N = 1..16, i.e. a "per dispatch" cost that did not scale with N at all,
+      // and a chained figure BELOW it). The lesson is worth keeping: an arm whose two layouts differ in
+      // more than the variable under test measures the difference of its own mistakes.
+      //
+      //   * TOGETHER  - `a_sys` steps each dispatch to its own slice, so nothing orders them and the
+      //                 hardware may run them as concurrently as the device allows;
+      //   * SAME SLOT - every dispatch writes the FIRST slice, so each one's store races the previous
+      //                 one's: the serialization a dependency chain imposes, without needing a real
+      //                 read-after-write to exist.
+      //
+      // The slopes (not the totals) are the reading: us per dispatch when the device is free to overlap,
+      // against us per dispatch when it is not.
+      // `dispatches` = how many dispatchThreadgroups calls carry the work; the threadgroup COUNT is n
+      // either way. That is the axis this arm exists for: same work, same threadgroups, and the only
+      // difference is how many DISPATCH BOUNDARIES sit between them.
+      const auto run_layout = [&](uint32_t n, uint32_t dispatches, bool same_slot = false) -> double {
+        corr_params c = c3;
+        c.nof_systems = 1;
+        c.a_sys       = same_slot ? 0u : static_cast<uint32_t>(a_elems);
+        const uint32_t per = (n + dispatches - 1u) / dispatches;
+        double         best = 1e30;
+        for (unsigned round = 0; round != 7; ++round) {
+          id<MTLCommandBuffer> cb = [q commandBuffer];
+          id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+          [enc setComputePipelineState:p_corr_a];
+          [enc setBuffer:b_a offset:0 atIndex:0];
+          [enc setBytes:&c length:sizeof(c) atIndex:1];
+          uint32_t done = 0;
+          for (uint32_t d = 0; d != dispatches; ++d) {
+            const uint32_t take = std::min(per, n - done);
+            if (take == 0u) {
+              break;
+            }
+            [enc dispatchThreadgroups:MTLSizeMake(1, take, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            done += take;
+          }
+          [enc endEncoding];
+          [cb commit];
+          [cb waitUntilCompleted];
+          best = std::min(best, (cb.GPUEndTime - cb.GPUStartTime) * 1e6);
+        }
+        return best;
+      };
+
+      // A3 (dev doc 6.174): the SAME work, the same threadgroups, only the number of DISPATCH
+      // BOUNDARIES between them changes. The legs say a dispatch boundary is expensive (p72/p73/p74:
+      // 468.7 -> 505.8 -> 703.4 us of merged_hop as the front end's 14 transforms went from 1 dispatch
+      // to 2 to 7, i.e. ~33-39 us per added boundary, with the threadgroup count unchanged); this file
+      // says a dispatch costs ~0.07 us to encode and ~3.6 us to run when it is alone. If the legs are
+      // right about the boundary, this arm has to reproduce a slope that the dispatch COUNT, not the
+      // work, explains.
+      std::printf("\n[A3] same 16 threadgroups of mmse_corr_a (L=%u), split into 1 / 2 / 4 / 8 / 16 dispatches.\n"
+                  "     'own' = each dispatch writes its own slice (free to overlap); 'shared' = every\n"
+                  "     dispatch writes the FIRST slice, so their stores serialize on one address:\n",
+                  g2.L());
+      std::printf("     dispatches   own(us)   shared(us)   own/disp   shared/disp\n");
+      double o1 = 0.0;
+      double s1 = 0.0;
+      double o16 = 0.0;
+      double s16 = 0.0;
+      for (uint32_t d : {1u, 2u, 4u, 8u, 16u}) {
+        const double own    = run_layout(16u, d, false);
+        const double shared = run_layout(16u, d, true);
+        if (d == 1u) {
+          o1 = own;
+          s1 = shared;
+        }
+        o16 = own;
+        s16 = shared;
+        std::printf("  %8u   %8.3f   %9.3f     %8.3f    %8.3f\n",
+                    d,
+                    own,
+                    shared,
+                    own / static_cast<double>(d),
+                    shared / static_cast<double>(d));
+      }
+      std::printf("[A3] slope over 1->16 dispatches: own=%.3f us per dispatch boundary, shared=%.3f us "
+                  "-> the SERIALIZATION across boundaries costs %.3f us per boundary on the device\n",
+                  (o16 - o1) / 15.0,
+                  (s16 - s1) / 15.0,
+                  ((s16 - s1) - (o16 - o1)) / 15.0);
+
+      // A1: the host's own encode, with NO commit and NO wait inside the timer.
+      const auto host_encode = [&](uint32_t n) -> double {
+        double best = 1e30;
+        for (unsigned round = 0; round != 7; ++round) {
+          id<MTLCommandBuffer> cb = [q commandBuffer];
+          const double t0 = CFAbsoluteTimeGetCurrent();
+          id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+          [enc setComputePipelineState:p_corr_a];
+          [enc setBuffer:b_a offset:0 atIndex:0];
+          [enc setBytes:&c3 length:sizeof(c3) atIndex:1];
+          for (uint32_t r = 0; r != n; ++r) {
+            [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+          }
+          [enc endEncoding];
+          const double t1 = CFAbsoluteTimeGetCurrent();
+          [cb commit];
+          [cb waitUntilCompleted];
+          best = std::min(best, (t1 - t0) * 1e6);
+        }
+        return best;
+      };
+      const double enc_1  = host_encode(1u);
+      const double enc_16 = host_encode(16u);
+      std::printf("[A1] host encode only (no commit/wait inside the timer): 1=%.3f us, 16=%.3f us -> "
+                  "%.3f us/dispatch on the HOST\n",
+                  enc_1,
+                  enc_16,
+                  (enc_16 - enc_1) / 15.0);
+    }
+
     std::printf("\nRead it against the hop: the legs' merged_hop is ~534 us/lane, of which the CE's own\n"
                 "dispatches are the ones counted here (5.91/hop without the scatter since 6.62). The\n"
                 "BASELINE row is what a dispatch costs when it does nothing - the floor the elimination\n"
