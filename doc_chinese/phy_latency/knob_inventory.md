@@ -1,7 +1,7 @@
 # OCUDU_* 旋钮清单（**生成物** + 人工判读）
 
 > 生成方式：`python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > doc_chinese/phy_latency/knob_inventory.md`
-> 本次生成：commit `da0897e4c6`。**不要手改正文**——改生成器或改人工判读小节。
+> 本次生成：commit `c667d084f3`。**不要手改正文**——改生成器或改人工判读小节。
 > （生成器把**生成那一刻的 HEAD**写进这一行；要把这一行也追平 HEAD，就重跑生成器再提交一次——那一次是纯文档差异。）
 >
 > **默认值**是**从守卫表达式读出来的**（`ON` = 不设或非 0 都开；`OFF` = 必须显式置 1；`AUTO` = 由别处推导；`?` = 需要读注释）。
@@ -38,11 +38,11 @@
 
 | 旋钮 | 默认 | 读取点 | 飞过的腿 | 说明 |
 |---|---|---|---|---|
-| `OCUDU_LANE_ABLATE` | OFF | `lib/phy/metal/ocudu_metal_burst.mm:450` | 11 | 消去法总开关：各阶段的绑定换成 `lane_ablate_noop`（只换 kernel，网格/屏障/提交结构不变） |
-| `OCUDU_LANE_ABLATE_EVERY` | ? | `lib/phy/metal/ocudu_metal_burst.mm:455` | 10 | **修饰符**（默认 1 = 每跳都消去；只在 `OCUDU_LANE_ABLATE=1` 时有意义）：`=8` = 每 8 跳消去 1 跳，全消去手机接不进来（p79） |
-| `OCUDU_LANE_ABLATE_STAGE` | OFF | `lib/phy/metal/ocudu_metal_burst.mm:284` | 5 | **修饰符**（只在 `OCUDU_LANE_ABLATE=1` 时有意义）：只消去哪一**阶段族**——`front_end`/`ce`/`eq`/`demap`（`|` 或 `,` 组合），不设 = `all` = 历史行为；拼错的名字按 `all` 处理并打 WARNING。族级账单靠它，覆盖度看报告里的 `Q9-F5 ablation coverage`（开发文档 6.162） |
-| `OCUDU_METAL_GPU_TIME` | OFF | `lib/phy/metal/ocudu_metal_queue.mm:325` | 61 | **探针**：给每条 cb 装 GPU 时间戳（per-label 表的来源；验收腿一直带着它） |
-| `OCUDU_UL_PHASE_SEGMENTS` | OFF | `include/ocudu/support/executors/ul_pipeline_probe.h:1365` | 102 | **探针**：上行相位分段读数（验收腿一直带着它） |
+| `OCUDU_LANE_ABLATE` | OFF | `lib/phy/metal/ocudu_metal_burst.mm:450` | 16 | 消去法总开关：各阶段的绑定换成 `lane_ablate_noop`（只换 kernel，网格/屏障/提交结构不变） |
+| `OCUDU_LANE_ABLATE_EVERY` | ? | `lib/phy/metal/ocudu_metal_burst.mm:455` | 15 | **修饰符**（默认 1 = 每跳都消去；只在 `OCUDU_LANE_ABLATE=1` 时有意义）：`=8` = 每 8 跳消去 1 跳，全消去手机接不进来（p79） |
+| `OCUDU_LANE_ABLATE_STAGE` | OFF | `lib/phy/metal/ocudu_metal_burst.mm:284` | 10 | **修饰符**（只在 `OCUDU_LANE_ABLATE=1` 时有意义）：只消去哪一**阶段族**——`front_end`/`ce`/`eq`/`demap`（`|` 或 `,` 组合），不设 = `all` = 历史行为；拼错的名字按 `all` 处理并打 WARNING。族级账单靠它，覆盖度看报告里的 `Q9-F5 ablation coverage`（开发文档 6.162） |
+| `OCUDU_METAL_GPU_TIME` | OFF | `lib/phy/metal/ocudu_metal_queue.mm:325` | 66 | **探针**：给每条 cb 装 GPU 时间戳（per-label 表的来源；验收腿一直带着它） |
+| `OCUDU_UL_PHASE_SEGMENTS` | OFF | `include/ocudu/support/executors/ul_pipeline_probe.h:1365` | 107 | **探针**：上行相位分段读数（验收腿一直带着它） |
 
 > ⚠ **验收腿的旋钮白名单**（`milestone_audit.sh` / `leg_gate.sh` 判的就是它）：`OCUDU_METAL_GPU_TIME`、`OCUDU_UL_PHASE_SEGMENTS` 任意值；
 > `OCUDU_DFT_BATCH_SYMBOLS=14`、`OCUDU_DFT_OPEN_BLOCK=1`、`OCUDU_DFT_RELEASE_BLOCK=1`、`OCUDU_CE_LANE_ORDER=merged` 视为「等于交付默认」。其余一律判 FAIL（**fail-closed**）。
@@ -142,11 +142,11 @@
 | `OCUDU_L1_DROP_CONSUMER_WAIT` | OFF | test | `lib/phy/upper/channel_processors/metal/test/ul_chain_replay.cpp:713` | 1 | `lib/phy/upper/channel_processors` | 0 | 1/1 | — |
 | `OCUDU_L1_DROP_MISS_WAIT` | OFF | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_metal_mmse_engine.mm:195` | 1 | `lib/phy/upper/signal_processors` | 0 | 3/2 | — |
 | `OCUDU_L1_HOST_FIRST` | OFF | test | `lib/phy/upper/channel_processors/metal/test/ul_chain_replay.cpp:1134` | 1 | `lib/phy/upper/channel_processors` | 0 | 1/1 | — |
-| `OCUDU_LANE_ABLATE` | OFF | lib | `lib/phy/metal/ocudu_metal_burst.mm:450` | 3 | `lib/phy/metal/ocudu_metal_burst.mm` | 11 | 70/5 | 1 |
-| `OCUDU_LANE_ABLATE_EVERY` | ? | lib | `lib/phy/metal/ocudu_metal_burst.mm:455` | 3 | `lib/phy/metal/ocudu_metal_burst.mm` | 10 | 12/3 | 8 |
-| `OCUDU_LANE_ABLATE_STAGE` | OFF | lib | `lib/phy/metal/ocudu_metal_burst.mm:284` | 1 | `lib/phy/metal/ocudu_metal_burst.mm` | 5 | 19/5 | all,ce,demap,eq,front_end |
+| `OCUDU_LANE_ABLATE` | OFF | lib | `lib/phy/metal/ocudu_metal_burst.mm:450` | 3 | `lib/phy/metal/ocudu_metal_burst.mm` | 16 | 70/5 | 1 |
+| `OCUDU_LANE_ABLATE_EVERY` | ? | lib | `lib/phy/metal/ocudu_metal_burst.mm:455` | 3 | `lib/phy/metal/ocudu_metal_burst.mm` | 15 | 12/3 | 8 |
+| `OCUDU_LANE_ABLATE_STAGE` | OFF | lib | `lib/phy/metal/ocudu_metal_burst.mm:284` | 1 | `lib/phy/metal/ocudu_metal_burst.mm` | 10 | 19/5 | all,ce,demap,eq,front_end |
 | `OCUDU_LANE_DIAG_SPLIT` | ? | lib | `lib/phy/metal/ocudu_metal_burst.mm:884` | 1 | `lib/phy/metal/ocudu_metal_burst.mm` | 3 | 29/7 | 1 |
-| `OCUDU_METAL_GPU_TIME` | OFF | lib | `lib/phy/metal/ocudu_metal_queue.mm:325` | 2 | `lib/phy/metal/ocudu_metal_queue.mm` | 61 | 106/22 | 1 |
+| `OCUDU_METAL_GPU_TIME` | OFF | lib | `lib/phy/metal/ocudu_metal_queue.mm:325` | 2 | `lib/phy/metal/ocudu_metal_queue.mm` | 66 | 107/22 | 1 |
 | `OCUDU_MMSE_DEBUG` | ? | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_metal_mmse_engine.mm:404` | 2 | `lib/phy/upper/signal_processors` | 0 | 21/7 | — |
 | `OCUDU_PROBE_GAPPED` | ? | test | `lib/phy/upper/channel_processors/metal/test/metal_chain_probe.cpp:268` | 1 | `lib/phy/upper/channel_processors` | 0 | 8/2 | — |
 | `OCUDU_PROBE_RE` | ? | test | `lib/phy/upper/channel_processors/metal/test/metal_dispatch_probe.cpp:57` | 1 | `lib/phy/upper/channel_processors` | 0 | 0/0 | — |
@@ -159,7 +159,7 @@
 | `OCUDU_UL_DUMP_MAX_RB` | ? | lib | `lib/phy/upper/channel_processors/pusch/ul_capture.cpp:52` | 1 | `lib/phy/upper/channel_processors` | 0 | 3/2 | — |
 | `OCUDU_UL_DUMP_TD` | ? | lib | `lib/phy/lower/processors/uplink/puxch/puxch_processor_impl.cpp:35` | 2 | `lib/phy/lower/processors` | 0 | 14/7 | — |
 | `OCUDU_UL_DUMP_TD_SLOTS` | ? | lib | `lib/phy/lower/processors/uplink/puxch/puxch_processor_impl.cpp:45` | 1 | `lib/phy/lower/processors` | 0 | 2/2 | — |
-| `OCUDU_UL_PHASE_SEGMENTS` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1365` | 1 | `include/ocudu` | 102 | 103/20 | 1 |
+| `OCUDU_UL_PHASE_SEGMENTS` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1365` | 1 | `include/ocudu` | 107 | 104/20 | 1 |
 | `OCUDU_UL_RX_POOL_DROP` | ? | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:1048` | 1 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 1 | 17/2 | 0 |
 | `OCUDU_UL_RX_POOL_DROP_FORCE` | ? | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:1061` | 1 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 1 | 11/3 | 20 |
 | `OCUDU_UL_RX_POOL_SIZE` | ? | lib | `lib/phy/lower/lower_phy_factory.cpp:226` | 1 | `lib/phy/lower/lower_phy_factory.cpp` | 1 | 8/4 | 12 |
