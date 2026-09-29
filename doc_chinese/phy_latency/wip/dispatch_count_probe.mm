@@ -64,19 +64,28 @@ kernel void noop_kernel(device float* out [[buffer(0)]],
 NSString* const sweep_source = @R"(
 #include <metal_stdlib>
 using namespace metal;
-kernel void sweep_kernel(device const float* in  [[buffer(0)]],
+kernel void sweep_kernel(device const float* in   [[buffer(0)]],
                          device float*       grid [[buffer(1)]],
                          constant uint&      n_in [[buffer(2)]],
                          constant uint&      n_grid [[buffer(3)]],
+                         constant uint&      mode [[buffer(4)]],
                          uint                i    [[thread_position_in_grid]])
 {
   if (i >= n_grid) { return; }
   float acc = 0.0f;
-  // One pass over the whole input per output element is NOT what the real kernels do; this reads a slice of
-  // it, which keeps the traffic per dispatch close to the grid's own size (read + write).
-  const uint base = (i * 7u) % n_in;
-  acc += in[base] + in[(base + 1u) % n_in] + in[(base + 2u) % n_in] + in[(base + 3u) % n_in];
-  grid[i] = acc * 0.25f;
+  if (mode == 0u) {
+    // PRODUCER: reads the input, writes the grid (the front end's shape).
+    const uint base = (i * 7u) % n_in;
+    acc += in[base] + in[(base + 1u) % n_in] + in[(base + 2u) % n_in] + in[(base + 3u) % n_in];
+    grid[i] = acc * 0.25f;
+  } else {
+    // CONSUMER: reads the grid the previous dispatch wrote, writes it back (the estimator/equalizer/
+    // demapper shape). This is the read-after-write edge the earlier arm was missing: without it, five
+    // dispatches on the same buffers were still independent.
+    const uint base = (i * 3u) % n_grid;
+    acc += grid[base] + grid[(base + 1u) % n_grid] + grid[(base + 2u) % n_grid];
+    grid[i] = acc * 0.3333f;
+  }
 }
 )";
 
@@ -239,11 +248,73 @@ int main()
         std::fflush(stdout);
       };
       std::printf("\n-- 5 memory-bound dispatches at the air chain's sizes (46 KB in / 64 KB grid) --\n");
-      run_sweep(true, "5 chained (same in+grid: dependency)");
+      run_sweep(true, "5 chained (same in+grid, NO raw edge)");
       run_sweep(false, "5 separate (own in+grid: no dep)");
-      for (unsigned d : {1u, 5u}) {
-        (void)d;
-      }
+
+      // ---- the TRUE read-after-write chain ---------------------------------------------------------
+      // Dispatch 0 produces the grid; dispatches 1..4 consume it (read the grid the PREVIOUS dispatch
+      // wrote, write it back). That is the hop's real dependency: front end -> estimator -> equalizer ->
+      // demapper, all on one grid. A window much longer than the sum of the isolated prices would then be
+      // the price of the raw edges (cache visibility / barriers), not of the work.
+      auto run_raw = [&](bool with_competitor, const char* what) {
+        std::vector<double> gpu, host;
+        std::atomic<bool>   stop{false};
+        std::thread         comp;
+        if (with_competitor) {
+          comp = std::thread([&]() {
+            while (!stop.load(std::memory_order_relaxed)) {
+              id<MTLCommandBuffer>         ccb = [other commandBuffer];
+              id<MTLComputeCommandEncoder> cen = [ccb computeCommandEncoder];
+              [cen setComputePipelineState:spipe];
+              unsigned ni = n_in, ng = n_grid, m0 = 0, m1 = 1;
+              for (unsigned d = 0; d != 5; ++d) {
+                [cen setBuffer:in_shared offset:0 atIndex:0];
+                [cen setBuffer:grid_shared offset:0 atIndex:1];
+                [cen setBytes:&ni length:sizeof(ni) atIndex:2];
+                [cen setBytes:&ng length:sizeof(ng) atIndex:3];
+                [cen setBytes:(d == 0 ? &m0 : &m1) length:sizeof(unsigned) atIndex:4];
+                [cen dispatchThreadgroups:MTLSizeMake(tg, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads_per_tg, 1, 1)];
+              }
+              [cen endEncoding];
+              [ccb commit];
+            }
+          });
+        }
+        for (unsigned i = 0; i != nof_warmup + nof_runs; ++i) {
+          id<MTLCommandBuffer>         cb  = [queue commandBuffer];
+          id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+          [enc setComputePipelineState:spipe];
+          unsigned ni = n_in, ng = n_grid, m0 = 0, m1 = 1;
+          for (unsigned d = 0; d != 5; ++d) {
+            [enc setBuffer:in_shared offset:0 atIndex:0];
+            [enc setBuffer:grid_shared offset:0 atIndex:1];
+            [enc setBytes:&ni length:sizeof(ni) atIndex:2];
+            [enc setBytes:&ng length:sizeof(ng) atIndex:3];
+            [enc setBytes:(d == 0 ? &m0 : &m1) length:sizeof(unsigned) atIndex:4];
+            [enc dispatchThreadgroups:MTLSizeMake(tg, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads_per_tg, 1, 1)];
+          }
+          [enc endEncoding];
+          const auto t0 = std::chrono::steady_clock::now();
+          [cb commit];
+          [cb waitUntilCompleted];
+          const auto t1 = std::chrono::steady_clock::now();
+          if (i >= nof_warmup) {
+            gpu.push_back((cb.GPUEndTime - cb.GPUStartTime) * 1e6);
+            host.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
+          }
+        }
+        stop.store(true, std::memory_order_relaxed);
+        if (comp.joinable()) {
+          comp.join();
+        }
+        std::printf("%-42s gpu median %8.1f us   host median %8.1f us\n", what, median(gpu), median(host));
+        std::fflush(stdout);
+      };
+      std::printf("\n-- TRUE read-after-write chain: 1 producer + 4 consumers on ONE grid --\n");
+      run_raw(false, "RAW chain, GPU otherwise idle");
+      run_raw(true, "RAW chain + a competing lane streaming");
+      std::printf("\n-- the same RAW chain with NO-OP content (the ablation question) --\n");
+      run_arm(5, 1, 0, "(no-op 5 dispatches, for comparison: no raw edge)");
     }
   }
   return 0;
