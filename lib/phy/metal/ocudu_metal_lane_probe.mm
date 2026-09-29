@@ -323,6 +323,25 @@ struct lane_stats_t {
   std::vector<double> paired_eqdem_us;
   std::vector<double> paired_busy_ratio;
   std::vector<double> paired_eqdem_ratio;
+  /// \name IQ -> CE: the WHOLE front of the chain in one number (dev doc 6.165).
+  ///
+  /// WHY IT EXISTS. The pipeline probe already pairs three segments per hop - `start -> t2f` (the receive and
+  /// the time-frequency stage), `t2f -> ce` (the estimator), `t2f -> eq_demap` - but the three are printed as
+  /// SEPARATE populations, so the sum a reader actually wants ("this hop was decoded N us after its IQ
+  /// arrived") has never been a reading: it had to be reconstructed by adding three medians taken over three
+  /// possibly different sample sets. This series is that sum, taken on the PAIRED population (one sample per
+  /// hop that has all three landmarks), and it exists to be read against the parts of the same chain that are
+  /// measured on the DEVICE: the front end's batched transform is ~47-51us of device execution (dev doc 6.31),
+  /// the lane's merged buffer holds ~470us of device window (6.159), and the CPU's own participation is ~94us
+  /// (6.97). A total that is much larger than the union of those is the thing that has never been explained -
+  /// the "~470us" question - and it can only be attacked with both ends of the chain in the same units.
+  ///
+  /// \note `t2f` and `ce` are both measured on the HOST clock (high_resolution_clock, the same origin
+  ///       record_start() uses), so the sum is a host wall-clock span and stays comparable with `residency`
+  ///       and with the host-side landmark table - NOT with `merged_hop`, which is device time.
+  ///@{
+  std::vector<double> paired_iq2ce_us;  ///< start -> t2f + t2f -> ce: IQ arrival to the estimator's end
+  std::vector<double> paired_iq2eqdem_us; ///< start -> t2f + t2f -> eq_demap: IQ arrival to LLR-ready
   ///@}
 };
 
@@ -602,6 +621,12 @@ void gpu_lane_probe::note_phase_sample(uint64_t slot, int64_t t2f_ns, int64_t ce
   s.paired_eqdem_us.push_back(static_cast<double>(eqdem_ns) / 1e3);
   s.paired_t2f_us.push_back(static_cast<double>(t2f_ns) / 1e3);
   s.paired_ce_us.push_back(static_cast<double>(ce_ns) / 1e3);
+  // Q9-G2 (dev doc 6.165): the two sums, from the SAME three landmarks this pairing just validated (t2f and
+  // ce/eqdem are matched to one start within the tolerance the pairing itself enforces). Computing them here
+  // rather than adding medians in the report is what makes "IQ -> CE" a reading instead of an arithmetic
+  // hope: the parts of a median are not the median of the parts.
+  s.paired_iq2ce_us.push_back(static_cast<double>(t2f_ns + ce_ns) / 1e3);
+  s.paired_iq2eqdem_us.push_back(static_cast<double>(t2f_ns + eqdem_ns) / 1e3);
   if (row.residency_us > 0.0) {
     s.paired_busy_ratio.push_back(row.busy_us / row.residency_us);
     s.paired_eqdem_ratio.push_back((static_cast<double>(eqdem_ns) / 1e3) / row.residency_us);
@@ -992,6 +1017,8 @@ void gpu_lane_probe::report()
   std::vector<double> paired_busy;
   std::vector<double> paired_t2f;
   std::vector<double> paired_ce;
+  std::vector<double> paired_iq2ce;
+  std::vector<double> paired_iq2eqdem;
   std::vector<double> paired_eqdem;
   std::vector<double> paired_busy_ratio;
   std::vector<double> paired_eqdem_ratio;
@@ -1047,6 +1074,8 @@ void gpu_lane_probe::report()
     paired_busy          = s.paired_busy_us;
     paired_t2f           = s.paired_t2f_us;
     paired_ce            = s.paired_ce_us;
+    paired_iq2ce         = s.paired_iq2ce_us;
+    paired_iq2eqdem      = s.paired_iq2eqdem_us;
     paired_eqdem         = s.paired_eqdem_us;
     paired_busy_ratio    = s.paired_busy_ratio;
     paired_eqdem_ratio   = s.paired_eqdem_ratio;
@@ -1210,6 +1239,43 @@ void gpu_lane_probe::report()
     print_series("paired t2f (phase segment)", paired_t2f);
     print_series("paired ce (phase segment)", paired_ce);
     print_series("paired eq_demap (phase segment)", paired_eqdem);
+    // ---- Q9-G2 (dev doc 6.165): the WHOLE front of the chain, IQ arrival -> estimator end, and the account
+    // against the device-side parts it has to be read with. The three segments above answer "where did the
+    // time go BETWEEN landmarks"; this answers "how long from the radio's IQ to a decoded estimate", which is
+    // the number the ~470us question is actually about, and it is taken per hop (the sum), not by adding
+    // medians. The parts are printed beside it so a reader never has to hold two reports in their head.
+    print_series("paired iq2ce (start -> ce, whole front)", paired_iq2ce);
+    print_series("paired iq2eqdem (start -> eq_demap)", paired_iq2eqdem);
+    if (!paired_iq2ce.empty()) {
+      const auto med = [](std::vector<double> v) {
+        if (v.empty()) {
+          return 0.0;
+        }
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+      };
+      const double t2f_med   = med(paired_t2f);
+      const double ce_med    = med(paired_ce);
+      const double iq2ce_med = med(paired_iq2ce);
+      // The accounting the reading exists for. `residency` is the lane's own device window; the front end's
+      // batched dispatch is ~47-51us of device execution (dev doc 6.31/6.159) and `merged_hop` is the whole
+      // merged buffer's device window. If IQ->CE is much larger than the device windows it contains, the
+      // difference is host-side (dispatch, encode, wake-ups, the waits the lane took) - and THAT is the part
+      // no instrument has yet attributed.
+      std::fprintf(stderr,
+                   "[ul_gpu_lane] Q9-G2 account (dev doc 6.165): iq2ce median=%.1fus = t2f %.1fus + ce %.1fus"
+                   " (paired, same hops); lane residency median=%.1fus, busy median=%.1fus -> host+wait share"
+                   " of iq2ce = %.1fus (%.0f%%) | read the DEVICE side against it: merged_hop exec p50 and"
+                   " the front end's batched dispatch are printed by [metal_stats] and [ul_gpu_lane] dft\n",
+                   iq2ce_med,
+                   t2f_med,
+                   ce_med,
+                   paired_residency.empty() ? 0.0 : med(paired_residency),
+                   paired_busy.empty() ? 0.0 : med(paired_busy),
+                   iq2ce_med - (paired_busy.empty() ? 0.0 : med(paired_busy)),
+                   (iq2ce_med > 0.0) ? (100.0 * (iq2ce_med - (paired_busy.empty() ? 0.0 : med(paired_busy))) / iq2ce_med)
+                                     : 0.0);
+    }
     std::fprintf(stderr,
                  "[ul_gpu_lane] paired ratios (P0-5): busy/residency median=%.3f over ALL lanes' own"
                  " ratio=%.3f; eq_demap/residency median=%.3f\n",
