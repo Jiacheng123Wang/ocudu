@@ -12451,6 +12451,38 @@ lane 提交这条 cb（打标 merged_hop）→ **LLR 是这条 cb 里最后一�
    **判据**：`iq2eqdem_新 ≈ V1`（同一批跳，±2%）——即新求和与独立序列互证；其余读数与 `p143` 在噪声内一致（`merged_hop` ≈470、`ce_weights` ≈40、契约 9/9）。
 3. **不重跑历史腿**：它们输出的是原始测量，没有错。
 
+### 6.197 ★ **预登记：腿 `p153-n78-iq2fix`（探针修好后的第一条腿，同配方刷新 baseline）**（2026-09-30，**未飞**）
+
+#### ① 为什么飞它
+
+1. **验证 §6.196 的代码修复**：`paired iq2eqdem` 改成三项求和后，它必须与 `[ul_gpu_pipeline]`（V1）**同量级** —— 两条序列的 `start` 与终点是同一个时刻（`record_ldpc_start`），
+   只差配对总体（V1 含所有尝试，paired 只含配对成功的跳）⇒ **这是探针目前最强的一条自检**，比"修了一行算术"有说服力得多；
+2. **刷新 `wip/ce_refactor_baseline.md`**（它是 CE 重构的比较基准，当前那一行的标签是错的，且快照是 `p143`）；
+3. 顺带复核：这次只改了仪器与注释，**设备侧与判据读数不许动**。
+
+#### ② 命令（与 `p143` 逐字同配方，只换标签；戳已核 `a7a06f00f6`）
+
+```bash
+LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 \
+  sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p153-n78-iq2fix --regime=default
+```
+
+**收尾纪律**：业务（100 ping + 30 s iperf3）→ 排空 ~10 s → **一次 Ctrl-C**（`[metal_stats]`/`[ul_gpu_lane]` 只在正常关停时打印）。
+
+#### ③ 预登记判据
+
+| # | 量 | 预登记 | 反面读法 |
+|---|---|---|---|
+| 1 | **新增的 `paired iq2eqdem (start -> llr ready, whole front)`** | **≈ V1 `[ul_gpu_pipeline]` 中位**（同一腿，±2%）| 差 >5% ⇒ 修法与探针的终点假设不符，先查代码再解释 |
+| 2 | `paired iq2ce` | **605 ± 15 µs**（与 `p143`–`p152` 同带）| 动 ⇒ 这次"只改仪器"的前提不成立 |
+| 3 | `merged_hop` exec p50 / `ce_weights` exec p50 | **469 ± 10 / 41 ± 6 µs** | 动 ⇒ 改到了交付路径（不该发生）|
+| 4 | 契约 / `stale` / `cbs/lane` | **9 of 9 MET / 0 / 2.00** | 任一破 ⇒ 腿不作数 |
+| 5 | `paired eq_demap`（相位段）| **818 ± 10 µs**（`p150` 口径）| 用于把 baseline 的相位行更新成**逐跳配对**的口径 |
+
+#### ④ 飞完之后
+
+把 `wip/ce_refactor_baseline.md` 的 §1/§2 用 `p153` 的数刷新，并**保留 `p143` 一列作对照**（避免"基准被悄悄换掉"）；`iq2eqdem` 一行改为"= V1（自检）"。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
