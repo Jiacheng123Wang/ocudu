@@ -1167,6 +1167,99 @@ int main(int argc, char** argv)
                   static_cast<unsigned long>(p_corr_merged.maxTotalThreadsPerThreadgroup));
     }
 
+    // CAN TWO BUFFERS OF ONE QUEUE RUN AT THE SAME TIME? (dev doc 6.184)
+    //
+    // The question that decides whether "fewer commits" is worth anything. `merged_hop` is committed while
+    // another buffer is running (Q9-F6, leg p150: idle-commit 0%), and its wait is ~210us. If the device
+    // could start it on the cores the running buffer is NOT using, that wait would be spent doing this
+    // hop's work instead - and collapsing submissions would buy nothing. If it cannot, the wait is a hard
+    // serialization and the queue is a queue.
+    //
+    // HOW: the SAME kernel, the SAME total work, two layouts.
+    //   * SERIAL  - commit A, wait for it, commit B, wait for it. The floor: two executions back to back.
+    //   * TOGETHER- commit A and B, then wait for both. If the device overlaps them, this is FASTER than
+    //               serial. If the second only starts when the first ends, it is the SAME - and that
+    //               equality is the answer.
+    // The work per buffer is deliberately much larger than the device can retire at once (thousands of
+    // threadgroups), so "the first does not fill the machine" cannot be the reason they overlap.
+    if (p_corr_a != nil) {
+      const geometry   g9{};
+      const NSUInteger a9 = static_cast<NSUInteger>(g9.L()) * g9.L();
+      corr_params      c9{};
+      c9.npt                = g9.npt;
+      c9.npf                = g9.npf();
+      c9.ncomb              = g9.ncomb;
+      c9.nf                 = g9.nf();
+      c9.L                  = g9.L();
+      c9.Ls                 = g9.L();
+      c9.a_sys              = g9.L() * g9.L();
+      c9.r_sys              = g9.nout() * g9.L();
+      c9.ts                 = 1.0F / (15e3F * 14.0F);
+      c9.scs_hz             = 15e3F;
+      c9.fd_hz              = 300.0F;
+      c9.tau_rms_s          = 370e-9F;
+      c9.sigma2             = 0.01F;
+      c9.ridge              = 1e-6F;
+      c9.sigma2_from_device = 0;
+      c9.sigma2_slot        = 0;
+      c9.dmrs_slots[0]      = 2;
+      c9.dmrs_slots[1]      = 7;
+      c9.dmrs_slots[2]      = 11;
+      const uint32_t  sys9  = 64u; // 64 systems of A: thousands of threadgroups, far more than one pass
+      const NSUInteger tgs9 = (a9 + 255u) / 256u;
+      c9.nof_systems        = sys9;
+
+      const auto issue = [&](id<MTLCommandBuffer> cb, NSUInteger offset) {
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:p_corr_a];
+        [enc setBuffer:b_a offset:offset atIndex:0];
+        [enc setBytes:&c9 length:sizeof(c9) atIndex:1];
+        [enc dispatchThreadgroups:MTLSizeMake(tgs9, sys9, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+      };
+
+      double best_serial = 1e30;
+      double best_toget  = 1e30;
+      for (unsigned round = 0; round != 11; ++round) {
+        const double t0 = CFAbsoluteTimeGetCurrent();
+        {
+          id<MTLCommandBuffer> a = [q commandBuffer];
+          issue(a, 0);
+          [a commit];
+          [a waitUntilCompleted];
+          id<MTLCommandBuffer> b = [q commandBuffer];
+          issue(b, static_cast<NSUInteger>(sys9) * a9 * sizeof(float));
+          [b commit];
+          [b waitUntilCompleted];
+        }
+        best_serial = std::min(best_serial, (CFAbsoluteTimeGetCurrent() - t0) * 1e6);
+
+        const double t1 = CFAbsoluteTimeGetCurrent();
+        {
+          id<MTLCommandBuffer> a = [q commandBuffer];
+          id<MTLCommandBuffer> b = [q commandBuffer];
+          issue(a, 0);
+          issue(b, static_cast<NSUInteger>(sys9) * a9 * sizeof(float));
+          [a commit];
+          [b commit];
+          [a waitUntilCompleted];
+          [b waitUntilCompleted];
+        }
+        best_toget = std::min(best_toget, (CFAbsoluteTimeGetCurrent() - t1) * 1e6);
+      }
+      std::printf("\n[TWO-QUEUED] the SAME work as two buffers, serial vs both committed then waited "
+                  "(64 systems of \n     mmse_corr_a each = %lu threadgroups; median-of-11 minimum):\n",
+                  static_cast<unsigned long>(tgs9 * sys9));
+      std::printf("     serial   : %9.1f us\n", best_serial);
+      std::printf("     together : %9.1f us\n", best_toget);
+      std::printf("     => the device %s the two buffers (together/serial = %.3f)%s\n",
+                  (best_toget < best_serial * 0.9) ? "OVERLAPS" : "SERIALIZES",
+                  best_toget / best_serial,
+                  (best_toget < best_serial * 0.9)
+                      ? "  <- a queued buffer starts on the cores the running one is not using"
+                      : "  <- a queued buffer does NOT start until the running one ends");
+    }
+
     // O1 (dev doc 6.174): the merged correlation kernel against the two it replaces, BYTE FOR BYTE.
     //
     // This is the arm that decides whether "one dispatch" changed anything it was not allowed to change.
