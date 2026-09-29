@@ -16,8 +16,6 @@
 #include "tests/unittests/scheduler/test_utils/dummy_test_components.h"
 #include "tests/unittests/scheduler/test_utils/indication_generators.h"
 #include "tests/unittests/scheduler/test_utils/scheduler_test_suite.h"
-#include "ocudu/ran/band_helper.h"
-#include "ocudu/ran/prach/prach_configuration.h"
 #include "ocudu/ran/prach/prach_time_mapping.h"
 #include "ocudu/ran/prach/ra_helper.h"
 #include "ocudu/scheduler/config/time_domain_resource_helper.h"
@@ -81,7 +79,8 @@ public:
     ASSERT_NO_FATAL_FAILURE(tracker.on_new_result(res_grid[0].slot, res_grid[0].result));
   }
 
-  void handle_rach_indication(rach_indication_message ind)
+  /// \param occasion_slot_delay Slots between the PRACH occasion and the slot the lower layers report it in.
+  void handle_rach_indication(rach_indication_message ind, unsigned occasion_slot_delay = 0)
   {
     // Advance the simulator to a slot that has a valid PRACH occasion. The ra_scheduler only
     // prereserves MsgA PUSCH for slots whose corresponding PRACH slot is a valid occasion per
@@ -94,8 +93,9 @@ public:
     run_slot_until([this, &prach_mapper]() { return prach_mapper.has_prach_occasion(next_slot_rx()); });
     ind.slot_rx = next_slot_rx();
     if (not ind.occasions.empty()) {
-      // The occasion index tracks the slot_rx just selected above.
-      ind.occasions[0].slot_index = test_helper::compute_prach_occasion_slot_index(cell_cfg, ind.slot_rx);
+      // The lower layers report the t_id of the occasion, which may precede the slot they report it in.
+      ind.occasions[0].slot_index =
+          test_helper::compute_prach_occasion_slot_index(cell_cfg, ind.slot_rx - occasion_slot_delay);
     }
     ra_sch.handle_rach_indication(ind);
     tracker.on_new_rach_ind(ind);
@@ -224,17 +224,14 @@ TEST_P(ra_scheduler_common_test, when_no_rach_indication_received_then_no_rar_al
   ASSERT_FALSE(grants_scheduled_in_next_slots(10));
 }
 
-/// Test suite for the configurations whose PRACH occasion t_id is counted in a coarser numerology than the cell slots.
-class ra_scheduler_coarser_prach_scs_test : public ra_scheduler_common_test
-{};
-
 /// \brief The RA-RNTI comes from the reported occasion slot index, not from the indication slot.
 ///
-/// The RAR is only matched if the scheduler and the tracker both take t_id from the occasion.
-TEST_P(ra_scheduler_coarser_prach_scs_test,
-       when_occasion_slot_index_differs_from_rx_slot_then_ra_rnti_uses_the_occasion)
+/// The lower layers own t_id, as per TS 38.321, Section 5.1.3. The RAR is only matched if the scheduler and the tracker
+/// both take t_id from the occasion.
+TEST_P(ra_scheduler_common_test, when_occasion_slot_index_differs_from_rx_slot_then_ra_rnti_uses_the_occasion)
 {
-  handle_rach_indication(create_rach_indication(1));
+  // A one subframe shift changes t_id in any numerology, so it never matches the one derived from slot_rx.
+  handle_rach_indication(create_rach_indication(1), get_nof_slots_per_subframe(cell_cfg.scs_common()));
 
   for (unsigned slot_count = 0, max_slot_count = 1000; slot_count < max_slot_count and tracker.nof_msg3_acked() == 0;
        ++slot_count) {
@@ -382,29 +379,7 @@ static std::vector<test_params> get_test_params()
           test_params{frequency_range::FR2, 1, create_tdd_pattern(tdd_pattern_profile_fr2_120khz::DDDSU), true}};
 }
 
-/// Keeps the test cases whose PRACH occasion t_id is counted in a coarser numerology than the cell slots.
-static std::vector<test_params> get_coarser_prach_scs_test_params()
-{
-  std::vector<test_params> params               = get_test_params();
-  const auto               uses_cell_numerology = [](const test_params& p) {
-    const sched_cell_configuration_request_message req = ra_scheduler_common_test::get_sched_req(p);
-    const rach_config_common&                      rach_cfg = *req.ran.ul_cfg_common.init_ul_bwp.rach_cfg_common;
-    const prach_configuration prach_cfg = prach_configuration_get(band_helper::get_freq_range(req.ran.dl_carrier.band),
-                                                                  band_helper::get_duplex_mode(req.ran.dl_carrier.band),
-                                                                  rach_cfg.rach_cfg_generic.prach_config_index);
-    // The t_id of a long preamble is counted in the 15kHz reference numerology, and in the msg1 SCS otherwise.
-    const unsigned ref_numerology = is_long_preamble(prach_cfg.format) ? 0U : to_numerology_value(rach_cfg.msg1_scs);
-    return ref_numerology >= to_numerology_value(req.ran.ul_cfg_common.init_ul_bwp.generic_params.scs);
-  };
-  params.erase(std::remove_if(params.begin(), params.end(), uses_cell_numerology), params.end());
-  return params;
-}
-
 INSTANTIATE_TEST_SUITE_P(ra_scheduler, ra_scheduler_common_test, ::testing::ValuesIn(get_test_params()));
-
-INSTANTIATE_TEST_SUITE_P(ra_scheduler,
-                         ra_scheduler_coarser_prach_scs_test,
-                         ::testing::ValuesIn(get_coarser_prach_scs_test_params()));
 
 /// RA procedure in an NTN cell, where every DL-signalled UL transmission is delayed by the cell-specific Koffset.
 class ra_scheduler_ntn_test : public ra_scheduler_setup, public ::testing::Test
