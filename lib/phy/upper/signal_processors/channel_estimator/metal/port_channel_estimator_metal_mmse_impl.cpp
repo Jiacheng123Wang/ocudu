@@ -16,6 +16,7 @@ using ocudu::metal::mmse_refusals;
 #include "ocudu/ocuduvec/sc_prod.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/phy/phy_pipeline_crossings.h"
+#include "ocudu/phy/phy_pipeline_report.h"
 #include "ocudu_metal_lane_clock.h"
 #include "ocudu/support/math/math_utils.h"
 #include <atomic>
@@ -35,6 +36,130 @@ namespace {
 /// The per-hop [mmse_time] debug line is far too verbose to run under load (tens of lines per
 /// slot, which perturbs what it measures) and needs all_level: debug on top. This accumulator
 /// keeps the same fields and prints one summary line per process, to stderr, like [metal_stats].
+/// \brief A1 (dev doc 6.169): REUSE the matrices that do not depend on the received signal.
+///
+/// WHAT IS REUSED AND WHY IT IS LEGAL. A, A^-1, R_hp and W = R_hp . A^-1 are functions of the GEOMETRY
+/// (which symbols carry DM-RS, which subcarriers carry pilots, how many blocks and systems) and of the
+/// STATISTICS (fd_hz, tau_rms_s and the noise loading). None of them reads the received grid, which only
+/// enters at the apply step (h = W . y). The geometry is fixed by the cell and the PUSCH configuration;
+/// fd/tau are constants; and the noise loading is what the user's ruling is about: it is a measured noise
+/// LEVEL, a slow variable, and A's diagonal is the only place it enters. Caching the four matrices and
+/// reusing them for following hops therefore trades a small, bounded accuracy error (the width of the
+/// noise level's variation over the reuse window) for the whole correlation + inversion + weights prefix.
+///
+/// WHY THERE IS NO COPY. gpu_a / gpu_r_hp / gpu_w are allocated once in the constructor and their
+/// per-system slots are at fixed offsets, so a hit means "leave the slots alone": the apply step reads the
+/// matrices the previous hop's kernels left there. Nothing is copied on either side.
+///
+/// OFF BY DEFAULT (OCUDU_CE_MATRIX_CACHE=1 turns it on), and only for the plain kernel flavor: the matrix
+/// (nn) flavor has its own entry point and is left alone.
+struct mmse_matrix_cache {
+  bool     valid = false;
+  uint64_t hits  = 0;
+  uint64_t misses = 0;
+  // key
+  unsigned L = 0;
+  unsigned nout = 0;
+  unsigned nf = 0;
+  unsigned l_key = 0;
+  unsigned npf = 0;
+  unsigned ncomb = 0;
+  unsigned nof_blocks = 0;
+  unsigned a_stride = 0;
+  unsigned r_stride = 0;
+  unsigned nof_systems = 0;
+  unsigned nof_prb = 0;
+  float    fd_hz = 0.0F;
+  float    tau_rms_s = 0.0F;
+  float    ts = 0.0F;
+  float    scs_hz = 0.0F;
+  /// The sigma2 the cached matrices were built with. Logged, because the whole trade is about how far
+  /// this drifts from the per-hop value over the reuse window (dev doc 6.169).
+  float    sigma2 = 0.0F;
+};
+
+mmse_matrix_cache& matrix_cache()
+{
+  static mmse_matrix_cache* c = new mmse_matrix_cache();
+  return *c;
+}
+
+/// Whether the reuse is asked for. Read once: a knob that moved under a running leg would make two hops
+/// of one leg incomparable.
+bool matrix_cache_enabled()
+{
+  static const bool value = (std::getenv("OCUDU_CE_MATRIX_CACHE") != nullptr);
+  return value;
+}
+
+/// The sigma2 spread over the run, so the reuse window's accuracy cost can be read instead of assumed.
+struct sigma2_spread {
+  std::atomic<uint64_t> samples{0};
+  std::atomic<uint64_t> min_bits{0};
+  std::atomic<uint64_t> max_bits{0};
+  std::atomic<uint64_t> first_bits{0};
+};
+
+sigma2_spread& sigma2_stats()
+{
+  static sigma2_spread* s = new sigma2_spread();
+  return *s;
+}
+
+/// Records one hop's sigma2. First/last/min/max only: the reading this exists for is "how much does the
+/// noise level move across a leg", and four numbers answer it without a distribution's memory.
+void note_sigma2(float value)
+{
+  sigma2_spread& s = sigma2_stats();
+  uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  s.samples.fetch_add(1, std::memory_order_relaxed);
+  uint64_t prev = s.first_bits.load(std::memory_order_relaxed);
+  if ((prev == 0) && (bits != 0)) {
+    s.first_bits.compare_exchange_strong(prev, bits);
+  }
+  prev = s.min_bits.load(std::memory_order_relaxed);
+  while (((prev == 0) || (bits < prev)) && !s.min_bits.compare_exchange_weak(prev, bits)) {
+  }
+  prev = s.max_bits.load(std::memory_order_relaxed);
+  while (bits > prev && !s.max_bits.compare_exchange_weak(prev, bits)) {
+  }
+}
+
+float bits_to_float(uint64_t bits)
+{
+  const uint32_t b = static_cast<uint32_t>(bits);
+  float          f = 0.0F;
+  std::memcpy(&f, &b, sizeof(f));
+  return f;
+}
+
+/// Prints the sigma2 spread once, at exit, next to the other CE summaries.
+void sigma2_report()
+{
+  sigma2_spread& s = sigma2_stats();
+  if (s.samples.load(std::memory_order_relaxed) == 0) {
+    return;
+  }
+  const float lo = bits_to_float(s.min_bits.load(std::memory_order_relaxed));
+  const float hi = bits_to_float(s.max_bits.load(std::memory_order_relaxed));
+  const float fi = bits_to_float(s.first_bits.load(std::memory_order_relaxed));
+  std::fprintf(stderr,
+               "[ce_sigma2] samples=%llu first=%.6g min=%.6g max=%.6g (max/min=%.3f) - how SLOW the noise "
+               "loading is, i.e. what the matrix reuse window costs in accuracy (dev doc 6.169)\n",
+               static_cast<unsigned long long>(s.samples.load(std::memory_order_relaxed)),
+               static_cast<double>(fi),
+               static_cast<double>(lo),
+               static_cast<double>(hi),
+               (lo > 0.0F) ? (static_cast<double>(hi) / static_cast<double>(lo)) : 0.0);
+}
+
+const bool sigma2_report_registered = []() {
+  std::atexit(sigma2_report);
+  ocudu::register_p0_report(sigma2_report);
+  return true;
+}();
+
 struct mmse_time_stats {
   std::atomic<uint64_t> calls{0};
   std::atomic<uint64_t> hops_gpu{0};
@@ -3654,7 +3779,53 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(const metal::mmse_engine
     }
   }
   const bool k1_inline = gpu_invert && (std::getenv("OCUDU_CE_INVERT_FIRST") == nullptr);
-  const bool engine_ok =
+  // A1 (dev doc 6.169): when the matrices for THIS geometry are already in the persistent slots, the whole
+  // correlation + inversion + weights prefix is skipped and only the apply step runs - h = W . y with the W
+  // the previous hop's kernels left in gpu_w. The hit path uses mmse_engine::apply(), which had no caller
+  // until now: it is exactly "K2 alone", the third stage of the fused pipeline.
+  //
+  // The key is the GEOMETRY plus the two statistics that shape the correlations. sigma2 is deliberately NOT
+  // in the key: it is the noise LEVEL, a slow variable, and it enters only A's diagonal - reusing it is the
+  // trade this change is (its spread is printed by [ce_sigma2] so the cost is a reading, not an assumption).
+  bool cache_hit = false;
+  {
+    mmse_matrix_cache& mc = matrix_cache();
+    const float        sigma2_now =
+        (corr != nullptr) ? corr->sigma2 : ((corr_edge != nullptr) ? corr_edge->sigma2 : 0.0F);
+    note_sigma2(sigma2_now);
+    const bool usable = matrix_cache_enabled() && !matrix && (corr != nullptr) && (nof_y_scatter == 0);
+    const bool same =
+        mc.valid && (mc.L == L) && (mc.nout == nout) && (mc.nof_systems == nof_systems) &&
+        (mc.nof_blocks == nof_blocks) && (mc.l_key == corr->l) && (mc.npf == corr->npf) &&
+        (mc.ncomb == corr->ncomb) && (mc.nf == corr->nf) && (mc.a_stride == corr->a_l_stride) &&
+        (mc.r_stride == corr->r_stride) && (mc.fd_hz == corr->fd_hz) && (mc.tau_rms_s == corr->tau_rms_s) &&
+        (mc.ts == corr->ts) && (mc.scs_hz == corr->scs_hz);
+    if (usable && same) {
+      cache_hit = true;
+      ++mc.hits;
+    } else if (usable) {
+      ++mc.misses;
+      mc.valid      = true;
+      mc.L          = L;
+      mc.nout       = nout;
+      mc.nof_systems = nof_systems;
+      mc.nof_blocks = nof_blocks;
+      mc.l_key      = corr->l;
+      mc.npf        = corr->npf;
+      mc.ncomb      = corr->ncomb;
+      mc.nf         = corr->nf;
+      mc.a_stride   = corr->a_l_stride;
+      mc.r_stride   = corr->r_stride;
+      mc.fd_hz      = corr->fd_hz;
+      mc.tau_rms_s  = corr->tau_rms_s;
+      mc.ts         = corr->ts;
+      mc.scs_hz     = corr->scs_hz;
+      mc.sigma2     = sigma2_now;
+    }
+  }
+  const bool engine_ok = cache_hit
+                             ? engine->apply(w_slot, y_slot, h_slot, nout, L, nof_systems, nof_blocks)
+                             :
       matrix ? engine->run_nn(a_slot, r_slot, w_slot, q_slot, h_slot, nout, L, nof_systems, nof_blocks)
              : (k1_inline
                     ? (defer ? engine->run_async(a_slot,
