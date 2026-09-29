@@ -2780,12 +2780,12 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
       // legs read to know what ran, and it has to keep answering "A was built" and "R_hp was built".
       ce_site_diag().corr_a.fetch_add(1, std::memory_order_relaxed);   // dev doc 6.61
       ce_site_diag().corr_rhp.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
-      // ALWAYS dispatchThreadgroups() here, whatever corr_uniform() says: this kernel's second grid
-      // dimension carries the MATRIX, and dispatchThreads() with a 1-D threadgroup does not tile it -
-      // gid.y would stay 0 and every matrix but the first would never be built (measured off-line; see
-      // the kernel's own warning). The padding dispatchThreadgroups() adds is already guarded.
-      const NSUInteger tgs = (union_elems + 255u) / 256u;
-      [enc dispatchThreadgroups:MTLSizeMake(tgs, nof_systems + 1u, 1)
+      // ONE dimension of threadgroups, always: the kernel decodes (matrix, system) from the threadgroup
+      // index, so neither the driver's mapping of a second dimension nor the dispatch type can change
+      // which work items exist. Two earlier layouts depended on that mapping and both left part of A
+      // unwritten (see the kernel's own warning, and dev doc 6.174).
+      const NSUInteger tgs_wide = (union_elems + 255u) / 256u;
+      [enc dispatchThreadgroups:MTLSizeMake(tgs_wide * 2u * static_cast<NSUInteger>(nof_systems), 1, 1)
           threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }
     return true;

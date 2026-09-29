@@ -892,6 +892,11 @@ int main(int argc, char** argv)
       const geometry   g3{};
       const NSUInteger a_elems3 = static_cast<NSUInteger>(g3.L()) * g3.L();
       const NSUInteger r_elems3 = static_cast<NSUInteger>(g3.nout()) * g3.L();
+      // The buffers' OWN strides, which are what the comparison must walk with. The first version used
+      // `a_elems + 64`, a made-up pad: it read the second system from the wrong offset and reported a
+      // difference in the kernel that was in the comparison window (dev doc 6.174②).
+      const NSUInteger a_sys3 = a_elems3;
+      const NSUInteger r_sys3 = r_elems3;
       corr_params      c4{};
       c4.nof_systems        = g3.systems();
       c4.npt                = g3.npt;
@@ -946,27 +951,25 @@ int main(int argc, char** argv)
         [enc setBuffer:b_a offset:0 atIndex:0];
         [enc setBuffer:b_rhp offset:0 atIndex:1];
         [enc setBytes:&c4 length:sizeof(c4) atIndex:2];
-        // Same grid AND the same dispatch call the engine uses: the wider of the two matrices, plus one
-        // gid.y for A. dispatchThreadgroups(), because dispatchThreads() with a 1-D threadgroup does not
-        // tile the second grid dimension.
+        // The engine's own grid: one dimension of threadgroups, (matrix, system) decoded from the index.
         const NSUInteger wider = (a_elems3 > r_elems3) ? a_elems3 : r_elems3;
         const NSUInteger tgs_m = (wider + 255u) / 256u;
-        [enc dispatchThreadgroups:MTLSizeMake(tgs_m, c4.nof_systems + 1u, 1)
+        [enc dispatchThreadgroups:MTLSizeMake(tgs_m * 2u * c4.nof_systems, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         [enc endEncoding];
         [cb commit];
         [cb waitUntilCompleted];
       };
       run_two();
-      std::vector<float> a_two(static_cast<size_t>((a_elems3 + 64) * c4.nof_systems));
-      std::vector<float> r_two(static_cast<size_t>((r_elems3 + 64) * c4.nof_systems));
+      std::vector<float> a_two(static_cast<size_t>(a_sys3 * c4.nof_systems));
+      std::vector<float> r_two(static_cast<size_t>(r_sys3 * c4.nof_systems));
       std::memcpy(a_two.data(), b_a.contents, a_two.size() * sizeof(float));
       std::memcpy(r_two.data(), b_rhp.contents, r_two.size() * sizeof(float));
       std::memset(b_a.contents, 0, a_two.size() * sizeof(float));
       std::memset(b_rhp.contents, 0, r_two.size() * sizeof(float));
       run_merged();
-      std::vector<float> a_m(static_cast<size_t>((a_elems3 + 64) * c4.nof_systems));
-      std::vector<float> r_m(static_cast<size_t>((r_elems3 + 64) * c4.nof_systems));
+      std::vector<float> a_m(static_cast<size_t>(a_sys3 * c4.nof_systems));
+      std::vector<float> r_m(static_cast<size_t>(r_sys3 * c4.nof_systems));
       std::memcpy(a_m.data(), b_a.contents, a_m.size() * sizeof(float));
       std::memcpy(r_m.data(), b_rhp.contents, r_m.size() * sizeof(float));
       size_t diff_a = 0;
@@ -988,8 +991,8 @@ int main(int argc, char** argv)
         size_t shown = 0;
         for (size_t i = 0; (i != a_two.size()) && (shown != 4); ++i) {
           if (a_two[i] != a_m[i]) {
-            const size_t sys = i / (a_elems3 + 64);
-            const size_t in  = i % (a_elems3 + 64);
+            const size_t sys = i / a_sys3;
+            const size_t in  = i % a_sys3;
             std::printf("[O1]   A diff at i=%zu (system %zu, within-system %zu): two=%.9g merged=%.9g  "
                         "Ls*Ls=%lu L=%u\n",
                         i,

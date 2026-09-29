@@ -224,37 +224,46 @@ kernel void mmse_corr_a_rhp(device float* a [[buffer(0)]],
                             device float* r_hp [[buffer(1)]],
                             constant mmse_corr_params& p [[buffer(2)]],
                             device const float* scalars [[buffer(3)]],
-                            uint2 gid [[thread_position_in_grid]])
+                            uint  gid_x [[thread_position_in_grid]],
+                            uint  tgid [[threadgroup_position_in_grid]])
 {
-    // THE SECOND GRID DIMENSION CARRIES THE MATRIX, not the system: gid.y == 0 is A (one lane per
-    // system), gid.y in [1, nof_systems] is R_hp's system gid.y - 1.
+    // ONE DIMENSIONAL GRID OF THREADGROUPS. Work item identity comes from `tgid` and the threadgroup
+    // size, never from gid.y: a threadgroup is either one lane of A's or one lane of R_hp's, and which
+    // system it serves is decoded from its index.
     //
-    // \warning THIS KERNEL MUST BE DISPATCHED WITH dispatchThreadgroups(), NOT dispatchThreads(). With a
-    //          1-D threadgroup (256,1,1) and a 2-D grid, dispatchThreads() does NOT tile the second
-    //          dimension: gid.y stays 0 and every row but the first is never executed - measured on the
-    //          offline harness, where the merged kernel then left A's whole first system untouched (the
-    //          buffer kept its previous contents). dispatchThreadgroups() tiles both dimensions with the
-    //          grid the caller gives, and both guards below already tolerate the padding it adds.
+    // WHY IT IS BUILT THIS WAY. Two earlier layouts were dispatched, and the offline byte-for-byte arm
+    // caught both:
+    //   * both matrices end to end in gid.x with the system in gid.y - R_hp came out correct while A's
+    //     SECOND system kept whatever the buffer held before the dispatch;
+    //   * the matrix in gid.y (0 = A, 1..nof_systems = R_hp) on a 2-D grid of threadgroups - A's first
+    //     system and BOTH systems' R_hp came out correct, A's second system was never written.
+    // A missing write is invisible until something reads the slot, which is why the layout no longer
+    // depends on how the driver maps a second grid dimension at all.
     //
-    // WHY IT IS NOT ONE FLAT RANGE OVER BOTH. The first version laid A's Ls*Ls elements and R_hp's
-    // nout*L elements end to end in gid.x, with gid.y still meaning "the system". That reads well until
-    // the grids are wrapped into threadgroups: A's row is Ls*Ls wide and R_hp's is nout*L, so after the
-    // wrap the two matrices' system boundaries no longer coincide, and the harness measured the
-    // consequence - R_hp came out byte-identical while A's SECOND system kept the values that were in
-    // the buffer before the dispatch (128 elements, the tail of A's slot). A missing write is the worst
-    // kind of defect to find on air, so the layout is now one that cannot express it: each matrix owns
-    // its own gid.y slice and indexes its systems from zero.
-    const uint Ls      = (p.Ls != 0u) ? p.Ls : p.L;
-    const uint a_elems = Ls * Ls;
-    const uint nout    = p.nf * 14u;
+    // LAYOUT: `tgs_wide` threadgroups per (matrix, system) block, blocks laid out as
+    //   [0, nof_systems)                     -> A, system = block
+    //   [nof_systems, 2 * nof_systems)       -> R_hp, system = block - nof_systems
+    //
+    // \warning Dispatch ONE dimensionally with
+    //          `tgs_wide * 2 * nof_systems` threadgroups of `tpt` threads, via dispatchThreadgroups().
+    const uint Ls        = (p.Ls != 0u) ? p.Ls : p.L;
+    const uint a_elems   = Ls * Ls;
+    const uint nout      = p.nf * 14u;
+    const uint rhp_elems = nout * p.L;
+    const uint wider     = (a_elems > rhp_elems) ? a_elems : rhp_elems;
+    const uint tpt       = 256u;
+    const uint tgs_wide  = (wider + tpt - 1u) / tpt;
 
-    if (gid.y == 0u) {
+    const uint block = tgid / tgs_wide;
+    const uint lane  = tgid % tgs_wide;
+    const uint i     = lane * tpt + (gid_x % tpt);
+
+    if (block < p.nof_systems) {
         // ---- A: the mmse_corr_a element, expression for expression ----------------------------------
-        if (gid.x >= a_elems) {
+        if (i >= a_elems) {
             return;
         }
-        device float* a_sys = a + (ulong)gid.y * p.a_sys;
-        const uint    i     = gid.x;
+        device float* a_sys = a + (ulong)block * p.a_sys;
         const uint    row   = i / Ls;
         const uint    col   = i % Ls;
         if ((row >= p.L) || (col >= p.L)) {
@@ -282,12 +291,11 @@ kernel void mmse_corr_a_rhp(device float* a [[buffer(0)]],
     }
 
     // ---- R_hp: the mmse_corr_r_hp element, expression for expression --------------------------------
-    const uint sys = gid.y - 1u;
-    if ((sys >= p.nof_systems) || (gid.x >= nout * p.L)) {
+    const uint sys = block - p.nof_systems;
+    if ((sys >= p.nof_systems) || (i >= rhp_elems)) {
         return;
     }
     device float* r_sys = r_hp + (ulong)sys * p.r_sys;
-    const uint    i     = gid.x;
     const uint    o     = i / p.L;
     const uint    col   = i % p.L;
     const uint    sym   = o / p.nf;
