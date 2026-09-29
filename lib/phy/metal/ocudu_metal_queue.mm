@@ -713,10 +713,18 @@ void shared_queue_stats_report()
       std::vector<hole> holes;
       uint64_t          frontier   = 0;
       uint64_t          busy_union = 0;
+      // How long the device had been idle before each record STARTED (0 = the previous window was still
+      // running): the quantity that decides the cold-start question. A rare 5-10x device EXECUTION that
+      // follows a long idle is a GPU waking up; the same execution inside a busy stretch is contention. The
+      // union walk below already computes exactly this frontier for its hole accounting, so the reading
+      // costs one subtraction per record.
+      std::vector<uint64_t> idle_before_ns(records.size(), 0);
       // A hole worth reporting is longer than the ordinary spacing between two submissions (tens of us);
       // 100 us is the same order the lane probe's D-series uses for "this is not jitter".
       constexpr uint64_t hole_threshold_ns = 100000;
-      for (const shared_queue_state::occupancy_record& r : records) {
+      for (size_t rec_i = 0; rec_i != records.size(); ++rec_i) {
+        const shared_queue_state::occupancy_record& r = records[rec_i];
+        idle_before_ns[rec_i]                         = (r.start_ns > frontier) ? (r.start_ns - frontier) : 0;
         if (r.start_ns > frontier) {
           const uint64_t gap_ns = r.start_ns - frontier;
           if ((frontier != 0) && (gap_ns > hole_threshold_ns)) {
@@ -870,6 +878,52 @@ void shared_queue_stats_report()
                      static_cast<unsigned long long>(r.has_slot ? r.slot : 0),
                      to_start_us,
                      static_cast<double>(r.end_ns - r.start_ns) / 1e3);
+      }
+      // ★ The slowest EXECUTIONS by start -> GPU end, each with how long NOTHING had been executing on any
+      // probed queue before it started, and how far into the leg its commit was. Added 2026-09-29 (dev doc
+      // 6.160(8)): the per-label table's `max=` says an execution outlier exists but not WHEN it happened,
+      // and the two candidates for a 5-10x execution have opposite fixes - a GPU waking from a long idle
+      // (cold start: keep it warm) or contention inside a busy stretch (schedule differently). Same probe,
+      // same key: with OCUDU_METAL_GPU_TIME unset there are no records and this prints nothing at all.
+      if (!records.empty()) {
+        std::vector<size_t> slowest_exec(records.size());
+        for (size_t i = 0; i != records.size(); ++i) {
+          slowest_exec[i] = i;
+        }
+        const size_t nof_slow_exec = std::min<size_t>(8, slowest_exec.size());
+        std::partial_sort(slowest_exec.begin(),
+                          slowest_exec.begin() + static_cast<std::ptrdiff_t>(nof_slow_exec),
+                          slowest_exec.end(),
+                          [&records](size_t lhs, size_t rhs) {
+                            return (records[lhs].end_ns - records[lhs].start_ns) >
+                                   (records[rhs].end_ns - records[rhs].start_ns);
+                          });
+        const uint64_t first_commit_ns = records.front().commit_ns;
+        std::fprintf(stderr,
+                     "[metal_stats] queue occupancy (Q9-F3) slowest executions, by start -> end "
+                     "(idle_before = how long nothing executed on any probed queue before it started):\n");
+        for (size_t i = 0; i != nof_slow_exec; ++i) {
+          const size_t                                idx = slowest_exec[i];
+          const shared_queue_state::occupancy_record& r   = records[idx];
+          const double exec_us = static_cast<double>(r.end_ns - r.start_ns) / 1e3;
+          const double wait_us = (r.start_ns > r.commit_ns) ? (static_cast<double>(r.start_ns - r.commit_ns) / 1e3) : 0.0;
+          const double idle_ms = static_cast<double>(idle_before_ns[idx]) / 1e6;
+          char         when[32];
+          if ((r.commit_ns != 0) && (first_commit_ns != 0) && (r.commit_ns >= first_commit_ns)) {
+            std::snprintf(when, sizeof(when), "%.1fs", static_cast<double>(r.commit_ns - first_commit_ns) / 1e9);
+          } else {
+            std::snprintf(when, sizeof(when), "na");
+          }
+          std::fprintf(stderr,
+                       "[metal_stats]   label=%-12s slot=%llu exec=%.1fus commit->start=%.1fus "
+                       "idle_before=%.2fms t+=%s\n",
+                       (r.label != nullptr) ? r.label : "?",
+                       static_cast<unsigned long long>(r.has_slot ? r.slot : 0),
+                       exec_us,
+                       wait_us,
+                       idle_ms,
+                       when);
+        }
       }
       // The largest holes, worst first, each named by the commit that waited through it.
       std::sort(holes.begin(), holes.end(), [](const hole& lhs, const hole& rhs) { return lhs.us > rhs.us; });
