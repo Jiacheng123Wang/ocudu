@@ -42,11 +42,14 @@ ru_sdr:
   # `AT/BELOW 0` only 23, against 649 underflows) - i.e. the samples are queued and not moving over the wire,
   # which no ring depth can fix, and the bench cannot reproduce it either (0 underflows at 64 or 512 frames,
   # even with 20 ms feeder stalls). See dev doc 6.56 (2) for why arm C was retired rather than flown.
-  device_args: type=b200,num_recv_frames=512,num_send_frames=64
+  #device_args: type=b200,num_recv_frames=512,num_send_frames=64
+  device_args: type=b200,num_recv_frames=512,num_send_frames=64,clock_source=gpsdo,time_source=gpsdo,gpsdo=1
   srate: 23.04
   otw_format: sc12
   tx_gain: 80
   rx_gain: 70
+  clock: gpsdo
+  sync: internal
 
 cell_cfg:
 #  dl_arfcn: 632628         # 20M BW, onePlus8T only
