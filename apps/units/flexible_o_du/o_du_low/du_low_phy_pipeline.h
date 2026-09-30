@@ -63,6 +63,18 @@ struct phy_pipeline_effective {
   /// Keep the resource grid on the device: the OFDM demodulation writes it from the GPU (see
   /// ofdm_demodulator_configuration::device_grid_write) and the CPU reads the same memory.
   bool device_grid = false;
+  /// \brief The frequency-domain grid of the fused lane is produced by the HOST (a CPU DFT), not by the
+  ///        device's OFDM demodulation.
+  ///
+  /// WHY IT EXISTS (dev doc 6.205-6.207). The fused lane's front end normally runs the slot's transforms on
+  /// the device and hands its command buffer over to the lane (D1), so the grid is written by the GPU. With
+  /// a CPU DFT the transforms run in the RECEIVE THREAD while it is blocked waiting for the slot's samples
+  /// anyway - the front end's own work then leaves the hop's critical path - and the grid is written from
+  /// the host into the SAME device-visible storage, so the estimator, the equalizer and the demapper keep
+  /// reading it on the device. It is a measurement arm: it costs the device grid write and the one
+  /// host->device data dependency the fused lane otherwise does not have, and it is OFF unless
+  /// `--pusch_dft_type cpu` asks for it (see the `gpu` case of resolve_phy_pipeline()).
+  bool host_grid = false;
 };
 
 /// Whether a per-module backend value runs on the CPU.
@@ -203,15 +215,21 @@ resolve_phy_pipeline(const phy_pipeline_request& request, const phy_backend_avai
       break;
 
     case phy_pipeline_mode::gpu:
-      // The lane owns these four modules: a knob that selects the CPU cannot be honored - the mode has
-      // no CPU fallback - so it is a conflict rather than a silent override. Any other value stands:
-      // the knobs keep picking the FLAVOR of a device backend (a different Metal estimator, say),
-      // which is what they are for in cpu_gpu; what they may not do is claim the module runs on the
-      // CPU while the lane runs it on the device.
-      if (is_cpu_phy_backend(request.dft) && (request.dft != "auto")) {
-        set_phy_pipeline_conflict(error, out.mode, "--pusch_dft_type", request.dft);
-        return std::nullopt;
-      }
+      // The lane owns these modules: a knob that selects the CPU cannot be honored - the mode has no CPU
+      // fallback - so it is a conflict rather than a silent override. Any other value stands: the knobs
+      // keep picking the FLAVOR of a device backend (a different Metal estimator, say), which is what they
+      // are for in cpu_gpu; what they may not do is claim the module runs on the CPU while the lane runs it
+      // on the device.
+      //
+      // THE DFT IS THE ONE EXCEPTION, and it is a measurement arm rather than a fallback (dev doc
+      // 6.205-6.207): with `--pusch_dft_type cpu` the frequency-domain grid is produced by the HOST - the
+      // receive thread computes the slot's transforms while it is blocked waiting for its samples - and the
+      // lane keeps the estimator, the equalizer and the demapper on the device. The grid stays in the same
+      // device-visible storage (device_grid below), so the three consumers are untouched; what changes is
+      // that the front end no longer runs on the device, hence there is no block to hand over (D1 is
+      // skipped) and the hop's command buffer no longer carries the transforms. It is what makes the arm
+      // measurable against the ordinary lane on ONE binary: "auto" still resolves to the Metal DFT, so the
+      // delivery path does not move.
       if (is_cpu_phy_backend(request.ch_est) && (request.ch_est != "auto")) {
         set_phy_pipeline_conflict(error, out.mode, "--pusch_channel_estimator_algo", request.ch_est);
         return std::nullopt;
@@ -242,18 +260,29 @@ resolve_phy_pipeline(const phy_pipeline_request& request, const phy_backend_avai
     out.ldpc = "auto";
   }
 
+  // Read AFTER the substitutions above: a DFT that ended up on the CPU for any reason - asked for, or
+  // forced by a binary without the Metal one - is what makes the grid a host-written buffer.
+  out.host_grid = is_cpu_phy_backend(out.dft);
+
   return out;
 }
 
 /// Checks the prerequisites of the fused lane: the offload backends it is built from must be linked in.
+/// \param[in] available   The device backends built into this binary.
+/// \param[in] dft_on_cpu  Whether the lane's DFT was asked to run on the CPU - the host-grid arm, see
+///                        phy_pipeline_effective::host_grid. The Metal DFT is then NOT required (nothing on
+///                        the device writes the grid), while the three device-side consumers still are.
 /// \return An empty string when the lane can run, the reason otherwise.
-inline std::string check_phy_pipeline_lane_available(const phy_backend_availability& available)
+inline std::string check_phy_pipeline_lane_available(const phy_backend_availability& available,
+                                                     bool                            dft_on_cpu = false)
 {
-  if (available.dft && available.ch_est && available.equalizer && available.demapper) {
+  if ((dft_on_cpu || available.dft) && available.ch_est && available.equalizer && available.demapper) {
     return {};
   }
-  return "the fused UL PHY pipeline (--phy_pipeline gpu) requires the Metal DFT, channel estimator, equalizer and "
-         "soft demapper backends, which are not built into this binary";
+  return std::string("the fused UL PHY pipeline (--phy_pipeline gpu) requires the ") +
+         (dft_on_cpu ? "Metal channel estimator, equalizer and soft demapper"
+                     : "Metal DFT, channel estimator, equalizer and soft demapper") +
+         " backends, which are not built into this binary";
 }
 
 /// \brief Resolves the effective configuration from the expert-phy knobs, aborting on a configuration conflict.

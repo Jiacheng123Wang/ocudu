@@ -186,12 +186,37 @@ TEST(phy_pipeline_mode_test, gpu_mode_takes_over_the_lane_modules)
 TEST(phy_pipeline_mode_test, gpu_mode_has_no_cpu_fallback)
 {
   // The default of every lane module knob is "auto", so an explicit "cpu" is a deliberate request that the mode
-  // cannot honor.
-  EXPECT_NE(resolve_conflict(make_request("gpu", "cpu")).find("--pusch_dft_type"), std::string::npos);
+  // cannot honor. The DFT is the ONE exception and has its own test below.
   EXPECT_NE(resolve_conflict(make_request("gpu", "auto", "cpu")).find("--pusch_channel_estimator_algo"),
             std::string::npos);
   EXPECT_NE(resolve_conflict(make_request("gpu", "auto", "auto", "cpu")).find("--pusch_channel_equalizer_backend"),
             std::string::npos);
+}
+
+TEST(phy_pipeline_mode_test, gpu_mode_honors_a_cpu_dft_as_the_host_grid_arm)
+{
+  // --phy_pipeline gpu --pusch_dft_type cpu: the lane keeps the estimator, the equalizer and the demapper on the
+  // device, the grid stays in device-visible storage, and the DFT moves to the host - which is what host_grid
+  // reports (dev doc 6.205-6.207). It is the arm that has to be measurable against the ordinary lane on ONE binary.
+  const phy_pipeline_effective effective = resolve(make_request("gpu", "cpu"));
+  EXPECT_EQ(effective.mode, phy_pipeline_mode::gpu);
+  EXPECT_TRUE(effective.lane_fused);
+  EXPECT_EQ(effective.dft, "cpu");
+  EXPECT_TRUE(effective.host_grid);
+  // The three device-side consumers are untouched, and so is the grid's placement: only its WRITER changes.
+  EXPECT_EQ(effective.ch_est, "metal_mmse");
+  EXPECT_EQ(effective.equalizer, "metal");
+  EXPECT_TRUE(effective.device_grid);
+
+  // The delivered path does not move: "auto" is still the Metal DFT and a device-written grid.
+  const phy_pipeline_effective ordinary = resolve(make_request("gpu"));
+  EXPECT_EQ(ordinary.dft, "metal");
+  EXPECT_FALSE(ordinary.host_grid);
+
+  // Outside the fused lane the flag is simply the backend classification, and it is set for every mode.
+  EXPECT_TRUE(resolve(make_request("cpu")).host_grid);
+  EXPECT_TRUE(resolve(make_request("cpu_gpu", "cpu")).host_grid);
+  EXPECT_FALSE(resolve(make_request("cpu_gpu", "metal")).host_grid);
 }
 
 TEST(phy_pipeline_mode_test, gpu_mode_requires_the_lane_backends)
@@ -202,6 +227,16 @@ TEST(phy_pipeline_mode_test, gpu_mode_requires_the_lane_backends)
   // fused chain at all.
   constexpr phy_backend_availability no_demapper{true, true, true, false, true};
   EXPECT_FALSE(check_phy_pipeline_lane_available(no_demapper).empty());
+
+  // The host-grid arm (an explicit CPU DFT) does not need the Metal DFT - nothing on the device writes the grid -
+  // while the three device-side consumers are still required.
+  constexpr phy_backend_availability no_dft{false, true, true, true, true};
+  EXPECT_FALSE(check_phy_pipeline_lane_available(no_dft).empty());
+  EXPECT_TRUE(check_phy_pipeline_lane_available(no_dft, /*dft_on_cpu=*/true).empty());
+  EXPECT_FALSE(check_phy_pipeline_lane_available(no_demapper, /*dft_on_cpu=*/true).empty());
+  // The message names what is actually missing, so an operator can tell the two arms apart.
+  EXPECT_NE(check_phy_pipeline_lane_available(no_dft).find("Metal DFT"), std::string::npos);
+  EXPECT_EQ(check_phy_pipeline_lane_available(no_dft, /*dft_on_cpu=*/true).find("Metal DFT"), std::string::npos);
 }
 
 TEST(phy_pipeline_mode_test, device_resource_grid_follows_the_mode_by_default)
@@ -318,14 +353,24 @@ TEST(DuLowPhyPipelineTest, GpuModeEqualsTheModuleKnobsSpelledOut)
 /// than a silent override (a "cpu" knob that runs on the device makes the command line lie).
 TEST(DuLowPhyPipelineTest, GpuModeRejectsBackendsTheLaneDoesNotOwn)
 {
-  // An explicit CPU backend is a conflict: this mode has no CPU fallback.
-  // The whole conflict matrix: EVERY CPU backend (not only "cpu") is a conflict for every module the
-  // lane owns - "generic", "neon", "avx2" and "avx512" select a CPU implementation just as "cpu" does,
-  // and accepting them silently would let the command line claim the module runs on the host.
+  // The lane owns the estimator and the equalizer and has no CPU fallback: EVERY CPU backend (not only
+  // "cpu") is a conflict for them - "generic", "neon", "avx2" and "avx512" select a CPU implementation
+  // just as "cpu" does, and accepting them silently would let the command line claim the module runs on
+  // the host.
   for (const char* cpu_backend : {"cpu", "generic", "neon", "avx2", "avx512"}) {
-    EXPECT_FALSE(resolve_conflict(make_request("gpu", cpu_backend)).empty()) << cpu_backend;
     EXPECT_FALSE(resolve_conflict(make_request("gpu", "metal", cpu_backend)).empty()) << cpu_backend;
     EXPECT_FALSE(resolve_conflict(make_request("gpu", "metal", "metal_mmse", cpu_backend)).empty()) << cpu_backend;
+  }
+
+  // The DFT is the ONE module of the lane whose CPU backend IS honored, and it is a deliberate measurement
+  // arm rather than a fallback (dev doc 6.205-6.207): the frequency-domain grid is then written by the
+  // host and the three device-side consumers keep the device. Every CPU spelling resolves for it and is
+  // reported as a host-written grid.
+  for (const char* cpu_backend : {"cpu", "generic", "neon", "avx2", "avx512"}) {
+    const phy_pipeline_effective arm = resolve(make_request("gpu", cpu_backend));
+    EXPECT_EQ(arm.dft, cpu_backend) << cpu_backend;
+    EXPECT_TRUE(arm.host_grid) << cpu_backend;
+    EXPECT_TRUE(arm.lane_fused) << cpu_backend;
   }
 
   // The LDPC decoder is NOT part of the lane (the LLR still leaves the device for the CPU decoder), so

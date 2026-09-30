@@ -45,10 +45,15 @@ static void log_phy_pipeline_config(const du_low_unit_expert_upper_phy_config& c
   phy_pipeline_mode_registry::set(effective.mode);
 
   ocudulog::basic_logger& logger = ocudulog::fetch_basic_logger("PHY");
-  logger.info("[phy_pipeline] mode={} fused={} device_grid={} lane=IQ->LLR (expert_phy --phy_pipeline {})",
+  logger.info("[phy_pipeline] mode={} fused={} device_grid={}{} lane=IQ->LLR (expert_phy --phy_pipeline {})",
               to_string(effective.mode),
               effective.lane_fused ? "yes" : "no",
               effective.device_grid ? "yes" : "no",
+              // The fused lane's grid is normally written by the device's OFDM demodulation; with a CPU DFT
+              // it is written by the HOST into the same device-visible storage (the measurement arm, see
+              // du_low_phy_pipeline.h and dev doc 6.207). It is what the contract's crossing counters then
+              // mean, so it is stated at startup instead of being inferred from the DFT line below.
+              effective.host_grid ? " (written by the HOST DFT)" : "",
               config.phy_pipeline);
 
   // The demapper has no backend knob of its own: it follows the channel equalizer (see the upper PHY factory).

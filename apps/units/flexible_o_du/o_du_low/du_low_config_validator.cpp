@@ -84,7 +84,11 @@ static bool validate_phy_pipeline_config(const du_low_unit_expert_upper_phy_conf
 
   if (config.phy_pipeline == "gpu") {
     // The fused lane is built from the device-side chain: without those backends there is nothing to run.
-    const std::string lane_error = check_phy_pipeline_lane_available(available);
+    // An explicit CPU DFT is the ONE exception (the host-grid arm, see du_low_phy_pipeline.h and dev doc
+    // 6.207): the grid is then written by the host, so the Metal DFT is not required - the estimator, the
+    // equalizer and the demapper still are.
+    const bool        dft_on_cpu = is_cpu_phy_backend(request.dft) && (request.dft != "auto");
+    const std::string lane_error = check_phy_pipeline_lane_available(available, dft_on_cpu);
     if (!lane_error.empty()) {
       fmt::print("Invalid configuration: {}.\n", lane_error);
       return false;

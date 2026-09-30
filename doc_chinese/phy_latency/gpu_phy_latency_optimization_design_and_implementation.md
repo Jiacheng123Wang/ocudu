@@ -12758,6 +12758,323 @@ eq_demap 809.3
 2. "必须等整槽样点"是**策略**不是物理：符号级收包（`OCUDU_UL_RX_SYMBOLS=1`）实测**差得多**（V1 +676 µs，§6.71），
    所以整槽等待是**当前交付策略下的**硬约束，不是空口速率单独决定的。
 
+### 6.203 ★★★ **"交棒推迟 334 µs"是什么：它 = 宿主编完这一跳（≈123）+ 排在前一跳那条 cb 后面（≈211）**；它不是白付的工，但也不是"必须"的（用户提问；2026-09-30）
+
+#### ① 拆开这 334 µs（`p153` 中位，全部同一腿）
+
+| 组成 | µs | 出处 | 内容 |
+|---|---|---|---|
+| **deposit → lane 提交本跳的 cb** | **≈123** | 334 − 211 | 前端把块交出去之后，宿主要把这一跳编完：CE 各段宿主 + 解调器建参/编码 |
+| **lane 提交 → 该 cb 在 GPU 上开始** | **211.0** | `merged_hop wait p50` | **队列等待**：同一队列上排在**另一条在飞跳的那条 cb** 之后（Q9-F6：`idle-commit 0%` ⇒ 提交时设备上已经有别的东西在跑）|
+| 合计 | **≈334** | `dft carried deposit → GPU start` p50 = 333.8 | |
+
+★ 自洽校验：**334（推迟）+ 483.5（窗口）= 817.5 ≈ `eq_demap` 809.3** ⇒ 相位就是"推迟 + 窗口"，没有重复计数、也没有藏起来的第三项。
+
+#### ② 为什么会推迟：这是**交棒设计的直接后果**
+
+前端把块 **uncommitted** 交给 lane（`[dft_release] D1 step 1: … handed over uncommitted … created on the BACK-END queue`），
+lane 要等**整跳编完**（抽取 + eq + demap 都进这条 cb）才提交 ⇒ 块里的 14 个变换**在提交之前一行都不会执行**。
+⇒ 这就是"为什么 FFT 的设备执行不在样点之后立刻发生（§6.202）"的机制。
+
+#### ③ 该不该付？——**"不是工"成立，"能省掉"不成立**
+
+* **它不是计算**：这 334 µs 里设备一行都没跑（`busy` 里没有它；它纯粹是"块在等提交"）；
+* **但它也不是可以随便摘掉的**：要让 FFT 立刻开始，只能**让前端自己提交那条 cb**（普通路，`dft_front_end` exec 46.7 µs）。
+  这一条**实测过**（`p75`/`p77`）：**价钱只是搬家，总量不变** —— 前端自己提交时 `dft` cb 变 **443.5**，或者 lane 的 burst 变 **516.7**
+  （§6.141⑤：四种结构里恒有**一条** cb 吃 ~450–520，与内容无关）；
+* ⇒ 正确的说法是：**"这 334 µs 没有任何计算价值"成立；"换一种结构就能省掉它"被四次实测否掉** ——
+  它与 §6.191–§6.201 那 ~430 µs 的 cb 价钱是**同一个现象的两个侧面**（一个是"开始得晚"，一个是"跑得久"）。
+
+#### ④ 对绝对时间线的意义
+
+```
+T0（样点到齐）
+ ├─ 60     前端宿主（编码 + deposit）
+ ├─ 334    ★ 推迟：宿主编完这一跳 123 + 排队 211
+ ├─ 483.5  那条 cb 的窗口（里面 kernel 只有 ≈61）
+ └─ ≈810–880  LLR 就绪
+```
+⇒ 要让 LLR 更早，动的**不能**是"让 FFT 早开始"（那只是把 450–520 的价钱挪个位置），而只能是**那个价钱本身**（§6.191④ 的首绑单价臂 / §6.141 的结构判决）。
+
+**流程更正（用户裁定，2026-09-30）**：**只改文档时不必 commit、不必重建 `build/hashes.h`、不必核对三段戳** —— 那套纪律**只在要飞 OTA 腿时**才需要（腿的证据是关于二进制的，二进制必须与提交一致）。本节起照此执行。
+
+### 6.204 ★★ **"符合并 FFT：第一个符号到期就开始算"——物理直觉对，但数字前提不成立，而且它被飞过一次（V1 +676 µs）**（用户提议；2026-09-30）
+
+> 用户的模型：FFT 不必等整槽；第 1 个符号的样点到了就能算它的 FFT，只要"CPU 算 FFT 快于一个符号到来的速度（500/14 = **35.7 µs**）"；
+> 于是 `500（等整槽）+ <35.7（最后一个符号的 FFT）` 之后就能开工 CE。
+
+#### ① ★ 前提不成立：**一个符号的 FFT 延迟 ~47 µs > 符号周期 35.7 µs**
+
+| 事实 | 数 | 出处 |
+|---|---|---|
+| 一个 DFT **线程组**（= 一个符号的变换）的延迟 | **47.4 µs** | 离线微基准（`dft_kernel_cost`：1 组 47.4 / **14 组 47.3**）|
+| 空口普通路：**1 变换一条 cb** 的 exec | **46.7 µs** | `p153`：`dft_front_end exec p50=46.7, n=104437 = 变换数` |
+| 空口：**14 变换一条 cb** 的 exec | **46.9 µs** | `p129`/D1 关腿（`batched` 109007 条 14 变换批）|
+| 符号周期 | **35.7 µs** | 500 µs / 14 |
+
+⇒ ★★ **14 个变换一条派发与 1 个变换一条派发同价（46.9 vs 46.7）** ⇒ FFT 在这个平台上**是延迟受限、不是吞吐受限**：
+14 个线程组**并行**跑完只要 47 µs（吞吐 ≈ **3.4 µs/符号**），但**任何一个**线程组的延迟都是 ~47 µs。
+⇒ 所以"CPU 单个 FFT 快于 35.7 µs"**做不到**（47 > 35.7，慢 1.3×），**严格的逐符号串行流水每符号欠 ~11 µs**；
+但**做不到也没关系** —— 正确形态是"**多个符号的 FFT 同时在飞**"，而不是"单个快于符号周期"。
+
+#### ② ★ 收益上界很小：批量化并没有浪费 14 × 35.7
+
+| 形态 | 最后一个变换算完的时刻* | |
+|---|---|---|
+| 整槽批（现行）| 500（样点齐）+ 编码 ~40–60 + **47** ≈ **590–607** | 14 个一起跑，代价就是一个延迟 |
+| 理想逐符号流水 | 500 + **47** ≈ **547** | 最后一个符号的样点 500 才到，它的 FFT 仍要 47 µs |
+| **可省** | **≈ 40–60 µs**（就是那一段编码/启动时间），**不是几百 µs** | |
+
+\* 以"本槽第一个样点到达"为 0，槽长 500 µs。
+
+⇒ **批量化本来就把 14 个变换并行做完了**，"等整槽"真正多付的只是**最后一个符号那 47 µs 之外的启动开销**。
+
+#### ③ ★★ 而且这条路已经飞过：`OCUDU_UL_RX_SYMBOLS=1`（符号级收包）
+
+| 读数 | 整槽（`p42`）| 符号级（`p41`）|
+|---|---|---|
+| V1 中位 | **1366.8** | **2043.1（+676 µs）** |
+| 前端 cb 数 | **0.39/槽** | **14.0/槽**（`dft slots/cbs = 178407/2497686`）|
+| `[ul_dft_wait]` | 无样本 | **中位 577.6 µs** |
+| 后果 | —— | 每跳 TB 塌 15×（调度器把块变小）|
+
+⇒ 机制：符号级收包把前端的**批量化拆掉了**（`batch_max` 不再是 14）⇒ 一槽从 0.39 条 cb 变成 **14 条**，
+而**提交数在这个平台上是硬成本**（§6.190：一条派发地板 1.2–1.5 µs；§6.141：一条 cb 的价钱 ~450–520）⇒ **省下的等样点被 14 倍的提交与调度吃掉**（§6.71）。
+
+#### ④ 结论与"如果要试"的正确形态
+
+1. **物理上你是对的**：FFT 确实可以早算，代码里也有一条符号级收包的路（`OCUDU_UL_RX_SYMBOLS`）；
+2. **但提前算兑现不了**：在**交付（融合）结构**里，FFT 的执行在 lane 的那条 cb 里，而那条 cb 在 deposit 之后还要等 **334 µs**（§6.203）——
+   **前端什么时候编码完，与 FFT 什么时候执行无关**；
+3. **而且收益上界只有 ~40–60 µs**（②），远小于它可能引入的提交成本；
+4. ★ **要试的正确形态**是"**收包粒度与派发粒度解耦**"：符号级/半槽收包 + **批量仍 >1**（例如 7）+ **让前端自己提交**（否则提前无意义），
+   判据：`dft_front_end` 的 exec 不退化（≈47）、`[ul_dft_wait]` 无样本、V1 不退化、契约 9/9；
+   ⚠ 但按 §6.141⑤（四种结构恒有一条 ~450–520 的 cb），最可能的结果是**把等待从"等样点"搬到"等提交"**。
+
+### 6.205 ★★★ **把 FFT 从 GPU 搬到 CPU（用户提议）：CPU 一个 768 点 FFT 实测 2.88 µs（vDSP 1.54 µs）⇒ 零积压、12–23 倍余量；但省下的只是"一条派发"（~40 µs 量级），且要动"0 host↔device crossings"契约**（2026-09-30，离线实测 + 读码 + 文献）
+
+> 用户的提议：反正 CPU 在 `receive()` 里阻塞 ~497 µs 等整槽样点，**干脆用这段时间在 CPU 上把 FFT 做了**，
+> 于是 GPU 的开工直接从 CE 开始，省掉 FFT 的 GPU 计算；唯一代价是最后一个符号的 FFT。
+
+#### ① ★ 实测：CPU 一个 768 点复 FFT = **2.88 µs**（现用实现）/ **1.54 µs**（Apple vDSP）
+
+| 实现 | 768 点复 FFT | 相对 | 备注 |
+|---|---|---|---|
+| **OCUDU 现用**：`dft_processor_generic_impl` | **2.88 µs** | 1× | 本机 `-O3`，单线程，混合基 + NEON |
+| **Apple vDSP**（`vDSP_DFT_zop`）| **1.54 µs** | **1.87× 更快** | 数值已核对：与暴力 DFT 差 1.7e-6 |
+| GPU（离线，14 组**一条**派发）| 47.3 µs / 14 = **3.4 µs/变换**，但**延迟 47 µs** | —— | §6.124：14 组与 1 组同价（并行）|
+| GPU（空口，1 变换**一条 cb**）| **46.7 µs** | —— | `dft_front_end exec p50`（`p153`）|
+
+**积压算术（用户问的）**：符号周期 = 500/14 = **35.7 µs**；CPU 一个符号的 FFT 占 **8.1%**（现用）/ **4.3%**（vDSP）
+⇒ **完全不会积压**；一整个 slot 的 14 个变换 = **40.3 µs / 21.6 µs**，只占 497 µs 等样点时间的 **8.1% / 4.3%**（**12× / 23× 余量**）。
+⇒ 要开始积压，CPU 的 FFT 得慢 **12 倍以上**（>35.7 µs/符号）。
+
+#### ② 当前 CPU 路径怎么算 FFT（读码）
+
+* 工厂链（`generic_functions_factories.h:89`）：FFTW → AOCL-FFTZ → **generic**；macOS 上没编前两者 ⇒ 走 **`dft_processor_generic_impl`**；
+* 算法：**混合基 DIT FFT** —— `std::enable_if` 特化出 radix-2/3/5 递归（`generic_dft_dit<N, N%2==0 && N%3!=0 && N%5!=0>` …），
+  基例是 **SIMD 直乘 DFT**（`OCUDU_SIMD_CF_SIZE` = 4 复数 = NEON 128-bit），蝶形也用 SIMD；
+* 本系统的尺寸：**n = 768 = 2⁸ × 3**（`radix2=8, radix3=1`，与 Metal kernel 同一分解；`srate: 23.04` / 30 kHz）；
+* ★ **全树没有 `Accelerate`/`vDSP`**（grep 为空）⇒ 现在**一点硬件矩阵单元都没用上**。
+
+#### ③ ★ "Apple 的 DSP 协处理器"：**存在，而且 vDSP 的 FFT 就在用它**——我们没用
+
+| 事实 | 出处 |
+|---|---|
+| Apple Silicon CPU 有**矩阵协处理器**：M1–M3 = 未公开的 **AMX**，M4 起 = ARM 标准 **SME/SME2**（512-bit）| 文献（arXiv [2609.32237](https://arxiv.org/html/2609.32237v1) 的 Related Work）|
+| ★ **vDSP 的 FFT 跑在矩阵单元上**：单线程 vDSP FFT(4096) ≈ 203 GFLOPS，**从 1 到 6 线程完全不扩展**（6 核共享一个矩阵单元），而纯 NEON 循环线性扩展（49→278 GFLOPS）| 同上，Table IV |
+| 该论文实测：**CPU 矩阵单元比其向量单元快 47×**；自写 SME FFT kernel 比 vDSP 最多快 **5.3×** | 同上，Abstract/§IX |
+| ⚠ GPU 的矩阵单元**帮不上** FFT（"把 FFT 写成矩阵乘，加进去的算术和它省下的一样多"）；且 **CPU 矩阵单元与 GPU 共享同一条内存带宽**，两者同时跑没有净收益 | 同上 |
+| **OCUDU 现状**：既没用 vDSP，也没用 SME —— 自写的 NEON 版本只跑**向量单元** | 本仓 grep + `dft_processor_generic_impl.cpp` |
+
+#### ④ 这个提议能省多少（**上界估算，需一条臂来量**）
+
+| 项 | 量 | 依据 |
+|---|---|---|
+| CPU 侧新增成本 | **40 µs/槽（vDSP 21.6）** —— 藏在 497 µs 等待里 ⇒ 近似免费 | ① |
+| GPU 侧能省的：lane 那条 cb 里的 **FFT 派发** | **≈38–47 µs** | §6.191 的形状律（首条 ~430 + 每条追加 ~38）；`p72`–`p74` 实测 +37/+39 每条派发 |
+| ⚠ 不能省的：cb 的那 ~430 µs | **内容无关**（`p84`：全空 kernel 仍 462.9）⇒ 它只会**转移到下一条派发** | §6.141/§6.191 |
+| 可能额外省：交棒（D1）对 PUSCH 不再必要 ⇒ §6.203 的 **123 µs**（"等宿主编完"）可能缩小 | 0…123（211 的队列等待不动）| §6.203① |
+| **合计上界** | **≈40 µs（3% of V1）… ≈170 µs（12%）** | |
+
+**代价（必须先想清楚）**：
+1. ★ **网格变成宿主产物** ⇒ 交付契约里那条 **"0 host↔device data crossings"** 要重新定义（融合车道的卖点之一就是它）——**V 判据变更，需用户裁决**；
+2. CPU 每槽多 40 µs 负载：单跳藏在等待里，但 **`concurrency=2` 时两个跳会叠加**（80 µs/槽，仍只占 497 的 16%）；
+3. 数值接口要重新验证（vDSP/自写 CPU FFT 与 Metal kernel 的容差；已有 `dft_processor` 单测的容差网可复用）。
+
+**建议**：这值得一条**预登记臂**，形态是 `CPU FFT + 保留 D1 关/开两臂`，并且**如果做就直接用 vDSP**（1.87×，且用到矩阵单元）。
+判据：契约（含新的 crossings 定义）→ `stale` → V1 → `merged_hop`/`busy` → `[ul_rx_wait]` 不变。
+
+### 6.206 ★★★ **CPU 做 FFT 的完整时间账（重算）：省 ~93 µs（≈6.5%），而 334 µs 里只走掉 ~57**（用户要求重算；2026-09-30）
+
+> 用户的两点：(1) "0 host↔device crossings" 契约**本来就该改**——它的目的是 CPU offload，而 CPU 在等样点时**本来什么也做不了**；
+> (2) 原来那 **334 µs 应当消失**。**第 (1) 点成立；(2) 只对 1/6。**
+
+#### ① 先把口径钉死（探针源码自带公式，且有两个独立旁证）
+
+```
+[ul_time_frequency] = [ul_rx_wait] + (前端的自身工作)      ← ul_pipeline_probe.h 的原文
+p153（GPU 腿）： 534.6 = 474.0 + 60.6 µs
+n1 CPU 腿（文档记录）：1111.7 = 1054.0 + 57.7 µs
+```
+⇒ **前端"最后一个样点之后"的自身工作 ≈ 58–60 µs**，**与 FFT 在 CPU 还是 GPU 无关**（n1 那条是纯 CPU 腿，它的 57.7 µs 里已经含 14 次 CPU FFT）。
+
+#### ② ★ 关键前提：CPU 做 FFT 要**与符号级收包打包**，否则更差
+
+| 收包策略 | 前端在 T0 之后的工作 | 结论 |
+|---|---|---|
+| **整槽收包**（现行）+ CPU FFT | 59.5 里那 14 次 FFT **全部**落到 T0 之后 ⇒ **+40 µs（vDSP 21.6）⇒ 反而更差** | ✗ |
+| **符号级收包** + CPU FFT | 13 个符号的 FFT 与它的机制**藏在等样点里**，T0 之后只剩**最后一个符号**（2.88 / 1.54 µs）⇒ **59.5 → ~5** | ✓ |
+
+★ 而符号级收包之所以**以前不能用**（`p41`：V1 1366.8 → **2043.1**，+676 µs），机制是**前端每符号提交一条 cb**（14.0/槽 vs 0.39/槽）——**那 14 条 cb 就是 14 条 DFT 派发**。
+**CPU 做 FFT ⇒ 没有 DFT 派发 ⇒ 没有那 14 条 cb ⇒ 老惩罚的机制被移除**。这是本提议真正的技术支点。
+
+#### ③ 重算后的账（中位，T0 = 本槽最后一个样点到齐；"改后"为估算）
+
+| 项 | 现在（`p153`）| 改后（符号级收包 + CPU FFT）| 依据 |
+|---|---|---|---|
+| 前端自身工作（T0 之后）| **59.5** | **~5** | ①；CPU FFT 2.88 / vDSP 1.54 µs |
+| CE + 解调器的宿主工作 | **123**（= 334 − 211）| **123（不变）**，但**起点提前 55**（网格早 55 µs 就绪）| §6.203① |
+| ⇒ lane 提交本跳 cb 的时刻 | T0 + **184** | T0 + **129** | 59.5 + 123 / 5 + 123 |
+| cb 的**队列等待** | **211** | **211（不变）** | 队列位置（另一条在飞跳的 cb 前面）|
+| cb 的**窗口** | **469**（4 条派发）| **~431**（3 条派发）| §6.191 形状律：首条 ~430 + 每条 ~38 |
+| cb 的**价钱**（与内容无关）| ~430 | **~430（不变）** | `p84`：全空 kernel 仍 462.9 |
+| **⇒ LLR 就绪** | **T0 + 864** | **T0 + 771** | 184+211+469 / 129+211+431 |
+| **节省** | —— | **≈93 µs ≈ 6.5% of V1（1422.8）** | |
+
+#### ④ ★ 为什么 334 不会整个消失
+
+```
+334 µs = [deposit → lane 提交 = 123] + [提交 → GPU 开始 = 211]
+          ↑ 任何结构都必须做的宿主工作        ↑ 队列位置，与本改动无关
+            （CE 的宿主路径 + 解调器建参/编码）
+```
+* **123**：CE 与解调器的宿主工作**不会消失**（换结构也要做）；CPU FFT 只让它的**起点提前 ~55 µs**（因为网格早 55 µs 就绪，不必再等前端交棒）；
+* **211**：这是那条 cb 在**后端队列里的位次**（Q9-F6：提交时设备上已有东西在跑）。它由"队列里前面有什么"决定，**不由交棒决定** ⇒ 本改动不动它（⚠ 二阶效应：cb 变短 38 µs 后位次可能变，需实测）。
+
+#### ⑤ 还有一个**未计入**的额外上界（不建议现在做）
+
+估计器需要的是 **DM-RS 符号**（本几何 3 个，最后一个约在符号 11/14）。若让 CE 在**最后一个 DM-RS 符号到达时就开工**（而不是等整槽），
+它的宿主工作（64.8 µs）还能往前挪 ≈ **T0 − 90 µs** ⇒ 再省最多 ~90 µs。
+⚠ 但这要求 CE 消费"写了一半的网格"（且它有若干宿主侧读回：LSE / CFO / sigma2），属于**更深的改动**，本臂**不计入**。
+
+#### ⑥ 契约那句话要改成什么（用户的第 (1) 点，采纳）
+
+* 原话（融合车道的卖点）：**"0 host read(s) / 0 host write(s) of device data"**（`p153` 契约原文，IQ upload 与 LLR download 不计）；
+* 它的**目的**是"不把 CPU 绑在数据搬运上"；CPU 在等样点期间**本来就无事可做** ⇒ 让它算 FFT **不违反这个目的**；
+* Apple Silicon 是**统一内存**：CPU 直接把频域符号写进 GPU 也能读的 `Shared` 缓冲 ⇒ **不新增任何拷贝**，只是**生产者换了**；
+* ⇒ 建议的新口径：**"每跳新增的 host↔device 数据搬运 = 0；允许的生产者为 CPU（频域网格）与 GPU（其余）；计数量仍是 IQ 上传 + 网格写入 + LLR 下载"**。
+  ⚠ 这是 **V 判据的措辞变更**，按规矩**先登记再改**（§5.2 第 2 条），并由用户裁决。
+
+#### ⑦ 预登记（等用户放行后飞）
+
+* **臂**：`pNNN-n78-cpudft`，`OCUDU_UL_RX_SYMBOLS=1`（符号级收包）+ **CPU DFT**（保留 D1 关/开两臂做对照）；配方其余同 `p153`；
+* **判据（顺序）**：契约（按 ⑥ 的新措辞）→ `stale=0` → `cbs/lane` 不涨（符号级收包下**应仍是 2.00**，因为不再有 DFT cb）→ **`dft_front_end` 的 cb 数应归零或接近** → V1 中位应降 **~60–95 µs** → `merged_hop` exec 应降 ~38 µs → `[ul_rx_wait_hop]` 不变（≈474）；
+* **反面读数**：`cbs/lane` 又涨到 ~14 ⇒ 说明前端还在为 CPU FFT 提交 cb（实现没走通）；V1 反而涨 ⇒ 符号级收包的其他代价（池/通知）超过了收益。
+
+### 6.207 ★★ **A/B 怎么落地：用现有开关，不要加新模式**（用户提问；2026-09-30，读码）
+
+#### ① 现状：`gpu` 模式**故意拒绝** CPU DFT —— 所以无论如何都要动一处代码
+
+`apps/units/flexible_o_du/o_du_low/du_low_phy_pipeline.h:205-220`（`case phy_pipeline_mode::gpu`）原文：
+
+```cpp
+// The lane owns these four modules: a knob that selects the CPU cannot be honored - the mode has
+// no CPU fallback - so it is a conflict rather than a silent override. …
+if (is_cpu_phy_backend(request.dft) && (request.dft != "auto")) {
+  set_phy_pipeline_conflict(error, out.mode, "--pusch_dft_type", request.dft);
+  return std::nullopt;
+}
+```
+⇒ 今天 `--phy_pipeline gpu --expert_phy.pusch_dft_type cpu` 会被**判为冲突并拒绝启动**。
+⇒ 而 DFT 后端本就有独立选项（`expert_phy --pusch_dft_type`，CPU 取值 `auto/cpu/generic/neon/avx2/avx512`，设备取值 `metal`），
+**收包策略**也已有独立旋钮（`OCUDU_UL_RX_SYMBOLS`）。
+
+#### ② ★ 建议：**改那一条冲突判断**（复用 `--pusch_dft_type`），**不要新增 `cpufft_gpu` 模式**
+
+| 理由 | 说明 |
+|---|---|
+| **A/B 纪律** | 本项目的 A/B 必须是**同一二进制、只差一个开关**；跨模式 = 跨两次改动，不能当 A/B |
+| **本改动需要两个独立变量** | ① DFT 在哪算 ② 收包粒度（符号级/整槽）。**模式只能打包一种组合，开关能组合**（§6.206②：整槽 + CPU FFT 反而更差，必须能单独飞那一臂做反证）|
+| **已有先例** | `cpu_gpu` 已经是"模式 × 模块旋钮"的组合，再加模式会把矩阵变成 `cpu / cpu_gpu / gpu / cpufft_gpu / …` |
+| **改动面** | 新模式要动 `phy_pipeline_mode`、CLI schema、validator、resolver 四个分支、banner translator、门禁与文档骨架；改一条判断只动 resolver |
+
+#### ③ 保持"全 GPU 路径依然有效"的具体要求（**这才是工程量所在**）
+
+1. **默认关、关时逐字节不变**：`auto` → `metal`，走的还是今天那条路（项目一贯约定）；
+2. **打开时在 resolver 里显式登记替换**（代码已有 "substitution reported" 的机制），并在 leg 的 banner 里可见（`describe_backend()`）；
+3. ★ **lane 侧要有一条"网格由宿主产出"的分支**（不是删一行判断就完事）：
+   * **不武装 D1 交棒**（没有交棒块可 adopt ⇒ `handover` 计数应为 0）；
+   * **不要求 `device_resource_grid on`**（`device_resource_grid` 的冲突检查在 `:184`，CPU 模式那边已有先例）；
+   * 网格缓冲必须**宿主可写、设备可读**（Apple Silicon 统一内存 ⇒ `Shared`，**不新增拷贝**）；
+4. **回归网**：
+   * `dft_processor` 的**容差**单测（CPU DFT 与 Metal DFT 数值不同 ⇒ **逐字节网不适用**，`ul_chain_replay` 的 byte 对照要换容差臂）；
+   * `ctest -L phy` 全绿；契约按 §6.206⑥ 的**新措辞**登记（V 判据变更 = 用户裁决）。
+
+#### ④ 预登记的 A/B（**同一二进制**，三臂，同一配方、背靠背）
+
+| 臂 | DFT | 收包 | 预期 | 作用 |
+|---|---|---|---|---|
+| **A** `pNNN-n78-gpudft`（对照）| metal | 整槽 | V1 基线（≈1422.8）| 今天的交付 |
+| **B** `pNNN-n78-cpudft` | **cpu** | 整槽 | ⚠ **应比 A 差 ~40 µs** | ★ **反证臂**：若 B 不更差，说明 §6.206② 的模型错了 |
+| **C** `pNNN-n78-cpudft-rx1` | **cpu** | `OCUDU_UL_RX_SYMBOLS=1` | **应比 A 好 60–95 µs** | 本提议 |
+
+**判据顺序**：§6.198 的运输门（`AT/BELOW 0 == 0`、`PDUSession ≠ 0`）→ 契约（新措辞）→ `stale=0` → **C 的 `cbs/lane` 应仍是 2.00** → **C 的 `dft_front_end` cb 数应≈0** → V1（C vs A）→ `merged_hop` exec（应降 ~38）→ `[ul_rx_wait_hop]` 不变（≈474）。
+**注**：`OCUDU_UL_RX_SYMBOLS` 在 `gpu` 模式下与 CPU DFT 的组合**从未飞过**；`p41` 的 +676 µs 是**带 GPU DFT** 的读数，不能直接套用（§6.206②）。
+
+### 6.208 ★★ **实现记录：`gpu` 模式接受 CPU DFT（宿主写网格臂），默认关、关时行为逐字不变**（2026-09-30）
+
+#### ① 改了什么（5 个文件，全部默认关）
+
+| 文件 | 改动 |
+|---|---|
+| `apps/units/flexible_o_du/o_du_low/du_low_phy_pipeline.h` | ① `gpu` 分支**去掉 `--pusch_dft_type` 的 CPU 冲突**（ch_est / equalizer 的冲突**保留**），并把理由写成注释；② `phy_pipeline_effective` 新增 **`bool host_grid`**，在**所有替换之后**由 `is_cpu_phy_backend(out.dft)` 统一置位；③ `check_phy_pipeline_lane_available(available, dft_on_cpu=false)` —— 宿主网格臂**不再要求 Metal DFT**，但仍要求三个设备侧消费者 |
+| `apps/units/flexible_o_du/o_du_low/du_low_config_validator.cpp` | 把 `dft_on_cpu` 传给上面那个检查（`gpu` 模式下显式 CPU DFT 不再被判"缺 Metal DFT"）|
+| `apps/units/flexible_o_du/o_du_low/du_low_config_translator.cpp` | banner 增补：`device_grid=yes (written by the HOST DFT)` —— 腿的报告必须能一眼看出这是哪条臂 |
+| `apps/units/flexible_o_du/o_du_low/du_low_config_cli11_schema.cpp` | `--pusch_dft_type` 的帮助文本：说明 `gpu` 模式下显式 `cpu` 是**测量臂**（只把 DFT 移到宿主），`auto` 仍是交付的 Metal DFT |
+| `tests/unittests/apps/units/flexible_du/o_du_low/du_low_phy_pipeline_test.cpp` | 新增 `gpu_mode_honors_a_cpu_dft_as_the_host_grid_arm`（4 条断言含"对照臂不动"）；`gpu_mode_requires_the_lane_backends` 增补 `no_dft + dft_on_cpu` 两例与**消息措辞**断言；`GpuModeRejectsBackendsTheLaneDoesNotOwn` 的 DFT 分支改为"**五种 CPU 拼写全部放行且 `host_grid=true`**" |
+
+#### ② ★ 为什么**不需要**动 lane / 前端 / 网格 —— 通路已经现成（读码已证）
+
+* **前端工厂**：`lower_phy_factory.cpp:28` 只认 `config.dft_processor_type == "metal"`，其余走 `create_dft_processor_factory()`（FFTW→FFTZ→**generic CPU**）；
+  而 `dft_processor_type` 正是 `effective.dft`（`flexible_o_du_factory.cpp:269-276` 注释原文：*"Both layers resolve their backends through the same entry point, so the two sides of the boundary cannot drift apart"*）；
+* **网格**：`device_grid=true` 保持不变（网格仍在**设备可见**内存里）；`ofdm_demodulator_impl.cpp:390` 里 `dft->get_grid_write() == nullptr` ⇒ **自动回落到宿主写网格**，并打一条 warning；
+* **交棒**：CPU DFT 没有 block 可交 ⇒ `handed=0` ⇒ 抽取走 `begin_stage(fuse=false)` 的**自有 cb 并 hold 住**，eq/demap 再 adopt ⇒ **一跳仍是一条 cb**（只是不再含 14 条变换）；
+* **契约计数器**：`phy_pipeline_crossings` 的定义是"宿主**取走设备产出**的数据"或"把**设备派生**的数据交回"；
+  CPU 写网格**两者都不是**（它是宿主自己产出的），且 `dft` 那个 reporter 只在"输入被拷到设备（wrap 被拒）"时计数 ⇒ **计数器不会变红**，这正是要在 banner/警告里标注原因（§6.206⑥ 的措辞变更仍待用户裁决）。
+
+#### ③ 验证（离线，非腿）
+
+| 检查 | 结果 |
+|---|---|
+| 全树编译 | ✅ 无错误 |
+| `ctest -L phy -j 1` | ✅ **203/203** |
+| `du_low_phy_pipeline_test` | ✅ **20/20**（含新增的 3 组断言）|
+| `du_low_executor_mapper_test` | ✅ 4/4 |
+| ★ **启动横幅（arm）** | `mode=gpu fused=yes device_grid=yes (written by the HOST DFT)` / `dft=cpu channel_estimator=metal_mmse (auto) equalizer=metal (auto) demapper=metal` |
+| ★ **启动横幅（对照，默认 auto）** | `mode=gpu fused=yes device_grid=yes` / `dft=metal (auto) …` —— **逐字未变** |
+| 校验器 | arm 配置**通过**（无 "Invalid configuration"/conflict），已跑过真实启动路径 |
+
+#### ④ 飞腿命令（三条臂，**同一二进制**，背靠背；`LEG_CONFIG` 必须在 `sudo -E` 之前）
+
+```bash
+# A 对照（今天的交付）
+LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 \
+  sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p154-n78-gpudft --regime=default
+
+# B 反证臂：CPU DFT + 整槽收包（预期比 A *差* ~40 µs）
+LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 \
+  sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p155-n78-cpudft --regime=default \
+  --expert_phy.pusch_dft_type=cpu
+
+# C 本提议：CPU DFT + 符号级收包（预期比 A 好 60–95 µs）
+LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 \
+  OCUDU_UL_RX_SYMBOLS=1 sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p156-n78-cpudft-rx1 --regime=default \
+  --expert_phy.pusch_dft_type=cpu
+```
+**每条腿的收尾**：业务（100 ping + 30 s iperf3）→ 排空 ~10 s → **一次 Ctrl-C**。
+**前置门**（§6.198）：`dl_tx_slack … AT/BELOW 0 == 0`、`slip >1ms ≈ 0`、`PDUSession ≠ 0`，否则该腿作废。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

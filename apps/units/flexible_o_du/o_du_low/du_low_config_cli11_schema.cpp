@@ -377,7 +377,11 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              "--pusch_dft_type",
              expert_phy_params.pusch_dft_type,
              "PUSCH (uplink receive) DFT processor type: auto, cpu and metal (Apple Silicon only; the "
-             "downlink transmit path is unaffected).\nModule-level offload selection: only meaningful with --phy_pipeline cpu_gpu (cpu and gpu fix it).")
+             "downlink transmit path is unaffected).\nModule-level offload selection: only meaningful with --phy_pipeline cpu_gpu (cpu and gpu fix it), with ONE "
+             "exception: with --phy_pipeline gpu an explicit cpu moves ONLY the DFT to the host - the frequency-domain grid "
+             "is then written by the receive thread (which is blocked waiting for the slot's samples anyway) and the lane "
+             "keeps the estimator, the equalizer and the demapper on the device. It is a measurement arm, not a fallback; "
+             "auto keeps the delivered Metal DFT.")
       ->capture_default_str()
       ->check(pusch_dft_type_check);
   add_option(app,
