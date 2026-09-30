@@ -52,6 +52,15 @@ namespace {
 /// the radio's own receive buffering removed (both terms contain it, so it cancels). `margin <= 0` means the
 /// hand-over happened AT OR AFTER the deadline: the host-side shape of an `underflow`.
 ///
+/// ⚠ THE MAP MUST NAME THE SAMPLE THE RECEIVE CALL RETURNED ON (dev doc 6.213). `last_rx_ts` is the radio
+/// timestamp paired with the instant `receive()` returned, and that instant is "just after the block's LAST
+/// sample" - while the radio reports the FIRST sample's timestamp. Recording the first sample makes the map's
+/// offset grow with the BLOCK LENGTH and inflates this margin by the same amount (the same downlink read
+/// 1511 us with whole-slot blocks and 1047 us with symbol-sized ones); it also makes the AT/BELOW 0 count
+/// understate a whole-slot leg's real late hand-overs. The whole term cancels only because both the map and the
+/// margin use the SAME pair, so a policy change that moves the pairing moves the reading without any change to
+/// the downlink.
+///
 /// \note The distribution is the point, not the minimum: "the transmit path lives 200 us from the deadline all
 ///       the time" and "it is usually 2 ms ahead and occasionally 3 ms late" are different defects, and only the
 ///       percentiles tell them apart.
@@ -108,6 +117,13 @@ tx_slack_accounting& tx_slack_accounts()
 }
 
 /// Records the clock map from the receive path (see tx_slack_accounting). Called after receiver.receive().
+///
+/// \param radio_ts The radio timestamp the call RETURNED ON - the instant just after the block's last sample,
+///                 NOT the block's first sample. Pairing the first sample with the return instant makes the
+///                 map's offset grow with the block length and inflates every margin derived from it by the
+///                 same amount (dev doc 6.213: the same downlink read 1511 us with whole-slot blocks and
+///                 1047 us with symbol-sized ones).
+/// \param host_ns  The host instant of that same return.
 void tx_slack_note_receive(uint64_t radio_ts, int64_t host_ns)
 {
   tx_slack_accounting& a = tx_slack_accounts();
@@ -1338,9 +1354,30 @@ void lower_phy_baseband_processor::ul_process()
   const auto rx_call_begin = std::chrono::steady_clock::now();
   baseband_gateway_receiver::metadata rx_metadata = receiver.receive(rx_writer);
   const auto rx_call_end = std::chrono::steady_clock::now();
-  // dev doc 6.41: the clock map the transmit-side margin needs - the radio timestamp just delivered and the
-  // host instant it was delivered at. One relaxed store each per receive, on the receive thread.
-  tx_slack_note_receive(static_cast<uint64_t>(rx_metadata.ts),
+  // dev doc 6.41: the clock map the transmit-side margin needs - the radio timestamp the call RETURNED ON and
+  // the host instant it returned at. One relaxed store each per receive, on the receive thread.
+  //
+  // IT IS THE BLOCK'S LAST SAMPLE, NOT ITS FIRST (fixed 2026-09-30, dev doc 6.213). `receive()` returns once
+  // the block it was asked for is in hand, and the radio reports the FIRST sample's timestamp (see
+  // radio_uhd_rx_stream.cpp: "Save timespec for first block only"). Pairing the first sample with the return
+  // instant makes the map's implied offset (rx_host_ns - rx_ts/srate) grow with the BLOCK LENGTH - and every
+  // margin computed from it grows with it too, because the margin is (due_ts - rx_ts)/srate - (host_now -
+  // rx_host_ns) = due_ts/srate - host_now + that offset. Measured on air: the SAME downlink read
+  // `[dl_tx_slack]` median 1511 us with whole-slot receive blocks (11520 samples = 500 us) and 1047 us with
+  // symbol-sized ones (822 samples = 35.7 us) - a difference of exactly one slot, with the two distributions
+  // identical after the shift (the whole-slot p1/p5/p25 = 1506/1510/1511 minus 464 us equals the symbol-sized
+  // median 1047). The downlink never moved; the ruler did.
+  //
+  // WHY IT MATTERS BEYOND THE NUMBER: the margin is what separates "this hand-over was late" from "the
+  // lateness is inside the radio" - the $AT/BELOW 0$ reading is quoted for exactly that inference (see
+  // tx_slack_accounting::late). An offset that grows with the block length makes every whole-slot leg
+  // (i.e. every delivered leg before this fix) report a margin too large by its block duration and
+  // undercount its own late hand-overs: 1511 us was really 1047, and a leg reading AT/BELOW 0 = 4 had
+  // ~14 (`below 500us`).
+  //
+  // `+ nof_samples` names the instant just after the last sample, which is when the call can return; the
+  // residual offset is the delivery latency and no longer depends on the block size.
+  tx_slack_note_receive(static_cast<uint64_t>(rx_metadata.ts) + nof_samples,
                         std::chrono::duration_cast<std::chrono::nanoseconds>(
                             rx_call_end.time_since_epoch())
                             .count());
