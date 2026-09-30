@@ -638,6 +638,7 @@ smoke asan:
 
 smoke valgrind:
   extends: .smoke valgrind
+  timeout: 4 hours
   rules:
     - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Nightly/
 
