@@ -157,15 +157,26 @@ else:
 # "cannot read" instead of as the failure it was.
 # 2026-09-27: the contract has NINE names since 6.97 (lane host participation), so the literal "8 of 8" is
 # gone; what is judged is "all nine NAMES are present AND MET", which is era-proof (pitfall 28: names).
+#
+# 2026-10-01: TWO READINGS since the host-written grid became the DEFAULT (dev doc 6.215 (4)). With the DFT
+# on the HOST the "dft radio inputs" check has no population left, so the contract reports "MET (8 of 9)"
+# and this gate used to FAIL a perfectly good delivery leg - measured on p163-n78-delivered, the first
+# delivery leg, while milestone_audit.sh (which already carries the rule) PASSED the same line. Accepting
+# "8 of 9" is not a loosening: it is bound to the instrument that lost its population, exactly as the
+# milestone audit does, and "NOT MET" / a missing name / another count still fail closed.
 NAMES = ["radio sample continuity", "dft radio inputs", "zero-copy wraps", "lane host participation",
          "ce device estimates", "host device data crossings", "cfo compensation", "baseband metrics",
          "host sample assembly"]
 names_found = sum(1 for n in NAMES if f"]   {n}:" in leg_err)
 contract = f(leg_err, r"contract ((?:MET|NOT MET)[^\n]*)")
 mode     = f(leg_err, r"contract \(mode=([a-z_]+)\)")
+dft0     = f(leg_err, r"dft radio inputs: (\d+) transform")
+contract_ok = (contract is not None) and mode == "gpu" and (
+    contract.startswith("MET (9 of 9") or (contract.startswith("MET (8 of 9") and dft0 == "0"))
 check("contract: the 9 names present and MET, mode=gpu",
-      (names_found == 9) and (contract is not None) and contract.startswith("MET (9 of 9") and mode == "gpu",
-      f"names {names_found}/9; {contract} mode={mode}")
+      (names_found == 9) and contract_ok,
+      f"names {names_found}/9; {contract} mode={mode}"
+      + ("" if contract_ok else "  <- 'MET (8 of 9)' is accepted ONLY with 'dft radio inputs: 0 transform(s)'"))
 
 # 2026-09-27: registered for the DEFAULT regime. Under load, 5.9.127's R4 licenses the opposite (the
 # stressed legs on record read stale=1..2), so a stress leg is not judged on it - reported instead.

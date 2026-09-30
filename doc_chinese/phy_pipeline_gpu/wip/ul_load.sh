@@ -66,12 +66,29 @@ for p in paths:
     etxt = open(err, errors="replace").read()
     lab  = os.path.basename(p).replace("gnb_gpu_", "").replace(".log", "")
 
-    slots = num(etxt, r"\[ul_rx\] blocks=(\d+)")
-    slots = int(slots) if slots else None
+    # ONE BLOCK IS NOT ONE SLOT since the symbol-grained receive policy became the default (dev doc 6.215
+    # (1)): [ul_rx] blocks counts receive() calls, and that policy calls receive() once per OFDM SYMBOL.
+    # Measured on p163-n78-delivered: 2565225869/3117462 = 822.86 samples per block = 11520/14, where every
+    # whole-slot leg reads exactly 11520. Reading blocks as slots inflates the wall clock by 14x and
+    # DEFLATES the duty and the asked-for rate by the same factor (that leg printed "17.1 hops/s" against a
+    # true 239, and "duty 0.9%" against a true 12.0%). Two independent facts decide which one it is, so a
+    # truncated log cannot silently pick the wrong divisor:
+    #   * the [ul_rx_policy] line states it in words (every leg since the flip prints it);
+    #   * samples/blocks states it numerically on every leg, old or new.
+    blocks = num(etxt, r"\[ul_rx\] blocks=(\d+)")
+    blocks = int(blocks) if blocks else None
+    samps  = num(etxt, r"\[ul_rx\] blocks=\d+ samples=(\d+)")
+    spb    = (float(samps) / blocks) if (samps and blocks) else None
+    nsym   = num(etxt, r"(\d+) of \d+ slot symbols")
+    nsym   = int(nsym) if nsym else 14
+    sym_rx = ("blocks of 1 OFDM symbol" in etxt) or (spb is not None and spb < 2000.0)
+    slots  = (blocks // nsym) if (blocks is not None and sym_rx) else blocks
+    policy = (f"blocks={blocks} are OFDM SYMBOLS, {nsym}/slot" if sym_rx else
+              (f"blocks={blocks} are whole slots" if blocks is not None else "blocks: cannot read"))
     dur   = (slots or 0) / (1e6 / slot_us)          # seconds, from the slot count
     ul    = [int(x) for x in re.findall(r"PUSCH:.*?tbs=(\d+)", txt)]
     dl    = [int(x) for x in re.findall(r"PDSCH:.*?tbs=(\d+)", txt)]
-    r = {"lab": lab, "slots": slots, "dur": dur, "ul": ul, "dl": dl}
+    r = {"lab": lab, "slots": slots, "dur": dur, "ul": ul, "dl": dl, "policy": policy}
 
     r["ul_grants"]  = len(ul)
     r["ul_mbps"]    = (sum(ul) * 8 / dur / 1e6) if dur else None
@@ -144,7 +161,7 @@ def show(v, fmt="{:.2f}", unit="", dash="  -  "):
 for r in rows:
     print(f"================ {r['lab']}   (slot period assumed {slot_us:.0f} us)")
     print("-- LOAD (read this FIRST: headroom without load says nothing)")
-    print(f"  slots                : {r['slots']}  ({show(r['dur'])} s)")
+    print(f"  slots                : {r['slots']}  ({show(r['dur'])} s)   [{r['policy']}]")
     print(f"  UL grants / duty     : {r['ul_grants']}  ({show(r['ul_duty'], '{:.1f}', '%')} of slots)")
     print(f"  UL payload           : {show(r['ul_mbps'], '{:.2f}', ' Mbit/s')}   "
           f"TBS median {r['ul_med']} B, max {r['ul_max']} B, >=1000 B: {show(r['ul_big'], '{:.1f}', '%')}")

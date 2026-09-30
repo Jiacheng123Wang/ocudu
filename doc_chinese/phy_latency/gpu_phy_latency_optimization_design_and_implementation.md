@@ -13465,6 +13465,407 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p162-n78-delivered 
 **V1 中位 ≈1270–1310 µs**（对 `p154`/`p157`/`p159` 的 A 基线 1417–1420 是 **−110…−150**）；`merged_hop` exec ≈437、`gap` ≈15；
 **`dl_tx_slack` 中位 ≈1011**（修好的仪器）。
 
+### 6.216 ⚠⚠ **验收腿 `p162` 跑错配置（我给错了命令）：机制判据全过，但时延读数作废**（2026-09-30）
+
+#### ① 结果：机械判据 ✅ 全过，时延判据 ❌ 不可比
+
+| 判据 | 期望 | `p162` 实测 | |
+|---|---|---|---|
+| `[ul_rx_policy]` | 1 OFDM symbol（默认）| `blocks of 1 OFDM symbol (OCUDU_UL_RX_SYMBOLS=1, the default); … the symbol-grained policy runs` | ✅ |
+| 网格生产者 | 宿主 | `device_grid=yes (written by the HOST DFT)` / `dft=cpu (auto)` | ✅ |
+| 契约 | 8 of 9 + DFT 无样本 | `contract MET (8 of 9)` + `dft radio inputs: 0 transform(s)` | ✅ |
+| `cbs/lane` | 2.00 | `cbs/lane=2.00 (max=2)` | ✅ |
+| 前端两条 cb 流 | 不存在 | `dft_front_end` **0** 次、`late_handed` **0** 次 | ✅ |
+| `stale` | 0 | 0 | ✅ |
+| `dl_tx_slack`（修好的仪器）| ≈1011–1047 | **1012**（`AT/BELOW 0 = 4`）| ✅ |
+| **V1 中位** | **1270–1310** | **1608.5** | ❌ **作废** |
+
+#### ② 为什么 V1 是 1608：**跑的是 n1 + 串行 strand**
+
+```
+[leg] cell config : configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml      ← ★ 不是 n78！
+[ul_lane_exec] PUSCH/SRS concurrency = 1 (auto-derived; bw=5MHz layers=1 ul_ratio=1.00)
+```
+对照 `p161`：`cell config: configs/gnb_rf_b200_tdd_n78_20mhz.yml` / `concurrency = 2 (configured; bw=20MHz ul_ratio=0.30)`。
+
+* ★ **根因是我给的命令漏了 `LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml`**（`run_leg.sh` 的默认值是 n1 5 MHz 桥接配置）；标签里写着 `n78` 但**标签只是字符串**，配置由 `LEG_CONFIG` 决定；
+* 同时**漏了 `OCUDU_METAL_GPU_TIME=1` 与 `OCUDU_UL_PHASE_SEGMENTS=1`** ⇒ 报告里明说 `no phase sample was announced`、`no GPU-time records` ⇒ **配对相位段与 per-label 表都没有**（这也是我没能第一时间看出真凶的原因）；
+* ⚠ `concurrency=1` 下 V1 本来就约 **1606 µs**（§6.127 的 `p76`：conc 1 = **1606.2** vs conc 2 = 1399.5）⇒ `p162` 的 1608.5 **正好落在 conc-1 那一档**，与交付改动无关。
+
+#### ③ 纪律 53
+
+**给腿的命令必须整条照抄配方（`LEG_CONFIG` + 两个探针旋钮 + 判据用到的旋钮），不许只给 `run_leg.sh <mode> <label>`** ——
+`LEG_CONFIG` 不设会**静默**换成 n1 默认配置，而**腿的标签里可以写着 `n78`** ⇒ 标签与几何不一致的腿只有读 provenance 才能发现（本次就是"机械判据全过、时延判据全废"）。
+
+#### ④ 重飞的正确命令（**唯一区别是完整配方**）
+
+```bash
+LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 \
+  sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p163-n78-delivered --regime=default
+```
+判据同 §6.215⑥（这次含相位段与 per-label 表，可逐项对账）。
+
+### 6.217 ★★ **`max_pusch_and_srs_concurrency` = 1 与 2 的区别（读码 + 实测）**（用户提问；2026-09-30）
+
+#### ① 它是什么、从哪来
+
+* 旋钮：`expert_execution --max_pusch_and_srs_concurrency`；sentinel **`auto` = `UINT_MAX`（默认）**、**`unlimited` = `0`**（`du_low_config.h:227-254`）；
+* `auto` 的推导（`du_low_config_translator.cpp:341-364`）：
+  `required = Σ_cells 12.5 × (bw_MHz/100) × layers × ul_ratio`，`N = max(1, ⌈required⌉)`；`N ≥ 可用 CPU 数 ⇒ unlimited`。
+  * **n1 5 MHz FDD**（`ul_ratio=1.00`）：12.5 × 0.05 × 1 × 1.00 = 0.625 ⇒ **N = 1**（日志写 `auto-derived`）；
+  * **n78 20 MHz TDD**（`ul_ratio=0.30`）派生值也是 1，但**交付配置显式写死 2**（`configs/gnb_rf_b200_tdd_n78_20mhz.yml:93`）⇒ 日志写 `configured`；
+  * 若配了 hwacc PUSCH 解码器，它会被解码器的 `nof_hwacc` 覆盖。
+
+#### ② 它控制什么（机制）
+
+`du_low_executor_mapper.cpp:124-141`：`create_task_fork_limiter(中优先级池, N, 队列, batch)` ⇒ **`task_fork_limiter`**，其状态是一个打包整数
+`state = (active_forks << 32) | jobs_in_queue`（`task_fork_limiter.h:197-245`）：
+
+* `job_enqueued()`：任务入队时 `jobs_in_queue++`，**且仅当 `active_forks < max_forks` 时才 `active_forks++`**（"开一个新 fork"）；
+* `reserve_fork_task()`：持有 fork 的 worker 从队列取任务，**队列空时释放 fork**。
+
+⇒ ★ **`max_forks` 就是"允许同时抽干这条队列的 worker 数"**，也就是**允许多少个 PUSCH 跳同时在飞**（mapper 的注释原话：
+*"a value of 1 (or less) is not 'a limit of one' - it is create_task_fork_limiter() returning a STRAND, i.e. the PUSCH lane serialises: one hop in it at a time"*）。
+
+| N | 形态 | 含义 |
+|---|---|---|
+| **1** | **串行 strand** | 队列里的任务被**一个** worker 按 FIFO 逐个处理；下一跳的**任何**任务（含宿主阶段）都要等上一跳整条链走完 |
+| **2** | **fork limiter** | 两个 worker 并发抽队列 ⇒ 第 N+1 跳的宿主工作可以**藏在第 N 跳的设备等待里** |
+| **0**（unlimited）| 用池的并发 | 腿里中优先级池是 5 |
+
+#### ③ 实测差异（n78 同二进制对 `p72`/`p76`，+ `p162` 的独立旁证）
+
+| 读数（中位）| **conc 2**（`p72`）| **conc 1**（`p76`）| conc 1 旁证（`p162`，n1）|
+|---|---|---|---|
+| **V1** | 1399.5 | **1606.2（+206.7）** | 1608.5 |
+| `merged_hop` exec | 468.7 | **464.2（不变）** | —— |
+| `merged_hop` wait | 206.5 | **54.4** | —— |
+| lane `residency` | 623.4 | **495.7** | 400.9 |
+| **lane `gap`** | 125.7 | **0.0** | **−16.6** ✅ |
+| 对照：n78 conc 2 的 A 腿（`p161`）| `gap` **133.7** | —— | —— |
+
+★ **conc 1 的签名是 `gap ≈ 0`**（设备队列里只有自己这一跳的 cb）：`p162` 的 **−16.6** 与 `p76` 的 **0.0** 一致，而所有 conc 2 的腿都在 **127–135** ⇒
+**从另一个 cell、另一条腿独立复现**了这条签名（也是判定 `p162` 跑成 conc 1 的第三条证据）。
+
+#### ④ 为什么 conc 1 反而 V1 差 207 µs（★ 关键）
+
+**串行化把宿主工作也串了进去**：conc 1 下，一跳的"宿主参与（≈86 µs）+ 设备等待（≈500 µs）"与下一跳的宿主阶段**不能重叠**；
+conc 2 下，下一跳的宿主阶段跑在上一跳的设备等待里 ⇒ 每跳少付一次宿主段（≈200 µs 量级，与实测 +207 吻合）。
+⚠ 注意这时**设备侧读数反而更好**（wait 206→54、gap 125→0）⇒ ★ **"设备读数更好"不等于"端到端更快"**（与 §6.201 的三层口径同源）。
+
+#### ⑤ 对我们工作的两条实际影响
+
+1. **A/B/C 必须同 conc**：n78 交付配置 = **2** ✓（三对 A/B/C 都在 2 下，§6.212 的结论成立）；`p162` 不小心落到 n1 的 `auto ⇒ 1` ⇒ 时延读数作废（§6.216）；
+2. **`gap`/`wait`/`residency`/`defer_wait` 都是 conc 与载荷敏感量** ⇒ 跨臂比较这些量时也必须同 conc —— 这正是 §6.209 那条"`gap` −114 µs 不是载荷假象"论证的前提（两对都在 conc 2 下、且跳率方向相反）。
+
+### 6.218 ★★ **"`max_concurrency` 设成 0（unlimited）会不会更好？" —— 先纠正语义（0 = 池并发 5，不是无限），再算 Little：单 UE 在这个 TDD 图案下**在飞跳数上不了 2**，N=5 的可赢上界是 ~30 µs**（用户提问；2026-09-30，`p160`/`p161`/`p72`/`p76`）
+
+> 用户的推理：一跳的 pipeline 长度 > 3 slot（假定每个 slot 都有 PUSCH）⇒ 同时在飞的跳数应当有 3、4 跳 ⇒ `max_pusch_and_srs_concurrency=2` 会卡住。
+> **前半段（pipeline 长度）成立**，**后半段（在飞跳数）不成立**：在飞数不是"长度 ÷ 1 slot"，而是"**跳率 × 停留**"（Little），而跳率由**业务 + TDD 图案**决定，本 cell 单 UE 的上限是 **0.30 跳/slot**。
+>
+> ⚠⚠ **本节标题与 ④⑤⑥ 的"在飞 0.17–0.52 / 上不了 2"已被 ⑨（2026-10-01）更正：那是**全程平均**，突发期在飞 ≈3 跳（用户的前提成立）**；
+> ⑥ 的"上界 ~30 µs"与 ② 的机制读码仍然有效，**先读 ⑨**。
+
+#### ① 先纠正语义：`unlimited` = 0 ⇒ **被夹到中优先级池的并发数**，本机是 **5**
+
+| 环节 | 代码 | 行为 |
+|---|---|---|
+| CLI/配置 | `du_low_config_cli11_schema.cpp:102-113` | `unlimited` → `concurrency_unlimited = 0`；`auto` → `UINT_MAX`（`du_low_config.h:227-229`）|
+| 校验 | `du_low_config_validator.cpp:16,27-31` | 允许区间 `[0, hardware_concurrency]` ⇒ 0 合法（"0 = 无上限"是哨兵）|
+| worker manager | `worker_manager.cpp:420-423` | 注释原话 *"a zero value means unlimited concurrency"* ⇒ **0 不被夹**，非 0 才 `min(N, nof_workers_general_pool)` |
+| 执行器 | `du_low_executor_mapper.cpp:264-266` | ★ `if ((max_nof_threads == 0) \|\| (max_nof_threads > base.max_concurrency)) max_nof_threads = base.max_concurrency;` |
+
+⇒ **`unlimited` 的实际取值 = `non_rt_medium_prio_exec.max_concurrency` = `nof_workers_general_pool` = 5**（腿的横幅 `[ul_lane_exec] ... medium pool max_concurrency=5`，`available cpus=14`）。
+所以用户问的不是"N=∞"，而是 **N: 2 → 5**；而 5 是硬上界（`du_low_executor_mapper.cpp:99-103` 有 `report_error_if_not(N <= medium.max_concurrency)`）。
+
+#### ② ★ N 不只控制"队伍宽度"：它在代码里还有两处副作用（加之前必须一起看）
+
+| # | 位置 | 副作用 |
+|---|---|---|
+| 1 | `upper_phy_factories.cpp:934` → `processor_factories.cpp:161-173` | ★ `pusch_config.max_nof_concurrent_threads = N` ⇒ **PUSCH processor 的 `concurrent_dependencies` 池容量 = N**，每个对象自带 estimator / demodulator / demux / uci_decoder **各一份实例**（融合车道上 estimator 实例带设备侧状态）⇒ N=5 就是 5 份 |
+| 2 | `pusch_processor_impl.cpp:180-196` | 该池的 `get()` **不阻塞**（`bounded_object_pool.h:146-200` 扫位图，无空闲就返回 `nullptr`）⇒ 取不到时**记 error 并按 CRC KO 直接返回**（PDU 被丢）。它靠"fork limiter 也不放第 N+1 个跳进来"与 ① 对齐，两边用的是**同一个 N** |
+| 3 | `du_low_executor_mapper.cpp:270-275` | **N ≤ 1 ⇒ 不是"限 1"，而是换成 strand**（`create_strand`），且 `strand_executor.h` 的 `handle_enqueued_task` **永远用 `defer`**（注释：即使调用方允许 inline 也不 inline）——这是 §6.217 那 +207 µs 的形态来源 |
+| 4 | `upper_phy_factories.cpp:959-970` | `nof_regular_processors = MAX_PUSCH_PDUS_PER_SLOT = 16`（因为 decoder executor 是 low-prio 池、`max_concurrency=5≠0`）；只有 `nof_uci_processors = N` ⇒ **processor 池本身不按 N 限流**，限流的是 ② 的依赖池与 fork limiter |
+
+#### ③ 用户的算术：pipeline 长度确实 ≈ 3 slot（交付配置实测）
+
+| 段 | `p160`（C 臂 = 交付配置）中位 | 端点 |
+|---|---|---|
+| `t2f` | **533.1** | 样点齐 → 前端交棒完成（含 `[ul_rx_wait_hop]` 476.0）|
+| `ce` | **65.2** | 交棒 → CE 完 |
+| `eq_demap` | **689.9** | CE 完 → LLR |
+| **V1 合计** | **1309.1**（`[ul_gpu_pipeline] samples=12683 mean=1313.8`）| **= 2.62 slot**（n78 slot = 500 µs）|
+| + `[ul_ldpc_decode]` | **66.0** | LLR → 解码完 |
+| **全链** | **≈1375 µs ≈ 2.75 slot** | ⇒ "整条 pipeline > 3 slot"对"样点→CRC"**基本成立** |
+
+（整槽 A 臂 `p161` V1 中位 **1423.5 = 2.85 slot**，解码 55.0。）
+
+#### ④ ★★ 但在飞跳数 = **跳率 × 停留**，不是"长度 ÷ slot"：实测 0.17 / 0.24 / 0.52
+
+| 腿（全部 conc 2）| 跳数（`merged_hop n`）| 窗口 s | 跳率 /s | V1 中位 | **在飞 = 跳率 × V1** |
+|---|---|---|---|---|---|
+| `p160` n78 C 臂（交付）| 14233 | 110.14 | 129.2 | 1309.1 µs | **0.169** |
+| `p161` n78 A 臂（整槽）| 19290 | 115.75 | 166.7 | 1423.5 µs | **0.237** |
+| `p72` n78 A 臂（整槽）| 141729 | 382.17 | 370.9 | 1399.5 µs | **0.519** |
+
+**N=2 咬合的条件（Little 反解）**：`跳率 × V1 > 2` ⇒ 跳率 > **1528 跳/s** = **0.764 跳/slot**。三条腿离它差 **4–12 倍**。
+⇒ 用户模型里的"3、4 跳在飞"需要 **2292 / 3056 跳/s**（1.15 / 1.53 跳/slot）。
+
+#### ⑤ 为什么"每个 slot 都有 PUSCH"在本 cell 达不到：TDD 图案上限 0.30
+
+* `configs/gnb_rf_b200_tdd_n78_20mhz.yml` **没有** `tdd_ul_dl_cfg` ⇒ 用默认图案（`du_high_config_cli11_schema.cpp:3054-3060`）：**`DDDDDDXUUU`**，周期 10 槽 / 6 DL / 1 特殊（8 DL 符号）/ **3 UL**；
+* `split_8_o_du_application_unit_impl.cpp:18-32`：`ul_ratio = nof_ul_slots / period = 3/10 = **0.30**`（与腿横幅 `ul_ratio=0.30` 逐字一致）；
+* ⇒ 单 UE、每 UL 槽一次 PUSCH：**600 跳/s** ⇒ 在飞 **0.79**（V1=1309 µs）；把 X 槽的 6 个 UL 符号也算上 ≈ **800 跳/s ⇒ 1.05**。
+* ★ **本 cell 单 UE 的物理上限 < 2 跳在飞** ⇒ N=2 已经有 ≥2.4× 余量；要让 N=2 咬合，需要平均 **≥2.55 个 PUSCH / UL 槽**（多 UE 或多次授权；配置上限 `max_puschs_per_slot = MAX_PUSCH_PDUS_PER_SLOT = 16`，`du_high_config.h:361`、`slot_pdu_capacity_constants.h:61`）。
+
+#### ⑥ 那 N=5 到底能赢多少？——**上界 ~30 µs（≈2%），因为现在的排队本来就只有这么点**
+
+即便"在飞 > N"的那一瞬真的出现，N 能吃掉的是**排队**，而 C 臂（交付配置）实测排队已经很小：
+
+| 读数（`p160`）| 值 | 含义 |
+|---|---|---|
+| `paired ce` 中位 | **65.2** | CE 段，其中纯工作 `[mmse_time_sum] total=35.5` ⇒ **余量 ≈30 µs** |
+| `[ul_gpu_lane] gap` | 中位 **15.9**（均值 10.7，p95 87.2）| 车道驻留里设备没在执行的部分 |
+| `merged_hop wait p50` | 58.7 | 设备队列等待 |
+| 对照 `p161`（A 臂）| ce 65.7 / gap 133.7 / wait 213.9 | 整槽 A 臂的排队大得多 |
+| **N=5 乐观上界** | **≈30 µs ≈ 2.3%** | 且要与"设备队列变长"（wait 58.7 上升）对赌 |
+
+#### ⑦ 一个真实的变化：C 交付把**设备侧**余量抬起来了，于是 N 的相对位置上升（值得看一眼的理由）
+
+* 每跳设备窗口（`busy(union) / 跳数`）：`p161`（A，GPU DFT + 整槽）= 15567793.3/19290 = **807.0 µs** ⇒ 单设备容量 ≈ **1239 跳/s** < N=2 的 1528 ⇒ **A 臂是设备先咬合**；
+* `p160`（C，CPU DFT + 符号级）= 5857465.9/14233 = **411.5 µs** ⇒ 容量 ≈ **2430 跳/s** > 1528 ⇒ **交付配置变成执行器先咬合**（如果窗口互斥这个假设成立）。
+* ⇒ ★ 结论不是"应该加 N"，而是"**加 N 的天花板由设备窗口决定，而设备窗口应该用 §6.201 的三层口径去砍（cb 价钱），不是加队列**"。
+
+#### ⑧ 判决与预登记（如果还是要飞）
+
+1. **预测：在当前单 UE 载荷下 N=5（`unlimited`）是空结果**，ΔV1 落在噪声带（A 臂三条腿散布只有 3 µs）内；
+2. 这条腿**预先就不能"证明 N 有用"**：载荷不够时读到 0，分不清"N 无关"与"载荷太低" ⇒ 判据必须写成**单边**：
+   * 若 ΔV1(中位) **< 20 µs** ⇒ 判"**该载荷下 N 不是约束**"（不许读成"unlimited 更好"）；
+   * 若 ΔV1 **> +50 µs（更差）** ⇒ 判"**更深的队列有害**"，N 保持 2；
+   * 若 ΔV1 **< −50 µs（更好）** ⇒ 才成立"N 是约束"，且必须同时给出**载荷证据**（跳率 > 1528 跳/s 或 ≥3 PUSCH/UL 槽）；
+3. 腿配方（在 `p163` 交付配方上只加一个选项）：`--expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=unlimited`；
+   启动自检：横幅应写 `configured: no limit`（`du_low_config_translator.cpp:435-445`），且 **`pusch_executor.max_concurrency=5`**（若仍写 2，说明选项没进 argv）；
+4. **要做判定性的腿，必须同时把载荷推到咬合区**（多 UE / 多授权，≥3 PUSCH/UL 槽），否则这条腿只是把"没差"再测一遍。
+
+**纪律 54**：**`max_concurrency` 不是"队伍宽度"一个量** —— 在同一份代码里它同时是 ① fork limiter 的 `max_forks`、② PUSCH processor 依赖池的容量（取不到就丢 PDU）、③ ≤1 时整体换成 **strand**；判它要不要加，先算 **Little（跳率 × 停留 > N 才咬合）**，再报出"**可被它吃掉的上界**"（本例 ≈30 µs）——**只报"并发度高一点会更顺"而不报上界，就是把一个 ≤2% 的项包装成结构项**。
+
+#### ⑨ ⚠ **更正（2026-10-01，交付腿 `p163` 到手后）：④ 用的"平均跳率"把突发结构平均掉了 —— 突发期在飞 ≈2.5–3 跳，用户的前提成立**
+
+④ 把 `跳数 / 全程窗口` 当成到达率，得到"在飞 0.17–0.52、N=2 有 2.4× 余量"。**这个口径错了**：交付腿 `p163` 的
+**逐跳间隔（`[ul_gpu_lane] period`，相邻两跳 lane 结束之差）中位只有 `412.5 µs`** —— 比一个槽（500 µs）还短、比一跳的 lane 驻留（478.8 µs）也短：
+
+| 腿 | `period` 中位 | `period` min | p95 | 全程平均跳率 | **突发期在飞 = V1/period** |
+|---|---|---|---|---|---|
+| `p163`（交付，符号级）| **412.5 µs** | 220.8 | 4314.2 | 239.4 跳/s | **1246.4/412.5 = 3.02** |
+| `p161`（A，整槽）| **483.0 µs** | 284.7 | —— | 171.0 跳/s | 1423.5/483.0 = **2.95** |
+
+★ 两条腿都是 **≈3 跳在飞**，与用户"pipeline 长度 > 3 slot ⇒ 在飞 3、4 跳"的推理一致；而 `ul_load.sh` 的
+"burst: residency median / period median = **116.1%**（>100% = 一跳填不满到下一跳的空档）"就是同一件事的设备侧表述。
+
+**机制（读码）**：TDD 图案 `DDDDDDXUUU` 的 **3 个 UL 槽是连续的**（`du_high_config_validator.cpp:1264-1270`：
+`nof_dl_slots + nof_ul_slots ≤ period − 1` ⇒ 第 10 个槽是特殊槽）⇒ TCP 突发一来就是**连续 2–3 个 UL 槽**、每个槽一跳，
+之后 ~3.5 ms 空档（`period` p95 **4314 µs**、p99 39897 µs）⇒ 一半以上的跳落在"背靠背"里。
+
+**但 ⑥ 的结论不变（上界 ~30 µs），理由换成更贴切的那一个**：
+fork limiter 闸的不是"整跳"，而是**一跳里的各段延迟任务**（`uplink_processor_impl.cpp:337` 一条 `defer` 跑整跳，
+CE/均衡的续段各自再 `defer`，见 `port_channel_estimator_metal_mmse_impl.cpp` 的 `merged_defer`）；每段都是**几十 µs 的宿主工作**，
+所以"被 N 挡住"的代价是**段的排队**，不是整跳 —— 实测正好是几十 µs：交付臂 `paired ce` **59.6** vs 它自己的工作量
+`[mmse_time_sum] mean total=31.4`（余量 ≈25–28）、`gap` 中位 **17.3**（`busy/residency=0.964`）。
+⇒ **N=5 的可赢上界仍是 ~30 µs（≈2%）**；改变的只是"这条腿值不值得飞"：**突发期确实过订（3 > 2）**，
+所以一条 N=5 的腿**是有信息的**（预测 +0…−30 µs，噪声底 3 µs），不再是"注定空结果"。
+
+**纪律 55**：**判断"并发度够不够"不能用全程平均到达率** —— 平均把突发抹平（本例 12.0% 的占空比下平均在飞 0.29、突发期 3.02，**差 10 倍**）；
+必须用**逐跳间隔分布**（`[ul_gpu_lane] period` 的中位/p95）或"占空比 × 图案给出的连续槽数"，两者都要与**一跳的停留**比，而不是与一个槽比。
+
+### 6.219 ★★★ **交付腿 `p163-n78-delivered` 跑成：预登记判据全过、门禁全绿，V1 中位 1246.4 µs（vs A 臂 −173 µs）；顺带查出并修好两个"工具"缺陷**（2026-10-01）
+
+> 这是 §6.215⑥ 预登记的那条**默认配置验收腿**（配方逐字照抄：`LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p163-n78-delivered --regime=default`）。
+
+#### ① 身份与配方（先证明这条腿是"交付形态"）
+
+| 项 | 读数 |
+|---|---|
+| 提交 | **`42c987f3d9` = HEAD**（`milestone_audit.sh` 判 PASS；`run_leg.sh` 的三段戳门也过了）|
+| 后端旋钮 | **`mode options: <none>`** —— 这是关键：后端由 `resolve_phy_pipeline()` 自己解析，**没有任何命令行旋钮** |
+| 收包策略 | ★ **`[ul_rx_policy] blocks of 1 OFDM symbol (OCUDU_UL_RX_SYMBOLS=1, the default)`** ⇒ 新默认生效 |
+| 网格来源 | `dft radio inputs: 0 transform(s) ... the hand-over route carried 0 (0.0%)`、`gpu busy (front_end): commits=0 busy=0.0us` ⇒ **前端不再碰设备** |
+| 探针 | 只有 `OCUDU_METAL_GPU_TIME=1` + `OCUDU_UL_PHASE_SEGMENTS=1`（两个都是只读探针）|
+
+#### ② 预登记判据逐条（§6.215⑥）
+
+| 判据 | 预登记 | `p163` 实测 | |
+|---|---|---|---|
+| **V1** | 1270–1310 | ★ **`[ul_gpu_pipeline]` 中位 1246.4**（mean 1251.2 / p95 1449.1）；`[ul_pipeline]` 中位 **1280.0** | ✅ **比窗口还低**（两条序列都读，见 ③）|
+| **契约** | 8 of 9 | **MET (8 of 9 checks applicable)**，9 个名字全在 | ✅（`leg_gate` 的陈旧字面量已修，见 ⑤）|
+| **`dft_front_end` / `late_handed`** | 消失 | ★ **消失**：`[metal_stats]` 只剩 `ce_weights n=26655` + `merged_hop n=26649`（各 1 条首跳 `ce_held`/`ce_stage`/`lane_burst`）| ✅ |
+| **`gap`** | ≈15 | **中位 17.3**（均值 10.3，p95 53.7）| ✅ |
+| **`dl_tx_slack`** | ≈1011 | **中位 1012.0**（均值 1010.1，p25 1011.0）| ✅ |
+| 业务 | ≠0 | **26322 CRC-OK 跳（98.8%）**、`[ul_mac_pdu_size] total=18626554.0 B`、会话建立并在收尾时断开（`psi=1` 事件数与 `p160`/`p161` 逐条相同）| ✅ |
+| 门禁（§6.198）| `AT/BELOW 0 == 0` | **9**（min −4479 µs）| ⚠ **待裁**，见 ⑥ |
+
+#### ③ ★ 三段与三条序列（都能自洽相加）
+
+| 段（中位）| `p163` | A 臂（`p161`）| B 臂（`p160`）|
+|---|---|---|---|
+| `t2f` | **494.0** | 536.8 | 533.1 |
+| `ce` | **59.6** | 65.7 | 65.2 |
+| `eq_demap` | **687.1** | 806.2 | 689.9 |
+| **V1**（`[ul_gpu_pipeline]`）| **1246.4** | 1423.5 | 1309.1 |
+
+* **`[ul_by_size]`（本腿新增的好读法）**：`iq2llr` 中位从最小桶 **1175.6**（<128 B）到最大桶 **1272.0**（≥768 B），**×1.08**
+  ⇒ 时延几乎与传输块大小无关 ⇒ 又一次旁证"**结构主导**"（§6.201）；
+* ★ **`t2f` 的解释在符号级下变了**：`[ul_rx_wait_hop]` 中位 **0.0**（均值 33.4）——`receive()` 不再阻塞，
+  于是 `t2f 494.0` ≈ **本槽 PUSCH 自己 12 个符号的到达时间**（`eq_batch symbols=319790 / flushes=26650 = 12.0` 符号/跳，
+  12×35.71 = **428.6 µs**）+ 前端收尾 ≈65 µs（与整槽分析里那条"前端自身 59.5–60.6 µs"吻合）
+  ⇒ ★ **t2f 的下界是物理的**（最后一个符号在发射之前不存在），别再往这里找空间；
+* **`[ul_ldpc_decode]` 中位 27.0**（A 55.0 / B 66.0）⇒ 全链 **≈1273 µs ≈ 2.55 slot**。
+
+#### ④ 设备侧：前端归零、每跳窗口 405.6 µs
+
+| 读数 | `p163` | 说明 |
+|---|---|---|
+| `busy(union) / 跳` | **405.6 µs**（10809449.3 / 26650）| A 臂 807.0 ⇒ **C 交付砍掉一半**（前端不再上设备）|
+| `merged_hop wait / exec` p50 | **41.7 / 437.2** | A 臂 213.9 / 469.0 ⇒ **排队从 214 掉到 42** |
+| `ce_weights wait / exec` p50 | 30.5 / 33.6 | |
+| `busy split` | ch_wt 35.8（7%）+ merged_hop 465.7（93%）| |
+| `residency / busy / gap` 中位 | 478.8 / 478.4 / 17.3；`busy/residency=0.964` | 车道窗口 96.4% 被设备占着 |
+| `[ul_rx_timing]` | `recv(max=100288us over 1ms=1)`（= 启动那一次，工具已显式排除）、`loop over 1ms=1`、**`slip over 1ms=1`（1314 µs）** | 传输侧干净（对照 `p153` 的 21–467）|
+| `[ul_rx_pool]` | `free_min=29`、`held_max=3/32`、`starved=0`、`dropped=0`、`pop_blocking max=23 µs` | 池毫无压力 |
+| `[ul_gpu_lane]` | `lanes=26650 cbs/lane=2.00 (max=5) dropped=0 period_dropped=0` | V4 契约不变 |
+
+#### ⑤ 两个**工具**缺陷（这条腿查出来的，都已在本次修好；都不是腿的问题）
+
+1. ★ **`leg_gate.sh` 的契约字面量把交付腿判 FAIL**：它要求 `contract.startswith("MET (9 of 9")`，
+   而宿主写网格之后 DFT 那一项**合法地失去总体**（§6.215④ 已让 `milestone_audit.sh` 接受两种读数）⇒
+   同一个契约，**审计 PASS、空口门 FAIL**。已照 `milestone_audit.sh` 的规则改成**两种读数**（`MET (9 of 9`，
+   或 `MET (8 of 9` **且** `dft radio inputs: 0 transform(s)`），其余仍 fail-closed。
+   ⚠ 修的过程中踩到一个坑：`leg_gate.sh` 的 `f()` 用的是 `re.findall` 的**整段匹配**（模式无捕获组时返回整行匹配），
+   所以"判它为 0"必须写成 `(\d+)` 捕获组 —— 否则两种读数的分支永远不进。修后 **9 of 9 judged pass, 0 to explain**。
+2. ★ **`ul_load.sh` 把 `[ul_rx] blocks` 当槽数**：符号级收包下**一块 = 一个 OFDM 符号**
+   （旁证：`2565225869/3117462 = 822.86 = 11520/14` 样点/块，而所有整槽腿都恰好是 11520）⇒
+   它把墙钟放大 **14×**、把占空比与"请求率"缩小 14×：实测打印 **"slots 3117462 (1558.73 s) / duty 0.9% / asked 17.1 hops/s / 余量 99.1%"**，
+   真值是 **222 675 槽（111.34 s）/ duty 12.0% / asked 239.4 hops/s / 余量 87.7%**。
+   已改成用**两个独立事实**判定（`[ul_rx_policy]` 的措辞 + `samples/blocks`），并把用到的除数**打印出来**；
+   回归对照 `p161`（整槽）读数逐字不变。
+
+#### ⑥ ✅ **复查 `dl_tx_slack AT/BELOW 0 = 9`（用户追问"是不是仪器没修好"）：仪器修复**生效**，这 9 次是 **Ctrl-C 之后的拆链窗口**里的迟到，不是业务期的、也不是仪器故障**（2026-10-01 当日更正）
+
+**① 仪器修复确实生效 —— 三条独立证据**
+
+| # | 证据 | 读数 |
+|---|---|---|
+| 1 | 读数族回到同一个数 | 修复前：整槽腿中位 **1511–1512**、符号级腿 **1047**（差正好一个块）；修复后：整槽 `p161` **1011.0**、符号级 `p163` **1012.0** |
+| 2 | 源码就是修好的形式 | `lower_phy_baseband_processor.cpp:1410`：`tx_slack_note_receive(rx_metadata.ts + nof_samples, rx_call_end)` |
+| 3 | 血缘 | 二进制戳 `42c987f3d9` ⊃ `a1767cb3de`（就是那次修复）|
+
+★ 而且这个修复**只会让读数更悲观**：它去掉的是"把块的**第一个**样点与调用返回配对"造成的**虚高整整一块**（整槽 500 µs、符号级 35.7 µs）⇒ **它不可能制造假的迟到**。
+反过来：`p151`（"健康腿"，旧仪器）报的 min **+416 µs**，扣掉整槽一块之后真值 **≈ −84 µs** —— 也就是说 **"健康腿 `AT/BELOW 0 = 0`"这个校准点本身就有 1 次迟到被虚高掩盖**。
+
+**② 这 9 次在腿的最后一秒，不在业务期（`p163` 逐行时间轴）**
+
+| 时刻（腿内）| 事件 |
+|---|---|
+| 0 s | 起腿（提交 `42c987f3d9`）|
+| … 114.43 s | 仍在正常业务：`PUSCH … tbs=624 crc=OK`、`Slot decisions … 1 PUSCH` |
+| **114.51 s** | **`[GNB] Stopping...`（操作员 Ctrl-C）** |
+| 114.53 s | `Uplink processing stopped: blocks received while stopping are not handed over (822 samples)` |
+| **114.5 s** | ★ **23 条 `Real-time failure in RF` 里有 22 条落在这里的最后 30 ms**（只有 1 条在 **78.1 s**）|
+| 114.91 s | 退出 |
+
+★ **最深的负余量也在腿尾**：`min = −4479 µs` 的 `due_ts = 2612609580` ÷ 23.04 Msps = **113.4 s**（仪器只为 min 留了时间戳）。
+对照 `p161`（整槽、固定仪器、min −630 µs）：`due_ts = 1347794220` → **58.5 s**，与它 6 条 underflow 的时刻（+8.9 s、**+59.6 s ×5**）**逐一对上** ⇒ 整槽腿的迟到发生在**业务中段**。
+
+**③ 家族普查（12 条腿）：符号级 = 拆链爆发，整槽 = 一条都没有**
+
+| 腿 | 收包策略 | 仪器 | 腿长 | RF 失败 | **最后 3 s 内** |
+|---|---|---|---|---|---|
+| `p163`（交付）| 符号 | 固定 | 114.9 s | 23 | **22** |
+| `p158` / `p156` | 符号 | 旧 | 111.2 / 121.9 s | 23 / 22 | **22 / 18** |
+| `p162`（n1）| 符号 | 固定 | 128.9 s | 8 | **8** |
+| `p161` / `p155` / `p154` | 整槽 | 固定 / 旧 / 旧 | 116 / 152 / 281 s | 6 / 9 / 28 | **0 / 0 / 0** |
+| `p160` / `p157` / `p159` | 整槽 | 旧 | 112 / 130 / 104 s | **0** | 0 |
+
+⇒ ★ **4/4 符号级腿都有 8–22 条拆链爆发，5/5 整槽腿一条都没有**；而**业务中段**的失败数是符号级 **1 / 1 / 4**、整槽 **0–28**
+⇒ **交付的符号级策略在业务期并不更差**（反而更好），它多出来的全部集中在拆链那 30 ms。
+
+**④ 结论与建议（修正 ⑥ 原来的"三条件合取"建议）**
+
+1. `AT/BELOW 0 = 9` **既不是仪器故障、也不是业务期缺陷**，是 **Ctrl-C 之后**（RX 先停、DL 交接还在继续）的产物；
+2. 因此 §6.198④ 的 `== 0` 应当**限定在业务窗口**判断，而不是全程；要让"排除拆链窗口"从**假设**变成**测量**，给 `tx_slack_accounting` 加一样东西即可：
+   **每个 at/below-0 事件的腿内时间**（或"距最近一次 receive 的间隔"）—— 现在只留了 min 的 `due_ts`，所以只能靠 `due_ts` 反推；✅ **已实施，见 ⑧**；
+3. 若要让这个尾巴彻底消失，正确的修法是**让 DL 交接在 RX 停止时同步停止**（现在它一直继续到进程退出）；这是一个独立的小改动，建议与第 2 条一起做、并在下一次飞行里验；✅ **已实施（改为"不进入统计"而不是"让 DL 早停"），见 ⑧**；
+4. **V3（率带）不受影响**：`p163` 是 **23 / 222669 = 0.0103%**，落在 `gpu` 的 ≤0.25% 带内（25× 余量）。
+
+**纪律 57**：**"这个数是不是仪器问题"要用"它落在时间轴的哪一段"回答，不能用"上次修过仪器"回答** ——
+同一条腿的中位数修好了（1511 → 1012）**不等于**尾部也修好了；本例 22/23 个事件挤在最后 30 ms，
+只有把事件放回时间轴（或至少把 min 的 `due_ts` 换算成腿内秒数）才看得出来。
+
+#### ⑦ ✅ **用户要求"`dft=metal` 时仍然读 9 of 9"—— 这**本来就是**现在的行为，已用单测把它锁住**
+
+**行为（现状，逐腿取证）**：契约里那条 `dft radio inputs` 在**没有任何 Metal 变换**时返回 `nullopt`（`ocudu_dft_metal_engine.mm:731-737`：
+`total == 0` ⇒ "not applicable"）⇒ 于是：
+
+| DFT 后端 | 腿 | 契约读数 |
+|---|---|---|
+| **metal**（设备写网格）| `p154`/`p157`/`p159`/`p161` | ★ **`MET (9 of 9)`**（那条检查有总体、被判定）|
+| **cpu**（宿主写网格，交付）| `p155`/`p156`/`p158`/`p160`/`p163` | **`MET (8 of 9)`**（该检查 `0 transform(s)` ⇒ not applicable）|
+
+⇒ **两种模式各自保留自己的读数**，`leg_gate.sh` 现在**同时接受**这两条（`9 of 9`，或 `8 of 9` **且** `dft radio inputs: 0 transform(s)`），
+并且仍然要求 9 个名字全在 ⇒ 既不会把 metal 腿的 9/9 判红，也不会让"别的检查消失"蒙混过关。
+
+**锁定**：给 `dft_processor_metal_unit_test.cpp` 加了**第三条臂**（原来的两条是"零拷贝 ⇒ OK"与"被迫 staging ⇒ FAILED"）：
+**进程里一个 Metal 变换都没有时，这条检查必须 DECLINE**（`nullopt` + 契约印 `-> not applicable`）。
+它必须在**任何变换之前**跑（计数器是进程级单调的），所以放在 `contract_line()` 之后、第一个 `engine.run()` 之前。
+实测：`dft radio inputs, no transform: [... 0 transform(s) ... -> not applicable]`，`ctest -R dft_processor_metal_unit_test` **1/1 passed**（`ALL OK`）。
+⇒ 从此"宿主写网格 ⇒ 8 of 9、设备写网格 ⇒ 9 of 9"这两条都有**可执行的**守护，改坏了会红。
+
+#### ⑧ ✅ **已实施（用户裁定："Ctrl-C 之后 RX 停止后的 DL 尾巴不进入统计范围"）：两条发送侧序列的窗口 = **接收路径的存活期**，并在离线台架上先自证
+
+**① 窗口判据是机制的，不是时间阈值**
+`stop()` 先置 `rx_stop_requested` 再请求两条链（`lower_phy_baseband_processor.cpp:948`）：**接收链**在置真后立刻不再交接样点
+（`ul_process` 的 `Uplink processing stopped: blocks received while stopping are not handed over`），而**发送链**要跑完倒计时
+（`2 × max_processing_delay_slots`，`lower_phy_factory.cpp:278`）才停。那段窗口里时钟图**是冻住的** ⇒
+取 `rx_stop_requested` 作边界，与"RX 停止"**逐字同义**，不需要任何"多久算尾巴"的猜测。
+
+**② 改动（`lib/phy/lower/lower_phy_baseband_processor.cpp`，一处文件）**
+
+| 项 | 内容 |
+|---|---|
+| 新计数 | `excluded_after_rx_stop`（窗口外的交接数）、`tx_call_excluded`（窗口外的调用数）|
+| 交接 | 窗口关 ⇒ **计数、不采样**；窗口开但时钟图还没建立 ⇒ 与以前一样不采样（那不是"被排除"，是还没开始）|
+| `transmit()` 时长 | **两端都查**（进入前 + 返回后）：★ "跨过停止的那一次调用"正是驱动在拆链里阻塞的那一次 |
+| 报告 | `[dl_tx_slack]` 行尾印 `excluded N hand-over(s) ... every number above is over the M hand-over(s) inside the stream`；`[dl_tx_call]` 印 `... %llu call(s) outside the window` ⇒ **不靠藏尾巴来声称窗口干净** |
+
+**③ 顺手查出**第二个窗口外样本：`[dl_tx_call]` 的 max 一直是 **84–92 ms**，而它的 p99 只有 81 µs。
+新加的"最坏调用是第几次"（`tx_call_max_index`，与 slack 的 `min_due_ts` 同一个思路）**一次就定位**：
+台架上 `max=92467us (**at call #1**)` ⇒ 那是 **TX 流启动**那一次，不是链路属性。修后 `over 1ms=0, over 5ms=0`。
+
+**④ 验证先把"不需要电台"的路走完：新台架 `wip/gnb_loopback_n78.yml`**
+`ru_sdr --device_driver realtime_loopback` 能在**无电台、无 sudo、无手机**的情况下复现拆链尾巴
+（校验器只接受 default clock/sync、default OTW、无 device_args —— 见配置注释）。实测（n78/20 MHz/30 kHz，20 s，Ctrl-C）：
+
+```
+[dl_tx_slack] transmissions=23989 ... min=988us ... AT/BELOW 0=0; excluded 10 hand-over(s) after the RECEIVE
+              path stopped (...); every number above is over the 23989 hand-over(s) inside the stream
+[dl_tx_call]  calls=23989 median=0.0us p95=0.0us p99=0.0us max=6us (at call #22377); over 1ms=0, over 5ms=0;
+              19 call(s) outside the window (before the clock map exists, or while the streams are stopping)
+```
+
+⇒ ★ **`excluded 10` 与空口腿 `p163` 的同名现象（拆链倒计时的槽数）在离线台架上复现**；
+两条序列**数目相等（23989 = 23989）= 同一总体**；`over 1ms/5ms` 由 1/1 变 **0/0**。
+另：`ctest -L phy` **203/203**、`ctest -R lower_phy|dft_processor_metal` 5/5。
+
+**⑤ 仍需一条空口腿才能判的**：`p163` 那 9 次里有多少落在窗口外 —— 现在报告直接给两个数
+（**窗口外的条数** + **窗口内的 AT/BELOW 0**），下一次交付腿读这两个即可，不再需要 `due_ts` 反推。
+
+**纪律 58**：**一条"时间序列"探针的窗口必须与它声称测量的对象同生命周期** ——
+本例两条序列此前各自悄悄含进了"流启动"与"流停止"两段；`calls ≠ transmissions` 这个不等式就是它们
+**不是同一总体**的现成指纹（修好后 `calls == transmissions`）。
+
+**纪律 56**：**交付翻转默认值之后，第一件要查的不是时延，是"哪些工具的字面量还停在旧默认上"** ——
+本次一条腿查出两处：门禁把合法的 `MET (8 of 9)` 判 FAIL、负载工具把"一块"当"一槽"（14× 量纲错）。
+两者都与被测代码无关，却都能让**健康的交付腿**读成红的或读成"余量 99%"。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

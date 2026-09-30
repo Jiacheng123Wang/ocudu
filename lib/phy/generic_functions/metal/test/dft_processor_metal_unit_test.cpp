@@ -203,6 +203,37 @@ int main()
       return text.substr(at, (end == std::string::npos) ? std::string::npos : end - at);
     };
 
+    // ---- THIRD ARM: NO transform at all -> "not applicable", which is what 8 of 9 rests on ------------
+    //
+    // The delivered uplink writes the grid on the HOST (dev doc 6.215 (1)), so no Metal transform runs and
+    // this check loses its population: it must DECLINE (nullopt -> the contract prints "not applicable").
+    // That is the whole reason a delivered leg reads "MET (8 of 9 checks applicable)" while a metal-DFT leg
+    // still reads "MET (9 of 9)" - both readings are registered in dev doc 6.219 (5). The arm is what keeps
+    // the FIRST of those two falsifiable: without it, an edit that made the zero-transform case answer
+    // "true" would turn every host-grid leg green by accident, and the 8-of-9 form the gate accepts would
+    // stop meaning anything.
+    //
+    // It has to run BEFORE any transform in this process: the engine's counters are process-global and
+    // monotonic, so after the control transform below there is no way back to "no transform ran".
+    {
+      std::string               evidence;
+      const std::optional<bool> verdict = evaluate_named("dft radio inputs", evidence);
+      const std::string         line    = contract_line();
+      const bool declined = !verdict.has_value() && (line.find("-> not applicable") != std::string::npos);
+      if (!declined) {
+        std::fprintf(stderr,
+                     "FAIL: with no Metal transform in the process this check must DECLINE (the host-written "
+                     "grid's 8 of 9 depends on it): verdict=%s contract line=[%s] evidence=[%s]\n",
+                     verdict.has_value() ? (*verdict ? "OK" : "FAILED") : "not applicable",
+                     line.c_str(),
+                     evidence.c_str());
+        ok = false;
+      }
+      else {
+        std::printf("  dft radio inputs, no transform: [%s]\n", line.c_str());
+      }
+    }
+
     constexpr unsigned k_size  = 1536; // the mixed-radix size the rest of this file measures with
     constexpr unsigned k_batch = 16;   // dft_processor_metal::max_batch: the engine wraps the WHOLE batch
     const std::size_t  page    = compat::page_size(); // 16 KiB on Apple Silicon, NOT 4 KiB
