@@ -6,9 +6,11 @@
 
 #include "ocudu/adt/span.h"
 #include "ocudu/mac/mac_cell_control_information_handler.h"
+#include "ocudu/mac/mac_cell_rach_handler.h"
 #include "ocudu/mac/mac_pdu_handler.h"
 #include "ocudu/ran/harq_id.h"
 #include "ocudu/ran/rnti.h"
+#include "ocudu/ran/subcarrier_spacing.h"
 
 namespace ocudu {
 
@@ -16,6 +18,7 @@ struct pucch_info;
 struct uci_info;
 struct ul_sched_info;
 struct srs_info;
+struct prach_occasion_info;
 class slot_point;
 
 namespace test_helpers {
@@ -50,6 +53,13 @@ mac_crc_indication_message create_crc_indication(slot_point sl_rx, span<const ul
 mac_srs_pdu create_srs_pdu(const srs_info& srs);
 
 mac_srs_indication_message create_srs_indication(slot_point sl_rx, span<const srs_info> srss);
+
+/// Creates a RACH indication that reports one preamble detected in a scheduled PRACH occasion.
+/// \param msg1_scs PRACH subcarrier spacing, ignored for long preamble formats.
+mac_rach_indication create_rach_indication(slot_point                 prach_slot_rx,
+                                           const prach_occasion_info& occasion,
+                                           subcarrier_spacing         msg1_scs,
+                                           unsigned                   preamble_id = 0);
 
 } // namespace test_helpers
 } // namespace ocudu

@@ -5,6 +5,8 @@
 #include "mac_test_messages.h"
 #include "tests/test_doubles/utils/test_rng.h"
 #include "ocudu/mac/mac_pdu_format.h"
+#include "ocudu/ran/prach/ra_helper.h"
+#include "ocudu/scheduler/result/prach_info.h"
 #include "ocudu/scheduler/result/pucch_info.h"
 #include "ocudu/scheduler/result/pusch_info.h"
 #include "ocudu/scheduler/result/srs_info.h"
@@ -220,4 +222,21 @@ mac_srs_indication_message test_helpers::create_srs_indication(slot_point sl_rx,
     srs_ind.srss.push_back(create_srs_pdu(srs));
   }
   return srs_ind;
+}
+
+mac_rach_indication test_helpers::create_rach_indication(slot_point                 prach_slot_rx,
+                                                         const prach_occasion_info& occasion,
+                                                         subcarrier_spacing         msg1_scs,
+                                                         unsigned                   preamble_id)
+{
+  mac_rach_indication rach_ind;
+  rach_ind.slot_rx = prach_slot_rx;
+
+  mac_rach_indication::rach_occasion& occ = rach_ind.occasions.emplace_back();
+  occ.start_symbol                        = occasion.start_symbol;
+  occ.slot_index      = ra_helper::get_prach_occasion_slot_index(prach_slot_rx, occasion.format, msg1_scs);
+  occ.frequency_index = occasion.index_fd_ra;
+  occ.preambles.push_back({.index = preamble_id, .time_advance = phy_time_unit::from_seconds(0)});
+
+  return rach_ind;
 }

@@ -94,6 +94,27 @@ public:
   async_task<void>
   launch_ue_context_release_task(rnti_t rnti, srb_id_t srb_id = srb_id_t::srb1, bool assert_success = true);
 
+  /// Outcome of the random access procedures run by \ref launch_rach_attempts_task.
+  struct rach_attempts_result {
+    /// Number of RACH indications forwarded to the DU.
+    unsigned nof_attempts = 0;
+    /// Number of them whose RAR the scheduler sent within the RA window.
+    unsigned nof_rars_received = 0;
+  };
+
+  /// \brief Launch non-blocking task to run \c nof_attempts contention-based random access procedures.
+  ///
+  /// The task detects one preamble in each of the next \c nof_attempts PRACH occasions of the cell and awaits the RAR
+  /// of each of them.
+  ///
+  /// \param[out] result           Outcome of the attempts, filled in as the task progresses.
+  /// \param prach_ind_delay_slots Number of slots the RACH indication takes to reach the DU, counted from the PRACH
+  ///                              occasion it reports. It models the PHY preamble detection and the FAPI transport.
+  async_task<void> launch_rach_attempts_task(unsigned              nof_attempts,
+                                             rach_attempts_result& result,
+                                             unsigned              prach_ind_delay_slots = 3,
+                                             du_cell_index_t       cell_index            = to_du_cell_index(0));
+
   /// Await completion of all pending asynchronous tasks.
   void run_until_all_pending_tasks_completion();
 
