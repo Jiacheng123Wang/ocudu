@@ -845,17 +845,47 @@ void lower_phy_baseband_processor::start(baseband_gateway_timestamp init_time, b
   // to the uplink processor, and one that does not describe it (a test double, or a build without one)
   // keeps the historical whole-slot blocks. Decided per stream, when the configuration is final.
   rx_symbol_grid_known = uplink_processor.locate_symbols(0, 1).nof_samples != 0;
-  // How many symbols one block covers: 0 keeps the whole-slot blocks, which is the DEFAULT and the only
-  // policy whose shutdown has been seen to complete cleanly on air. The symbol-grained policy (S-7g-13) is
-  // experimental and opt-in through OCUDU_UL_RX_SYMBOLS=N: it is functionally green (contract MET 7/7,
-  // assembled=0, gaps=0) but its shutdown still trips a DU teardown race, and its latency benefit cannot be
-  // judged with [ul_pipeline]/[ul_time_frequency] because those series start at the first RECEIVED block -
-  // the slot's END under the whole-slot policy and its BEGINNING under the symbol one. Set the default back
-  // to 14 (= a slot's worth of symbols, i.e. the same request the whole-slot policy makes) only after the
-  // DU race is fixed and the policy has a judge whose endpoints do not move.
+  // How many OFDM symbols one receive block covers. DEFAULT 1 SINCE 2026-09-30 (dev doc 6.215): one symbol per
+  // block, so a symbol's transform is computed as soon as its samples exist instead of after the whole slot.
+  // Measured on air, back to back against the whole-slot policy: the front end's own work leaves the hop's
+  // critical path (t2f 536.0 -> 496.2 us) and the hop is ~25 us shorter on top of the CPU-DFT change it is
+  // delivered with (three pairs, dev doc 6.212).
+  //
+  // OCUDU_UL_RX_SYMBOLS=0 keeps the historical WHOLE-SLOT policy (and any N in 1..14 asks for that many symbols
+  // per block); the whole-slot request is `nof_symbols_per_block = 0` below.
+  //
+  // The two things that used to argue against this default are both settled:
+  //  * the SERIES whose endpoints moved - [ul_pipeline]/[ul_time_frequency] start at the first RECEIVED block,
+  //    i.e. the slot's END under whole-slot blocks and its BEGINNING under symbol ones - no longer move:
+  //    record_start() takes the block's SAMPLE TIMESTAMP (the S-7g-13 fix above), so the two policies are
+  //    comparable;
+  //  * the DU teardown race the symbol policy was said to trip on shutdown was NOT observed: four symbol-level
+  //    air legs (p41 on 2026-09-26 and p156/p158/p41's successors on 2026-09-30) all left complete reports and
+  //    no `Could not stop application` line.
+  // The policy is PRINTED below, because a leg's report could not otherwise say which one it ran (the pool line
+  // describes the buffers, which are slot-sized under either policy).
   {
     const char* env       = std::getenv("OCUDU_UL_RX_SYMBOLS");
-    nof_symbols_per_block = (env == nullptr) ? 0U : static_cast<unsigned>(std::strtoul(env, nullptr, 10));
+    nof_symbols_per_block = (env == nullptr) ? 1U : static_cast<unsigned>(std::strtoul(env, nullptr, 10));
+  }
+  {
+    char blocks[64] = {};
+    if (nof_symbols_per_block == 0) {
+      std::snprintf(blocks, sizeof(blocks), "a whole slot");
+    } else if (nof_symbols_per_block == 1) {
+      std::snprintf(blocks, sizeof(blocks), "1 OFDM symbol");
+    } else {
+      std::snprintf(blocks, sizeof(blocks), "%u OFDM symbols", nof_symbols_per_block);
+    }
+    std::fprintf(stderr,
+                 "[ul_rx_policy] blocks of %s (OCUDU_UL_RX_SYMBOLS=%u%s); the grid is %s: %s\n",
+                 blocks,
+                 nof_symbols_per_block,
+                 (std::getenv("OCUDU_UL_RX_SYMBOLS") == nullptr) ? ", the default" : "",
+                 rx_symbol_grid_known ? "symbol-addressable" : "NOT symbol-addressable",
+                 (rx_symbol_grid_known && (nof_symbols_per_block != 0))
+                     ? "the symbol-grained policy runs"
+                     : "the whole-slot policy runs (asked for, or forced by the chain)");
   }
   // A stream that starts here has to establish its phase again: the first block only closes the gap to
   // the next slot (whole-slot policy) or symbol (symbol-grained policy) boundary and is not processed

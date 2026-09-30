@@ -61,6 +61,12 @@ def classify_default(window):
         return "OFF"
     if re.search(r"return\s+(?:std::)?getenv\([^)]*\)\s*==\s*nullptr", w):
         return "ON"
+    # a VALUE default rather than a boolean: `x = (env == nullptr) ? 1U : strtoul(env, ...)`. The unset case IS
+    # the default a leg runs with, so report the value instead of giving up (the knob inventory's job is what a
+    # reader needs before flying; `?` for a knob whose default is a plain number hides it).
+    m = re.search(r"env\s*==\s*nullptr\)\s*\?\s*([0-9]+)[uU]?\s*:", w)
+    if m:
+        return f"= {m.group(1)}"
     return "?"
 
 

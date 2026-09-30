@@ -222,7 +222,11 @@ leg_commit_check() {   # <label> <leg .stderr path> <kind>
 # instrumentation was read on an acceptance leg (dev doc 6.145 (6) (1)); the behaviour-changing knobs stay
 # refused below.
 kNOB_ANY=" OCUDU_METAL_GPU_TIME OCUDU_UL_PHASE_SEGMENTS OCUDU_UL_SLOT_TRACE "
-kNOB_EQ=" OCUDU_DFT_BATCH_SYMBOLS=14 OCUDU_DFT_OPEN_BLOCK=1 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_CE_LANE_ORDER=merged " # == the delivery default
+# `== the delivery default`. SINCE 2026-09-30 (dev doc 6.215) the delivered lane writes the grid from the HOST,
+# so the three DFT entries are MOOT on a delivery leg (that engine is not on the path at all) while
+# `CE_LANE_ORDER=merged` still is the delivered value. A delivery leg should set NONE of them - that is the
+# strongest case, and the one the delivered configuration now is.
+kNOB_EQ=" OCUDU_DFT_BATCH_SYMBOLS=14 OCUDU_DFT_OPEN_BLOCK=1 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_CE_LANE_ORDER=merged "
 kCRC_FLOOR_PCT=60
 kCRC_MIN_HOPS=20000
 
@@ -513,9 +517,27 @@ if [ -n "${LEGF:-}" ] && [ -f "$LEGF" ]; then
         "$([ "$got" = "9" ] && echo PASS || echo FAIL)" "found $got of 9 in $(basename "$LEGF")"
 
   ml=$(grep -aE "contract MET" "$LEGF" | tail -1)
-  check "leg $LEG: contract MET (9 of 9) and mode=gpu" "MET (9 of 9" \
-        "$(echo "$ml" | grep -q "MET (9 of 9" && grep -q "contract (mode=gpu)" "$LEGF" && echo PASS || echo "$([ -z "$ml" ] && echo RED || echo FAIL)")" \
-        "${ml:-<unreadable>}"
+  # TWO DELIVERY READINGS SINCE 2026-09-30 (dev doc 6.215). The lane's DFT default moved to the HOST, and the
+  # "dft radio inputs" check then has NO POPULATION (the Metal DFT engine is off the path: `0 transform(s)`), so
+  # the contract reports "MET (8 of 9)". That is not a regression - and it is not accepted blindly either: the
+  # 8-of-9 reading is only a PASS when the check that lost its population is exactly that one, verified by
+  # reading its line. Anything else fails closed, as before.
+  dftl=$(grep -aF "]   dft radio inputs:" "$LEGF" | tail -1)
+  if echo "$ml" | grep -q "MET (9 of 9"; then
+    check "leg $LEG: contract MET (9 of 9) and mode=gpu" "MET (9 of 9" \
+          "$(grep -q "contract (mode=gpu)" "$LEGF" && echo PASS || echo "$([ -z "$ml" ] && echo RED || echo FAIL)")" \
+          "${ml:-<unreadable>}"
+  elif echo "$ml" | grep -q "MET (8 of 9" && echo "$dftl" | grep -q "0 transform(s)"; then
+    check "leg $LEG: contract MET (8 of 9) - the DFT check lost its population because the HOST writes the grid" \
+          "MET (8 of 9) with dft radio inputs = 0 transform(s)" \
+          "$(grep -q "contract (mode=gpu)" "$LEGF" && echo PASS || echo "$([ -z "$ml" ] && echo RED || echo FAIL)")" \
+          "${ml:-<unreadable>} | ${dftl:-<unreadable>}"
+  else
+    check "leg $LEG: contract MET (9 of 9), or 8 of 9 with the DFT check unpopulated, and mode=gpu" \
+          "MET (9 of 9), or MET (8 of 9) with dft radio inputs = 0 transform(s)" \
+          "$([ -z "$ml" ] && echo RED || echo FAIL)" \
+          "${ml:-<unreadable>} | ${dftl:-<no dft radio inputs line>}"
+  fi
 
   xl=$(grep -aE "= [0-9.]+ read\(s\)" "$LEGF" | tail -1)
   check "leg $LEG: crossings 0.00 + 0.00 per hop" "0.00 + 0.00" \

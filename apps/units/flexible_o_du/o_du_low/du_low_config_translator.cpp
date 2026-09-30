@@ -31,6 +31,12 @@ static std::string describe_backend(const std::string& requested, const std::str
     // "auto" is the "follow the pipeline mode" value, not a fallback: say which backend it resolved to.
     return fmt::format("{} (auto)", effective);
   }
+  if ((requested == "gpu") && (effective == "metal")) {
+    // An ALIAS is not a substitution (dev doc 6.215): `--pusch_dft_type gpu` names the device DFT under a
+    // second spelling, and the resolver normalizes it. Reading "requested backend not built in" for it would
+    // look like a fallback to the CPU in a leg's own banner.
+    return fmt::format("{} (alias of {})", effective, requested);
+  }
   return fmt::format("{}->{} (requested backend not built in)", requested, effective);
 }
 

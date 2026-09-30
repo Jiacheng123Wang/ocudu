@@ -172,7 +172,10 @@ TEST(phy_pipeline_mode_test, gpu_mode_takes_over_the_lane_modules)
   const phy_pipeline_effective effective = resolve(make_request("gpu"));
   EXPECT_EQ(effective.mode, phy_pipeline_mode::gpu);
   EXPECT_TRUE(effective.lane_fused);
-  EXPECT_EQ(effective.dft, "metal");
+  // The lane's DEFAULT DFT is the CPU since 2026-09-30 (dev doc 6.215): the host writes the grid and the other
+  // three modules stay on the device. See gpu_mode_defaults_to_a_host_written_grid below for the whole rule.
+  EXPECT_EQ(effective.dft, "cpu");
+  EXPECT_TRUE(effective.host_grid);
   EXPECT_EQ(effective.ch_est, "metal_mmse");
   EXPECT_EQ(effective.equalizer, "metal");
   // The LDPC decoder is not part of the lane: the LLR still leaves the device for the CPU decoder.
@@ -185,38 +188,56 @@ TEST(phy_pipeline_mode_test, gpu_mode_takes_over_the_lane_modules)
 
 TEST(phy_pipeline_mode_test, gpu_mode_has_no_cpu_fallback)
 {
-  // The default of every lane module knob is "auto", so an explicit "cpu" is a deliberate request that the mode
-  // cannot honor. The DFT is the ONE exception and has its own test below.
+  // The default of the estimator and the equalizer knobs is "auto", so an explicit "cpu" is a deliberate
+  // request that the mode cannot honor. The DFT is NOT one of them any more - the CPU is its DEFAULT there,
+  // and the Metal DFT is what has to be asked for (see the test below).
   EXPECT_NE(resolve_conflict(make_request("gpu", "auto", "cpu")).find("--pusch_channel_estimator_algo"),
             std::string::npos);
   EXPECT_NE(resolve_conflict(make_request("gpu", "auto", "auto", "cpu")).find("--pusch_channel_equalizer_backend"),
             std::string::npos);
 }
 
-TEST(phy_pipeline_mode_test, gpu_mode_honors_a_cpu_dft_as_the_host_grid_arm)
+TEST(phy_pipeline_mode_test, gpu_mode_defaults_to_a_host_written_grid)
 {
-  // --phy_pipeline gpu --pusch_dft_type cpu: the lane keeps the estimator, the equalizer and the demapper on the
-  // device, the grid stays in device-visible storage, and the DFT moves to the host - which is what host_grid
-  // reports (dev doc 6.205-6.207). It is the arm that has to be measurable against the ordinary lane on ONE binary.
-  const phy_pipeline_effective effective = resolve(make_request("gpu", "cpu"));
-  EXPECT_EQ(effective.mode, phy_pipeline_mode::gpu);
-  EXPECT_TRUE(effective.lane_fused);
-  EXPECT_EQ(effective.dft, "cpu");
-  EXPECT_TRUE(effective.host_grid);
-  // The three device-side consumers are untouched, and so is the grid's placement: only its WRITER changes.
-  EXPECT_EQ(effective.ch_est, "metal_mmse");
-  EXPECT_EQ(effective.equalizer, "metal");
-  EXPECT_TRUE(effective.device_grid);
+  // The delivered rule (dev doc 6.215): --phy_pipeline gpu with no DFT knob writes the frequency-domain grid
+  // from the HOST and keeps the estimator, the equalizer and the demapper on the device. The grid stays in
+  // device-visible storage, so what changes is its WRITER, not where it lives.
+  const phy_pipeline_effective delivered = resolve(make_request("gpu"));
+  EXPECT_TRUE(delivered.lane_fused);
+  EXPECT_EQ(delivered.dft, "cpu");
+  EXPECT_TRUE(delivered.host_grid);
+  EXPECT_EQ(delivered.ch_est, "metal_mmse");
+  EXPECT_EQ(delivered.equalizer, "metal");
+  EXPECT_TRUE(delivered.device_grid);
 
-  // The delivered path does not move: "auto" is still the Metal DFT and a device-written grid.
-  const phy_pipeline_effective ordinary = resolve(make_request("gpu"));
-  EXPECT_EQ(ordinary.dft, "metal");
-  EXPECT_FALSE(ordinary.host_grid);
+  // Writing the knob out explicitly is the same configuration (it is what the delivered config file may say).
+  const phy_pipeline_effective spelled = resolve(make_request("gpu", "cpu"));
+  EXPECT_EQ(spelled.dft, delivered.dft);
+  EXPECT_EQ(spelled.host_grid, delivered.host_grid);
+
+  // The HISTORICAL configuration - the DFT on the device - is asked for explicitly, under either spelling; the
+  // alias is normalized so that every consumer downstream sees one value.
+  const phy_pipeline_effective metal = resolve(make_request("gpu", "metal"));
+  EXPECT_EQ(metal.dft, "metal");
+  EXPECT_FALSE(metal.host_grid);
+  EXPECT_EQ(resolve(make_request("gpu", "gpu")).dft, "metal");
+  EXPECT_FALSE(resolve(make_request("gpu", "gpu")).host_grid);
+  // ... and the three device-side consumers are the same in both arms: only the grid's writer moves.
+  EXPECT_EQ(metal.ch_est, delivered.ch_est);
+  EXPECT_EQ(metal.equalizer, delivered.equalizer);
+  EXPECT_TRUE(metal.device_grid);
 
   // Outside the fused lane the flag is simply the backend classification, and it is set for every mode.
   EXPECT_TRUE(resolve(make_request("cpu")).host_grid);
   EXPECT_TRUE(resolve(make_request("cpu_gpu", "cpu")).host_grid);
   EXPECT_FALSE(resolve(make_request("cpu_gpu", "metal")).host_grid);
+}
+
+TEST(phy_pipeline_mode_test, gpu_mode_honors_a_cpu_dft_as_the_host_grid_arm)
+{
+  // Superseded by gpu_mode_defaults_to_a_host_written_grid above (dev doc 6.215): the CPU DFT is the lane's
+  // DEFAULT now, and the Metal one is the configuration that has to be asked for.
+  SUCCEED();
 }
 
 TEST(phy_pipeline_mode_test, gpu_mode_requires_the_lane_backends)
@@ -324,7 +345,11 @@ TEST(phy_pipeline_cli_test, module_backends_accept_auto)
   EXPECT_EQ(explicit_cpu.pusch_dft_type, "cpu");
   EXPECT_EQ(explicit_cpu.pusch_channel_estimator_algo, "cpu");
   EXPECT_EQ(explicit_cpu.pusch_channel_equalizer_backend, "cpu");
-  EXPECT_THROW(parse_expert_phy({"expert_phy", "--pusch_dft_type", "gpu"}), CLI::ParseError);
+  // "gpu" is ACCEPTED as the alias of the device DFT since 2026-09-30 (dev doc 6.215): the historical
+  // full-Metal configuration is what has to be asked for, and both spellings mean it.
+  EXPECT_EQ(parse_expert_phy({"expert_phy", "--pusch_dft_type", "gpu"}).pusch_dft_type, "gpu");
+  EXPECT_EQ(parse_expert_phy({"expert_phy", "--pusch_dft_type", "metal"}).pusch_dft_type, "metal");
+  EXPECT_THROW(parse_expert_phy({"expert_phy", "--pusch_dft_type", "magic"}), CLI::ParseError);
   EXPECT_THROW(parse_expert_phy({"expert_phy", "--pusch_channel_equalizer_backend", "magic"}), CLI::ParseError);
   EXPECT_THROW(parse_expert_phy({"expert_phy", "--pusch_channel_estimator_algo", "magic"}), CLI::ParseError);
 }
@@ -335,11 +360,15 @@ TEST(phy_pipeline_cli_test, module_backends_accept_auto)
 /// This is the promise that lets the four module knobs be treated as cpu_gpu-only: once the glue is
 /// gone, the switch alone is the whole configuration. The two command lines differ only in how they
 /// say it, so their effective configurations must be identical field by field.
+///
+/// \note The DFT is spelled `cpu` since 2026-09-30 (dev doc 6.215): the lane's own default moved to the
+///       HOST-written grid, so that is what the equivalent command line says. The module-level default
+///       ("auto" -> the CPU implementation, which is the same backend) is what makes the two agree.
 TEST(DuLowPhyPipelineTest, GpuModeEqualsTheModuleKnobsSpelledOut)
 {
   const phy_pipeline_effective via_mode = resolve(make_request("gpu"));
   const phy_pipeline_effective via_knobs =
-      resolve(make_request("cpu_gpu", "metal", "metal_mmse", "metal", "metal", "on"));
+      resolve(make_request("cpu_gpu", "cpu", "metal_mmse", "metal", "metal", "on"));
 
   // The mode LABEL differs by design (gpu also declares the fused lane), what must be identical is the
   // configuration those two command lines select.
@@ -347,6 +376,13 @@ TEST(DuLowPhyPipelineTest, GpuModeEqualsTheModuleKnobsSpelledOut)
   EXPECT_EQ(via_mode.ch_est, via_knobs.ch_est);
   EXPECT_EQ(via_mode.equalizer, via_knobs.equalizer);
   EXPECT_EQ(via_mode.device_grid, via_knobs.device_grid);
+
+  // And the historical configuration needs BOTH knobs spelled out on the mode side: the DFT on the device.
+  const phy_pipeline_effective historical = resolve(make_request("gpu", "metal"));
+  EXPECT_EQ(historical.dft, "metal");
+  EXPECT_FALSE(historical.host_grid);
+  EXPECT_EQ(historical.ch_est, via_mode.ch_est);
+  EXPECT_EQ(historical.equalizer, via_mode.equalizer);
 }
 
 /// The gpu mode's knobs may only repeat the lane's own backend: everything else is a conflict rather

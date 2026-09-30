@@ -229,10 +229,10 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
     return "Invalid PUSCH channel equalizer backend. Accepted values [auto,cpu,metal]";
   };
   auto pusch_dft_type_check = [](const std::string& value) -> std::string {
-    if ((value == "auto") || (value == "cpu") || (value == "metal")) {
+    if ((value == "auto") || (value == "cpu") || (value == "metal") || (value == "gpu")) {
       return {};
     }
-    return "Invalid PUSCH DFT processor type. Accepted values [auto,cpu,metal]";
+    return "Invalid PUSCH DFT processor type. Accepted values [auto,cpu,metal,gpu]";
   };
 
   add_option(app,
@@ -376,12 +376,13 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
   add_option(app,
              "--pusch_dft_type",
              expert_phy_params.pusch_dft_type,
-             "PUSCH (uplink receive) DFT processor type: auto, cpu and metal (Apple Silicon only; the "
-             "downlink transmit path is unaffected).\nModule-level offload selection: only meaningful with --phy_pipeline cpu_gpu (cpu and gpu fix it), with ONE "
-             "exception: with --phy_pipeline gpu an explicit cpu moves ONLY the DFT to the host - the frequency-domain grid "
-             "is then written by the receive thread (which is blocked waiting for the slot's samples anyway) and the lane "
-             "keeps the estimator, the equalizer and the demapper on the device. It is a measurement arm, not a fallback; "
-             "auto keeps the delivered Metal DFT.")
+             "PUSCH (uplink receive) DFT processor type: auto, cpu, metal (alias: gpu) - the downlink transmit path "
+             "is unaffected.\nWith --phy_pipeline gpu the DEFAULT is cpu: the receive thread computes the slot's "
+             "transforms while it is blocked waiting for its samples (2.9us per 768-point transform against a 35.7us "
+             "symbol), so the front end's command buffers leave the lane's queue and the frequency-domain grid is "
+             "written by the HOST into the same device-visible storage. The estimator, the equalizer and the demapper "
+             "stay on the device either way.\nmetal (or gpu) selects the historical full-Metal DFT on the device. With "
+             "--phy_pipeline cpu_gpu the knob is the per-module offload selection.")
       ->capture_default_str()
       ->check(pusch_dft_type_check);
   add_option(app,

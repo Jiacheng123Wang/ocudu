@@ -90,8 +90,20 @@ inline bool is_cpu_phy_backend(std::string_view value)
 
 /// Per-module backend substitutions applied when the fused lane takes a module over.
 namespace phy_pipeline_lane_defaults {
-/// DFT backend of the fused lane.
-constexpr const char* dft = "metal";
+/// \brief DFT backend of the fused lane: the CPU one, so the frequency-domain grid is written by the HOST.
+///
+/// FLIPPED 2026-09-30 (dev doc 6.212/6.215). The lane used to take the DFT onto the device like the other
+/// three modules; the measurement arms showed that keeping it on the HOST is worth **~118 us per hop**
+/// (three back-to-back pairs, the control legs reproducing to 3 us), because:
+///  * the receive thread is blocked waiting for the slot's samples anyway, and the per-symbol transform of a
+///    768-point FFT costs 2.88 us against a 35.7 us symbol period (vDSP does it in 1.54 us);
+///  * with the DFT on the device, the front end's command buffers share the LANE's queue - the engine picks
+///    one queue per instance and the block hand-over puts it on the back-end one - and the lane pays
+///    ~112-115 us of queue wait for them (dev doc 6.209/6.212).
+/// The grid stays in device-visible storage either way, so the estimator, the equalizer and the demapper are
+/// untouched: only its WRITER changes. The Metal DFT is still available and is asked for explicitly with
+/// `--pusch_dft_type metal` (or its alias `gpu`), which is the historical configuration.
+constexpr const char* dft = "cpu";
 /// Channel estimator backend of the fused lane.
 constexpr const char* ch_est = "metal_mmse";
 /// Channel equalizer backend of the fused lane.
@@ -215,21 +227,19 @@ resolve_phy_pipeline(const phy_pipeline_request& request, const phy_backend_avai
       break;
 
     case phy_pipeline_mode::gpu:
-      // The lane owns these modules: a knob that selects the CPU cannot be honored - the mode has no CPU
-      // fallback - so it is a conflict rather than a silent override. Any other value stands: the knobs
-      // keep picking the FLAVOR of a device backend (a different Metal estimator, say), which is what they
-      // are for in cpu_gpu; what they may not do is claim the module runs on the CPU while the lane runs it
-      // on the device.
+      // The lane owns the estimator and the equalizer: a knob that selects the CPU cannot be honored - the mode
+      // has no CPU fallback - so it is a conflict rather than a silent override. Any other value stands: the
+      // knobs keep picking the FLAVOR of a device backend (a different Metal estimator, say), which is what
+      // they are for in cpu_gpu; what they may not do is claim the module runs on the CPU while the lane runs
+      // it on the device.
       //
-      // THE DFT IS THE ONE EXCEPTION, and it is a measurement arm rather than a fallback (dev doc
-      // 6.205-6.207): with `--pusch_dft_type cpu` the frequency-domain grid is produced by the HOST - the
-      // receive thread computes the slot's transforms while it is blocked waiting for its samples - and the
-      // lane keeps the estimator, the equalizer and the demapper on the device. The grid stays in the same
-      // device-visible storage (device_grid below), so the three consumers are untouched; what changes is
-      // that the front end no longer runs on the device, hence there is no block to hand over (D1 is
-      // skipped) and the hop's command buffer no longer carries the transforms. It is what makes the arm
-      // measurable against the ordinary lane on ONE binary: "auto" still resolves to the Metal DFT, so the
-      // delivery path does not move.
+      // THE DFT IS NOT ONE OF THEM ANY MORE (flipped 2026-09-30, dev doc 6.215). Its DEFAULT in this mode is
+      // the CPU (see phy_pipeline_lane_defaults::dft): the grid is written by the HOST and the lane keeps the
+      // estimator, the equalizer and the demapper on the device. The Metal DFT - the historical configuration
+      // - is asked for explicitly, with `--pusch_dft_type metal` or its alias `gpu`; the alias is normalized
+      // to the canonical value here so that every consumer downstream (the lower PHY's DFT factory, the
+      // effective-configuration log) sees one spelling. Either way the grid stays in device-visible storage
+      // (device_grid below) and the three consumers are untouched: only the grid's WRITER changes.
       if (is_cpu_phy_backend(request.ch_est) && (request.ch_est != "auto")) {
         set_phy_pipeline_conflict(error, out.mode, "--pusch_channel_estimator_algo", request.ch_est);
         return std::nullopt;
@@ -239,6 +249,9 @@ resolve_phy_pipeline(const phy_pipeline_request& request, const phy_backend_avai
         return std::nullopt;
       }
       out.dft        = (request.dft == "auto") ? phy_pipeline_lane_defaults::dft : request.dft;
+      if (out.dft == "gpu") {
+        out.dft = "metal"; // the alias of the device DFT
+      }
       out.ch_est     = (request.ch_est == "auto") ? phy_pipeline_lane_defaults::ch_est : request.ch_est;
       out.equalizer  = (request.equalizer == "auto") ? phy_pipeline_lane_defaults::equalizer : request.equalizer;
       out.lane_fused = true;

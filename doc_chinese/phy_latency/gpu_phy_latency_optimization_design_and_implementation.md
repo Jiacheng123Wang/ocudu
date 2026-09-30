@@ -13365,6 +13365,106 @@ tx_slack_note_receive(static_cast<uint64_t>(rx_metadata.ts) + nof_samples, /*rx_
 **纪律 52**：**凡是把两个时钟对起来的探针，必须写明"这个地标属于哪一个样点"** ——
 一个随**块长**变化的偏移，会让读数跟着**收包策略**走，而不是跟着被测对象走；这类错误的表现是"换了个无关的旋钮，读数整体平移一个常量"。
 
+#### ⑤ 修复的**空口验收**：腿 `p161-n78-gpudft-d`（A 臂，整槽）✅ 判据命中
+
+| 读数 | 修前（`p154`/`p157`/`p159`，整槽）| **`p161`（修后，整槽）** | 符号级（`p156`/`p158`）|
+|---|---|---|---|
+| `dl_tx_slack` 中位 | **1511** | **1011** | 1047 |
+| p1 / p5 / p25 | 1506 / 1510 / 1511 | **1006 / 1010 / 1011** | — |
+| `below 1ms` / `below 500us` | 34 / 14、1 / 0、0 / 0 | **122 / 6** | 870 / 13、833 / 9 |
+| **`AT/BELOW 0`** | 4 / 0 / 0 | **3** | 9 / 8 |
+| `min` | −1306 / +973 / +1382 | **−630** | −4303 / −3784 |
+
+* ★ **整体平移正好 500 µs**（= 块的时长 11520/23.04 MHz）⇒ **与预登记一致，机制确认无误**；
+* 修后的 tails 才是**真实**的：`AT/BELOW 0 = 3`、最差一次迟到 **630 µs**（旧映射把这些藏起来了）；
+* **残余 36 µs**（1011 vs 符号级 1047）= **一个符号**：那是两种块长**投递延迟**的真实差别（11520 样点的传输比 822 的排空稍慢），
+  500 µs 那一项已经消掉（占比 2.4%，可接受）；
+* ★ **旁证**：同腿 **V1 = 1423.5**（正常 A 带 1417–1420）、契约 **9 of 9**、`gap` 133.7、`merged_hop` exec 469.0
+  ⇒ **只改了探针，没动流水线**。
+
+### 6.214 ★ **口径更正（用户指出）：交付对象是 C，不是 B**；以及"C 交付化"的清单（2026-09-30）
+
+> 我在 §6.212④ 里写了"**B 的交付化**"—— 用户指出这是**框架错误**：**B 只是对照/反证臂**（它的价值在于把收益拆成"CPU DFT 单独"与"再加符号级收包"两半），
+> **交付候选是 C**。以下按 C 重列。
+
+#### ① C 的组成（两个设置，缺一不可）
+
+| 设置 | 现状 | 交付化要做的 |
+|---|---|---|
+| `--expert_phy.pusch_dft_type cpu`（`gpu` 模式下）| ✅ 已实现，**默认关** | 把 banner/help/测试里的"measurement arm"措辞改成**受支持的配置**；yml 里写上 |
+| **`OCUDU_UL_RX_SYMBOLS=1`**（符号级收包）| ⚠ **只是环境变量**，不在 yml/CLI 里 | ★ **必须让它成为受支持的配置**（或明确按"启动环境"交付并写进文档），否则 C 不可复现 |
+
+#### ② 其余三件（与 B/C 无关，属"换配置"的账）
+
+1. **契约措辞**：网格生产者改为宿主 + `dft radio inputs` 检查的 **N/A** 语义（自然口径 **8 of 9 applicable**，§6.209⑤）；
+2. **baseline 重取**（`wip/ce_refactor_baseline.md`）以 **C** 为基准；
+3. **风险复核**：C 的唯一历史风险是 `p41`（`OCUDU_UL_RX_SYMBOLS=1` + **GPU DFT**）把 UL 吞吐打塌（V1 +676 µs）；
+   其机制是**前端每符号一条 cb**（14.0/槽）—— 在 CPU DFT 下**该机制不存在**（C 三腿 `cbs/lane=2.00` ✓、PDU/字节正常 ✓）⇒ **该风险在当前 C 上不复现**。
+
+#### ③ 待办（更新后的顺序）
+
+1. **C 的交付化**（① 的两个设置 + ② 的三件）；
+2. **vDSP 臂**（§6.210②：CPU FFT 2.88 → 1.54 µs，预期再省 ~18 µs，零契约代价）；
+3. 若要**定稿数字**：一对**配平业务**的 A/C（同 ping 次数、同 iperf3 参数），用两次 A 的散布作噪声底。
+
+### 6.215 ★★★ **C 交付化（用户裁定）：两个设置都翻成默认**；历史"全 Metal"路径改为显式指定（2026-09-30）
+
+#### ① 用户裁定
+
+> "把 2 个设置都要翻成默认的设置……想要跑原来的全 metal（DFT 也在 Metal）要明确指示：`--expert_phy.pusch_dft_type gpu`。
+> 如果要画蛇添足的设置：`--expert_phy.pusch_dft_type cpu` 就和默认的没有设置是一样的行为。"
+> 补充："`OCUDU_UL_RX_SYMBOLS=1` 也应该类似地处理。"
+
+#### ② 改了什么
+
+| 文件 | 改动 |
+|---|---|
+| `du_low_phy_pipeline.h` | **`phy_pipeline_lane_defaults::dft = "metal"` → `"cpu"`**（融合车道的 DFT 默认改为**宿主写网格**）；resolver 把 **`gpu` 归一化成 `metal`**（别名，所有下游只见一种拼写）；注释写明翻转的理由与逃生口 |
+| `du_low_config_validator.cpp` | `dft_on_cpu = is_cpu_phy_backend(request.dft)`（`auto` 现在也是 CPU ⇒ **没有 Metal DFT 的二进制也能跑 `gpu` 模式**）|
+| `du_low_config_cli11_schema.cpp` | `--pusch_dft_type` 接受 **`gpu`**（别名）；帮助文本改写为"`gpu` 模式下默认 cpu；`metal`/`gpu` = 历史的全 Metal DFT" |
+| `du_low_config_translator.cpp` | `describe_backend()` 把别名与降级区分开：`dft=metal (alias of gpu)`（原来会打成 *"requested backend not built in"*，像降级）|
+| `lower_phy_baseband_processor.cpp` | **`OCUDU_UL_RX_SYMBOLS` 默认 `0`（整槽）→ `1`（一符号）**；新增 **`[ul_rx_policy]` 启动行**（★ 这条是必须的：`[ul_rx_pool]` 描述的是**缓冲**，两种策略下逐字相同 ⇒ 报告原来**看不出**用的哪种收包策略）；注释里把两个旧顾虑逐条结清（见 ④）|
+| `milestone_audit.sh` | 契约判据**接受两种交付读数**：`MET (9 of 9)`，或 **`MET (8 of 9)` 且 `dft radio inputs` = `0 transform(s)`**（宿主写网格 ⇒ 该检查**无样本**）；**其余一律 FAIL（fail-closed）**；`kNOB_EQ` 注释注明三条 DFT 项在新默认下已无意义 |
+| `knob_inventory.md` | 重新生成（116 → 121 个旋钮；生成器补了"**数值型默认**"的识别 ⇒ `OCUDU_UL_RX_SYMBOLS` 的默认从 `?` 变成 **`= 1`**）|
+| `du_low_phy_pipeline_test.cpp` | 21/21：新增 `gpu_mode_defaults_to_a_host_written_grid`（默认 = 宿主网格、`metal`/`gpu` 两种拼写都指向设备 DFT、三个消费者不变）；`GpuModeEqualsTheModuleKnobsSpelledOut` 的等价命令行改用 `cpu`；`gpu` 从"非法值"改为"合法别名" |
+
+#### ③ 现在的三个配置（**同一二进制**）
+
+| 想要的 | 命令 |
+|---|---|
+| **交付（新默认 = C）** | `--phy_pipeline gpu`（**不设任何旋钮**）|
+| **历史全 Metal 收 + 整槽收包** | `--phy_pipeline gpu --expert_phy.pusch_dft_type metal`（或 `gpu`）**且** `OCUDU_UL_RX_SYMBOLS=0` |
+| 显式写出默认（等价，画蛇添足）| `--expert_phy.pusch_dft_type cpu`（RX 不设）|
+
+⚠ ★ **两个逃生口必须一起用**才等于历史交付配置：只给 `--pusch_dft_type metal` 得到的是 **Metal DFT + 符号级收包** —— 那是 `p41` 的形状（+676 µs），**不是**历史交付路径。
+
+#### ④ 翻转前的两个顾虑，逐条结清
+
+1. **"判据的端点会移动"**（`[ul_pipeline]`/`[ul_time_frequency]` 从"第一个收到的块"起算 ⇒ 整槽策略是时隙末尾、符号级是开头）：**已修**（S-7g-13 的 `record_start()` 取**块的样点时间戳**）⇒ 两种策略可比 ✓；
+2. **"shutdown 会踩 DU teardown race"**：**四条符号级空口腿**（`p41` 2026-09-26 + `p156`/`p158` 今日）**全部报告完整、`Could not stop application` 计数为 0** ⇒ 旧注释里的担忧**未复现** ✓。
+
+#### ⑤ 离线验证
+
+| 检查 | 结果 |
+|---|---|
+| 全树编译 | ✅ |
+| `ctest -L phy -j 1` | ✅ **203/203**；`du_low*` **5/5**；`du_low_phy_pipeline_test` **21/21** |
+| 默认启动 | `device_grid=yes (written by the HOST DFT)` / `dft=cpu (auto)` / `[ul_rx_policy] blocks of 1 OFDM symbol (OCUDU_UL_RX_SYMBOLS=1, the default)` |
+| `--pusch_dft_type metal` | `dft=metal`，无 host-grid 标记 |
+| `--pusch_dft_type gpu` | **`dft=metal (alias of gpu)`**（不是降级）|
+| `OCUDU_UL_RX_SYMBOLS=0` | `[ul_rx_policy] blocks of a whole slot (OCUDU_UL_RX_SYMBOLS=0)` |
+| 门禁契约判据 | `p154`（设备 DFT）→ PASS(9 of 9)；`p158`（宿主 DFT）→ **PASS(8 of 9 + N/A)** ✓ 两种都接受、其余 FAIL |
+
+#### ⑥ 空口验收（预登记）：一条**默认配置**的腿
+
+```bash
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p162-n78-delivered --regime=default
+```
+**判据**：`[ul_rx_policy]` 行存在且说"1 OFDM symbol (…, the default)"；`device_grid=yes (written by the HOST DFT)`；
+**契约 8 of 9**（`dft radio inputs` = 0）；`cbs/lane=2.00`；**`dft_front_end`/`late_handed` 两条 cb 流不存在**；
+**V1 中位 ≈1270–1310 µs**（对 `p154`/`p157`/`p159` 的 A 基线 1417–1420 是 **−110…−150**）；`merged_hop` exec ≈437、`gap` ≈15；
+**`dl_tx_slack` 中位 ≈1011**（修好的仪器）。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
