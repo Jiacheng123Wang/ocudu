@@ -82,7 +82,7 @@ void f1ap_du_removal_procedure::handle_f1_removal_response()
   if (transaction.aborted()) {
     // Timeout or cancellation case.
     logger.warning(
-        "{}: Forcing shutdown of F1 TNL association. Cause: Timeout reached for reception of the F1 Setup Response.",
+        "{}: Forcing shutdown of F1 TNL association. Cause: Timeout reached for reception of the F1 Removal Response.",
         name());
   } else if (transaction.response().has_value()) {
     const asn1::f1ap::successful_outcome_s& success = transaction.response().value();
