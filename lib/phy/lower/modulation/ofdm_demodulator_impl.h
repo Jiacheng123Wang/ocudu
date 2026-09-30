@@ -23,8 +23,10 @@ class ofdm_symbol_demodulator_impl : public ofdm_symbol_demodulator
 {
   /// Indicates the DFT size.
   unsigned dft_size;
-  /// Indicates the resource grid bandwidth in resource elements.
+  /// Resource grid bandwidth in resource elements.
   unsigned rg_size;
+  /// Half resource grid bandwidth in resource elements.
+  unsigned half_rg_size;
   /// Cyclic prefix type.
   cyclic_prefix cp;
   /// DFT window offset.
@@ -43,8 +45,6 @@ class ofdm_symbol_demodulator_impl : public ofdm_symbol_demodulator
   std::atomic<double> next_center_freq_Hz;
   /// Current center frequency in Hertz.
   double current_center_freq_Hz;
-  /// Internal buffer aimed at storing the phase compensated DFT outputs.
-  std::vector<cf_t> compensated_output;
   /// DFT window offset phase compensation.
   std::vector<cf_t> window_phase_compensation;
 

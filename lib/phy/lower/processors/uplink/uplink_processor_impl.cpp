@@ -181,42 +181,49 @@ void lower_phy_uplink_processor_impl::process_collecting(const baseband_gateway_
   // Select the minimum among the remainder of samples to process and the number of samples to complete the buffer.
   unsigned nof_samples = std::min(nof_input_samples, current_symbol_size - temp_buffer_write_index);
 
-  // For each port, concatenate samples.
-  for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
-    // Select view of the temporary buffer.
-    span<ci16_t> temp_buffer_dst = temp_buffer[i_port].subspan(temp_buffer_write_index, nof_samples);
+  // Copy samples to a temporary buffer if the buffer requires alignment or if CFO compensation is required.
+  baseband_gateway_buffer_reader_view samples_view(samples, 0, nof_samples);
+  if ((nof_samples != current_symbol_size) || cfo_processor.has_cfo()) {
+    // For each port, concatenate samples.
+    for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
+      // Select view of the temporary buffer.
+      span<ci16_t> temp_buffer_dst = temp_buffer[i_port].subspan(temp_buffer_write_index, nof_samples);
 
-    // Select view of the input samples.
-    span<const ci16_t> temp_buffer_src = samples.get_channel_buffer(i_port).first(nof_samples);
+      // Select view of the input samples.
+      span<const ci16_t> temp_buffer_src = samples.get_channel_buffer(i_port).first(nof_samples);
 
-    // Append input samples into the temporary buffer.
-    ocuduvec::copy(temp_buffer_dst, temp_buffer_src);
+      // Append input samples into the temporary buffer.
+      ocuduvec::copy(temp_buffer_dst, temp_buffer_src);
+    }
+
+    // Increment the count of samples stored in the temporal buffer.
+    temp_buffer_write_index += nof_samples;
+
+    // If the temporal buffer is not full, keep state in-sync and return.
+    if (temp_buffer_write_index < current_symbol_size) {
+      state = fsm_states::collecting;
+      return;
+    }
+
+    // Perform carrier frequency offset compensation.
+    cfo_processor.process(temp_buffer.get_writer());
+
+    // Advance CFO processor number of samples.
+    cfo_processor.advance(temp_buffer.get_nof_samples());
+
+    // Update the samples view with the temporary buffer.
+    samples_view = baseband_gateway_buffer_reader_view(temp_buffer.get_reader(), 0, temp_buffer.get_nof_samples());
   }
-
-  // Increment the count of samples stored in the temporal buffer.
-  temp_buffer_write_index += nof_samples;
-
-  // If the temporal buffer is not full, keep state in-sync and return.
-  if (temp_buffer_write_index < current_symbol_size) {
-    state = fsm_states::collecting;
-    return;
-  }
-
-  // Perform carrier frequency offset compensation.
-  cfo_processor.process(temp_buffer.get_writer());
-
-  // Advance CFO processor number of samples.
-  cfo_processor.advance(temp_buffer.get_nof_samples());
 
   // Process symbol by PRACH processor.
   prach_processor_baseband::symbol_context prach_context = {
       .slot = current_slot, .symbol = current_symbol_index, .sector = sector_id};
-  prach_proc->get_baseband().process_symbol(temp_buffer.get_reader(), prach_context);
+  prach_proc->get_baseband().process_symbol(samples_view, prach_context);
 
   // Process symbol by PUxCH processor.
   lower_phy_rx_symbol_context puxch_context = {
       .slot = current_slot, .sector = sector_id, .nof_symbols = current_symbol_index};
-  bool processed = puxch_proc->get_baseband().process_symbol(temp_buffer.get_reader(), puxch_context);
+  bool processed = puxch_proc->get_baseband().process_symbol(samples_view, puxch_context);
 
   if (processed) {
     sample_statistics<float> avg_power;

@@ -11,5 +11,6 @@ target_link_libraries(ofdm_modulator_unittest ocudulog ocudu_lower_phy_modulatio
 add_test(ofdm_modulator_unittest ofdm_modulator_unittest)
 
 add_executable(ofdm_demodulator_unittest ofdm_demodulator_unittest.cpp)
+target_include_directories(ofdm_demodulator_unittest PRIVATE ${CMAKE_SOURCE_DIR}/lib)
 target_link_libraries(ofdm_demodulator_unittest ocudulog ocudu_lower_phy_modulation GTest::gtest ocudu_gtest_main)
-gtest_discover_tests(ofdm_demodulator_unittest)
+add_test(ofdm_demodulator_unittest ofdm_demodulator_unittest)

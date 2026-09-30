@@ -4,9 +4,11 @@
 
 #include "../../generic_functions/dft_processor_test_doubles.h"
 #include "../../support/resource_grid_test_doubles.h"
+#include "phy/lower/modulation/phase_compensation_lut.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/compare.h"
 #include "ocudu/ocuduvec/conversion.h"
+#include "ocudu/ocuduvec/sc_prod.h"
 #include "ocudu/phy/antenna_ports.h"
 #include "ocudu/phy/lower/modulation/modulation_factories.h"
 #include <gtest/gtest.h>
@@ -72,6 +74,9 @@ TEST(ofdm_demodulator_unittest, demodulate)
 
         unsigned nsubc = ofdm_config.bw_rb * NOF_SUBCARRIERS_PER_RB;
 
+        // Create phase compensation table for the expected DFT input computation.
+        phase_compensation_lut expected_phase_comp(scs, cp, dft_size, ofdm_config.center_freq_Hz, false);
+
         // Create OFDM demodulator.
         std::unique_ptr<ofdm_slot_demodulator> ofdm = ofdm_factory->create_ofdm_slot_demodulator(ofdm_config);
         ASSERT_TRUE(ofdm != nullptr);
@@ -126,9 +131,12 @@ TEST(ofdm_demodulator_unittest, demodulate)
             // Get DFT input.
             span<const cf_t> dft_input = dft_entries[symbol_idx].input;
 
-            // Verify DFT input.
+            // Verify DFT input. It shall include the phase compensation, scaling, and the ci16 to cf conversion scale.
+            cf_t              phase_compensation = expected_phase_comp.get_coefficient(symbol_idx);
             std::vector<cf_t> expected_dft_input(dft_size);
-            ocuduvec::convert(expected_dft_input, time_data_symbol.last(dft_size), ocuduvec::scaling_factor_ci16_to_cf);
+            ocuduvec::sc_prod(expected_dft_input,
+                              time_data_symbol.last(dft_size),
+                              (phase_compensation * ofdm_config.scale) / ocuduvec::scaling_factor_ci16_to_cf);
             ASSERT_TRUE(ocuduvec::equal(expected_dft_input, dft_input.first(dft_size)));
 
             // Generate ideal frequency domain outputs.
@@ -138,9 +146,9 @@ TEST(ofdm_demodulator_unittest, demodulate)
               entry.symbol                                     = symbol_idx;
               entry.subcarrier                                 = subc_idx;
               if (subc_idx < nsubc / 2) {
-                entry.value = dft_entries[symbol_idx].output[dft_size - (nsubc / 2) + subc_idx] * ofdm_config.scale;
+                entry.value = dft_entries[symbol_idx].output[dft_size - (nsubc / 2) + subc_idx];
               } else {
-                entry.value = dft_entries[symbol_idx].output[subc_idx - (nsubc / 2)] * ofdm_config.scale;
+                entry.value = dft_entries[symbol_idx].output[subc_idx - (nsubc / 2)];
               }
               expected_rg.push_back(entry);
             }

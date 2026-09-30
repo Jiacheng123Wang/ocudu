@@ -217,6 +217,24 @@ TEST_P(OcuduvecScProdFixture, OcuduvecScProdBrainFloatComplexReal)
   }
 }
 
+TEST_P(OcuduvecScProdFixture, OcuduvecScProdInt16Complex)
+{
+  std::vector<ci16_t> x = generate_complex_random_data<ci16_t>();
+  cf_t                h = get_random_complex_coeff();
+
+  std::vector<cf_t> z(size);
+
+  ocuduvec::sc_prod(z, x, h);
+
+  std::vector<cf_t> expected(size);
+  std::transform(x.begin(), x.end(), expected.begin(), [h](ci16_t value) { return to_cf(value) * h; });
+
+  for (size_t i = 0; i != size; i++) {
+    float err = std::abs(expected[i] - z[i]);
+    ASSERT_LT(err, ASSERT_MAX_ERROR) << fmt::format("expected={} z={}", expected[i], z[i]);
+  }
+}
+
 TEST_P(OcuduvecScProdFixture, OcuduvecScAndAddProdFloat)
 {
   std::vector<float> x = generate_real_random_data();
