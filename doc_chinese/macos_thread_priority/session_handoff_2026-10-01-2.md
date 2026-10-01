@@ -174,3 +174,5 @@ LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml OCUDU_METAL_GPU_TIME=1 OCUDU_UL
 7. **上报"停顿"必须同时给** `cpu`/`win`/`ivcsw`/`base_age` + 同秒 `[RF]` 行；**现在还要给 `thread=`/`tcpu=`**。
 8. **heavy 观察（taskinfo/powermetrics/sample）只能在 `-diag` 腿上**（§2.4，153 ms 的教训）。
 9. ★ **新**：**"设了"不等于"生效"** —— 任何调度/档位改动都必须在**线程内回读**（本会话的全部价值来自这一条）。
+10. ★ **新（2026-10-01 的教训）**：**腿在跑的时候，本机不许跑构建/测试/loopback/任何 `-j`** —— 动手前先 `pgrep -x gnb`。
+    实测代价：`p191` 因我在 22:09:12 跑了 `-j 8` 构建而作废（最后一窗独占 19/23 个接收尾部事件、`load1` 3.8→5.6）。
