@@ -388,6 +388,12 @@
 > ⑥ ⏳ **剩下 2 条要用户收**：`p167`/`p169` 跑在 `f02d40e791`，而 `f02d40e791..HEAD` 含 vDSP 的**代码**改动 ⇒ 两条腿不再是关于 HEAD 的证据 ⇒ **需在当前 HEAD 重飞 baseline + stress**（root + B210 + 手机，纪律 63）；
 > ⑦ ⚠ 教训（纪律 72）：§6.227 记的"GREEN"是 **`--quick`** 跑的，而 `--quick` **跳过的正是这四条长臂** ⇒ 引用"GREEN"必须写明**档位与总条数**。
 >
+> **2026-10-01 ★★ 交付腿 `p175-n78-milestone`（你在当前 HEAD 上飞）：`leg_gate` **10 of 10**、审计 **32 PASS / 1 FAIL / 0 RED** —— 唯一 FAIL 是 stress 腿还跑在旧提交上（开发文档 §6.236）** ——
+> ① 腿的戳 = **HEAD `6ab45c1b30`** ⇒ 提交判据 PASS；`leg_gate --slot-ms=0.5` = **10 of 10 judged**（2 条 NOT JUDGED 是绑定问题：Mbit/s 属 stress 配方、槽占比注册在 n1 几何）；
+> ② 逐条：契约 **8 of 9**、**0 gaps / 5705557 blocks**、`cbs/lane=2.00 dropped=0`、`stale=0`、crossings **0.00+0.00**、CRC-OK **97.1%**、池 `free_min=29`、§6.198④ 重述门 PASS（`AT/BELOW 0`=**0**、`slip over 1ms`=2、`recv over 1ms`=1）；`[dl_tx_call] over 1ms=0` 且 max 只 **213 µs**（§6.219 的 call-#1 自旋峰不再出现）；
+> ③ ★ **与 `p167` 并排**（同配方、不同 HEAD、各一条腿）：V1 中位 **1245.1 → 1248.1（+3.0 µs，在 ±5 带内）**、机制段 `t2f` **492.8 → 489.5（−3.3 µs，落在五条 FFTW 腿的带 492.8–494.0 之外，紧挨 vdsp 臂 488.8）**、契约/`cbs/lane`/crossings/gaps/`stale` 逐字不变 ⇒ **翻 vDSP 默认没有把交付读数挪出基线**（本节点不重判 vDSP，判据仍是 §6.233 的配对腿）；
+> ④ ⏳ **只差一条腿**：stress 腿（`p169` 在 `f02d40e791`）在 HEAD 上重飞 ⇒ 配方与 `p169` 逐字相同（`--regime=stress` + 两个探针），载荷要真跑（`UL ≥ 2.0 Mbit/s`，纪律 63）；飞完应达 **33 PASS / 0 FAIL / 0 RED = 全量档 GREEN**。
+>
 > **2026-09-30 ★★ `max_concurrency` 设成 0（unlimited）会不会更好？—— 语义先纠正，再用 Little 算：单 UE 在本 TDD 图案下在飞跳数上不了 2（用户提问；开发文档 §6.218）** ——
 > ① **`unlimited` = 0 不是"无限"**：`create_task_fork_limiter()` 把 0 夹到**基执行器的并发** = 中优先级池 = **5**（`du_low_executor_mapper.cpp:264-266`、`worker_manager.cpp:420-423`）⇒ 真问题是 **N: 2 → 5**；
 > ② ★ **N 在同一份代码里还是另外两件事**：`upper_phy_factories.cpp:934` ⇒ **PUSCH processor 依赖池容量 = N**（取不到就**丢 PDU**），`N ≤ 1` ⇒ **换成 strand**（§6.217 那 +207 µs 的形态）；

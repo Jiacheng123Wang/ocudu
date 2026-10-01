@@ -14637,6 +14637,35 @@ LEG_CONFIG=... OCUDU_DFT_BACKEND=generic run_leg.sh gpu p171-n78-novdsp --regime
 
 **纪律 72**：**审计的档位是读数的一部分** —— `--quick` 与全量的 PASS 数不可比（前者不跑四条长臂）；引用"GREEN"必须写明档位与总条数。
 
+### 6.236 ★ `p175-n78-milestone`（用户在**当前 HEAD** 上飞的交付腿）：`leg_gate` **10 of 10**、审计 **32 PASS / 1 FAIL / 0 RED**（唯一 FAIL = stress 腿还跑在旧提交上）；与 `p167` 并排：**翻 vDSP 默认没有把交付读数挪出基线**（2026-10-01）
+
+**① 为什么飞它**：§6.235⑥ 的结论是 `p167`/`p169`（跑在 `f02d40e791`）**不再是关于 HEAD 的证据**（vDSP 的代码改动在两者之间）⇒ 需要一对当前 HEAD 的腿。用户先飞了 default 那一侧。
+
+**② 归属与门**：腿自己印的戳 `--== OCUDU gNB (commit 6ab45c1b30) ==--` = **HEAD** ⇒ 审计的提交判据 PASS（"the leg ran 6ab45c1b30 = HEAD"）。
+`leg_gate.sh --slot-ms=0.5 p175-n78-milestone`（30 kHz cell ⇒ 0.5 ms/slot）= **10 of 10 judged**（2 条 NOT JUDGED 都是绑定问题：`UL ≥ 2.0 Mbit/s` 是 stress 配方的合法性判据、`UL grant ≥ 50% 槽` 注册在 n1/FDD 几何上）；
+`milestone_audit.sh --leg=p175-n78-milestone --stress-leg=p169-n78-stress` = **32 PASS / 1 FAIL / 0 RED**（`p175` 那一侧全绿）。
+
+**③ 逐条判据**：contract **MET (8 of 9)**、**0 gaps / 5705557 blocks**、`cbs/lane=2.00 dropped=0`、`stale=0`、`crossings 0.00+0.00`、CRC-OK **97.1%**（25224/25967）、RX 池 `free_min=29`、`dft radio inputs: 0 transform(s)`（交付形态：host 写网格 ⇒ 该项没有总体）、§6.198④ 重述门 **PASS**（in-stream `AT/BELOW 0`=**0**、`slip over 1ms`=2、`recv over 1ms`=1、`gaps=0`）、`[dl_tx_call] over 1ms=0`（且 max 只 **213 µs @ call #115556** —— §6.219 那个"call #1 = 84–92 ms"的自旋峰**不再出现**）。
+
+**④ 与 `p167` 并排**（同一配方 `--regime=default`、同一 cell、只探针，两侧各**一条腿**）：
+
+| | `p167`（`f02d40e791`，vDSP 之前）| `p175`（`6ab45c1b30`，vDSP 默认）| Δ |
+|---|---|---|---|
+| V1 `[ul_gpu_pipeline]` 中位 | 1245.1 | **1248.1** | **+3.0 µs**（预登记带 ±5 之内）|
+| `[ul_pipeline]` 中位 | 1274.0 | 1285.0 | +11.0 |
+| **机制段 `t2f`** 中位 | 492.8 | **489.5** | **−3.3 µs** ← **落在五条 FFTW 腿的带（492.8–494.0）之外**，紧挨 vdsp 臂 `p170` 的 **488.8** |
+| `ce` 中位 | 59.1 | 60.5 | +1.4 |
+| `residency` 中位 | 478.8 | 474.2 | −4.6 |
+| 契约 / `cbs/lane` / crossings / gaps / `stale` | 8 of 9 / 2.00 / 0.00+0.00 / 0 / 0 | 同 | 逐字不变 |
+| CRC-OK | 98.5% | 97.1% | −1.4 pp（都远在 60% 地板之上）|
+
+⇒ ★ **翻默认没有把交付腿的验收读数挪出基线**：总账在噪声带内（+3.0 µs），而**唯一含这个 FFT 的段**（`t2f`）朝 vDSP 的方向移动，量级与 §6.232 的微基准（~1.4 µs）同阶、比噪声大。
+⚠ **这一节不重判 vDSP**：判据是 §6.233 的**配对腿**给出的（n78 那对的 +7.6 与 n1 那对的 −12.9 已按纪律 69 讨论过）；本节的值在于"**交付形态在新默认下的验收读数**"，不是新的 A/B（每边一条腿）。
+⚠ 报告项（**不判**）：`cbs/lane` 的最坏一跳 `max=2`（`p167`）→ `max=5`（`p175`），而**均值两边都是 2.00** —— 与 §6.230 记录的"报而不判"一致。
+
+**⑤ 还差一条腿**：唯一 FAIL 是 **stress 腿 `p169` 跑在 `f02d40e791`**（`f02d40e791..HEAD` 有 20 个文件变、11 个在 `lib/include/apps/tests`）⇒ 在 HEAD 上重飞一次即可，配方与 `p169` **逐字相同**：`LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 sudo -E bash …/run_leg.sh gpu <label> --regime=stress`。
+⚠ stress 侧的**合法性**判据要求 `UL ≥ 2.0 Mbit/s`（5× 基线）⇒ 载荷必须真的在跑（手机数据开关，纪律 63）。飞完这一条，全量审计应达 **33 PASS / 0 FAIL / 0 RED ⇒ GREEN（全量档，不是 `--quick` —— 纪律 72）**。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
