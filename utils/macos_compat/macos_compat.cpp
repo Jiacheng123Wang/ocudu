@@ -23,6 +23,8 @@
 #undef htole32
 #endif
 #include <cstdlib> // posix_memalign(), free()
+#include <cstdio>  // std::sscanf / std::fprintf for the time-constraint arm parser and its report
+#include <string>  // the time-constraint specification read from the environment
 #include <mutex>
 #include <unordered_map>
 #include <thread>  // std::thread::hardware_concurrency()
@@ -41,19 +43,181 @@ namespace {
 constexpr size_t MIN_ALIGNMENT = 64;
 
 #if defined(__APPLE__)
-/// Default Mach real-time time constraint applied to real-time workers.
+/// The Mach real-time time constraint the 2026-09-01 arm applied to EVERY real-time worker.
 ///
-/// Period = computation = constraint = 1 ms matches the 5G subframe budget
-/// (1 ms at 15 kHz SCS, 0.5 ms at 30 kHz): the worker declares a full-core
-/// computational deadline every millisecond. The constraint is soft
-/// (preemptible), so it never starves lower-priority work; the XNU scheduler
-/// uses it to keep the thread on the performance cores and to protect it from
-/// preemption by network I/O within its computation window.
+/// It is kept EXACTLY as it was, for one reason: it is the shape whose effect on a real radio leg is still
+/// unknown, so the one-word arm that reproduces it must stay reachable.
+///
+/// \warning The comment that used to sit here claimed the constraint "keeps the thread on the performance
+/// cores". The opposite is measured: applying a time constraint ERASES the thread's QoS class, and the QoS class
+/// is the mechanism that steers a thread to the performance cores (measured 2026-10-01, dev doc 10.29).
+///
+/// What has since been measured about this exact shape (wip/sched_microbench/, 2x CPU oversubscription):
+/// * it does NOT harm the thread that declares it - wakeup lateness stays at p50 4.9 / max 12.1 us, against
+///   871 ms / 1.89 s for the same thread unconstrained, i.e. as good as a calibrated declaration;
+/// * the 100% duty declaration does NOT starve other work: 16 spinner threads ran at 4.337 G-iter/s without it
+///   and 4.445 G-iter/s with it;
+/// * the only harmful shape is a malformed one (`constraint < computation`: p50 793 us / max 7.3 ms), which is
+///   why apply_time_constraint_if_requested() refuses that shape instead of passing it to the kernel.
+/// What it DOES do is give every worker the same deadline, flattening the inter-thread priority order that the
+/// POSIX FIFO priorities (44/46/...) used to encode. That is the one candidate cause of the 2026-09-01
+/// random-access regression no micro-benchmark can settle - hence opt-in, per-thread, and logged.
 constexpr darwin_thread_time_constraint default_rt_time_constraint{
     std::chrono::microseconds{1000},
     std::chrono::microseconds{1000},
     std::chrono::microseconds{1000},
     true};
+
+/// \brief Outcome of resolving OCUDU_SCHED_TIME_CONSTRAINT for one worker thread.
+enum class tc_arm_outcome {
+  /// The knob is off, or it names other threads: nothing is applied and nothing is printed.
+  not_selected,
+  /// This thread's arm was applied; the caller reports it.
+  applied,
+  /// The knob names this thread but the specification is malformed. NOTHING is applied, and this is reported:
+  /// a leg that states an arm it did not get is worse than a leg that fails loudly (dev doc 10.29(5)).
+  rejected
+};
+
+/// \brief Parses one "period/computation/constraint" value list (microseconds). False when malformed.
+bool parse_time_constraint_values(std::string_view values, darwin_thread_time_constraint& tc)
+{
+  unsigned long period = 0;
+  unsigned long comp   = 0;
+  unsigned long cons   = 0;
+  const std::string text(values);
+  if (std::sscanf(text.c_str(), "%lu/%lu/%lu", &period, &comp, &cons) != 3) {
+    return false;
+  }
+  if ((period == 0) || (comp == 0) || (cons == 0)) {
+    return false;
+  }
+  tc = darwin_thread_time_constraint{std::chrono::microseconds{period},
+                                     std::chrono::microseconds{comp},
+                                     std::chrono::microseconds{cons},
+                                     true};
+  return true;
+}
+
+/// \brief True when the parameters are a shape this project has measured to be safe.
+///
+/// Only two rejections, both deliberate:
+/// * `constraint < computation` - the one shape measured to be catastrophic (under load: p50 793 us, max 7.3 ms
+///   of wakeup lateness, dev doc 10.29(2)). A deadline that expires before the work can be done is not a
+///   conservative request, it is a malformed one;
+/// * `period < constraint` - a deadline beyond its own period contradicts the declaration itself.
+/// Everything else is accepted: sustained over-runs AND bursts inside the period were both measured harmless, so
+/// refusing them would refuse arms that are known to work.
+bool time_constraint_shape_is_sane(const darwin_thread_time_constraint& tc, std::string& why)
+{
+  if (tc.constraint < tc.computation) {
+    why = fmt::format("constraint {}us < computation {}us (the one shape measured harmful: p50 793us / max 7.3ms)",
+                      tc.constraint.count(),
+                      tc.computation.count());
+    return false;
+  }
+  if (tc.period < tc.constraint) {
+    why = fmt::format(
+        "period {}us < constraint {}us (a deadline beyond its own period)", tc.period.count(), tc.constraint.count());
+    return false;
+  }
+  return true;
+}
+
+/// \brief Resolves the OCUDU_SCHED_TIME_CONSTRAINT arm for one worker thread and applies it if it selects one.
+///
+/// GRAMMAR (a leg must be able to state its arm in the environment, and the log must then prove it):
+///   unset / "" / "0"                -> no constraint: the default, byte-identical behaviour
+///   "1" / "default"                 -> the 2026-09-01 arm: EVERY worker gets default_rt_time_constraint
+///   "NAME=P/C/K[;NAME=P/C/K...]"    -> per-thread microseconds; NAME="*" matches every worker. An exact NAME
+///                                      match beats "*" whatever the order, so a default entry cannot silently
+///                                      shadow a thread's own parameters.
+///
+/// WHERE IT APPLIES: on the worker thread itself, from apply_worker_thread_scheduling(), i.e. AFTER the QoS class
+/// is requested - because that is the order that makes the consequence visible in the readback (the constraint
+/// erases the class, so the thread it selects reads back UNSPECIFIED). It is NOT applied to io_timer/io_broker/
+/// radio threads: this is a worker arm, and every thread this project has suspected of carrying the stall is a
+/// worker.
+tc_arm_outcome apply_time_constraint_if_requested(std::string_view               thread_name,
+                                                  bool                           rt_intent,
+                                                  darwin_thread_time_constraint& applied,
+                                                  std::string&                   reject_reason)
+{
+  // Read on EVERY call rather than cached in a static, for the reason OCUDU_SCHED_ATTR_QOS gives: a cached
+  // answer cannot be moved by a test. The cost is one getenv per worker thread creation.
+  const char* env = std::getenv("OCUDU_SCHED_TIME_CONSTRAINT");
+  if ((env == nullptr) || (env[0] == '\0') || ((env[0] == '0') && (env[1] == '\0'))) {
+    return tc_arm_outcome::not_selected;
+  }
+
+  const std::string spec(env);
+  if ((spec == "1") || (spec == "default")) {
+    // The blanket arm reproduces 2026-09-01 in one word, including its scope: that arm applied the constraint to
+    // the workers that declared a real-time intent, not to every thread in the process.
+    if (!rt_intent) {
+      return tc_arm_outcome::not_selected;
+    }
+    applied = default_rt_time_constraint;
+    set_this_thread_time_constraint(applied);
+    return tc_arm_outcome::applied;
+  }
+
+  // Two passes so an exact match wins over "*" regardless of where it appears in the string.
+  for (int pass = 0; pass != 2; ++pass) {
+    std::string_view rest = spec;
+    while (!rest.empty()) {
+      const size_t     sep   = rest.find(';');
+      std::string_view entry = (sep == std::string_view::npos) ? rest : rest.substr(0, sep);
+      rest                   = (sep == std::string_view::npos) ? std::string_view{} : rest.substr(sep + 1);
+      if (entry.empty()) {
+        continue;
+      }
+      const size_t eq = entry.find('=');
+      if (eq == std::string_view::npos) {
+        reject_reason = fmt::format("entry \"{}\" has no '=' (expected NAME=P/C/K)", entry);
+        return tc_arm_outcome::rejected;
+      }
+      const std::string_view name  = entry.substr(0, eq);
+      const bool             exact = (name == thread_name);
+      const bool             any   = (name == "*");
+      if (!(((pass == 0) && exact) || ((pass == 1) && any))) {
+        continue;
+      }
+      darwin_thread_time_constraint tc{};
+      if (!parse_time_constraint_values(entry.substr(eq + 1), tc)) {
+        reject_reason = fmt::format("entry \"{}\" does not parse as NAME=P/C/K in microseconds", entry);
+        return tc_arm_outcome::rejected;
+      }
+      if (!time_constraint_shape_is_sane(tc, reject_reason)) {
+        return tc_arm_outcome::rejected;
+      }
+      applied = tc;
+      set_this_thread_time_constraint(applied);
+      return tc_arm_outcome::applied;
+    }
+  }
+  return tc_arm_outcome::not_selected;
+}
+
+/// \brief Reports the time-constraint arm to stderr, on the thread that got it, with the values that were asked.
+///
+/// This line is NOT gated behind OCUDU_FLOW_PROBES, unlike the probe instruments: it is not a measurement, it is
+/// the record of a scheduling change that has a regression history, and the 2026-09-01 incident is exactly what
+/// an unprovable arm looks like. With the knob unset it prints nothing, so a default leg stays byte-identical.
+void report_time_constraint_arm(std::string_view thread_name, const darwin_thread_time_constraint& tc)
+{
+  std::fprintf(stderr,
+               "[sched_tc] thread=%.*s applied period=%lldus computation=%lldus constraint=%lldus duty=%.0f%% "
+               "preemptible=%d | this thread has NO QoS class any more: on Darwin a Mach time constraint and a "
+               "QoS class are mutually exclusive and the constraint wins (measured 2026-10-01, dev doc 10.29)\n",
+               static_cast<int>(thread_name.size()),
+               thread_name.data(),
+               static_cast<long long>(tc.period.count()),
+               static_cast<long long>(tc.computation.count()),
+               static_cast<long long>(tc.constraint.count()),
+               100.0 * static_cast<double>(tc.computation.count()) / static_cast<double>(tc.period.count()),
+               tc.preemptible ? 1 : 0);
+}
 #endif
 
 } // namespace
@@ -330,6 +494,34 @@ void apply_worker_thread_scheduling(const os_thread_realtime_priority& prio,
   set_this_thread_qos_class(darwin_qos_class_for_prio(prio));
   set_this_thread_affinity_tag(cpu_mask.any() ? affinity_tag_from_cpu_mask(cpu_mask)
                                               : affinity_tag_from_thread_name(thread_name));
+
+  // ★ P4 (dev doc 10.29): the Mach time constraint - the only macOS mechanism that reserves CPU, measured at
+  // 700x on the wakeup tail under 2x oversubscription (5358 us -> 9.9 us) - applied HERE, after the QoS class,
+  // and only when the environment names this thread. Two consequences are deliberate:
+  // * the constraint ERASES the class just set above (they are mutually exclusive on Darwin, and the class
+  //   cannot be restored afterwards: set_qos_class_self_np then returns EPERM). That is why the arm is reported
+  //   with the sentence it is reported with, and why the readback prints `tc=` next to `eff=`;
+  // * it is opt-in and per-thread, because the 2026-09-01 arm's one remaining suspect is not the constraint but
+  //   giving every worker the SAME parameters, which flattens the inter-thread priority order.
+  {
+    darwin_thread_time_constraint tc{};
+    std::string                   reject_reason;
+    switch (apply_time_constraint_if_requested(
+        thread_name, prio != os_thread_realtime_priority::no_realtime(), tc, reject_reason)) {
+      case tc_arm_outcome::applied:
+        report_time_constraint_arm(thread_name, tc);
+        break;
+      case tc_arm_outcome::rejected:
+        std::fprintf(stderr,
+                     "[sched_tc] thread=%.*s REJECTED, nothing applied: %s\n",
+                     static_cast<int>(thread_name.size()),
+                     thread_name.data(),
+                     reject_reason.c_str());
+        break;
+      case tc_arm_outcome::not_selected:
+        break;
+    }
+  }
 #else
   (void)prio;
   (void)cpu_mask;

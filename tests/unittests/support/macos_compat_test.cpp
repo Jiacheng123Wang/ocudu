@@ -239,12 +239,183 @@ TEST(macos_compat_sched_test, apply_worker_thread_scheduling_smoke)
   // platform (Linux no-op, macOS QoS USER_INITIATED + affinity tag).
   compat::apply_worker_thread_scheduling(os_thread_realtime_priority::no_realtime(), {}, "compat_smoke_test");
 
-  // Real-time intent on a short-lived thread: on macOS this additionally
-  // requests the Mach time constraint, which dies with the thread.
+  // Real-time intent on a short-lived thread. NOTE (2026-10-01): this no longer requests a Mach time constraint -
+  // that was the 2026-09-01 arm, reverted, and it is now reachable only through OCUDU_SCHED_TIME_CONSTRAINT
+  // (tested below). What the call does here is request the QoS class and the affinity tag.
   std::thread rt_thread([]() {
     compat::apply_worker_thread_scheduling(os_thread_realtime_priority::max(), {}, "compat_rt_smoke");
   });
   rt_thread.join();
+}
+
+// The P4 arm (dev doc 10.29): OCUDU_SCHED_TIME_CONSTRAINT decides WHICH worker gets a Mach time constraint, and
+// the parameters come from the environment - so one binary flies both arms.
+//
+// Every case runs on its OWN thread. That is not stylistic: a time constraint is a property of the thread, it
+// cannot be undone, and applying one ERASES the QoS class of that thread for good (pthread_set_qos_class_self_np
+// then returns EPERM). A test that reused one thread would therefore report the previous case's arm.
+TEST(macos_compat_sched_test, time_constraint_env_knob)
+{
+  struct tc_case_result {
+    bool    constrained = false;
+    int64_t period_us   = -1;
+    double  duty        = 0.0;
+    int32_t qos_class   = -1;
+  };
+
+  // spec == nullptr means "the knob is unset". rt flags a real-time scheduling intent, which the blanket arm
+  // ("1"/"default") requires - it reproduces 2026-09-01 including its scope.
+  const auto run_case = [](const char* spec, const char* thread_name, bool rt) {
+    if (spec == nullptr) {
+      ::unsetenv("OCUDU_SCHED_TIME_CONSTRAINT");
+    }
+    else {
+      ::setenv("OCUDU_SCHED_TIME_CONSTRAINT", spec, 1);
+    }
+    tc_case_result res{};
+    std::thread    t([&]() {
+      compat::apply_worker_thread_scheduling(
+          rt ? os_thread_realtime_priority::max() : os_thread_realtime_priority::no_realtime(), {}, thread_name);
+      const thread_sched_snapshot snap = this_thread_sched_snapshot();
+      res.constrained                  = snap.time_constrained();
+      res.period_us                    = snap.tc_period_ns / 1000;
+      res.duty                         = snap.declared_duty();
+      res.qos_class                    = snap.qos_class;
+    });
+    t.join();
+    return res;
+  };
+
+  // The default arm: no knob, no constraint. (This is the reverse arm of every assertion below: if the readback
+  // could not tell "no constraint" from "constraint", the whole switch would be untestable.)
+  {
+    const tc_case_result r = run_case(nullptr, "tc_case_off", true);
+    EXPECT_FALSE(r.constrained) << "the knob is unset: no thread may be put under a time constraint";
+    EXPECT_EQ(r.period_us, 0) << "a successful readback of 'no constraint' must be 0, not -1 (which means n/a)";
+  }
+
+#if !defined(__APPLE__)
+  // Linux has no such mechanism. The knob must be inert, and the readback must refuse to invent one (-1 = the
+  // platform has no such notion), which is this project's rule that "no reading" is never printed as "zero".
+  {
+    const tc_case_result r = run_case("1", "tc_case_linux", true);
+    EXPECT_FALSE(r.constrained) << "Linux must not apply a Mach time constraint";
+    EXPECT_EQ(r.period_us, -1) << "Linux has no time-constraint readback: it must report -1, not 0";
+  }
+#else
+  // (1) An exact NAME selects exactly one thread.
+  {
+    const tc_case_result selected = run_case("tc_case_exact=500/200/400", "tc_case_exact", true);
+    EXPECT_TRUE(selected.constrained);
+    EXPECT_EQ(selected.period_us, 500);
+    EXPECT_DOUBLE_EQ(selected.duty, 0.4);
+
+    // ...and does NOT select another one. This is the arm the single-thread experiment depends on: if the knob
+    // leaked to every worker we would be flying the 2026-09-01 blanket arm without saying so.
+    const tc_case_result other = run_case("tc_case_exact=500/200/400", "tc_case_other", true);
+    EXPECT_FALSE(other.constrained) << "an entry that names another thread must not constrain this one";
+    // The un-constrained thread is the one that keeps its QoS class - the measured price of the arm above.
+    EXPECT_EQ(selected.qos_class, static_cast<int32_t>(QOS_CLASS_UNSPECIFIED))
+        << "applying a Mach time constraint must erase the QoS class (measured 2026-10-01)";
+    EXPECT_EQ(other.qos_class, static_cast<int32_t>(darwin_qos_class_for_prio(os_thread_realtime_priority::max())))
+        << "a thread the knob did not select must keep the class it was given";
+  }
+
+  // (2) "*" is the blanket arm, and an exact NAME beats it in either order (a default must not shadow a thread's
+  // own parameters, whatever the order in the string).
+  {
+    const tc_case_result any = run_case("*=500/200/400", "tc_case_any", true);
+    EXPECT_TRUE(any.constrained);
+    EXPECT_EQ(any.period_us, 500);
+
+    const tc_case_result exact_first = run_case("tc_case_spec=800/100/200;*=500/200/400", "tc_case_spec", true);
+    const tc_case_result exact_last  = run_case("*=500/200/400;tc_case_spec=800/100/200", "tc_case_spec", true);
+    EXPECT_EQ(exact_first.period_us, 800) << "an exact match must win over '*'";
+    EXPECT_EQ(exact_last.period_us, 800) << "an exact match must win over '*' regardless of the order";
+  }
+
+  // (3) "1"/"default" is the 2026-09-01 arm in one word - including its scope (real-time intent only).
+  {
+    const tc_case_result rt_worker = run_case("1", "tc_case_blanket_rt", true);
+    EXPECT_TRUE(rt_worker.constrained);
+    EXPECT_EQ(rt_worker.period_us, 1000);
+    EXPECT_DOUBLE_EQ(rt_worker.duty, 1.0) << "'1' must reproduce the historical shape, 100% duty included";
+
+    const tc_case_result non_rt = run_case("1", "tc_case_blanket_non_rt", false);
+    EXPECT_FALSE(non_rt.constrained) << "the blanket arm must not reach threads without a real-time intent";
+  }
+
+  // (4) Malformed specifications are REJECTED, never half-applied. The first one is the only shape measured to be
+  // catastrophic (dev doc 10.29(2)); the others are ill-formed or contradict themselves.
+  {
+    const tc_case_result bad_order = run_case("tc_case_bad=500/400/100", "tc_case_bad", true);
+    EXPECT_FALSE(bad_order.constrained) << "constraint < computation was measured harmful: it must be refused";
+
+    const tc_case_result beyond_period = run_case("tc_case_bad2=500/300/600", "tc_case_bad2", true);
+    EXPECT_FALSE(beyond_period.constrained) << "a deadline beyond its own period must be refused";
+
+    const tc_case_result no_equals = run_case("tc_case_bad3-500/100/200", "tc_case_bad3", true);
+    EXPECT_FALSE(no_equals.constrained) << "an entry without '=' must be refused";
+
+    const tc_case_result unparsable = run_case("tc_case_bad4=500/100", "tc_case_bad4", true);
+    EXPECT_FALSE(unparsable.constrained) << "an entry without all three values must be refused";
+
+    const tc_case_result zero = run_case("tc_case_bad5=0/100/200", "tc_case_bad5", true);
+    EXPECT_FALSE(zero.constrained) << "a zero period must be refused";
+  }
+
+  // (5) The leg-visible `[sched]` line must be able to show BOTH states of the arm: `tc=none` for a thread the
+  // knob did not select, and the parameters for one it did. A field that can only ever print one of the two is
+  // not an instrument - this is the reverse-arm rule every new readback field in this project has to pass.
+  {
+    const auto capture_line = [](const char* spec, const char* name) {
+      if (spec == nullptr) {
+        ::unsetenv("OCUDU_SCHED_TIME_CONSTRAINT");
+      }
+      else {
+        ::setenv("OCUDU_SCHED_TIME_CONSTRAINT", spec, 1);
+      }
+      std::string line;
+      std::thread t([&]() {
+        compat::apply_worker_thread_scheduling(os_thread_realtime_priority::max(), {}, name);
+        FILE* capture = std::tmpfile();
+        std::fflush(stderr);
+        const int saved = dup(fileno(stderr));
+        dup2(fileno(capture), fileno(stderr));
+        ::setenv("OCUDU_SCHED_VERBOSE", "1", 1);
+        log_this_thread_scheduling(os_thread_realtime_priority::max(), name);
+        std::fflush(stderr);
+        dup2(saved, fileno(stderr));
+        close(saved);
+        ::unsetenv("OCUDU_SCHED_VERBOSE");
+        std::rewind(capture);
+        char   buf[512];
+        size_t nof_read = 0;
+        while ((nof_read = std::fread(buf, 1, sizeof(buf), capture)) > 0) {
+          line.append(buf, nof_read);
+        }
+        std::fclose(capture);
+      });
+      t.join();
+      return line;
+    };
+#if defined(OCUDU_FLOW_PROBES)
+    const std::string unselected = capture_line(nullptr, "tc_line_off");
+    const std::string selected   = capture_line("tc_line_on=500/200/400", "tc_line_on");
+    EXPECT_NE(unselected.find(" tc=none "), std::string::npos)
+        << "a thread with no constraint must say so, not print nothing: " << unselected;
+    EXPECT_NE(selected.find(" tc=500/200/400us(duty=40%) "), std::string::npos)
+        << "a constrained thread must report the parameters it is under: " << selected;
+    // The two fields have to agree with each other: a thread under a constraint cannot be in a QoS class.
+    EXPECT_NE(selected.find("eff=UNSPECIFIED"), std::string::npos)
+        << "the readback must show the erased class next to the constraint: " << selected;
+    EXPECT_NE(unselected.find("eff=USER_INTERACTIVE"), std::string::npos)
+        << "control: the unconstrained thread keeps its class: " << unselected;
+#endif
+  }
+#endif
+
+  ::unsetenv("OCUDU_SCHED_TIME_CONSTRAINT");
 }
 
 TEST(macos_compat_sched_test, radio_worker_realtime_priority_platform_contract)

@@ -59,9 +59,19 @@ struct darwin_thread_time_constraint {
 ///
 /// This is the closest equivalent of Linux SCHED_FIFO on macOS: it declares a recurring CPU deadline to the kernel,
 /// so the thread is not preempted by network I/O or other background work within its computation window. The
-/// constraint is attempted once per process; failures (e.g., unsupported kernels) are reported once and are not
-/// fatal (the QoS class remains in effect). Note that the parameters are converted to Mach absolute time units
-/// (mach_timebase_info) at runtime, so the microsecond values are timebase-independent.
+/// parameters are converted to Mach absolute time units (mach_timebase_info) at runtime, so the microsecond values
+/// are timebase-independent. Failures (e.g., unsupported kernels) are reported once and are not fatal.
+///
+/// \warning MEASURED 2026-10-01 (dev doc 10.29): a time constraint and a QoS class are mutually exclusive on
+/// Darwin, and the constraint wins - applying one ERASES the thread's class, and it cannot be restored
+/// afterwards (pthread_set_qos_class_self_np then returns EPERM, for the lifetime of the thread). So this call is
+/// NOT additive and must never be used on a thread whose QoS class matters. What it buys in exchange is the only
+/// CPU reservation macOS offers: under 2x oversubscription a periodic thread's wakeup lateness stayed at
+/// p50 3.2 / max 9.9 us, against 102.9 / 5358.1 us with no explicit scheduling at all. Two parameter rules were
+/// measured to matter: `constraint >= computation` (the reverse is catastrophic: p50 793 us / max 7.3 ms), while
+/// declaring MORE computation than the thread uses costs nothing - even sustaining 4.6x over it, or bursting 3x it
+/// inside the period - so declare generously. See utils/macos_compat/macos_compat.cpp for the opt-in
+/// OCUDU_SCHED_TIME_CONSTRAINT arm built on top of this call.
 void set_this_thread_time_constraint(const darwin_thread_time_constraint& constraint);
 
 /// \brief Sets the Mach thread affinity tag of the calling thread (THREAD_AFFINITY_POLICY).

@@ -55,6 +55,26 @@ struct thread_sched_snapshot {
   int32_t posix_policy = -1;
   /// POSIX scheduling priority as read back.
   int32_t posix_prio = -1;
+  /// The Mach time constraint (THREAD_TIME_CONSTRAINT_POLICY) the thread is ACTUALLY under, read back with
+  /// thread_policy_get. > 0 = constrained, 0 = the read succeeded and there is no explicit constraint, -1 = the
+  /// platform has no such notion or the query failed.
+  ///
+  /// WHY IT IS IN THIS SNAPSHOT: a time constraint is NOT additive on Darwin - applying one ERASES the thread's
+  /// QoS class, irreversibly (measured 2026-10-01, dev doc 10.29: `set_qos(UI)` -> qos 33, then
+  /// thread_policy_set(TIME_CONSTRAINT) -> qos 0, and setting it again returns EPERM). A readback line that
+  /// shows only `eff=` would therefore describe an arm that does not exist: a thread under a constraint can
+  /// never be `eff=USER_INTERACTIVE` at the same time.
+  int64_t tc_period_ns      = -1;
+  int64_t tc_computation_ns = -1;
+  int64_t tc_constraint_ns  = -1;
+  /// True when the kernel read back an explicit time constraint on this thread.
+  bool time_constrained() const { return tc_period_ns > 0; }
+  /// The nominal duty cycle the thread declares to the kernel (computation / period). 0 when unconstrained.
+  /// It is the number that matters for calibration: this is CPU the kernel will let the thread take.
+  double declared_duty() const
+  {
+    return (tc_period_ns > 0) ? (static_cast<double>(tc_computation_ns) / static_cast<double>(tc_period_ns)) : 0.0;
+  }
   /// The platform thread id (macOS: pthread_threadid_np; Linux: gettid), 0 when it could not be read. It is
   /// what makes two snapshots comparable AT ALL: subtracting one thread's CPU from another's baseline is the
   /// mistake this field exists to refuse (see the probe's `tcpu=`).

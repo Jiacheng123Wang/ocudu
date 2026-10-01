@@ -159,9 +159,9 @@ is_n1_fdd  = ("fdd_n1" in leg_cfg)
 # and prints nothing, and when set it stores at most 64 events (only above a 1 ms / 500 us floor).
 # OCUDU_SCHED_VERBOSE joined 2026-10-01 with doc_chinese/macos_thread_priority/ dev doc 10.5: it reads back each
 # worker thread's granted QoS class / POSIX policy ONCE at thread creation and PRINTS one line; it changes no
-# scheduling parameter, reads no clock, and prints nothing when unset. The two knobs that DO change macOS
-# scheduling (OCUDU_SCHED_POSIX_RT, OCUDU_SCHED_ATTR_QOS) are deliberately NOT here: they are arms, and an
-# arm can satisfy every other criterion in this file.
+# scheduling parameter, reads no clock, and prints nothing when unset. The knobs that DO change macOS
+# scheduling (OCUDU_SCHED_POSIX_RT, OCUDU_SCHED_ATTR_QOS, OCUDU_SCHED_TIME_CONSTRAINT) are deliberately NOT
+# here: they are arms, and an arm can satisfy every other criterion in this file.
 # OCUDU_UL_STABILITY_WINDOWS joined 2026-10-01 (macos_thread_priority dev doc 10.20): the within-run stability
 # view. It reads NOTHING new - it re-cuts the sample vectors the probe already keeps, in their recording order,
 # at report time - so on the hot path it costs zero and it changes no delivery decision.

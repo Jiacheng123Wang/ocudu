@@ -12,7 +12,9 @@
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
+#include <mach/mach_time.h>    // mach_timebase_info: ticks -> ns for the time-constraint readback
 #include <mach/thread_info.h>
+#include <mach/thread_policy.h> // THREAD_TIME_CONSTRAINT_POLICY readback
 #include <pthread/qos.h>
 #elif !defined(_WIN32)
 #include <sys/resource.h> // getrusage(RUSAGE_THREAD): the per-thread reading Linux has and Darwin does not
@@ -98,6 +100,40 @@ thread_sched_snapshot ocudu::this_thread_sched_snapshot()
   // the SDK: thread_basic_info has run_state/sleep_time/flags, thread_extended_info adds priorities and the
   // name, and neither has a switch counter). The process-wide counts from getrusage(RUSAGE_SELF) are what the
   // timing events print instead, and this refusal is why they are labeled process-wide.
+  //
+  // The Mach time constraint IS readable, but only with the trick that cost me a wrong probe earlier today:
+  // thread_policy_get()'s get_default argument is IN/OUT and must be FALSE on input, otherwise the call reports
+  // the kernel's default (0/120000/240000) and a constrained thread looks unconstrained. With FALSE it reports
+  // the thread's real policy and sets get_default on output when there is none.
+  {
+    mach_thread_port                     tc_port;
+    thread_time_constraint_policy_data_t tc{};
+    mach_msg_type_number_t               tc_count   = THREAD_TIME_CONSTRAINT_POLICY_COUNT;
+    boolean_t                            tc_default = FALSE;
+    if (::thread_policy_get(tc_port.port,
+                            THREAD_TIME_CONSTRAINT_POLICY,
+                            reinterpret_cast<thread_policy_t>(&tc),
+                            &tc_count,
+                            &tc_default) == KERN_SUCCESS) {
+      if (tc_default || (tc.period == 0)) {
+        snap.tc_period_ns      = 0;
+        snap.tc_computation_ns = 0;
+        snap.tc_constraint_ns  = 0;
+      }
+      else {
+        // Mach absolute time ticks, converted with the machine's own timebase (24 MHz => 125/3 ns per tick on
+        // Apple Silicon), the same conversion darwin_thread_scheduling.cpp applies in the other direction.
+        static const double ns_per_tick = [] {
+          mach_timebase_info_data_t tb{};
+          ::mach_timebase_info(&tb);
+          return (tb.denom != 0) ? (static_cast<double>(tb.numer) / static_cast<double>(tb.denom)) : 1.0;
+        }();
+        snap.tc_period_ns = static_cast<int64_t>(static_cast<double>(tc.period) * ns_per_tick);
+        snap.tc_computation_ns = static_cast<int64_t>(static_cast<double>(tc.computation) * ns_per_tick);
+        snap.tc_constraint_ns = static_cast<int64_t>(static_cast<double>(tc.constraint) * ns_per_tick);
+      }
+    }
+  }
 #elif !defined(_WIN32)
   snap.thread_id = static_cast<uint64_t>(::syscall(SYS_gettid));
   rusage ru{};
@@ -203,8 +239,28 @@ void ocudu::log_this_thread_scheduling(const os_thread_realtime_priority& prio, 
   // `req=` is what the code asked for (the QoS class the priority intent maps to); `eff=` is what the kernel
   // says the thread is in. They differ when the request was clamped, and that difference is the answer this
   // instrument exists to produce (high level 4: UI/IN billing 0 s with an effective ceiling of THREAD_QOS_LEGACY).
+  // `tc=` is the third key fact about the arm: on Darwin a Mach time constraint and a QoS class are mutually
+  // exclusive and the constraint wins (it erases the class), so `eff=UNSPECIFIED` next to `tc=-` means "we lost
+  // the class to something else" while `eff=UNSPECIFIED` next to `tc=1000/100/200us` means "this thread is
+  // deliberately on a budget". Those two are the same string without this field, and they are different arms.
+  char tc_str[64];
+  if (snap.tc_period_ns < 0) {
+    std::snprintf(tc_str, sizeof(tc_str), "-");
+  }
+  else if (!snap.time_constrained()) {
+    std::snprintf(tc_str, sizeof(tc_str), "none");
+  }
+  else {
+    std::snprintf(tc_str,
+                  sizeof(tc_str),
+                  "%lld/%lld/%lldus(duty=%.0f%%)",
+                  static_cast<long long>(snap.tc_period_ns / 1000),
+                  static_cast<long long>(snap.tc_computation_ns / 1000),
+                  static_cast<long long>(snap.tc_constraint_ns / 1000),
+                  100.0 * snap.declared_duty());
+  }
   std::fprintf(stderr,
-               "[sched] thread=%-16s id=%llu rt_intent=%d req=%s eff=%s run=%s posix=%s/%d cpu=%.3fms%s\n",
+               "[sched] thread=%-16s id=%llu rt_intent=%d req=%s eff=%s run=%s posix=%s/%d tc=%s cpu=%.3fms%s\n",
                std::string(thread_name).c_str(),
                static_cast<unsigned long long>(snap.thread_id),
                rt_intent ? 1 : 0,
@@ -213,6 +269,7 @@ void ocudu::log_this_thread_scheduling(const os_thread_realtime_priority& prio, 
                thread_run_state_name(snap.run_state),
                policy,
                snap.posix_prio,
+               tc_str,
                static_cast<double>(snap.cpu_ns >= 0 ? snap.cpu_ns : 0) / 1e6,
                // A thread that has just been created has burned ~0 CPU, so `cpu=` is not a reading of anything
                // yet. It is printed because a MISSING field would look like a broken instrument, and because a

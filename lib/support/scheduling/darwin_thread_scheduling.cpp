@@ -69,7 +69,7 @@ void ocudu::set_this_thread_time_constraint(const darwin_thread_time_constraint&
     if (not warned.exchange(true)) {
       std::fprintf(stderr,
                    "Warning: failed to set Mach time constraint on thread \"%s\" (kern_return %d). "
-                   "The QoS class remains in effect.\n",
+                   "Scheduling is unchanged (the QoS class, if any, is untouched by a FAILED call).\n",
                    this_thread_name(),
                    int(kr));
     }
