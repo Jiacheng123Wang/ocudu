@@ -118,7 +118,12 @@ case "$ACTION" in
     readback "$TMP"
     rm -f "$TMP"
     echo "[taskpolicy] ★ the tier changed at $(date -u +%Y-%m-%dT%H:%M:%SZ) (epoch_ms=$(($(date +%s) * 1000)))"
-    echo "[taskpolicy]   cut the leg's timeline here: `[ul_timing_events]` prints epoch_ms= on every event."
+    # NO BACKTICKS IN A DOUBLE-QUOTED echo: the first version of this line had them (Markdown habit) and bash ran
+    # `[ul_timing_events]` as a COMMAND, so the operator saw
+    #   taskpolicy_ab.sh: line 121: [ul_timing_events]: command not found
+    # right after a tier change that had in fact SUCCEEDED (rc=0, timestamp printed) - a warning that looks like a
+    # failure on the one line whose whole job is to tell the operator where to cut the timeline. Single quotes.
+    echo '[taskpolicy]   cut the leg timeline here: [ul_timing_events] prints epoch_ms= on every event.' 
     echo "[taskpolicy]   this leg is an ARM (the tier is a scheduling change) - not acceptance evidence."
     ;;
   clear)
