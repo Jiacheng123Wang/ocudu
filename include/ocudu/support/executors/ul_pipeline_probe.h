@@ -18,6 +18,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <cstring>
 #include <vector>
 #if !defined(_WIN32)
@@ -576,6 +577,12 @@ public:
     int64_t  ivcsw      = -1; ///< involuntary context switches of the process during the window (-1 = no baseline)
     int64_t  nvcsw      = -1; ///< voluntary ones, for the same window (a blocked thread switches voluntarily)
     int64_t  base_age_us = -1;///< how long BEFORE the window began the baseline was taken (the reading's slack)
+    /// The WIDTH of the window the CPU delta covers. For a receive event that is its wait; for a hand-over it is
+    /// the distance back to the baseline the receive path last took (~1 ms in steady state, the whole stall when
+    /// the receive path is stalled). It is printed because `cpu` without it cannot be read: measured on
+    /// `p180-n78-stress`, the transmit lines printed `cpu=0.00ms base_age=0us` - and `base_age` is 0 for a
+    /// hand-over BY CONSTRUCTION (its window IS the baseline), so the pair said nothing at all (dev doc 6.245).
+    int64_t  win_us     = -1;
   };
 
   /// The baseline for the deltas above: process-wide CPU time and switch counts, taken by the caller just before
@@ -709,6 +716,8 @@ public:
   /// taken) the fields stay -1 and the report prints `cpu=-`, because "no reading" must not look like "zero CPU".
   void attach_cpu_delta(timing_event& ev, int64_t begin_ns, int64_t end_ns)
   {
+    // The width is known even when there is no baseline, so it is set first and always printed.
+    ev.win_us = (end_ns >= begin_ns) ? ((end_ns - begin_ns) / 1000) : -1;
     if (!cpu_base.valid || (cpu_base.ns > begin_ns)) {
       if (cpu_base.valid) {
         ++late_baselines; // stamped inside the window: the caller's ordering is wrong, and the report says so
@@ -1385,7 +1394,7 @@ public:
       // `epoch_ms - wait`, computed here rather than stored, so the two cannot drift apart.
       std::fprintf(stderr,
                    "  rx  #%u wait=%lldus air=%lldus wall=%s epoch_ms=%lld began_ms=%lld steady_end_ns=%lld "
-                   "load1=%s cpu=%s ivcsw=%s nvcsw=%s base_age=%s\n",
+                   "load1=%s cpu=%s ivcsw=%s nvcsw=%s win=%s base_age=%s\n",
                    ++rank,
                    static_cast<long long>(ev.value_us),
                    static_cast<long long>(ev.air_us),
@@ -1393,11 +1402,12 @@ public:
                    static_cast<long long>(ev.wall_ms),
                    static_cast<long long>(ev.wall_ms) - static_cast<long long>(ev.value_us) / 1000,
                    static_cast<long long>(ev.end_ns),
-                   load1_str(ev.load1_x100),
-                   cpu_str(ev.cpu_ns),
-                   delta_str(ev.ivcsw),
-                   delta_str(ev.nvcsw),
-                   age_str(ev.base_age_us));
+                   load1_str(ev.load1_x100).c_str(),
+                   cpu_str(ev.cpu_ns).c_str(),
+                   delta_str(ev.ivcsw).c_str(),
+                   delta_str(ev.nvcsw).c_str(),
+                   age_str(ev.win_us).c_str(),
+                   age_str(ev.base_age_us).c_str());
     }
     if (worst_tx_events.empty()) {
       std::fprintf(stderr,
@@ -1414,7 +1424,7 @@ public:
       // past), i.e. the same two ends for the transmit direction.
       std::fprintf(stderr,
                    "  dl  #%u margin=%lldus due_ts=%lld wall=%s epoch_ms=%lld due_ms=%lld steady_end_ns=%lld "
-                   "load1=%s cpu=%s ivcsw=%s nvcsw=%s base_age=%s\n",
+                   "load1=%s cpu=%s ivcsw=%s nvcsw=%s win=%s\n",
                    ++rank,
                    static_cast<long long>(ev.value_us),
                    static_cast<long long>(ev.due_ts),
@@ -1422,58 +1432,64 @@ public:
                    static_cast<long long>(ev.wall_ms),
                    static_cast<long long>(ev.wall_ms) + static_cast<long long>(ev.value_us) / 1000,
                    static_cast<long long>(ev.end_ns),
-                   load1_str(ev.load1_x100),
-                   cpu_str(ev.cpu_ns),
-                   delta_str(ev.ivcsw),
-                   delta_str(ev.nvcsw),
-                   age_str(ev.base_age_us));
+                   load1_str(ev.load1_x100).c_str(),
+                   cpu_str(ev.cpu_ns).c_str(),
+                   delta_str(ev.ivcsw).c_str(),
+                   delta_str(ev.nvcsw).c_str(),
+                   age_str(ev.win_us).c_str());
     }
   }
 
   /// The process CPU time consumed over the window, in ms with two decimals, or `-` when there was no baseline.
   /// Read it AGAINST the window: `cpu` close to `wait` says the process kept its cores (the radio/USB side was
   /// late), `cpu` near zero says it did not run at all (host scheduling).
-  static const char* cpu_str(int64_t cpu_ns)
+  /// \note These formatters return std::string, NOT a pointer into a static buffer. The first version returned
+  /// `static thread_local char buf[]` and every call site printed TWO of them in one fprintf (win and base_age,
+  /// ivcsw and nvcsw): both arguments are the same pointer, the second call overwrites the first, and BOTH fields
+  /// print the same number. Measured on `p180-n78-stress`'s report plumbing: `win=0us base_age=0us` for an event
+  /// whose window was 18 ms long, with the value itself correct inside the struct - i.e. a silent corruption that
+  /// only shows when the two numbers differ (dev doc 6.245).
+  static std::string cpu_str(int64_t cpu_ns)
   {
-    static thread_local char buf[24];
     if (cpu_ns < 0) {
       return "-";
     }
+    char buf[24];
     std::snprintf(buf, sizeof(buf), "%lld.%02lldms", static_cast<long long>(cpu_ns / 1000000),
                   static_cast<long long>((cpu_ns % 1000000) / 10000));
     return buf;
   }
 
   /// A switch-count delta, or `-` when there was no baseline.
-  static const char* delta_str(int64_t v)
+  static std::string delta_str(int64_t v)
   {
-    static thread_local char buf[16];
     if (v < 0) {
       return "-";
     }
+    char buf[16];
     std::snprintf(buf, sizeof(buf), "+%lld", static_cast<long long>(v));
     return buf;
   }
 
   /// How stale the baseline was, in us.
-  static const char* age_str(int64_t us)
+  static std::string age_str(int64_t us)
   {
-    static thread_local char buf[16];
     if (us < 0) {
       return "-";
     }
+    char buf[16];
     std::snprintf(buf, sizeof(buf), "%lldus", static_cast<long long>(us));
     return buf;
   }
 
   /// The load average as a fixed-point string, or `-` when the caller had no reading (see the platform note in
   /// lower_phy_baseband_processor.cpp: getloadavg is POSIX and the callers gate it themselves).
-  static const char* load1_str(int64_t load1_x100)
+  static std::string load1_str(int64_t load1_x100)
   {
-    static thread_local char buf[16];
     if (load1_x100 < 0) {
       return "-";
     }
+    char buf[16];
     std::snprintf(buf, sizeof(buf), "%lld.%02lld", static_cast<long long>(load1_x100 / 100),
                   static_cast<long long>(load1_x100 % 100));
     return buf;

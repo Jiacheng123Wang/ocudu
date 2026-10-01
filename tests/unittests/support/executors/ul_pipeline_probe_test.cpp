@@ -1186,7 +1186,8 @@ TEST(ul_pipeline_probe_test, worst_timing_events_carry_the_wall_clock_and_stay_b
     // THE CPU READING (dev doc 6.243). No baseline has been taken in this case yet, so the line must SAY SO with
     // "-" rather than print a zero: "the process used no CPU" and "nobody measured" are different statements, and
     // a zero here would read as the strongest possible evidence of host scheduling.
-    EXPECT_NE(rx_line.find(" cpu=- ivcsw=- nvcsw=- base_age=-"), std::string::npos) << rx_line;
+    EXPECT_NE(rx_line.find(" cpu=- ivcsw=- nvcsw=- win="), std::string::npos) << rx_line;
+    EXPECT_NE(rx_line.find(" base_age=-"), std::string::npos) << rx_line;
     {
       const std::regex  ends(R"(epoch_ms=([0-9]+) began_ms=([0-9]+))");
       std::smatch       m;
@@ -1217,6 +1218,12 @@ TEST(ul_pipeline_probe_test, worst_timing_events_carry_the_wall_clock_and_stay_b
     EXPECT_LT(first, second) << "a hand-over margin goes wrong downwards, so the worst is the most negative";
     EXPECT_EQ(events.find("margin=-100us"), std::string::npos) << "only two are kept";
     EXPECT_EQ(events.find("margin=700us"), std::string::npos) << "an event above the floor must never enter";
+    // A DL line shows `win`, never `base_age`: the latter is 0 by construction there (see the arm above).
+    const size_t dl_at = events.find("  dl  #1 ");
+    ASSERT_NE(dl_at, std::string::npos) << events;
+    const std::string dl_line = events.substr(dl_at, events.find('\n', dl_at) - dl_at);
+    EXPECT_NE(dl_line.find("win="), std::string::npos) << dl_line;
+    EXPECT_EQ(dl_line.find("base_age="), std::string::npos) << dl_line;
   }
 
   // ---- the CPU delta: with a baseline, a kept event carries what the PROCESS did during its window ------------
@@ -1274,6 +1281,11 @@ TEST(ul_pipeline_probe_test, worst_timing_events_carry_the_wall_clock_and_stay_b
     const std::string line = report.substr(at, report.find('\n', at) - at);
     EXPECT_TRUE(std::regex_search(line, std::regex(R"(cpu=[0-9]+\.[0-9]{2}ms)")))
         << "a baseline plus real CPU work must produce a delta: " << line;
+    // THE WINDOW WIDTH is printed next to `cpu`, because `cpu` alone cannot be read: on `p180-n78-stress` the
+    // transmit lines printed `cpu=0.00ms base_age=0us`, and `base_age` is 0 for a hand-over BY CONSTRUCTION (its
+    // window IS the baseline), so the pair said nothing. Here the window is the burn, so `win` must be positive.
+    EXPECT_TRUE(std::regex_search(line, std::regex(R"(win=[1-9][0-9]*us)")))
+        << "a kept receive event must print the width of the window its cpu covers: " << line;
     // The delta must also be PLAUSIBLE against its window: a 10-20 ms burn cannot read as 200 ms of CPU.
     {
       std::smatch m;
@@ -1286,7 +1298,7 @@ TEST(ul_pipeline_probe_test, worst_timing_events_carry_the_wall_clock_and_stay_b
       EXPECT_GT(cpu_ms, 0.2) << line;
       EXPECT_LT(cpu_ms, wait_ms + 5.0) << "the process cannot have used more CPU than the window plus 5 ms: " << line;
     }
-    EXPECT_TRUE(std::regex_search(line, std::regex(R"(ivcsw=\+[0-9]+ nvcsw=\+[0-9]+ base_age=[0-9]+us)")))
+    EXPECT_TRUE(std::regex_search(line, std::regex(R"(ivcsw=\+[0-9]+ nvcsw=\+[0-9]+ win=[0-9]+us base_age=[0-9]+us)")))
         << "the switch counts and the baseline's age must be printed, not implied: " << line;
   }
 
