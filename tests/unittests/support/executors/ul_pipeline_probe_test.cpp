@@ -1255,6 +1255,20 @@ TEST(ul_pipeline_probe_test, worst_timing_events_carry_the_wall_clock_and_stay_b
     probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::milliseconds(100)).count(), false, begin_ns, end_ns,
                          /*air_us=*/35, /*load1_x100=*/468);
     const std::string report = capture_report();
+    // THE WIRING WARNING (dev doc 6.244). A baseline taken INSIDE the window cannot produce a delta and is refused;
+    // on `p179-n78-stress` that happened to every receive event (the call site stamped it after the window began)
+    // and the leg's report said only `cpu=-`. The refusal is now counted and printed, and this arm drives it: an
+    // event whose window begins BEFORE the baseline must raise the line, so the next leg says why.
+    {
+      // Deterministic by construction: a FRESH baseline, then an event whose window began before it.
+      const int64_t fresh = steady_now();
+      probe.timing_event_snapshot(fresh);
+      probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::milliseconds(100)).count(), false,
+                           /*begin_ns=*/fresh - 1000000, fresh, 35, 468);
+      const std::string warned = capture_report();
+      EXPECT_NE(warned.find("stamped INSIDE the window"), std::string::npos)
+          << "a baseline inside the window must be reported, not silently turned into `-`: " << warned;
+    }
     const size_t      at     = report.find("  rx  #1 wait=100000us");
     ASSERT_NE(at, std::string::npos) << report;
     const std::string line = report.substr(at, report.find('\n', at) - at);

@@ -167,20 +167,15 @@ void tx_slack_note_transmit(int64_t margin_us, uint64_t due_ts)
   tx_slack_accounting& a = tx_slack_accounts();
   a.transmissions.fetch_add(1, std::memory_order_relaxed);
 #if defined(OCUDU_FLOW_PROBES)
-  // Same baseline for the transmit side (dev doc 6.243), so a late hand-over can be read the same way: the DL
-  // hand-overs come every slot (500 us), so the throttled baseline is at most ~2 slots old.
-  {
-    const int64_t snapshot_now_ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
-            .count();
-    if (ul_pipeline_probe::get().timing_event_snapshot_wanted(snapshot_now_ns)) {
-      ul_pipeline_probe::get().timing_event_snapshot(snapshot_now_ns);
-    }
-  }
   // The worst-K list beside the receive waits (OCUDU_UL_TIMING_EVENTS, dev doc 6.241): the aggregate below says
   // HOW MANY hand-overs missed their due time, this says WHEN one did - which is what lets a leg line the DL side
-  // up against the RX stalls and the `[RF]` lines on one wall-clock axis. Only events below the floor pay for it,
-  // and the whole block is inside the compile-time key, so a build without the probes is untouched.
+  // up against the RX stalls and the `[RF]` lines on one wall-clock axis.
+  //
+  // IT DOES NOT TAKE ITS OWN BASELINE (dev doc 6.244): it uses the one the RECEIVE path maintains, so the window
+  // it reports is "the ~1 ms up to this hand-over" in steady state, and - the case that matters - "everything
+  // since the last receive" for a hand-over that happens while the receive path is stalled. Taking a fresh
+  // baseline here instead made every DL window a few microseconds wide (measured on `p179`:
+  // `cpu=0.00ms base_age=0us` on every line, i.e. a reading that can only ever say "no CPU").
   if (ul_pipeline_probe::timing_event_wanted_tx(margin_us)) {
     ul_pipeline_probe::get().record_tx_timing_event(margin_us,
                                                     due_ts,
@@ -1476,17 +1471,13 @@ void lower_phy_baseband_processor::ul_process()
   // Receive baseband.
   trace_point tp = ru_tracer.now();
 #if defined(OCUDU_FLOW_PROBES)
-  const auto t_recv_begin = std::chrono::steady_clock::now();
-#endif
-  // dev doc 6.51: the receive side gets the timing probe the transmit side already had ([dl_tx_slack] and
-  // [dl_tx_call]). Two clock reads and one relaxed-store block per slot, because the question - "is the host
-  // late to ASK, or does the transport block INSIDE the call?" - cannot be answered from the timestamps alone,
-  // and it is the question that decides whether the remaining millisecond discontinuities are ours to fix.
-#if defined(OCUDU_FLOW_PROBES)
-  // The process-wide baseline for the worst-K event list (dev doc 6.243): taken HERE, immediately before the call
-  // it will be subtracted from, and throttled inside the probe (<=1 per ms) so it costs a few percent of a thread
-  // that is blocked ~96% of the time. It answers what `load1` cannot - "did this process get the CPU while the
-  // samples were late" - because a 60 s load average is blind to a 12 ms stall.
+  // The process-wide baseline for the worst-K event list (dev doc 6.243) MUST be taken BEFORE t_recv_begin: that
+  // instant is the window's own start, so a baseline stamped after it lies INSIDE the window and the probe refuses
+  // it (the refusal is counted and printed - see timing_event_late_baselines). Measured on `p179-n78-stress`: with
+  // the two lines in the other order EVERY receive event printed `cpu=-` and the leg could not answer the question
+  // it was flown for. Throttled inside the probe (<=1 per ms), so it costs a few percent of a thread that is
+  // blocked ~96% of the time, and it answers what `load1` cannot: did THIS PROCESS get the CPU while the samples
+  // were late (a 60 s load average is blind to a 12 ms stall).
   {
     const int64_t snapshot_now_ns =
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
@@ -1495,6 +1486,18 @@ void lower_phy_baseband_processor::ul_process()
       ul_pipeline_probe::get().timing_event_snapshot(snapshot_now_ns);
     }
   }
+  const auto t_recv_begin = std::chrono::steady_clock::now();
+#endif
+  // dev doc 6.51: the receive side gets the timing probe the transmit side already had ([dl_tx_slack] and
+  // [dl_tx_call]). Two clock reads and one relaxed-store block per slot, because the question - "is the host
+  // late to ASK, or does the transport block INSIDE the call?" - cannot be answered from the timestamps alone,
+  // and it is the question that decides whether the remaining millisecond discontinuities are ours to fix.
+#if defined(OCUDU_FLOW_PROBES)
+  // NOTE (dev doc 6.244): the baseline is NOT refreshed here. It is maintained by the RECEIVE path, ~1 ms ahead of
+  // this point (28k receives/s against a 1 ms throttle), which is what makes a hand-over's reading meaningful:
+  // `cpu` covers everything since that baseline, so a hand-over inside a receive stall inherits the pre-stall
+  // baseline and reports what the PROCESS did during the stall - which is the question. Refreshing it here instead
+  // made every DL window a few microseconds wide (measured on `p179`: `cpu=0.00ms base_age=0us` on every line).
 #endif
   const auto rx_call_begin = std::chrono::steady_clock::now();
   baseband_gateway_receiver::metadata rx_metadata = receiver.receive(rx_writer);

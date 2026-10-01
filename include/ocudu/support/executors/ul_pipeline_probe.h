@@ -605,6 +605,11 @@ public:
   /// instrument was on and nothing was slow" from "the instrument was never called", which otherwise look alike.
   uint64_t rx_event_candidates{0};
   uint64_t tx_event_candidates{0};
+  /// Events whose baseline was taken INSIDE their own window and was therefore refused (`cpu=-`). It is counted and
+  /// printed because the alternative is what happened on `p179-n78-stress`: the receive path stamped the baseline
+  /// AFTER the window's start, every event printed `-`, and the leg's question stayed unanswered with nothing on
+  /// the report to say why (dev doc 6.244).
+  uint64_t late_baselines{0};
 
   void record_rx_wait(int64_t wait_ns,
                       bool    spans_stream_start = false,
@@ -705,6 +710,9 @@ public:
   void attach_cpu_delta(timing_event& ev, int64_t begin_ns, int64_t end_ns)
   {
     if (!cpu_base.valid || (cpu_base.ns > begin_ns)) {
+      if (cpu_base.valid) {
+        ++late_baselines; // stamped inside the window: the caller's ordering is wrong, and the report says so
+      }
       return;
     }
 #if !defined(_WIN32)
@@ -1354,6 +1362,13 @@ public:
     std::fprintf(stderr,
                  "  line them up against the .log's `[RF] Real-time failure in RF: ...` lines; wall= is UTC, "
                  "epoch_ms= is the same instant as an integer\n");
+    if (late_baselines != 0) {
+      std::fprintf(stderr,
+                   "  ⚠ %llu event(s) had their CPU baseline stamped INSIDE the window and were refused "
+                   "(cpu=-): the caller's ordering is wrong, fix the call site rather than reading the `-` as "
+                   "zero CPU\n",
+                   static_cast<unsigned long long>(late_baselines));
+    }
     if (worst_rx_events.empty()) {
       std::fprintf(stderr,
                    "  rx  : none above the %lld us floor in %llu candidate check(s) - the receive path never "
