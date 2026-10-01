@@ -46,12 +46,16 @@ done
 [[ -n $LEG ]] || { echo "usage: bash leg_gate.sh [--slot-ms=N] <leg-label> [baseline-label]" >&2; exit 2; }
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
-LOGDIR=$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs
+# TWO DIRECTORIES, newest first across both: the macOS thread-stability line keeps its legs in its own
+# (doc_chinese/macos_thread_priority/wip/logs, per that directory's README) while every leg before 2026-10-01 is
+# in this one. `ls -1t` sorts by mtime over ALL its arguments, so "the newest leg carrying this label" keeps
+# meaning exactly what it meant with one directory - and a label only exists in one of them anyway.
+LOGDIRS=("$ROOT/doc_chinese/macos_thread_priority/wip/logs" "$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs")
 
 resolve() { # newest .log whose name carries the label (never the .stderr / .stdout siblings)
   local hit
-  hit=$(ls -1t "$LOGDIR"/gnb_*"$1"*.log 2>/dev/null | grep -v '\.stderr$\|\.stdout$' | head -1)
-  [[ -n $hit ]] || { echo "no leg matched '$1' in $LOGDIR" >&2; exit 2; }
+  hit=$(ls -1t "${LOGDIRS[@]/%//}"gnb_*"$1"*.log 2>/dev/null | grep -v '\.stderr$\|\.stdout$' | head -1)
+  [[ -n $hit ]] || { echo "no leg matched '$1' in ${LOGDIRS[*]}" >&2; exit 2; }
   printf '%s' "$hit"
 }
 

@@ -40,7 +40,14 @@ if [ ! -f "$CONFIG" ]; then
   echo "REFUSING to run: LEG_CONFIG=$CONFIG is not a file." >&2
   exit 2
 fi
-LOGDIR=$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs
+# WHERE THE LEG'S THREE FILES GO. The default is this directory's logs - every leg flown before 2026-10-01 is
+# there - and LEG_LOGDIR overrides it for a workstream that keeps its own: doc_chinese/macos_thread_priority/
+# README.md declares that this line's legs live in doc_chinese/macos_thread_priority/wip/logs, and the three
+# GATES (leg_gate.sh, ul_load.sh, milestone_audit.sh) search BOTH directories, newest first, so a leg is found
+# wherever this puts it. Measured 2026-10-01: p183-n78-default flew into the historical directory while that
+# README said otherwise, which is exactly the kind of "the record says one thing, the tool does another" this
+# tree keeps writing post-mortems about.
+LOGDIR=${LEG_LOGDIR:-$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs}
 # The mode is part of the file name: an A/B across modes must never be able to overwrite one arm
 # with the other, which is the mistake that makes a comparison silently compare a run with itself.
 LOG=$LOGDIR/gnb_${MODE}_${LABEL}_$(date +%m%d_%H%M).log

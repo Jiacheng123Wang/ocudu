@@ -1423,6 +1423,17 @@ TEST(ul_pipeline_probe_test, phase_segment_tails_are_ranked_and_attributed)
     const std::string report = capture_report();
     EXPECT_EQ(report.find("[ul_timing_events]"), std::string::npos) << report;
     EXPECT_EQ(report.find("ce   :"), std::string::npos) << report;
+    // ★ AND THE BODY ITSELF MUST NOT RUN (dev doc 10.13). The knob check used to live only in the public wrapper
+    // above, while the two callers INSIDE the probe (record_ldpc_start, record_end_crc_ok) call the _locked body
+    // directly - so a leg with the knob unset still took a Mach thread snapshot (thread_info + pthread_threadid_np
+    // + pthread_getschedparam) four times per PUSCH hop, on the pool threads. The candidate counter is what makes
+    // that visible: it is bumped by the body, so "the body ran" is observable without counting syscalls. The
+    // reachability of the _locked entry point is the whole point of calling it directly here.
+    const uint64_t candidates_before = probe.phase_event_candidates[0];
+    probe.record_phase_timing_event_locked(ocudu::ul_pipeline_probe::timing_event_kind::phase_t2f, 5000000, 1, 2);
+    EXPECT_EQ(probe.phase_event_candidates[0], candidates_before)
+        << "with the knob unset the phase recorder's BODY must not run at all: it is on the hot path (a snapshot "
+           "per segment per hop) and its callers inside the probe bypass the public wrapper";
   }
 
   // ---- ON: floors, ranking, bound, and the thread that completed the segment ------------------------------------

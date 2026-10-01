@@ -432,5 +432,90 @@ setschedparam(SCHED_OTHER, 31) 之后再来一次      -> 1 (EPERM)：**不可�
 | **相位块**（加载腿）| `ce`/`t2f`/`eqd`/`ldpc` 四块**应各有一到数条**（历史 max：ce 1.2 ms > 1 ms floor、t2f 0.7–13 ms > 2 ms、eqd 3–13 ms > 3 ms、ldpc 441–961 µs > 500 µs）| 全 "none above the floor" 而**载荷资格成立** ⇒ 相位 floor 定得不对，回 P0 重导 |
 | 判据 | C1/C2（高层 §5.2）在**当前 HEAD** 上成立 | 挂 C2 而 C1 过 ⇒ "整体变慢"，先查是不是本次改动带进来的 |
 
-### 10.12 待补
+### 10.13 2026-10-01 —— 第一条真腿 `p183-n78-default`：**发现我自己的一个热路径 bug**，以及腿本身的读数
+
+#### (1) ★ bug：相位事件记录的"关着"臂**没有真的关**
+
+**怎么发现的**：读 p183 的腿文件时按 §10.11 的预登记逐条核对（这条腿**没有**带 `OCUDU_UL_TIMING_EVENTS`），
+于是问了一句"旋钮关着时，相位那一臂到底做了什么"，读代码发现：
+
+* `record_phase_timing_event()`（公开入口）**有**旋钮检查；
+* 但**探针内部的两个调用者**（`record_ldpc_start()`、`record_end_crc_ok()`）持有锁、直接调
+  `record_phase_timing_event_locked()` —— **那个函数体里没有检查**。
+
+⇒ 旋钮关着时，**每个 PUSCH hop** 仍然：构造事件 → `attach_cpu_delta()` →
+`this_thread_sched_snapshot()`（`thread_info` + `pthread_threadid_np` + `pthread_getschedparam` 三次系统调用）
++ `snprintf` 线程名，**在池线程上、每 hop 四次**（t2f/ce/eqdem/ldpc）。
+另外 `record_ldpc_start()` 里给 `phases_entry` 填三个瞬时用的 `to_ns()` **每次两次读钟**，×4 = 每 hop 六次读钟，
+也是无条件执行的。
+
+**这违反本项目自己的规则**（"旋钮不设 ⇒ 不读钟、不打印、零成本"），而且落在**数据面热路径**上。
+量级：约 **8–16 µs CPU / hop**（hop ≈ 1.25 ms），约 1%。
+
+**修法（两个调用点都要）**
+1. 把检查**移进 `record_phase_timing_event_locked()` 函数体** —— 一个检查，所有调用者都经过它；
+2. 昂贵的**实参**要在调用点先判：`if (timing_event_wanted_phase(...)) { … to_ns(…) … }`（C++ 先算实参再进函数）；
+3. `record_ldpc_start()` 里的三个瞬时改成 `want_phase_events ? to_ns(…) : 0`（0 = "没有采集"，因为**没有别人读它们**：
+   `get_phase_durations()` 只用三个**时长**）。
+
+**反向臂**（纪律 79，已实测能打红）：单测直接调 **`_locked`** 入口（这正是 bug 的入口），断言
+`phase_event_candidates[]` **不增加**；把函数体里的检查删掉重编译，用例变红（实测过），加回去变绿。
+*candidate 计数器就是"函数体跑过了"的观测量 —— 不需要数系统调用。*
+
+#### (2) 腿 p183 的读数（**关于修复前的二进制**，所以按审计规则它随旧二进制过期）
+
+**`[sched]` 在真电台腿上复现了 10.5**（12 行；`unique_thread` 覆盖的线程）：
+
+```
+[sched] thread=main_pool#0    rt_intent=1 req=USER_INTERACTIVE eff=UNSPECIFIED run=running posix=FIFO/44
+[sched] thread=lower_phy_rx#0 rt_intent=1 req=USER_INTERACTIVE eff=UNSPECIFIED run=running posix=FIFO/44
+[sched] thread=lower_phy_ul#0 rt_intent=1 req=USER_INTERACTIVE eff=UNSPECIFIED run=running posix=FIFO/45
+[sched] thread=lower_phy_tx#0 rt_intent=1 req=USER_INTERACTIVE eff=UNSPECIFIED run=running posix=FIFO/46
+[sched] thread=io_timer_tick  rt_intent=0 req=USER_INITIATED   eff=USER_INITIATED   run=running posix=OTHER/31
+```
+⇒ **10 条实时线程全部无档，2 条非实时线程有档** —— 与 loopback 上完全一致，机制在真机上成立。
+（覆盖范围：`unique_thread` 创建的 12 条；UHD/libusb 与 SCTP 那几条不走这条路径，所以不打印 —— 这是**已知边界**。）
+
+**C1/C2（§5.2 登记值）对 p181（同配方、同配置的参考腿）**：
+
+| 序列 | p181 p99 / median | **p183 p99 / median** | C1 | C2 |
+|---|---|---|---|---|
+| `ul_pipeline` | 1644.0 / 1329.0 | **1605.0 / 1302.0** | ≤2000 ✔ | ≤1700 ✔ |
+| `ul_gpu_pipeline` | 1535.8 / 1262.1 | **1535.5 / 1253.2** | ≤2000 ✔ | ≤1600 ✔ |
+| `ul_time_frequency` | 622.2 / 490.2 | **620.8 / 489.5** | ≤780 ✔ | ≤640 ✔ |
+| `ul_channel_estimation` | 173.2 / 64.0 | **165.9 / 63.2** | ≤210 ✔ | ≤84 ✔ |
+| `ul_equalization_demod` | 905.5 / 700.8 | **898.6 / 691.7** | ≤1130 ✔ | ≤850 ✔ |
+| `ul_ldpc_decode` | 210.0 / 59.0 | **128.0 / 43.0** | ≤150 ✔ | ≤58 ✔ |
+| `ul_rx_wait` | 174.0 / 0.0 | **174.0 / 0.0** | ≤220 ✔ | — |
+
+⇒ **C1/C2 全部达标，且多数比参考腿略好**（t2f/ce/eqdem/ldpc 的 p99 与中位都更低）。
+
+**门的结果：9/10**，唯一的 FAIL 是：
+```
+[FAIL] VALIDITY (6.198 (4)): AT/BELOW 0 <= 10 AND no transport storm (slip/recv over 1ms <= 10, gaps = 0)
+       in-stream AT/BELOW 0=5 (population 377989), slip=12, recv=10, gaps=0
+```
+`slip over 1ms = 12` 超了登记的 `≤10`（p181 是 10，正好压线）。**历史分布**：同类 n78 腿的
+`slip over 1ms` 读到过 7 / 10 / 10 / 12 / 22 —— 12 落在**这个平台的常态**里，而这条判据的登记值偏紧。
+**诚实的表述**：这条 FAIL 与"本次改动"的关系**无法从一条腿分开**（而我的热路径 bug 恰好会给池线程多加
+每 hop 几 µs、可能正好推高 slip）；bug 已修，重飞的腿会把它变成可判的问题。`gaps=0`、`rx_overflows=0`、
+契约 MET、`AT/BELOW 0 = 5`（≤10）都是干净的。
+
+**没测到的**：这条 default 腿**没有**带 `OCUDU_UL_TIMING_EVENTS`（历史配方如此），所以没有 `[ul_timing_events]`
+块，**相位尾部与 `thread=`/`tcpu=` 尚未在真腿上出现过** —— 留给下一对腿（§10.11 的预登记就是为此写的）。
+
+### 10.14 2026-10-01 —— 腿日志的目录：**改工具让它支持文档说的事**（用户发现）
+
+**现象**：`p183` 落在 `doc_chinese/phy_pipeline_gpu/wip/logs/`，而本目录 README 写的是"本线新腿放本目录 `wip/logs/`"。
+**原因**：`run_leg.sh` 把 `LOGDIR` 写死成历史目录，**这条约定从规划期起就没有被实现过**（本目录的 `wip/logs/` 一直是空的）。
+
+**决定（已实现）**：**让工具支持这条约定，而不是把 README 改小**：
+1. `run_leg.sh`：`LOGDIR=${LEG_LOGDIR:-<历史目录>}` —— 默认**逐字不变**（其它线不受影响），本线在命令里带
+   `LEG_LOGDIR=doc_chinese/macos_thread_priority/wip/logs`；
+2. 三个门（`leg_gate.sh`、`ul_load.sh`、`milestone_audit.sh`）改成**两个目录一起找**（`ls -1t` 跨参数按 mtime 排，
+   所以"最新的那条同名腿"语义不变）—— 老腿照旧能找到，新腿也能（两个方向都实测过）；
+3. `spike_census.py`/`threshold_candidates.py` **早就**读两个目录，无需改动。
+**没有做**：没有移动任何既有腿文件（历史不改），也没有改任何一处判据。
+
+### 10.15 待补
 （每次飞腿/改动后追加：做了什么、读数、判据是否满足、更正了哪一条。）

@@ -24,7 +24,7 @@
 | 路径 | 是否跟踪 | 放什么 |
 |---|---|---|
 | `wip/*.sh`、`wip/*.py` | ✅ **跟踪** | 腿配方与旁观脚本（它们产出证据，属于"人读了才懂"的东西）：`observe_threads.sh`（旁观，默认 light）、`taskpolicy_ab.sh`（P2 档位 A/B）、`spike_census.py`（尖峰普查，读 p99）、`threshold_candidates.py`（按**家族**导出 C1/C2 阈值）|
-| `wip/logs/` | ❌ **忽略**（`doc_chinese/.gitignore` 的 `**/logs/`）| 本线新飞的腿（三件套：`.log` / `.log.stderr` / `.log.stdout`）|
+| `wip/logs/` | ❌ **忽略**（`doc_chinese/.gitignore` 的 `**/logs/`）| 本线新飞的腿（三件套：`.log` / `.log.stderr` / `.log.stdout`）。★ **飞腿时必须带 `LEG_LOGDIR=doc_chinese/macos_thread_priority/wip/logs`**：`run_leg.sh` 的默认仍指向 `../phy_pipeline_gpu/wip/logs/`（2026-10-01 之前它的 `LOGDIR` 是写死的，所以本目录一直是空的 —— 用户发现，见开发文档 §10.14）；三个门（`leg_gate.sh`/`ul_load.sh`/`milestone_audit.sh`）**两个目录都会找**，所以腿放哪边都能判 |
 | `work_tmp/` | ❌ **忽略**（`**/work_tmp/`）| `taskinfo`/`powermetrics`/`sample` 的采样文件、dump、scratch |
 
 ## 与本仓其他目录的关系

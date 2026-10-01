@@ -359,15 +359,20 @@ public:
       const int64_t eqdem_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - ce_it->second.tp).count();
       // Negative durations can only come from a mismatched (shifted-slot) pairing: drop the entry.
       if (t2f_ns >= 0 && ce_ns >= 0 && eqdem_ns >= 0) {
-        // The three instants ride along with the durations (P1): the phase-tail events quote a window as well as
-        // a duration, and by the time the CRC-OK completion records them the landmarks themselves are gone from
-        // the pending maps. They are also what makes a phase event's `cpu=` a reading of ITS OWN window instead
-        // of a reading of "whatever happened since the last baseline".
-        const int64_t t2f_begin_ns = to_ns(start_it->second.tp);
-        const int64_t t2f_end_ns   = to_ns(t2f_it->second.tp);
-        const int64_t ce_end_ns    = to_ns(ce_it->second.tp);
-        const int64_t now_ns       = to_ns(now);
-        pending_phases[slot]       = {now, t2f_ns, ce_ns, eqdem_ns, t2f_begin_ns, t2f_end_ns, ce_end_ns, next_start_seq++};
+        // ★ The three instants are captured ONLY when the worst-K list is on, and the guard is not cosmetic:
+        // to_ns() rebases through two clock reads of its own, so filling them unconditionally cost six clock
+        // reads per PUSCH hop even with the knob unset - the same "unset = no clock, no cost" rule the check
+        // inside record_phase_timing_event_locked() enforces (dev doc 10.13). Nothing else reads these fields
+        // (get_phase_durations() returns the three DURATIONS), so 0 here means exactly "not captured".
+        //
+        // They are what lets a phase event quote a window instead of only a duration, and by the time the
+        // CRC-OK completion records the segments the landmarks are gone from the pending maps.
+        const bool    want_phase_events = timing_events_limit() != 0;
+        const int64_t t2f_begin_ns      = want_phase_events ? to_ns(start_it->second.tp) : 0;
+        const int64_t t2f_end_ns        = want_phase_events ? to_ns(t2f_it->second.tp) : 0;
+        const int64_t ce_end_ns         = want_phase_events ? to_ns(ce_it->second.tp) : 0;
+        const int64_t now_ns            = want_phase_events ? to_ns(now) : 0;
+        pending_phases[slot] = {now, t2f_ns, ce_ns, eqdem_ns, t2f_begin_ns, t2f_end_ns, ce_end_ns, next_start_seq++};
         evict_oldest(pending_phases);
         // ... and the three segments that END here are recorded as tail events immediately: their durations are
         // final at this instant (t2f ends at the FFT completion, ce at the channel-estimation completion, and
@@ -498,10 +503,16 @@ public:
       // task starts the decoder, the notifier completes it), so this is the one series whose window a single
       // thread owns end to end - and therefore the one whose `tcpu=` is a real per-thread reading whenever the
       // baseline happens to have been taken by that same thread.
-      record_phase_timing_event_locked(timing_event_kind::phase_ldpc,
-                                       ldpc_us.count(),
-                                       to_ns(ldpc_it->second.tp),
-                                       to_ns(now));
+      //
+      // The gate is repeated HERE because its ARGUMENTS are expensive: to_ns() costs two clock reads each, and C++
+      // evaluates them before the call can refuse (the body's own check then never sees the cost). The other
+      // phase call site guards its instants with the same reasoning.
+      if (timing_event_wanted_phase(timing_event_kind::phase_ldpc, ldpc_us.count())) {
+        record_phase_timing_event_locked(timing_event_kind::phase_ldpc,
+                                         ldpc_us.count(),
+                                         to_ns(ldpc_it->second.tp),
+                                         to_ns(now));
+      }
       pending_ldpc_starts.erase(ldpc_it);
       ldpc_latencies_us.push_back(static_cast<double>(ldpc_us.count()));
       mac_pdu_sizes_bytes.push_back(static_cast<double>(mac_pdu_bytes));
@@ -944,6 +955,8 @@ public:
   /// \param[in] end_ns    Steady instant it ended (the call site's `now`).
   void record_phase_timing_event(timing_event_kind kind, int64_t value_us, int64_t begin_ns, int64_t end_ns)
   {
+    // The gate lives in the body (see _locked); this wrapper only avoids taking the lock when the answer is
+    // already known to be "no".
     if (!timing_event_wanted_phase(kind, value_us)) {
       return;
     }
@@ -953,8 +966,19 @@ public:
 
   /// The body of the above for a caller that already holds \p mutex (record_ldpc_start assembles the three
   /// segment durations under the lock, and this probe's mutex is a plain std::mutex: re-entering it deadlocks).
+  ///
+  /// ★ THE KNOB IS CHECKED HERE, IN THE BODY, and that is not redundancy: the first version checked it only in the
+  /// public wrapper, while the two callers INSIDE this class (record_ldpc_start, record_end_crc_ok) call this
+  /// function directly - so a leg with `OCUDU_UL_TIMING_EVENTS` UNSET still built an event per segment and called
+  /// attach_cpu_delta(), i.e. took a Mach thread snapshot (thread_info + pthread_threadid_np +
+  /// pthread_getschedparam) four times per PUSCH hop, on the pool threads, against this project's rule that an
+  /// unset probe reads no clock and costs nothing. Found on 2026-10-01 by reading leg `p183-n78-default`, which
+  /// flew without the knob (dev doc 10.13). One check, in the one place every caller goes through.
   void record_phase_timing_event_locked(timing_event_kind kind, int64_t value_us, int64_t begin_ns, int64_t end_ns)
   {
+    if (!timing_event_wanted_phase(kind, value_us)) {
+      return;
+    }
     const size_t idx = phase_index(kind);
     ++phase_event_candidates[idx];
     timing_event ev;
