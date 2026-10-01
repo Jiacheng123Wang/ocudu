@@ -57,10 +57,18 @@ SERIES.append(
      r"(?: \(at call #(\d+)\))?")
 )
 
-# Field order of one record: the numbers a criterion can be read from, and the sample count that says how much
-# of the run the reading covers. `mean` and `min` are read but NOT kept: no criterion in this line uses them
-# (a mean is dominated by the median, a min by the fastest slot), and carrying them would invite one.
-FIELDS = ("samples", "median", "p95", "p99", "max")
+# Field order of one record: every number the series prints, plus the sample count that says how much of the run
+# the reading covers.
+#
+# WHY mean AND min ARE KEPT AFTER ALL (user clarification, 2026-10-01). They were dropped at first ("a mean is
+# dominated by the median, a min by the fastest slot"). That was wrong about what this line measures: running
+# stability means THE SAME TASK TAKES ABOUT THE SAME TIME, i.e. the whole distribution repeats from leg to leg -
+# mean, median, min, p95, p99 - and a statistic nobody records is a statistic nobody can show is stable. `max`
+# stays a reading rather than a criterion (it is one draw from a heavy tail), but it is read too, because a
+# distribution that is stable in five statistics and not in the sixth is a finding.
+FIELDS = ("samples", "mean", "median", "min", "p95", "p99", "max")
+# The order the stability view prints (and the one the user named): the central value first, then the shape.
+STABILITY_STATS = ("mean", "median", "min", "p95", "p99", "max")
 
 
 def leg_label(name):
@@ -93,10 +101,20 @@ def read_leg(path):
             call = int(m.group(6)) if m.group(6) else 0
             # call #1 == the startup spin-up: reported, but marked so nobody reads it as a stall.
             key = name + ("@call#1(startup)" if call == 1 else "")
-            # [calls, median, p95, p99, max] - the call count stands in for `samples`.
-            out[key] = dict(zip(FIELDS, [int(m.group(1))] + [float(m.group(i)) for i in (2, 3, 4, 5)]))
+            # [calls, median, p95, p99, max] - the call count stands in for `samples`, and mean/min are None
+            # because this series does not print them (None, not 0: "not reported" must not read as "zero").
+            out[key] = dict(zip(("samples", "median", "p95", "p99", "max"),
+                                [int(m.group(1))] + [float(m.group(i)) for i in (2, 3, 4, 5)]))
+            out[key].update({"mean": None, "min": None})
         else:
-            out[name] = dict(zip(FIELDS, [int(m.group(1))] + [float(m.group(i)) for i in (2, 6, 7, 5)]))
+            # THE CAPTURE ORDER IS NOT THE FIELD ORDER, and the first version of this line got it wrong:
+            # the regex captures samples/mean/median/min/MAX/p95/p99 while FIELDS wants .../p95/p99/max, so a
+            # positional zip silently read p95=max, p99=p95 and max=p99 (measured on p188: `ul_rx_wait` printed
+            # median 0.0 / p99 159.0 / max 172.0 for a line whose real numbers are p95 160, p99 172, max 2073).
+            # An explicit mapping is used instead: samples=1 mean=2 median=3 min=4 max=5 p95=6 p99=7.
+            out[name] = {"samples": int(m.group(1)), "mean": float(m.group(2)), "median": float(m.group(3)),
+                         "min": float(m.group(4)), "p95": float(m.group(6)), "p99": float(m.group(7)),
+                         "max": float(m.group(5))}
     return out
 
 
@@ -123,6 +141,28 @@ def main():
         i = args.index("--top")
         top = int(args[i + 1])
         del args[i:i + 2]
+    stability = "--stability" in args
+    if stability:
+        args.remove("--stability")
+    # Legs that are known to be perturbed are excluded BY DEFAULT and named in the output: a stability table that
+    # silently contains the observed leg (p182_1726, dev doc 10.3) or a leg with an external freeze reports the
+    # observation, not the platform.
+    excluded = []
+    if "--exclude" in args:
+        i = args.index("--exclude")
+        excluded = [args[i + 1]]
+        del args[i:i + 2]
+    excluded += [lab for lab in (os.environ.get("CENSUS_EXCLUDE", "").split(",") if os.environ.get("CENSUS_EXCLUDE") else []) if lab]
+    if "--keep-all" not in args:
+        excluded += ["p182-n78-stress_1001_1726"]   # the leg that was observed with taskinfo/powermetrics/sample
+    else:
+        args.remove("--keep-all")
+    if "--regime" in args:
+        i = args.index("--regime")
+        want_regime = args[i + 1]
+        del args[i:i + 2]
+    else:
+        want_regime = None
 
     files = []
     if args:
@@ -143,6 +183,9 @@ def main():
         print("no legs found; pass .log.stderr paths or fly one into wip/logs/", file=sys.stderr)
         return 2
     print(f"# {len(files)} leg(s); newest {recent} by default, --all for every leg, --legs <substr> to filter")
+
+    if stability:
+        return print_stability(files, want_regime, top, excluded)
 
     rows = []
     for f in files:
@@ -169,6 +212,92 @@ def main():
         r = "inf (median 0)" if ratio == float("inf") else f"x{ratio:.1f}"
         print(f"  {r:16s} {series:24s} median={st['median']:8.1f}us max={st['max']:9.1f}us  [{leg}]")
     return 0
+
+
+# ------------------------------------------------------------------------------------------------------------
+# THE STABILITY VIEW (--stability): what this line means by "running stability".
+#
+# USER'S DEFINITION (2026-10-01, verbatim in substance): stability means that when the PHY processing threads run
+# THE SAME TASK, the time it takes should not vary much - mean / median / min / p95 / p99 (and max, as a reading)
+# should barely change from leg to leg. Example given: [ul_gpu_pipeline] median 1262.4 us, and it should stay
+# there.
+#
+# So the quantity to report is NOT a threshold and not a ratio to the median: it is the SPREAD OF EACH STATISTIC
+# ACROSS LEGS that did the same work. This view prints, per series, the min and max of every statistic over the
+# selected legs, the relative spread, and which leg held each end - so "stable" is a number with a witness.
+#
+# THE PRE-CONDITION IS "THE SAME WORK", AND IT IS THE READER'S TO CHECK. Two legs of the same family still differ
+# in payload, and a series whose duration follows the transport block (ul_ldpc_decode does - measured, dev doc
+# 10.17(3)) will look "unstable" for a reason that has nothing to do with scheduling. The payload block below the
+# table is therefore part of the reading, not decoration.
+def print_stability(files, want_regime, top, excluded=()):
+    legs = []
+    for f in files:
+        label = leg_label(os.path.basename(f))
+        if want_regime is not None and (want_regime not in label):
+            continue
+        if any(x and (x in label) for x in excluded):
+            continue
+        st = read_leg(f)
+        if not st:
+            continue
+        payload = payload_of(f)
+        legs.append((os.path.getmtime(f), label, st, payload))
+    if not legs:
+        print("no leg matched", file=sys.stderr)
+        return 2
+    legs.sort()  # oldest first: the table reads left to right in time
+    print(f"# stability: {len(legs)} leg(s) - spread of EVERY statistic across legs (older -> newer)")
+    print(f"# legs: " + ", ".join(lab for _m, lab, _s, _p in legs))
+    if excluded:
+        print(f"# excluded (perturbed by construction, dev doc 10.3/10.17): " + ", ".join(excluded))
+    print()
+    print(f"{'series':24s} {'stat':7s} {'min over legs':>14s} {'max over legs':>14s} {'spread':>9s}   witness")
+    for series, _rx in SERIES:
+        stats = [(lab, st[series]) for _m, lab, st, _p in legs if series in st]
+        if len(stats) < 2:
+            continue
+        for stat in STABILITY_STATS:
+            vals = [(lab, st[stat]) for lab, st in stats if st.get(stat) is not None]
+            if len(vals) < 2:
+                continue
+            lo_lab, lo = min(vals, key=lambda t: t[1])
+            hi_lab, hi = max(vals, key=lambda t: t[1])
+            # A statistic that is 0 on every leg (a symbol-grained receive has median 0) has no meaningful
+            # ratio: say so instead of printing `inf`, which reads like a catastrophic instability.
+            if lo <= 0:
+                sp = "n/a" if hi == lo else "0->{:.1f}".format(hi)
+            else:
+                sp = f"{(hi - lo) / lo * 100.0:+.1f}%"
+            # The witnesses are worth the width: "stable" without the legs that held the ends is unfalsifiable -
+            # and they are printed IN FULL, because a truncated label is not something a reader can look up.
+            wit = "" if lo_lab == hi_lab else f"low {lo_lab}   high {hi_lab}"
+            print(f"{series:24s} {stat:7s} {lo:14.1f} {hi:14.1f} {sp:>9s}   {wit}")
+        print()
+    print("# the work each leg did (a series whose duration follows the payload cannot be read without this):")
+    for _m, lab, _st, payload in legs:
+        print(f"#   {lab:34s} {payload}")
+
+
+def payload_of(path):
+    """The UL payload line of a leg's stderr, or a note saying it is not there.
+
+    Read from the leg itself (not from a side file) so the table and the work it describes cannot drift apart.
+    """
+    try:
+        with open(path, errors="replace") as fh:
+            txt = fh.read()
+    except OSError:
+        return "<unreadable>"
+    m = re.search(r"^\s*UL payload\s*:\s*(.+)$", txt, re.M)
+    if m is not None:
+        return m.group(1).strip()
+    # Newer legs print it through ul_load.sh, not into their own stderr; the [ul_mac_pdu_size] series is the
+    # same information in the leg's own report.
+    m = re.search(r"^\[ul_mac_pdu_size\] samples=\d+ mean=([\d.]+)B median=([\d.]+)B", txt, re.M)
+    if m is not None:
+        return f"TBS mean={m.group(1)}B median={m.group(2)}B (from [ul_mac_pdu_size])"
+    return "<no payload line in this leg>"
 
 
 if __name__ == "__main__":
