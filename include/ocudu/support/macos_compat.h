@@ -215,17 +215,18 @@ void print_thread_affinity_info(::pthread_t thread);
 ///
 /// Linux: always true - SCHED_FIFO is the native, enforced mechanism there.
 ///
-/// macOS: true by default (the historical behaviour), and FALSE when OCUDU_SCHED_SKIP_POSIX_RT is set to something
-/// other than "0". The switch exists because of a measurement (2026-10-01, dev doc 10.5) that contradicts what
-/// this function used to assume: a Darwin thread is either QoS-managed or explicitly scheduled, and the POSIX call
-/// SILENTLY REMOVES the QoS class the compat layer set a moment earlier - irreversibly (setting it again returns
-/// EPERM for the rest of the thread's life, even after switching back to SCHED_OTHER). Measured on a loopback run:
-/// a real-time worker reads back `req=USER_INTERACTIVE eff=UNSPECIFIED`, while a non-real-time worker - which
-/// never makes this call - reads back `eff=USER_INITIATED`. With the switch on, the call is skipped and the class
-/// survives; with it off, the behaviour is byte-for-byte the historical one.
+/// macOS: **false by default**, and `OCUDU_SCHED_POSIX_RT=1` (any value but "0") restores the historical
+/// behaviour. The measurement behind that default (2026-10-01, dev doc 10.5): a Darwin thread is either
+/// QoS-managed or explicitly scheduled, and the POSIX call SILENTLY REMOVES the QoS class the compat layer set a
+/// moment earlier - irreversibly (setting it again returns EPERM for the rest of the thread's life, even after
+/// switching back to SCHED_OTHER). Measured on the bench and on three radio legs: with the call the real-time
+/// workers read back `req=USER_INTERACTIVE eff=UNSPECIFIED` while the non-real-time ones - which never make it -
+/// read back `eff=USER_INITIATED`, i.e. the data plane was running below the support threads it is meant to
+/// outrank. Skipping it is now the default because the QoS class is the mechanism that demonstrably works, and
+/// what is given up is a SCHED_FIFO policy this port has never shown to be enforced on macOS.
 ///
-/// \note The decision to make either arm the default belongs to the A/B (a P2-style leg pair), not to this switch:
-///       both arms are reachable from one binary on purpose.
+/// \note The arm that applies it stays reachable on the same binary, on purpose: the A/B is what would overturn
+///       the default, and a rebuild between arms would put the build itself into the comparison.
 bool posix_realtime_priority_is_enforceable();
 
 /// \brief Returns the real-time priority the radio (RU) worker should be

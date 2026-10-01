@@ -308,8 +308,8 @@ def main():
         "OCUDU_CE_LANE_ORDER": "信道估计的四种车道顺序：`merged`（**默认**，估计器的派发搭车道共享 cb）｜`event`｜`wait`/`host_wait`｜`burst`（旧名 `OCUDU_CE_FUSED_BURST`）。拼错的值打 error 并按 `merged` 跑（代码里那条 warning 的原文就写着 \"using merged\"）。白名单只接受 `=merged`",
         # ---- macOS 线程运行稳定性（doc_chinese/macos_thread_priority/，2026-10-01）--------------------------
         "OCUDU_SCHED_VERBOSE": "**探针（只打印，白名单可带）**：每个 worker 线程创建后**回读**它真正拿到的调度状态，一行 `[sched] thread=… id=… rt_intent=… req=… eff=… run=… posix=…/…`。★ 它回答的是本线开线时的悬案「我们请求的 QoS 到底生效没有」——**第一次跑就给了答案**：请求 `USER_INTERACTIVE` 的线程回读 `eff=UNSPECIFIED`，而**不调用** `pthread_setschedparam` 的非实时线程回读 `eff=USER_INITIATED`（开发文档 10.5）。两把钥匙：`ENABLE_FLOW_PROBES` 编译 + 本变量非 `0`；两者缺一即**一个字都不打印**（默认关）",
-        "OCUDU_SCHED_ATTR_QOS": "**实验臂（改 macOS 调度，**不在**白名单，fail-closed）**：把 QoS 类**声明在线程属性上**（`pthread_attr_set_qos_class_np`），让关键线程**从第一条指令**就在目标档上。默认关 = 历史行为。★ 现在的认识：只要 `pthread_setschedparam` 还在后面调用，attr 上声明的档**同样会被抹掉**（实测，开发文档 10.5），所以这一臂必须与 `OCUDU_SCHED_SKIP_POSIX_RT` 一起用",
-        "OCUDU_SCHED_SKIP_POSIX_RT": "**实验臂（改 macOS 调度，**不在**白名单，fail-closed）**：`=1` 时**不再**对实时意图线程调用 `pthread_setschedparam(SCHED_FIFO,prio)`。默认关 = 历史行为。存在的理由是一条实测：Darwin 上线程**要么**由 QoS 管、**要么**是显式调度，POSIX 调用会把刚设好的 QoS 类**静默抹掉且不可恢复**（再设返回 EPERM）；跳过它，`[sched]` 就回读 `eff=USER_INTERACTIVE`（同一条腿的 A/B 见开发文档 10.5）",
+        "OCUDU_SCHED_ATTR_QOS": "**实验臂（改 macOS 调度，**不在**白名单，fail-closed）**：把 QoS 类**声明在线程属性上**（`pthread_attr_set_qos_class_np`），让关键线程**从第一条指令**就在目标档上。默认关 = 历史行为。★ 注意它与 `OCUDU_SCHED_POSIX_RT=1` **不能同时用**：只要那个 POSIX 调用还在（现在只剩对照臂才调用），attr 上声明的档**同样会被抹掉**（实测，开发文档 10.5）。默认已经跳过那个调用，所以这一臂现在才有意义 —— 它买的是「起跑那一刻就在 P 核」",
+        "OCUDU_SCHED_POSIX_RT": "**对照臂（改 macOS 调度，**不在**白名单，fail-closed）**：`=1` = **恢复历史行为**，即对实时意图线程调用 `pthread_setschedparam(SCHED_FIFO,prio)`。★ **不设它才是新默认**（2026-10-01 用户裁决）：实测 Darwin 上线程**要么**由 QoS 管、**要么**是显式调度，那个 POSIX 调用会把刚设好的 QoS 类**静默抹掉且不可恢复**（再设返回 EPERM）；默认跳过它以后，`[sched]` 回读 `eff=USER_INTERACTIVE`（真腿读数见开发文档 10.15 与本次裁决 10.16）。保留这个臂是为了能**在同一个二进制上**做 A/B 推翻默认，而不是靠重新编译",
     }
     for knob, note in curated_new.items():
         rows = hits.get(knob, [])
@@ -325,7 +325,8 @@ def main():
           "只打印、不改调度；默认关时一个字都不打印 —— 见 `doc_chinese/macos_thread_priority/` 开发文档 10.5）。")
     print("> **视为「等于交付默认」**：`OCUDU_DFT_BATCH_SYMBOLS=14`、`OCUDU_DFT_OPEN_BLOCK=1`、`OCUDU_DFT_RELEASE_BLOCK=1`、`OCUDU_CE_LANE_ORDER=merged`、"
           "`OCUDU_DFT_BACKEND=vdsp`（2026-10-01 加入：Apple 上这就是不设它时的值）。其余一律判 FAIL（**fail-closed**）。")
-    print("> `OCUDU_DFT_BACKEND=generic` **故意不**在白名单里：那是一条 A/B **臂**——臂可以满足其余所有判据（p84 就是这样），闸门拦的就是它。")
+    print("> `OCUDU_SCHED_POSIX_RT`（改 macOS 调度）与 `OCUDU_SCHED_ATTR_QOS` 同样**故意不**在白名单里（臂，fail-closed）；"
+          "`OCUDU_DFT_BACKEND=generic` **故意不**在白名单里：那是一条 A/B **臂**——臂可以满足其余所有判据（p84 就是这样），闸门拦的就是它。")
     print("> 6.215 起交付车道的网格由 **host** 写，所以 `OCUDU_DFT_BATCH_SYMBOLS`/`OCUDU_DFT_OPEN_BLOCK`/`OCUDU_DFT_RELEASE_BLOCK` 对交付腿是 **MOOT**（那个引擎根本不在路上）；**最有力的交付腿是一个旋钮都不设**，白名单只是给「已经设了」的腿留出等于默认的写法。")
     print("> `OCUDU_UL_RX_SYMBOLS` 也不在白名单里，但它的**默认值就是 `= 1`**（每符号一跳）——交付腿不设它即得交付形态，设 `=7`/`=14` 才是改形状。")
     print()

@@ -37,8 +37,9 @@
 
 * **`../ocudu_env_knobs_inventory_and_leg_whitelist.md`**（生成物）：**整棵树**的 `OCUDU_*` 旋钮默认值/读取点/飞过的腿 + **验收腿白名单**。
   本线的任何新旋钮都必须在**改生成器**（`../phy_latency/wip/gen_knob_inventory.py`）之后重新生成它，并按需加入白名单。
-  本线现状：`OCUDU_SCHED_VERBOSE`（**只打印 ⇒ 在白名单**）、`OCUDU_SCHED_ATTR_QOS` 与 `OCUDU_SCHED_SKIP_POSIX_RT`
+  本线现状：`OCUDU_SCHED_VERBOSE`（**只打印 ⇒ 在白名单**）、`OCUDU_SCHED_ATTR_QOS` 与 `OCUDU_SCHED_POSIX_RT`
   （**改调度 ⇒ 故意不在白名单**，fail-closed —— 带它们的腿是**臂**，不得进验收结论）。
+  ★ 2026-10-01 用户裁决：**跳过 POSIX 调用已是 macOS 的新默认**（`OCUDU_SCHED_POSIX_RT=1` 是恢复历史行为的对照臂）。
 * `../README.md`：`doc_chinese/` 的总索引。
 
 ## 引用规则（写文档时必须守）

@@ -290,7 +290,8 @@ public:
     std::lock_guard<std::mutex> lock(mutex);
     const auto now = std::chrono::high_resolution_clock::now();
     trace_slot(slot, slot_trace_what::ldpc_start, now);
-    pending_ldpc_starts[slot] = {now, next_start_seq++};
+    // The baseline for the LDPC window, which starts at this instant (dev doc 10.15 (3)).
+    pending_ldpc_starts[slot] = {now, next_start_seq++, phase_baseline_for(to_ns(now))};
     // Bound the registry by insertion order (see record_start): unmatched entries belong to TBs that ended
     // without a CRC-OK completion (or with one in a shifted slot).
     evict_oldest(pending_ldpc_starts);
@@ -381,9 +382,21 @@ public:
         // know whose stack to look at.
         //
         // The lock is already held (see record_phase_timing_event_locked): taking it again would deadlock.
+        // `ce` starts at the t2f end and `eqdem` at the ce end, so each carries the snapshot its own start
+        // landmark took (see start_entry::base). `t2f` deliberately passes none: its start is record_start, on
+        // the receive path's per-BLOCK hot path, where a snapshot per block is not worth its cost for a series
+        // whose floor (2 ms) the legs barely reach - it keeps the shared baseline and prints `cpu=-`.
         record_phase_timing_event_locked(timing_event_kind::phase_t2f, t2f_ns / 1000, t2f_begin_ns, t2f_end_ns);
-        record_phase_timing_event_locked(timing_event_kind::phase_ce, ce_ns / 1000, t2f_end_ns, ce_end_ns);
-        record_phase_timing_event_locked(timing_event_kind::phase_eqdem, eqdem_ns / 1000, ce_end_ns, now_ns);
+        record_phase_timing_event_locked(timing_event_kind::phase_ce,
+                                         ce_ns / 1000,
+                                         window_start_ns(t2f_it->second.base, t2f_it->second.tp),
+                                         ce_end_ns,
+                                         &t2f_it->second.base);
+        record_phase_timing_event_locked(timing_event_kind::phase_eqdem,
+                                         eqdem_ns / 1000,
+                                         window_start_ns(ce_it->second.base, ce_it->second.tp),
+                                         now_ns,
+                                         &ce_it->second.base);
       }
     }
   }
@@ -398,7 +411,8 @@ public:
     }
     std::lock_guard<std::mutex> lock(mutex);
     const auto now         = std::chrono::high_resolution_clock::now();
-    pending_t2f_ends[slot] = {now, next_start_seq++};
+    // ... and the baseline for the CE window, which starts at this instant.
+    pending_t2f_ends[slot] = {now, next_start_seq++, phase_baseline_for(to_ns(now))};
     evict_oldest(pending_t2f_ends);
     trace_slot(slot, slot_trace_what::t2f, now);
   }
@@ -413,7 +427,8 @@ public:
     }
     std::lock_guard<std::mutex> lock(mutex);
     const auto now        = std::chrono::high_resolution_clock::now();
-    pending_ce_ends[slot] = {now, next_start_seq++};
+    // ... and the baseline for the EQUALIZATION+DEMOD window, which starts at this instant.
+    pending_ce_ends[slot] = {now, next_start_seq++, phase_baseline_for(to_ns(now))};
     evict_oldest(pending_ce_ends);
     trace_slot(slot, slot_trace_what::ce, now);
   }
@@ -510,8 +525,9 @@ public:
       if (timing_event_wanted_phase(timing_event_kind::phase_ldpc, ldpc_us.count())) {
         record_phase_timing_event_locked(timing_event_kind::phase_ldpc,
                                          ldpc_us.count(),
-                                         to_ns(ldpc_it->second.tp),
-                                         to_ns(now));
+                                         window_start_ns(ldpc_it->second.base, ldpc_it->second.tp),
+                                         to_ns(now),
+                                         &ldpc_it->second.base);
       }
       pending_ldpc_starts.erase(ldpc_it);
       ldpc_latencies_us.push_back(static_cast<double>(ldpc_us.count()));
@@ -711,6 +727,10 @@ public:
   uint64_t rx_event_candidates{0};
   uint64_t tx_event_candidates{0};
   std::array<uint64_t, 4> phase_event_candidates{};
+  /// Process+thread snapshots taken by the PER-HOP path (the phase landmarks and the phase events). It is the
+  /// observable half of the "knob unset => no clock, no cost" rule for that path: the candidate counters only
+  /// prove the RECORDER did not run, and this one proves the SNAPSHOT was not taken either (dev doc 10.13/10.15).
+  uint64_t phase_baselines_taken{0};
   /// Events whose baseline was taken INSIDE their own window and was therefore refused (`cpu=-`). It is counted and
   /// printed because the alternative is what happened on `p179-n78-stress`: the receive path stamped the baseline
   /// AFTER the window's start, every event printed `-`, and the leg's question stayed unanswered with nothing on
@@ -825,8 +845,16 @@ public:
   /// \param[in] count_late Whether a baseline that falls INSIDE the window is a caller's ordering mistake (true
   ///            for the receive path, which owns the baseline; false for a phase event, whose window legitimately
   ///            starts inside the receive path's ~1 ms cadence - see phase_baseline_misses).
-  void attach_cpu_delta(timing_event& ev, int64_t begin_ns, int64_t end_ns, bool count_late = true)
+  void attach_cpu_delta(timing_event&       ev,
+                        int64_t             begin_ns,
+                        int64_t             end_ns,
+                        bool                count_late = true,
+                        const cpu_snapshot* explicit_base = nullptr)
   {
+    // An event may carry its own baseline (the phase landmarks; see start_entry::base). The rules below are the
+    // SAME for both sources - in particular "a baseline that does not precede the window is refused, and the
+    // refusal is counted" - so a phase event can never print a delta that covers more than its own window.
+    const cpu_snapshot& base = (explicit_base != nullptr) ? *explicit_base : cpu_base;
     // The identity of the recording thread is filled FIRST and unconditionally: it costs two calls that are
     // already made once per event above the ranking bar, and an event whose thread is unknown cannot be
     // attributed at all - which is the only thing this line is for.
@@ -835,8 +863,8 @@ public:
     std::snprintf(ev.thread_name, sizeof(ev.thread_name), "%s", this_thread_name());
     // The width is known even when there is no baseline, so it is set first and always printed.
     ev.win_us = (end_ns >= begin_ns) ? ((end_ns - begin_ns) / 1000) : -1;
-    if (!cpu_base.valid || (cpu_base.ns > begin_ns)) {
-      if (cpu_base.valid) {
+    if (!base.valid || (base.ns > begin_ns)) {
+      if (base.valid) {
         if (count_late) {
           ++late_baselines; // stamped inside the window: the caller's ordering is wrong, and the report says so
         } else {
@@ -847,8 +875,8 @@ public:
     }
     // THIS thread's own CPU over the window, and only when the baseline was taken by this same thread: two
     // cumulative counters can be subtracted only when they describe the same thread (see timing_event::tcpu_ns).
-    if (self.valid() && (cpu_base.thread_cpu_ns >= 0) && (cpu_base.thread_id == self.thread_id)) {
-      ev.tcpu_ns = self.cpu_ns - cpu_base.thread_cpu_ns;
+    if (self.valid() && (base.thread_cpu_ns >= 0) && (base.thread_id == self.thread_id)) {
+      ev.tcpu_ns = self.cpu_ns - base.thread_cpu_ns;
     }
 #if !defined(_WIN32)
     rusage ru{};
@@ -858,10 +886,10 @@ public:
     const int64_t cpu_ns =
         (static_cast<int64_t>(ru.ru_utime.tv_sec) + static_cast<int64_t>(ru.ru_stime.tv_sec)) * 1000000000LL +
         (static_cast<int64_t>(ru.ru_utime.tv_usec) + static_cast<int64_t>(ru.ru_stime.tv_usec)) * 1000LL;
-    ev.cpu_ns      = cpu_ns - cpu_base.cpu_ns;
-    ev.ivcsw       = static_cast<int64_t>(ru.ru_nivcsw) - cpu_base.ivcsw;
-    ev.nvcsw       = static_cast<int64_t>(ru.ru_nvcsw) - cpu_base.nvcsw;
-    ev.base_age_us = (begin_ns - cpu_base.ns) / 1000;
+    ev.cpu_ns      = cpu_ns - base.cpu_ns;
+    ev.ivcsw       = static_cast<int64_t>(ru.ru_nivcsw) - base.ivcsw;
+    ev.nvcsw       = static_cast<int64_t>(ru.ru_nvcsw) - base.nvcsw;
+    ev.base_age_us = (begin_ns - base.ns) / 1000;
 #else
     (void)begin_ns;
     (void)end_ns;
@@ -953,7 +981,11 @@ public:
   /// \param[in] value_us  The segment's duration in microseconds (what the series' aggregate distribution holds).
   /// \param[in] begin_ns  Steady instant the segment's window began (its own start landmark).
   /// \param[in] end_ns    Steady instant it ended (the call site's `now`).
-  void record_phase_timing_event(timing_event_kind kind, int64_t value_us, int64_t begin_ns, int64_t end_ns)
+  void record_phase_timing_event(timing_event_kind kind,
+                                 int64_t           value_us,
+                                 int64_t           begin_ns,
+                                 int64_t           end_ns,
+                                 const cpu_snapshot* base = nullptr)
   {
     // The gate lives in the body (see _locked); this wrapper only avoids taking the lock when the answer is
     // already known to be "no".
@@ -961,7 +993,7 @@ public:
       return;
     }
     std::lock_guard<std::mutex> lock(mutex);
-    record_phase_timing_event_locked(kind, value_us, begin_ns, end_ns);
+    record_phase_timing_event_locked(kind, value_us, begin_ns, end_ns, base);
   }
 
   /// The body of the above for a caller that already holds \p mutex (record_ldpc_start assembles the three
@@ -974,7 +1006,11 @@ public:
   /// pthread_getschedparam) four times per PUSCH hop, on the pool threads, against this project's rule that an
   /// unset probe reads no clock and costs nothing. Found on 2026-10-01 by reading leg `p183-n78-default`, which
   /// flew without the knob (dev doc 10.13). One check, in the one place every caller goes through.
-  void record_phase_timing_event_locked(timing_event_kind kind, int64_t value_us, int64_t begin_ns, int64_t end_ns)
+  void record_phase_timing_event_locked(timing_event_kind   kind,
+                                        int64_t             value_us,
+                                        int64_t             begin_ns,
+                                        int64_t             end_ns,
+                                        const cpu_snapshot* base = nullptr)
   {
     if (!timing_event_wanted_phase(kind, value_us)) {
       return;
@@ -986,9 +1022,13 @@ public:
     ev.value_us = value_us;
     ev.begin_ns = begin_ns;
     ev.end_ns   = end_ns;
+    // The baseline is the one the landmark that STARTED this window took (`base`), which is why these events
+    // finally carry a `cpu=`; a null `base` falls back to the receive path's shared one, and that one is usually
+    // inside the window - the case the first two radio legs hit (dev doc 10.15 (3)).
+    //
     // count_late=false: a phase window may legitimately begin inside the receive path's own baseline cadence
     // (see the parameter's comment); the refusal is counted separately and the line still prints `cpu=-`.
-    attach_cpu_delta(ev, begin_ns, end_ns, /*count_late=*/false);
+    attach_cpu_delta(ev, begin_ns, end_ns, /*count_late=*/false, base);
     take_phase_timing_event(idx, ev);
   }
 
@@ -1211,20 +1251,11 @@ public:
   void timing_event_snapshot(int64_t now_ns)
   {
     std::lock_guard<std::mutex> lock(mutex);
-#if !defined(_WIN32)
-    rusage ru{};
-    if (getrusage(RUSAGE_SELF, &ru) != 0) {
+    const cpu_snapshot fresh = read_cpu_snapshot(now_ns);
+    if (!fresh.valid) {
       return;
     }
-    const thread_sched_snapshot self = this_thread_sched_snapshot();
-    cpu_base.ns     = now_ns;
-    cpu_base.cpu_ns = (static_cast<int64_t>(ru.ru_utime.tv_sec) + static_cast<int64_t>(ru.ru_stime.tv_sec)) * 1000000000LL +
-                      (static_cast<int64_t>(ru.ru_utime.tv_usec) + static_cast<int64_t>(ru.ru_stime.tv_usec)) * 1000LL;
-    cpu_base.nvcsw  = static_cast<int64_t>(ru.ru_nvcsw);
-    cpu_base.ivcsw  = static_cast<int64_t>(ru.ru_nivcsw);
-    cpu_base.thread_id     = self.thread_id;
-    cpu_base.thread_cpu_ns = self.cpu_ns;
-    cpu_base.valid  = true;
+    cpu_base = fresh;
     // The leg's own base rate, kept from the FIRST baseline of the run: the per-event switch deltas below are
     // only readable against it ("+412 involuntary switches" means nothing without "this process switches 194k
     // times a second", which is what taskinfo measured on the reference leg).
@@ -1232,9 +1263,52 @@ public:
       leg_base       = cpu_base;
       leg_base_valid = true;
     }
+  }
+
+  /// \brief Reads a process+thread snapshot WITHOUT publishing it as the shared baseline.
+  ///
+  /// Split out of timing_event_snapshot() so the phase landmarks can take their own (dev doc 10.15 (3)): a phase
+  /// window needs a baseline that precedes ITS start, and the receive path's shared one is refreshed on a ~1 ms
+  /// cadence - usually inside the window, which is why those events used to print `cpu=-`.
+  ///
+  /// \note Returns an INVALID snapshot (not a zeroed one) when the knob is off or the platform refuses: the
+  ///       caller stores it in a registry entry either way, and "no reading" must not become "zero CPU".
+  cpu_snapshot read_cpu_snapshot(int64_t now_ns)
+  {
+    cpu_snapshot snap;
+#if !defined(_WIN32)
+    rusage ru{};
+    if (getrusage(RUSAGE_SELF, &ru) != 0) {
+      return snap;
+    }
+    const thread_sched_snapshot self = this_thread_sched_snapshot();
+    snap.ns     = now_ns;
+    snap.cpu_ns = (static_cast<int64_t>(ru.ru_utime.tv_sec) + static_cast<int64_t>(ru.ru_stime.tv_sec)) * 1000000000LL +
+                  (static_cast<int64_t>(ru.ru_utime.tv_usec) + static_cast<int64_t>(ru.ru_stime.tv_usec)) * 1000LL;
+    snap.nvcsw  = static_cast<int64_t>(ru.ru_nvcsw);
+    snap.ivcsw  = static_cast<int64_t>(ru.ru_nivcsw);
+    snap.thread_id     = self.thread_id;
+    snap.thread_cpu_ns = self.cpu_ns;
+    snap.valid         = true;
 #else
     (void)now_ns;
 #endif
+    // Counted so the reverse arm has something to observe: with the knob unset this must stay 0, because the
+    // snapshot is a getrusage plus a Mach call on a per-hop path (see phase_baselines_taken).
+    ++phase_baselines_taken;
+    return snap;
+  }
+
+  /// \brief The snapshot a phase landmark attaches to its registry entry, or an invalid one when the knob is off.
+  ///
+  /// The gate is HERE rather than at the three call sites so the expensive part cannot be reached by accident -
+  /// the same mistake the phase-event recorder itself made once (dev doc 10.13).
+  cpu_snapshot phase_baseline_for(int64_t now_ns)
+  {
+    if (timing_events_limit() == 0) {
+      return cpu_snapshot{};
+    }
+    return read_cpu_snapshot(now_ns);
   }
 
   /// \brief Which row to drop when the timeline is full.
@@ -2203,9 +2277,19 @@ private:
 
   /// Registry entry: start timestamp plus a monotonic insertion sequence (the slot key wraps every SFN cycle,
   /// so it cannot serve as the age order for the bounded-registry eviction).
+  ///
+  /// \note `base` is the PROCESS+THREAD snapshot taken at the instant this landmark was recorded, and it exists
+  ///       for the PHASE tail events only (dev doc 10.15 (3)): a phase window's baseline has to PRECEDE that
+  ///       window's start, and the only baseline a probe could otherwise reach is the receive path's - refreshed
+  ///       on a ~1 ms cadence, hence usually INSIDE a 0.5-3.7 ms phase window, which is why every phase event
+  ///       printed `cpu=- tcpu=-` on the first two radio legs. A landmark IS the start of the next window
+  ///       (t2f_end starts `ce`, ce_end starts `eqdem`, ldpc_start starts `ldpc`), so the snapshot rides with the
+  ///       entry the landmark already creates and no extra registry is needed. It stays invalid when the knob is
+  ///       off: taking it costs a getrusage plus a Mach call, so it is behind the same gate as the list itself.
   struct start_entry {
     std::chrono::time_point<std::chrono::high_resolution_clock> tp;
     uint64_t                                                     seq;
+    cpu_snapshot                                                 base;
   };
 
   using start_registry = std::map<uint64_t, start_entry>;
@@ -2276,6 +2360,22 @@ private:
     const auto st_now = std::chrono::steady_clock::now();
     return std::chrono::duration_cast<std::chrono::nanoseconds>(st_now.time_since_epoch()).count() +
            std::chrono::duration_cast<std::chrono::nanoseconds>(tp - hr_now).count();
+  }
+
+  /// \brief The start instant to stamp on an event that carries \p base: the BASELINE'S OWN, when there is one.
+  ///
+  /// Not a cosmetic choice. `to_ns()` re-reads both clocks on every call, so two conversions of the SAME
+  /// time_point can differ by nanoseconds in either direction - and the rule that refuses a baseline which does
+  /// not precede its window (`base.ns > begin_ns`) would then fire on a baseline that was taken AT the window's
+  /// start, printing `cpu=-` for exactly the phase events this mechanism was added to give a reading to.
+  /// MEASURED by the unit case written for it (`phase_events_carry_the_baseline_of_their_own_window`): the first
+  /// version stamped `to_ns(landmark.tp)` beside a baseline taken at the same landmark, and every `ce` line still
+  /// read `cpu=-`. Using the baseline's instant for both makes the comparison exact, and keeps the window's own
+  /// duration in the time_points where it was always measured.
+  static int64_t window_start_ns(const cpu_snapshot&                                  base,
+                                 const std::chrono::high_resolution_clock::time_point& tp)
+  {
+    return base.valid ? base.ns : to_ns(tp);
   }
 
   /// Finds the entry of \c registry for \c slot with the completion-time tolerance (slot, slot-1, slot-2),

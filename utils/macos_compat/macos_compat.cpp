@@ -430,15 +430,27 @@ bool posix_realtime_priority_is_enforceable()
   // threads have been running with NO QoS class at all - below the io_timer/io_broker threads they are supposed
   // to outrank - since the day the POSIX call was added, and nothing could see it because nothing read it back.
   //
-  // THE OPT-IN. OCUDU_SCHED_SKIP_POSIX_RT=1 (any value but "0") answers "no": the thread wrapper then leaves the
-  // POSIX parameters alone, so the QoS class applied a moment earlier SURVIVES. It is opt-in because skipping a
-  // call is still a behaviour change on macOS, and it is an environment switch rather than a build option so both
-  // arms can be compared on ONE binary (a rebuild between arms would put the build itself into the comparison).
-  // Whether the QoS class is worth more than the (recorded, and to our knowledge unenforced) SCHED_FIFO policy is
-  // exactly what the A/B is for - it is a user decision, registered in the dev doc.
-  const char* env     = std::getenv("OCUDU_SCHED_SKIP_POSIX_RT");
-  const bool  skip    = (env != nullptr) && (env[0] != '\0') && !((env[0] == '0') && (env[1] == '\0'));
-  return !skip;
+  // ★★★ THE DEFAULT IS NOW "DO NOT APPLY IT" (user ruling, 2026-10-01, same evening as the measurement).
+  //
+  // The two arms are not symmetric and the ruling follows the evidence: with the POSIX call the data-plane
+  // threads have NO QoS class (measured on the bench AND on three radio legs), and with it skipped they keep
+  // USER_INTERACTIVE. What is given up is a SCHED_FIFO policy that this port has never shown to be enforced on
+  // macOS - its only demonstrated effect was to erase the class. So the default now protects the mechanism that
+  // demonstrably works, and the OLD behaviour stays reachable as a measurement arm:
+  //
+  //   (default)                     -> the POSIX parameters are NOT applied; the QoS class survives
+  //   OCUDU_SCHED_POSIX_RT=1        -> the historical arm: apply them, and lose the class (the A/B's control)
+  //
+  // It stays an ENVIRONMENT switch rather than a build option so the two arms are comparable on ONE binary - a
+  // rebuild between arms would put the build itself into the comparison.
+  //
+  // \note The switch was named OCUDU_SCHED_SKIP_POSIX_RT while it was an opt-in; it never flew a leg, so the
+  //       name changed with the default instead of accumulating a second, inverted knob.
+  const char* env = std::getenv("OCUDU_SCHED_POSIX_RT");
+  if (env == nullptr) {
+    return false;
+  }
+  return !((env[0] == '\0') || ((env[0] == '0') && (env[1] == '\0')));
 #else
   // Linux: SCHED_FIFO IS the mechanism there and it is enforced, so it is always applied.
   return true;

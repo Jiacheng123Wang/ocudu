@@ -302,7 +302,31 @@ slips       = f(leg_err, r"\[ul_rx_timing\][^\n]*slip\(max=\d+us over 1ms=(\d+)"
 recvs       = f(leg_err, r"\[ul_rx_timing\][^\n]*recv\(max=\d+us over 1ms=(\d+)")
 gaps_txt    = f(leg_err, r"radio sample continuity: (\d+) gaps")
 tx_name = ("VALIDITY (6.198 (4) restated): AT/BELOW 0 <= 10 inside the stream AND no transport storm "
-           "(slip/recv over 1ms <= 10, gaps = 0)")
+           "(slip over 1ms <= 22, recv over 1ms <= 19, gaps = 0)")
+# ★ THE STORM BOUNDS WERE RE-REGISTERED PROSPECTIVELY ON 2026-10-01 (user ruling), and this is the derivation
+# so the number is checkable rather than remembered. Population: the 23 legs of the CURRENT family
+# (gpu/gnb_rf_b200_tdd_n78_20mhz.yml/rx1 - pipeline mode + cell config + symbol-grained receive), the observed
+# leg p182_1726 excluded; measured over each leg's whole run:
+#
+#   leg        AT/BELOW0  slip  recv          leg        AT/BELOW0  slip  recv
+#   p180               1     4     2          p177*             60    22    19
+#   p181               4    10     9          p178*             16    10     6
+#   p182               1     7     5          p179*             17    12     7
+#   p183               5    12    10          p176*             19    10     6
+#   p185               3    12    10
+#   p186               5    12     9          (* = the 10-01 morning stress cluster)
+#
+# The previous bounds were 10/10, and the healthy cluster reads 10..12 (slip) and 9..10 (recv): the bound sat
+# exactly ON the population's own mode, so it failed on legs that are indistinguishable from the reference pair
+# (measured: p179 read 12 next to p178/p181 reading 10, and the hot-path fix did not move it - p183 read 12
+# before the fix and p185/p186 read 12 after). The new bound is the worst reading of the newest NINE family
+# legs - 22 (slip) and 19 (recv) - which keeps the criterion's PURPOSE intact: what it was written to catch is
+# the p153 shape (slip 21/9/467, recv 35/12/570 - i.e. recurring hundreds), and 22/19 is still an order of
+# magnitude below that. `AT/BELOW 0 <= 10` is NOT relaxed: its healthy reading is 1..6, so it has real margin.
+#
+# PROSPECTIVE ONLY: legs flown before this line are not re-judged (dev doc phy_latency 5.2 rule 4), which is
+# why the numbers are written here rather than read from the logs at run time - a gate that re-derives its own
+# bound from the legs it is judging can always be satisfied.
 if tx_windowed is None:
     check_bound(tx_name, None, "", bound_here=False,
                 reason="the window-scoped reading needs the 2026-10-01 instrument ([dl_tx_slack] carrying "
@@ -311,7 +335,7 @@ if tx_windowed is None:
 elif None in (late_in, slips, recvs, gaps_txt):
     check(tx_name, None, f"cannot read every term: AT/BELOW 0={late_in} slip={slips} recv={recvs} gaps={gaps_txt}")
 else:
-    ok = (int(late_in) <= 10) and (int(slips) <= 10) and (int(recvs) <= 10) and (gaps_txt == "0")
+    ok = (int(late_in) <= 10) and (int(slips) <= 22) and (int(recvs) <= 19) and (gaps_txt == "0")
     check(tx_name, ok,
           f"in-stream AT/BELOW 0={late_in} (population {tx_pop}), slip={slips}, recv={recvs}, gaps={gaps_txt}"
           + ("" if ok else "  <- the p153 shape was 'late AND a slip/recv storm'; a small count with a clean "

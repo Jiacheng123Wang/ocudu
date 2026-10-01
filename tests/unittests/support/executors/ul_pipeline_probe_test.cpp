@@ -1479,4 +1479,88 @@ TEST(ul_pipeline_probe_test, phase_segment_tails_are_ranked_and_attributed)
   ::unsetenv("OCUDU_UL_TIMING_EVENTS");
 }
 
+/// \brief P1 follow-up (dev doc 10.15 (3)): a phase event carries the baseline its OWN window needs.
+///
+/// THE GAP THIS CLOSES. The first two radio legs read every phase event as `cpu=- tcpu=-`, because the only
+/// baseline the probe had was the receive path's - refreshed on a ~1 ms cadence, so it usually starts INSIDE a
+/// 0.5-3.7 ms phase window and has to be refused. The fix attaches a snapshot to the landmark that STARTS each
+/// window (t2f_end starts `ce`, ce_end starts `eqdem`, ldpc_start starts `ldpc`), so the numbers finally exist -
+/// and this case drives that whole chain, with real elapsed time between the landmarks so each window clears its
+/// floor.
+///
+/// ARMS
+///  * OFF: driving every landmark must take NO snapshot at all (counted) - the counter is the observable, since
+///    a getrusage plus a Mach call per hop on the data path is exactly what must not happen with the knob unset;
+///  * ON: the `ce` and `ldpc` events must print a `cpu=` READING (a duration, not `-`) whose window is their own.
+TEST(ul_pipeline_probe_test, phase_events_carry_the_baseline_of_their_own_window)
+{
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+  const auto                sleep_ms = [](int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); };
+  // A slot number no other case uses: the registries are keyed by slot and the probe is a singleton.
+  const uint64_t slot = 0x5A5A0000ull + 7;
+
+  // ---- OFF: the landmarks must not take a snapshot (they run once per hop on the pool threads) -----------------
+  {
+    ::unsetenv("OCUDU_UL_TIMING_EVENTS");
+    const uint64_t before = probe.phase_baselines_taken;
+    probe.record_start(slot);
+    probe.record_t2f_end(slot);
+    probe.record_ce_end(slot);
+    probe.record_ldpc_start(slot);
+    probe.record_end_crc_ok(slot, 1000);
+    EXPECT_EQ(probe.phase_baselines_taken, before)
+        << "with the knob unset the phase landmarks must take no process/thread snapshot at all";
+  }
+
+  // ---- ON: every segment's event carries its own window's baseline ---------------------------------------------
+  ::setenv("OCUDU_UL_PHASE_SEGMENTS", "1", 1); // the phase segments are only assembled when they are recorded
+  ::setenv("OCUDU_UL_TIMING_EVENTS", "4", 1);
+  {
+    // The probe is a process-wide SINGLETON, so the ranked lists still hold the earlier cases' events - and one
+    // of them (a synthetic 13267 us `ce`) is larger than anything this case records. Asserting on `ce #1` would
+    // then read ANOTHER test's line, which is what the first version of this case did when the whole binary ran
+    // in one process; it passed under ctest, where gtest_discover_tests gives each case its own process, and
+    // that difference between the two modes must not decide a verdict. Clearing the lists is the honest fix:
+    // this case is about what IT records.
+    for (auto& list : probe.worst_phase_events) {
+      list.clear();
+    }
+    const uint64_t before = probe.phase_baselines_taken;
+    probe.record_start(slot);
+    sleep_ms(4); // the t2f window (floor 2 ms; it keeps the shared baseline on purpose and may print `cpu=-`)
+    probe.record_t2f_end(slot); // <- the CE window's baseline
+    sleep_ms(3);                // ce ~3 ms, above its 1 ms floor, and its window starts at the t2f end
+    probe.record_ce_end(slot);  // <- the EQDEM window's baseline
+    sleep_ms(5);                // eqdem ~5 ms, above its 3 ms floor
+    probe.record_ldpc_start(slot); // assembles t2f/ce/eqdem and takes the LDPC window's baseline
+    sleep_ms(2);                   // ldpc ~2 ms, above its 500 us floor
+    probe.record_end_crc_ok(slot, 1953);
+    EXPECT_GT(probe.phase_baselines_taken, before) << "with the knob on, the landmarks must take the baselines";
+
+    const std::string report = capture_report();
+    const std::string ce     = line_with(report, "  ce  #1 took=");
+    ASSERT_FALSE(ce.empty()) << report;
+    const std::string eqd = line_with(report, "  eqd #1 took=");
+    ASSERT_FALSE(eqd.empty()) << report;
+    const std::string ldpc = line_with(report, "  ldpc#1 took=");
+    ASSERT_FALSE(ldpc.empty()) << report;
+    for (const std::string& line : {ce, eqd, ldpc}) {
+      // The whole point: a NUMBER, not the `-` the first two radio legs printed for every phase event.
+      EXPECT_TRUE(std::regex_search(line, std::regex(R"(cpu=[0-9]+\.[0-9]{2}ms)")))
+          << "a phase event must carry a process-wide CPU reading over its own window: " << line;
+      EXPECT_TRUE(std::regex_search(line, std::regex(R"(base_age=[0-9]+us)")))
+          << "the baseline that produced the reading must be dated: " << line;
+      // ... and its window must be its own, not the receive path's cadence: a phase window here is milliseconds.
+      EXPECT_TRUE(std::regex_search(line, std::regex(R"(win=[1-9][0-9]{3,}us)")))
+          << "the window must be the segment's own: " << line;
+    }
+    // `tcpu` is a THREAD reading, so it needs the baseline to have been taken by the recording thread - which is
+    // the case here (one thread drives the whole chain), and it is what the two-endpoints-on-one-thread series
+    // (`ldpc`) exists for.
+    EXPECT_TRUE(std::regex_search(ldpc, std::regex(R"(tcpu=[0-9]+\.[0-9]{2}ms)"))) << ldpc;
+  }
+  ::unsetenv("OCUDU_UL_TIMING_EVENTS");
+  ::unsetenv("OCUDU_UL_PHASE_SEGMENTS");
+}
+
 #endif // OCUDU_FLOW_PROBES
