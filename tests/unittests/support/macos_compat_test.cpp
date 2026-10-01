@@ -415,16 +415,18 @@ TEST(macos_compat_sched_test, sched_self_read_is_env_gated_and_reports_requested
 TEST(macos_compat_sched_test, attr_qos_is_opt_in_and_platform_gated)
 {
   const auto read_attr_qos = [](::pthread_attr_t& attr) {
+#if defined(__APPLE__)
     qos_class_t qos = QOS_CLASS_UNSPECIFIED;
     int         rel = 0;
-#if defined(__APPLE__)
     if (::pthread_attr_get_qos_class_np(&attr, &qos, &rel) != 0) {
       return -1;
     }
     return static_cast<int>(qos);
 #else
+    // Linux: there is no attribute QoS to read, and THIS ARM HAS TO COMPILE there. The first version declared
+    // `qos_class_t qos` above the #if and the Ubuntu bench refused it (2026-10-01, dev doc 10.10) - the type
+    // exists on Darwin only. That is the whole reason the Linux check is run against the same commit.
     (void)attr;
-    (void)rel;
     return -1;
 #endif
   };
