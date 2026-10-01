@@ -141,8 +141,12 @@ is_n1_fdd  = ("fdd_n1" in leg_cfg)
 # Probes: report-only, but they do perturb (see milestone_audit.sh: the category rule and why
 # OCUDU_UL_SLOT_TRACE is one of them).
 KNOB_ANY = ("OCUDU_METAL_GPU_TIME", "OCUDU_UL_PHASE_SEGMENTS", "OCUDU_UL_SLOT_TRACE")
-KNOB_EQ  = ("OCUDU_DFT_BATCH_SYMBOLS=14", "OCUDU_DFT_OPEN_BLOCK=1",
-            "OCUDU_DFT_RELEASE_BLOCK=1", "OCUDU_CE_LANE_ORDER=merged")    # == the delivery default
+KNOB_EQ  = ("OCUDU_DFT_BATCH_SYMBOLS=14", "OCUDU_DFT_OPEN_BLOCK=1", "OCUDU_DFT_RELEASE_BLOCK=1",
+            "OCUDU_CE_LANE_ORDER=merged",
+            # OCUDU_DFT_BACKEND=vdsp joined 2026-10-01: on Apple that IS the value an unset leg resolves to
+            # (dev doc 6.231-6.233), so spelling it out changes nothing. `=generic` is the A/B arm and stays
+            # refused on purpose - an arm satisfies every other criterion here, which is what this check is for.
+            "OCUDU_DFT_BACKEND=vdsp")
 CRC_FLOOR_PCT = 60.0
 
 knobs = re.findall(r"^knob\s*:\s*(\S+)", leg_err, re.M)

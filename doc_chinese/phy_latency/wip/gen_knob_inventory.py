@@ -15,6 +15,23 @@
 # The classification is a HEURISTIC on the guard, and it says so per row (`?` = read the comment). It is
 # generated output: regenerate rather than edit, and put curated prose in the .md, not here.
 #
+# 2026-10-01 REPAIR (four defects, each found by comparing the output against the source):
+#   * SELF-REFERENCE: doc_mentions() walked doc_chinese/** including THIS SCRIPT'S OUTPUT, and the inventory
+#     lists every knob by construction - so every knob counted as "mentioned in the record" from the second
+#     generation onwards and section 3.1 (the retirement list) could only ever shrink to 0. It read 0 for
+#     the 8 offline arms that the previous generation had itself listed. The output file is now skipped.
+#   * WINDOW OVERRUN: the 10-line window runs past this knob's read into the NEXT knob's read, so
+#     OCUDU_CE_EDGE_CHECK (a diagnostic, default OFF) was classified ON on the guard of the knob 9 lines
+#     below it and printed in section 1 - the delivery-shape whitelist. The window is now cut at the first
+#     read of a DIFFERENT knob.
+#   * VARIABLE NAME: the boolean shapes assumed the value is held in `env`; OCUDU_DFT_WAIT_PER_SLOT holds it
+#     in `arm`, and OCUDU_DFT_RELEASE_BLOCK's guard is `if (env == nullptr) { return true; }` (default ON
+#     since 5.9.49, per its own warning text) which the crude early-return rule called OFF. Both shapes are
+#     recognised now, bound to the identifier this knob's own getenv() is assigned to.
+#   * VALUE DEFAULTS: a knob whose default is a plain number (`= 8`) or a string (`= "vdsp"`) reported `?`.
+#     Recognised in the ternary and strcmp forms; `?` remains for the "set = on" inline predicates, which are
+#     deliberately NOT read as ON - section 1 is a whitelist and a probe must never enter it.
+#
 # usage:  python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > doc_chinese/phy_latency/knob_inventory.md
 
 import collections
@@ -25,6 +42,7 @@ import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
 LOGDIR = os.path.join(ROOT, "doc_chinese", "phy_pipeline_gpu", "wip", "logs")
+SELF = os.path.join(ROOT, "doc_chinese", "phy_latency", "knob_inventory.md")  # this script's own output
 SRC_EXT = (".cpp", ".h", ".mm", ".metal")
 
 READ_RX = re.compile(r'getenv\(\s*"(OCUDU_[A-Z0-9_]+)"\s*\)')
@@ -40,20 +58,42 @@ def classify_default(window):
     """ON / OFF / AUTO / ? - read off the guard expression, in the three shapes this tree uses.
     `window` is the 4 source lines around the getenv() (or a string)."""
     w = " ".join(("\n".join(window) if isinstance(window, (list, tuple)) else window).split())
-    # default ON: `(env == nullptr) || (strtoul(env, nullptr, 10) != 0)`
-    if re.search(r"env\s*==\s*nullptr\)\s*\|\|\s*\(?\s*(?:std::)?strtoul[^;]*!=\s*0", w):
-        return "ON"
-    # default OFF written positively: `(env != nullptr) && (strtoul(env, nullptr, 10) != 0)`
-    if re.search(r"env\s*!=\s*nullptr\)\s*&&\s*\(?\s*(?:std::)?strtoul[^;]*!=\s*0", w):
-        return "OFF"
-    # default OFF written negatively: `(env == nullptr) || (strtoul(...) == 0)`
-    if re.search(r"env\s*==\s*nullptr\)\s*\|\|\s*\(?\s*(?:std::)?strtoul[^;]*==\s*0", w):
-        return "OFF"
-    if re.search(r"env\s*!=\s*nullptr\)\s*&&\s*\(?\s*(?:std::)?strtoul[^;]*==\s*0", w):
-        return "ON"
+    # The window is 10 lines, so it can run past this knob's read into the NEXT knob's read (two knobs a few
+    # lines apart are common). A guard that belongs to the next knob must not be read as this knob's default:
+    # cut at the first read of a DIFFERENT knob - reading the same knob twice in one window is fine.
+    first = re.search(r'getenv\(\s*"(OCUDU_[A-Z0-9_]+)"', w)
+    if first:
+        for m in re.finditer(r'getenv\(\s*"(OCUDU_[A-Z0-9_]+)"', w[first.end():]):
+            if m.group(1) != first.group(1):
+                w = w[:first.end() + m.start()]
+                break
+    # The variable that holds THIS knob's value is not always called `env` (OCUDU_DFT_WAIT_PER_SLOT uses `arm`),
+    # so the boolean shapes below are bound to the identifier that this knob's own getenv() is assigned to.
+    name = first.group(1) if first else None
+    bound = [m.group(1) for m in re.finditer(r'(\w+)\s*=\s*(?:std::)?getenv\(\s*"(OCUDU_[A-Z0-9_]+)"', w)
+             if m.group(2) == name] or ["env"]
+    # default ON: `(v == nullptr) || (strtoul(v, nullptr, 10) != 0)`
+    # default OFF written positively: `(v != nullptr) && (strtoul(v, nullptr, 10) != 0)`
+    # default OFF written negatively: `(v == nullptr) || (strtoul(v, ...) == 0)`
+    # ... and the fourth combination.
+    strtoul_shapes = [("==", r"\|\|", "!=", "ON"), ("!=", "&&", "!=", "OFF"),
+                      ("==", r"\|\|", "==", "OFF"), ("!=", "&&", "==", "ON")]
+    for null_cmp, glue, zero_cmp, verdict in strtoul_shapes:
+        for v in bound:
+            pattern = (re.escape(v) + r"\s*" + null_cmp + r"\s*nullptr\)\s*\(?\s*" + glue + r"\s*\(?\s*"
+                       + r"(?:std::)?strtoul[^;]*" + zero_cmp + r"\s*0")
+            if re.search(pattern, w):
+                return verdict
     if re.search(r"return\s+0\s*;\s*//\s*AUTO", w) or re.search(r"//\s*AUTO", w):
         return "AUTO"
-    # default OFF written as an early return: `if (getenv("X") == nullptr) { ... return; }`
+    # default OFF written as an early return: `if (getenv("X") == nullptr) { ... return; }` (void), and the
+    # mirror of it that returns a VERDICT: `if (env == nullptr) { return true; }` is ON - that is
+    # OCUDU_DFT_RELEASE_BLOCK's shape, whose default has been ON since 5.9.49 ("using the default (armed)"
+    # in its own warning text). The crude `== nullptr) {` + `return` rule below would call that OFF.
+    for v in bound + ["env"]:
+        m = re.search(r"if\s*\(\s*" + re.escape(v) + r"\s*==\s*nullptr\s*\)\s*\{[^{}]*?\breturn\s+(true|false)\b", w)
+        if m:
+            return "ON" if m.group(1) == "true" else "OFF"
     if re.search(r"==\s*nullptr\)\s*\{", w) and re.search(r"\breturn\b", w):
         return "OFF"
     # the knob read as a PREDICATE: `return std::getenv("X") != nullptr;` (set = on) / `== nullptr;`
@@ -67,6 +107,33 @@ def classify_default(window):
     m = re.search(r"env\s*==\s*nullptr\)\s*\?\s*([0-9]+)[uU]?\s*:", w)
     if m:
         return f"= {m.group(1)}"
+    for v in bound:
+        m = re.search(re.escape(v) + r"\s*==\s*nullptr\)\s*\?\s*([0-9]+)[uU]?\s*:", w)
+        if m:
+            return f"= {m.group(1)}"
+    # a STRING default: `(name == nullptr) || (std::strcmp(name, "value") == 0)` - unset means this value,
+    # i.e. the same shape as the boolean predicate above with one string comparison instead of strtoul
+    # (OCUDU_DFT_BACKEND). The variable is not always named `env`, and the platform `#if` that guards the
+    # whole expression can sit above the read window, so the row is the VALUE and the note says where it
+    # applies.
+    m = re.search(r"(\w+)\s*==\s*nullptr\)\s*\|\|\s*\(?\s*(?:std::)?strcmp\(\s*\1\s*,\s*\"([^\"]+)\"\s*\)\s*==\s*0", w)
+    if m:
+        return f'= "{m.group(2)}"'
+    # a VALUE default in the ternary form: `const char* e = getenv("X"); ... (e != nullptr) ? strtoul(e,...) : 8U`.
+    # The identifier that holds the getenv result has to be the one the ternary tests, so a ternary on some
+    # OTHER variable inside the same window (OCUDU_LANE_ABLATE_EVERY) is not mistaken for the default.
+    for name in set(re.findall(r"(\w+)\s*=\s*(?:std::)?getenv\(", w)):
+        # `[^;]*?` rather than `[^:;]*`: the "then" branch usually contains `std::` (a colon of its own), so the
+        # separator has to be found by backtracking from the FIRST literal after a colon.
+        m = re.search(r"\(\s*" + re.escape(name) + r"\s*!=\s*nullptr\s*\)\s*\?\s*[^;]*?:\s*"
+                      r"([0-9][0-9.eE+-]*[uUfF]?|\"[^\"]*\")\s*[;),]", w)
+        if m:
+            return f"= {m.group(1).rstrip('uUfF')}"
+        # the mirrored form: the default is the THEN branch - `(mode_override == nullptr) ? "auto" : ...`
+        m = re.search(r"\(\s*" + re.escape(name) + r"\s*==\s*nullptr\s*\)\s*\?\s*"
+                      r"([0-9][0-9.eE+-]*[uUfF]?|\"[^\"]*\")\s*:", w)
+        if m:
+            return f"= {m.group(1).rstrip('uUfF')}"
     return "?"
 
 
@@ -99,7 +166,11 @@ def module_of(path):
 def doc_mentions():
     """How often the RECORD names each knob (dev doc + memos + the plan). The `knob :` registration line
     only exists in the newer legs - measured 2026-09-27: 3 of the 108 `s`-series legs carry it - so the
-    logs alone would report a knob flown in the s-series as never used. The record covers the history."""
+    logs alone would report a knob flown in the s-series as never used. The record covers the history.
+
+    THIS FILE'S OWN OUTPUT IS NOT THE RECORD (fixed 2026-10-01): the inventory lists every knob by
+    construction, so counting it made every knob 'mentioned' from the second generation onwards and the
+    retirement list of section 3.1 could only ever shrink to 0 - a self-reference, not a measurement."""
     counts = collections.Counter()
     files = collections.Counter()
     for base, _, names in os.walk(os.path.join(ROOT, "doc_chinese")):
@@ -107,6 +178,8 @@ def doc_mentions():
             if not n.endswith(".md"):
                 continue
             path = os.path.join(base, n)
+            if os.path.abspath(path) == SELF:
+                continue
             try:
                 txt = open(path, errors="replace").read()
             except OSError:
@@ -164,7 +237,11 @@ def main():
     print(f"> 本次生成：commit `{head}`。**不要手改正文**——改生成器或改人工判读小节。")
     print("> （生成器把**生成那一刻的 HEAD**写进这一行；要把这一行也追平 HEAD，就重跑生成器再提交一次——那一次是纯文档差异。）")
     print(">")
-    print("> **默认值**是**从守卫表达式读出来的**（`ON` = 不设或非 0 都开；`OFF` = 必须显式置 1；`AUTO` = 由别处推导；`?` = 需要读注释）。")
+    print("> **默认值**是**从守卫表达式读出来的**（`ON` = 不设或非 0 都开；`OFF` = 必须显式置 1；`AUTO` = 由别处推导；"
+          "`= 14` / `= \"vdsp\"` = 默认是一个**值**而不是开关，腿不设它时用的就是这个值；`?` = 需要读注释）。")
+    print("> 生成器只认**本旋钮自己那次读取**的守卫（窗口在下一个旋钮的读取处截断），并且只认几种写法："
+          "`?` 里绝大多数是「置位即开」的探针/实验选择器（`static const bool x = (std::getenv(\"X\") != nullptr);`），"
+          "生成器**故意不把它们判成 `ON`** —— §1 是验收腿白名单，**宁可漏，不可错**。")
     print("> **飞过的腿数**来自 `logs/*.log.stderr` 顶部的 `knob : NAME=VALUE` 登记行 —— 这是**唯一能区分「新仪器」与「已退役」的一列**，源码里两者长得一样。")
     print()
     n_leg = sum(1 for k in hits if leg_counts.get(k))
@@ -199,7 +276,7 @@ def main():
         site = f"{rows[0][0]}:{rows[0][1]}"
         print(f"| `{knob}` | ON | `{site}` | {leg_counts.get(knob, 0)} | {notes_on.get(knob, '—')} |")
     print()
-    print("## 2. 本轮（2026-09-27）新增的仪器（默认 `OFF`）")
+    print("## 2. 探针、实验臂与消去法（**不是**交付形态；默认 `OFF` 或需要显式给值）")
     print()
     print("| 旋钮 | 默认 | 读取点 | 飞过的腿 | 说明 |")
     print("|---|---|---|---|---|")
@@ -209,6 +286,10 @@ def main():
         "OCUDU_LANE_ABLATE_STAGE": "**修饰符**（只在 `OCUDU_LANE_ABLATE=1` 时有意义）：只消去哪一**阶段族**——`front_end`/`ce`/`eq`/`demap`（`|` 或 `,` 组合），不设 = `all` = 历史行为；拼错的名字按 `all` 处理并打 WARNING。族级账单靠它，覆盖度看报告里的 `Q9-F5 ablation coverage`（开发文档 6.162）",
         "OCUDU_METAL_GPU_TIME": "**探针**：给每条 cb 装 GPU 时间戳（per-label 表的来源；验收腿一直带着它）",
         "OCUDU_UL_PHASE_SEGMENTS": "**探针**：上行相位分段读数（验收腿一直带着它）",
+        "OCUDU_UL_SLOT_TRACE": "**探针**：每**时隙**时间线（`=N` = 最多记 N 个时隙，非数字 = 开且用默认上限）。和上面两个一样被两条闸门当「任意值」接受，但它比相位分段宽得多，**验收腿不需要它**——只在追「某个时隙为什么晚」时开（开发文档 6.145⑹⑴；`=64` 曾打出 512 行，见 `ul_pipeline_probe.h` 的注）",
+        "OCUDU_DFT_BACKEND": "前端变换的**后端选择**：`=vdsp`（Apple 上**不设就是它**，所以白名单接受）｜`=generic`（**A/B 对照臂**，n78 p170/p171、n1 p172/p173 用它跑 generic 那一侧）。非 Apple 平台根本不编进这条分支，所以这一行的「默认」只在 Apple 上有意义",
+        "OCUDU_DFT_BATCH_SYMBOLS": "前端批量：不设 = `AUTO`（= 一个时隙自己的符号数，n78 上是 **14**）｜`=1` = 每符号对照臂｜`=7`/`=2` 是中间臂。白名单只接受与 AUTO 等价的 `=14`",
+        "OCUDU_CE_LANE_ORDER": "信道估计的四种车道顺序：`merged`（**默认**，估计器的派发搭车道共享 cb）｜`event`｜`wait`/`host_wait`｜`burst`（旧名 `OCUDU_CE_FUSED_BURST`）。拼错的值打 error 并按 `merged` 跑（代码里那条 warning 的原文就写着 \"using merged\"）。白名单只接受 `=merged`",
     }
     for knob, note in curated_new.items():
         rows = hits.get(knob, [])
@@ -216,8 +297,13 @@ def main():
         dflt = default_of(rows) if rows else "?"
         print(f"| `{knob}` | {dflt} | `{site}` | {leg_counts.get(knob, 0)} | {note} |")
     print()
-    print("> ⚠ **验收腿的旋钮白名单**（`milestone_audit.sh` / `leg_gate.sh` 判的就是它）：`OCUDU_METAL_GPU_TIME`、`OCUDU_UL_PHASE_SEGMENTS` 任意值；")
-    print("> `OCUDU_DFT_BATCH_SYMBOLS=14`、`OCUDU_DFT_OPEN_BLOCK=1`、`OCUDU_DFT_RELEASE_BLOCK=1`、`OCUDU_CE_LANE_ORDER=merged` 视为「等于交付默认」。其余一律判 FAIL（**fail-closed**）。")
+    print("> ⚠ **验收腿的旋钮白名单**（`milestone_audit.sh` 的 `kNOB_ANY`/`kNOB_EQ` 与 `leg_gate.sh` 的 `KNOB_ANY`/`KNOB_EQ` **就是它**，两边逐字一致）。")
+    print("> **任意值**（探针）：`OCUDU_METAL_GPU_TIME`、`OCUDU_UL_PHASE_SEGMENTS`、`OCUDU_UL_SLOT_TRACE`。")
+    print("> **视为「等于交付默认」**：`OCUDU_DFT_BATCH_SYMBOLS=14`、`OCUDU_DFT_OPEN_BLOCK=1`、`OCUDU_DFT_RELEASE_BLOCK=1`、`OCUDU_CE_LANE_ORDER=merged`、"
+          "`OCUDU_DFT_BACKEND=vdsp`（2026-10-01 加入：Apple 上这就是不设它时的值）。其余一律判 FAIL（**fail-closed**）。")
+    print("> `OCUDU_DFT_BACKEND=generic` **故意不**在白名单里：那是一条 A/B **臂**——臂可以满足其余所有判据（p84 就是这样），闸门拦的就是它。")
+    print("> 6.215 起交付车道的网格由 **host** 写，所以 `OCUDU_DFT_BATCH_SYMBOLS`/`OCUDU_DFT_OPEN_BLOCK`/`OCUDU_DFT_RELEASE_BLOCK` 对交付腿是 **MOOT**（那个引擎根本不在路上）；**最有力的交付腿是一个旋钮都不设**，白名单只是给「已经设了」的腿留出等于默认的写法。")
+    print("> `OCUDU_UL_RX_SYMBOLS` 也不在白名单里，但它的**默认值就是 `= 1`**（每符号一跳）——交付腿不设它即得交付形态，设 `=7`/`=14` 才是改形状。")
     print()
 
     # ---- the generated part ---------------------------------------------------------------------------

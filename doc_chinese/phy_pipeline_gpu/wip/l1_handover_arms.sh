@@ -12,6 +12,15 @@
 #   drop   hand-over ON, consumer wait REMOVED on purpose -> MUST differ (proves cand's pass means something)
 #   nogrid hand-over ON, fresh grid per slot instead of one reused -> the same claim, easier shape
 #
+# ⚠ EVERY ARM CARRIES OCUDU_GPU_STRICT=1 INCLUDING `ref` (fixed 2026-10-01). The control used to be the only
+# arm WITHOUT it, and strictness is not a property of the hand-over: in this harness the pipeline mode is
+# never published, so `strict` is OFF unless the variable is set (phy_pipeline_strict.h says the override
+# exists for exactly this harness). Measured, 16 slots, the same binary: holding strictness EQUAL leaves the
+# hand-over data-neutral in both directions (`ref`+strict == `cand`+strict, and `ref` == `cand` without it,
+# 16/16 captures byte-identical), while VARYING it changes all 16 captures (`ref` vs `ref`+strict) - RSRP
+# 79.7 -> 277.5, noise variance 84.9 -> 283.3 on slot 1. So the old control compared TWO policies and the
+# verdict it printed ("the hand-over changed the grid - D1 is broken") was about strictness, not the hand-over.
+#
 # Usage: doc_chinese/phy_pipeline_gpu/wip/l1_handover_arms.sh [slots] [workdir]
 set -u
 
@@ -44,7 +53,7 @@ BASE=(--dft --dft-metal --device-grid --synth "$SLOTS" --reuse-grid --synth-firs
 
 # The CONTROL: the front end commits and waits for its own block. Since 5.9.49 the knob's default is
 # ARMED, so the control has to SAY SO - "unset" is no longer the control, it is a second candidate arm.
-OCUDU_DFT_RELEASE_BLOCK=0 \
+OCUDU_DFT_RELEASE_BLOCK=0 OCUDU_GPU_STRICT=1 \
   run_arm ref "$TOOL" "${BASE[@]}" --out "$WORK/ref" || echo "  ^ ref arm FAILED" >&2
 # The candidate: the block is handed over uncommitted and the tool, as the consumer, produces it.
 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_GPU_STRICT=1 \

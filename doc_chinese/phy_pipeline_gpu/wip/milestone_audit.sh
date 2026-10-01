@@ -136,7 +136,19 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   mkdir "$LOCK" || exit 4
 fi
 echo $$ >"$LOCK/pid"
-trap 'rm -rf "$T" "$LOCK"' EXIT
+# 2026-10-01: the trap used to remove the LOCK and nothing else, so a KILLED audit (Ctrl-C, a timeout, a
+# closed terminal) released the lock while the replay it had started kept running - and the next audit then
+# ran in parallel with a live ul_chain_replay, which is the very thing section 0a refuses on. Measured: the
+# same command on the same HEAD, once with a SIGTERM'd predecessor, read "L1a PASS lines = 3" and
+# "L1b differing>0 x4" (four FALSE failures); re-running alone restored them. Killing this script's own
+# DESCENDANTS in the trap closes the hole without touching anyone else's replay: only children of $$ die.
+kill_descendants() {   # deepest first, so a wrapper shell cannot outlive the binary it started
+  local pid=$1 kids k
+  kids=$(pgrep -P "$pid" 2>/dev/null) || true
+  for k in $kids; do kill_descendants "$k"; done
+  [ "$pid" = "$$" ] || kill -TERM "$pid" 2>/dev/null || true
+}
+trap 'kill_descendants $$; rm -rf "$T" "$LOCK"' EXIT
 
 rows=()
 # check <name> <expected text> <verdict: PASS|FAIL|RED> <detail>
@@ -226,7 +238,9 @@ kNOB_ANY=" OCUDU_METAL_GPU_TIME OCUDU_UL_PHASE_SEGMENTS OCUDU_UL_SLOT_TRACE "
 # so the three DFT entries are MOOT on a delivery leg (that engine is not on the path at all) while
 # `CE_LANE_ORDER=merged` still is the delivered value. A delivery leg should set NONE of them - that is the
 # strongest case, and the one the delivered configuration now is.
-kNOB_EQ=" OCUDU_DFT_BATCH_SYMBOLS=14 OCUDU_DFT_OPEN_BLOCK=1 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_CE_LANE_ORDER=merged "
+# `OCUDU_DFT_BACKEND=vdsp` joined 2026-10-01 (dev doc 6.231-6.233): on Apple that is what an unset leg resolves
+# to, so it is a spelling of the default and not a change. `=generic` stays refused - that is the A/B arm.
+kNOB_EQ=" OCUDU_DFT_BATCH_SYMBOLS=14 OCUDU_DFT_OPEN_BLOCK=1 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_CE_LANE_ORDER=merged OCUDU_DFT_BACKEND=vdsp "
 kCRC_FLOOR_PCT=60
 kCRC_MIN_HOPS=20000
 

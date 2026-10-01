@@ -14569,6 +14569,74 @@ LEG_CONFIG=... OCUDU_DFT_BACKEND=generic run_leg.sh gpu p171-n78-novdsp --regime
 本次一条腿查出两处：门禁把合法的 `MET (8 of 9)` 判 FAIL、负载工具把"一块"当"一槽"（14× 量纲错）。
 两者都与被测代码无关，却都能让**健康的交付腿**读成红的或读成"余量 99%"。
 
+### 6.234 ★ `knob_inventory.md` 追平代码：**+1 旋钮、13 行默认值改正**（其中 2 行是**分类**错误 —— 一个诊断被印成交付形态、一个真交付成员被漏掉）；生成器**四个**缺陷一并修掉（用户要求"根据最新的代码更新文档，包括新加的和与实际代码不一致的"；2026-10-01）
+
+**① 要求与做法**：`knob_inventory.md` 是**生成物**（正文不许手改，见文件头），所以"更新文档" = **改生成器 + 重跑 + 只动人工判读小节**。每个数字都是"重跑 + 逐行读源码"得来的，不是读文档得来的。
+
+**② 机械差**（`git show HEAD:doc_chinese/phy_latency/knob_inventory.md` vs 重跑，逐行）：
+
+| | 旧（生成于 `fb411ce5d6`）| 新（生成于 `8c39d0f918`）|
+|---|---|---|
+| 旋钮数 | 121 | **122**（+`OCUDU_DFT_BACKEND`）|
+| 默认 `ON` | 20 | 20，但**成员换了**：−`OCUDU_CE_EDGE_CHECK`、+`OCUDU_DFT_RELEASE_BLOCK` |
+| 有腿登记行 / 只在记录里 / 两处都没有 | 26 / 87 / 8 | **27** / 87 / 8 |
+| 默认值被改正的行 | —— | **13**（11 行 `?` → 具体值，**2 行是分类错**）|
+| 消失的旋钮 | —— | **0** |
+
+**③ 生成器的四个缺陷**（都不是"文档写错了"，是**仪器读错了代码**）：
+
+1. ★ **自指**：`doc_mentions()` 遍历 `doc_chinese/**`，**包含它自己的输出**；而清单按构造列出每一个旋钮 ⇒ 从第二代起"每个旋钮都在记录里出现过"，**§3.1 的退役候选只能缩到 0**。第一跑就读到 `0 个两处都没有`，而那 8 个离线臂**正是上一代清单自己在 §3.1 里列出来的**。→ 生成时排除输出文件本身。
+2. ★ **窗口越界**：10 行窗口会越过本旋钮的读取、读到**下一个旋钮**的守卫。`OCUDU_CE_EDGE_CHECK` 是**诊断**（`return std::getenv(...) != nullptr;` ⇒ 默认关，源码注释原文 "Unset is the product"），却因为 9 行以下 `OCUDU_CE_K0A_RATIO_DEV` 的守卫被判 `ON`，**印进了 §1（交付形态白名单）**。→ 窗口在"**下一个不同旋钮**的读取"处截断。
+3. ★ **变量名**：四条布尔形状把变量写死成 `env`。`OCUDU_DFT_WAIT_PER_SLOT` 用的是 `arm`（被判 `?`）；更要紧的是 `OCUDU_DFT_RELEASE_BLOCK` —— 它的守卫是 `if (env == nullptr) { return true; }`，**5.9.49 起默认 ON**（它自己那条告警的原文就是 "using the default (armed)"），却被粗判成 `OFF` ⇒ **§1 漏掉一个真成员**，而它的人工注（生成器里一直写着"D1 交棒…5.9.49 起默认开"）**从未打印过**（注只对 `ON` 行输出，即成了一段死文案）。→ 守卫绑定到"**本旋钮这次 `getenv()` 赋给的那个标识符**"，并识别 `return true/false` 的早返回。
+4. **值默认**：默认是**值**而不是开关的旋钮（`= 8`、`= "vdsp"`）一律报 `?`。→ 认三元式与 `strcmp` 两种写法（且要求三元条件里的标识符**就是本旋钮的**）。11 行因此有了真实默认值（`UL_DUMP_COUNT=8`、`INV_TGX/TGY=64/16`、`PROBE_RE=1272`、`CE_FD_HZ=0.0`、`CE_TAU_RMS_US=0.37e-6`、`UL_RX_POOL_DROP_FORCE=0` …）。
+
+★ 第 4 条**同时**暴露一个反面：窗口里**下一个**旋钮的三元式会被误当成本旋钮的默认（`OCUDU_UL_DUMP` 一度读到 `OCUDU_UL_DUMP_COUNT` 的 `8U`）—— 这正是"第 2 条的截断"必须**先于**"第 4 条"存在的原因，两条修复缺一不可。
+★ **保守是有意的**：改完仍有 **66 个 `?`**，绝大多数是"置位即开"的探针（`static const bool x = (std::getenv("X") != nullptr);`）。**故意不把它们判成 `ON`**：§1 是**验收腿白名单**，把探针放进去比漏掉更坏。这条已写进文件头的图例（"宁可漏，不可错"）。
+
+**④ 人工判读小节也跟着改**：
+
+* §2 的标题从"**本轮（2026-09-27）**新增的仪器"（日期一过就错）改成"**探针、实验臂与消去法（不是交付形态）**"，并补进 `OCUDU_UL_SLOT_TRACE`、`OCUDU_DFT_BACKEND`、`OCUDU_DFT_BATCH_SYMBOLS`、`OCUDU_CE_LANE_ORDER` 四行（每行的说明都从代码/记录里读出来，不猜）；
+* **白名单那一段原来与工具不一致**：漏了 `OCUDU_UL_SLOT_TRACE`（两条闸门**早就**接受它），现在逐条对上 `leg_gate.sh` 的 `KNOB_ANY`/`KNOB_EQ` 与 `milestone_audit.sh` 的 `kNOB_ANY`/`kNOB_EQ`，并写明"两边逐字一致"；
+* 顺带写明两条容易误读的事实：`OCUDU_UL_RX_SYMBOLS` **不在白名单里但默认值就是 `= 1`**（不设即交付形态）；6.215 起交付车道由 **host** 写网格 ⇒ 三个 `OCUDU_DFT_*` 项对交付腿是 **MOOT**，**最有力的交付腿是一个旋钮都不设**。
+
+**⑤ 顺带修的两条闸门**：`OCUDU_DFT_BACKEND=vdsp` 加入**两份**白名单（Apple 上不设它就是它 ⇒ 写出来不改行为）；`=generic` **故意不加**（A/B 臂；臂能过其余所有判据，闸门拦的就是它）。实测三条：`=vdsp` 接受、`=generic` 拒绝、`OCUDU_UL_RX_SYMBOLS=7` 拒绝；`leg_gate.sh` 在 `p167`（不带该旋钮）仍 10 of 10、在 `p171`（`=generic`）仍**只**在旋钮那条判 FAIL。
+
+**纪律 70**：**控制臂与候选臂之间只许差一个变量** —— 见 §6.235：控制臂是四条臂里**唯一**没带 `OCUDU_GPU_STRICT=1` 的那条，于是"交接是否改数据"的判据实际在比较**两种策略**，印出来的结论（"D1 is broken"）是**错的**。
+**纪律 71**：**生成物不许把自己算成证据** —— 清单把自己列过的旋钮算作"记录里提到过"，退役候选就永远只能是 0；凡"从产物反过来统计"的生成器，语料都要**排除它自己的输出**。
+
+### 6.235 ★ 全量离线审计的两个假 FAIL（L1a/L1b）：**控制臂是唯一没带 `OCUDU_GPU_STRICT=1` 的那条**；把严格性固定住，交接本身**逐字节中立**（2026-10-01）
+
+**① 现象**：`milestone_audit.sh --leg=p167-n78-baseline --stress-leg=p169-n78-stress`（**不加** `--quick`）读 **29 PASS / 4 FAIL / 0 RED**：
+
+| FAIL | 读数 | 判定 |
+|---|---|---|
+| `default leg p167 …: the commit it ran, vs HEAD` | 腿跑在 `f02d40e791`，到 HEAD 有 **11 个 `lib/include/apps/tests` 文件**变了 | ✅ **判得对** —— 这条腿不再是关于 HEAD 的证据（见 ④）|
+| `stress leg p169 …` | 同上 | ✅ **判得对** |
+| `L1a hand-over arms: 5 PASS` | `PASS lines = 3` | ❌ **假 FAIL**（本节的修复对象）|
+| `L1b hop arms: 4 arms, all differing=0` | `differing=0 x0, differing>0 x4` | ❌ **假 FAIL**（同上）|
+
+**② 先验的假说，先被自己推翻**：本次审计之前我**杀过一次** 60 s 超时的同一条审计（`EXIT` trap 只删锁、**不杀子进程**），而本脚本 §0a 自己记着"两个 replay 并行 ⇒ 四个假失败"。⇒ 但**单独重跑复现了同样的 4 个 FAIL** ⇒ 假说被推翻，这是**确定性**的读数。顺手把那个洞补了：trap 现在递归杀掉**本脚本自己的后代**（只杀 `$$` 的子进程，别人的 replay 不受影响）。
+
+**③ 排除 vDSP**（因为 vDSP 是 `f02d40e791..HEAD` 之间唯一的代码改动）：`ul_chain_replay` 在两个后端下 **16/16 槽位逐字节相同**（`OCUDU_DFT_BACKEND=generic` vs `=vdsp`，`cmp` 全部 same）⇒ 这个旋钮**根本没走到 replay 的路径上**，vDSP 不可能是原因。（另：`[dl_tx_slack]` 那次改动也不可能是 —— `nm` 里 `ul_chain_replay` **一个** `lower_phy_baseband_processor` 符号都没有。）
+
+**④ 定位：控制臂差了两个变量**。四条臂里 `ref` 是**唯一**不带 `OCUDU_GPU_STRICT=1` 的（`cand`/`hostfirst`/`claim`/`claimnowait` 都带），而 `phy_pipeline_strict.h` 自己写着这个 override"**正是为离线 harness 存在的**"（replay 从不发布 pipeline mode ⇒ 不设它 strict 就是关的）。四个对照实验（同一二进制、16 槽、只翻这两个变量）：
+
+| 比较 | 差异变量 | 结果 |
+|---|---|---|
+| `ref`+STRICT vs `ref` | **严格性** | 16/16 不同 |
+| `cand`+STRICT vs `cand` | **严格性** | 16/16 不同 |
+| `ref`+STRICT vs `cand`+STRICT | **交接** | **16/16 相同** ✅ |
+| `ref` vs `cand`（都不带 STRICT）| **交接** | **16/16 相同** ✅ |
+
+⇒ ★ **判据读到的差别全部来自严格性，交接（D1）本身不改数据**。量级也不是舍入：同一槽 `noise_variance` **84.9 → 283.3**、`rsrp` **79.7 → 277.5**、LLR 字节 345/836 不同 ⇒ 确实是两条**策略**，不是最后一位。
+
+**⑤ 工具修复与结果**：`l1_handover_arms.sh` 与 `l1_hop_arms.sh` 的 `ref` 臂都补上 `OCUDU_GPU_STRICT=1`（并把这段测量写在两条臂的注释里，防止有人"顺手"去掉）。修后：**L1a 5 PASS**（`cand`/`nogrid` 逐字节相同、`drop`/`skew` 仍如设计般不同 ⇒ 网有齿）、**L1b 4 臂 `differing=0`**，审计回到 **31 PASS / 2 FAIL / 0 RED**。
+
+**⑥ 剩下的 2 个 FAIL 是对的，而且它们要用户来收**：`p167`/`p169` 跑在 `f02d40e791`，而 `f02d40e791..HEAD` 里有 vDSP 的**代码**改动 ⇒ 按判据"这段差分不许碰代码"，两条腿**不再是关于 HEAD 的证据**。收口只有一条路：在**当前 HEAD 上重飞** baseline + stress 两条腿（需要 root + B210 + 手机，见纪律 63 的数据开关）。
+⚠ **顺带一条教训**：§6.227 记的"`29 PASS / 0 FAIL ⇒ offline acceptance: GREEN`"是 **`--quick`** 跑的 —— `--quick` **跳过的正是** L1a/L1b/edge-block/MMSE 这四条长臂（脚本第 414 行 `if [ "$QUICK" = 0 ]`）。**"GREEN"这个词必须带上是哪一档跑的**，否则它比 FAIL 更容易骗人（这一档的 29 个 PASS 里没有那四条臂）。
+
+**纪律 72**：**审计的档位是读数的一部分** —— `--quick` 与全量的 PASS 数不可比（前者不跑四条长臂）；引用"GREEN"必须写明档位与总条数。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

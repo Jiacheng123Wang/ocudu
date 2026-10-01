@@ -372,6 +372,22 @@
 >    `ul_load.sh:69` 把 `[ul_rx] blocks` 当槽数（符号级下**一块 = 一个符号**，822.86 = 11520/14 样点）⇒ 墙钟虚高 **14×**、
 >    "余量 99.1%" 实为 **87.7%**（纪律 56：翻转默认值之后，第一件要查的是**工具字面量**还停在哪个默认上）。
 >
+> **2026-10-01 ★★ `knob_inventory.md` 追平代码（用户要求"根据最新的代码更新文档，包括新加的和与实际代码不一致的"；开发文档 §6.234）** ——
+> ① **机械差**：**121 → 122** 个旋钮（+`OCUDU_DFT_BACKEND`）、有腿登记行 **26 → 27**、默认 `ON` 仍 20 但**成员换了**、**13 行默认值被改正**、**0 个旋钮消失**；
+> ② ★ **两行是"分类"错，而且都印在最要紧的那张表上**：`OCUDU_CE_EDGE_CHECK`（**诊断**，源码注释 "Unset is the product"）被当成交付形态印进 §1；`OCUDU_DFT_RELEASE_BLOCK`（**5.9.49 起默认 ON**，它自己的告警原文 "using the default (armed)"）被漏出 §1 —— 它的人工注一直是**死文案**（注只对 ON 行打印）；
+> ③ 生成器**四个缺陷**：**自指**（把清单自己的输出当"记录"，退役候选只能缩到 0 —— 纪律 71）、**窗口越界**（10 行窗口读到**下一个**旋钮的守卫 ⇒ 上面那条假 ON）、**变量名**（四条守卫形状写死 `env`，而 `DFT_WAIT_PER_SLOT` 用 `arm`、`RELEASE_BLOCK` 是 `if (env == nullptr) { return true; }`）、**值默认**（`= 8`/`= "vdsp"` 一律报 `?`，现认三元式与 `strcmp`；同时暴露"下一个旋钮的三元式被误当本旋钮默认"，两条修复必须同时存在）；
+> ④ 人工小节：§2 去掉会过期的日期标题、补四行仪器；**白名单原来漏了 `OCUDU_UL_SLOT_TRACE`**（两条闸门早就接受它），现在与 `leg_gate.sh`/`milestone_audit.sh` **逐字对上**；`OCUDU_DFT_BACKEND=vdsp` 加入两份白名单（Apple 上不设它就是它），`=generic` **故意不加**（A/B 臂）；
+> ⑤ `leg_gate.sh` 复验：`p167` 仍 **10 of 10**、`p171`（`=generic`）仍**只**在旋钮那条判 FAIL。
+>
+> **2026-10-01 ★★ 全量离线审计的两个假 FAIL（L1a/L1b）已定位并修掉：控制臂是四条臂里**唯一**没带 `OCUDU_GPU_STRICT=1` 的那条（开发文档 §6.235）** ——
+> ① **现象**：`milestone_audit.sh --leg=p167 --stress-leg=p169`（**不加 `--quick`**）= **29 PASS / 4 FAIL / 0 RED**；4 条里 **2 条是"腿早于 HEAD"（判得对）**、2 条是 L1a/L1b 臂；
+> ② **先验假说被自己推翻**：我杀过一次 60 s 超时的同一条审计（trap 只删锁不杀子进程）⇒ 本脚本 §0a 记着"两个 replay 并行 ⇒ 四个假失败"，但**单独重跑复现同样的 4 条** ⇒ 确定性读数；顺手补洞：trap 现在递归杀**本脚本自己的后代**；
+> ③ **排除 vDSP**：`ul_chain_replay` 在两个后端下 **16/16 槽逐字节相同** ⇒ 该旋钮**根本不在这条路径上**（`[dl_tx_slack]` 那次也不可能：`nm` 里**一个**该文件的符号都没有）；
+> ④ ★ **定位**：控制臂差的是**严格性**而不是交接 —— 固定严格性后，交接**两个方向都逐字节中立**（`ref`+STRICT == `cand`+STRICT 16/16、`ref` == `cand` 16/16），而**只翻严格性**就 16/16 全变（`rsrp` 79.7 → 277.5、`noise_variance` 84.9 → 283.3）；
+> ⑤ **修复**：两条 harness 的 `ref` 臂补 `OCUDU_GPU_STRICT=1`（测量写在注释里）⇒ **L1a 5 PASS、L1b 4 臂 `differing=0`**、审计 **31 PASS / 2 FAIL / 0 RED**；
+> ⑥ ⏳ **剩下 2 条要用户收**：`p167`/`p169` 跑在 `f02d40e791`，而 `f02d40e791..HEAD` 含 vDSP 的**代码**改动 ⇒ 两条腿不再是关于 HEAD 的证据 ⇒ **需在当前 HEAD 重飞 baseline + stress**（root + B210 + 手机，纪律 63）；
+> ⑦ ⚠ 教训（纪律 72）：§6.227 记的"GREEN"是 **`--quick`** 跑的，而 `--quick` **跳过的正是这四条长臂** ⇒ 引用"GREEN"必须写明**档位与总条数**。
+>
 > **2026-09-30 ★★ `max_concurrency` 设成 0（unlimited）会不会更好？—— 语义先纠正，再用 Little 算：单 UE 在本 TDD 图案下在飞跳数上不了 2（用户提问；开发文档 §6.218）** ——
 > ① **`unlimited` = 0 不是"无限"**：`create_task_fork_limiter()` 把 0 夹到**基执行器的并发** = 中优先级池 = **5**（`du_low_executor_mapper.cpp:264-266`、`worker_manager.cpp:420-423`）⇒ 真问题是 **N: 2 → 5**；
 > ② ★ **N 在同一份代码里还是另外两件事**：`upper_phy_factories.cpp:934` ⇒ **PUSCH processor 依赖池容量 = N**（取不到就**丢 PDU**），`N ≤ 1` ⇒ **换成 strand**（§6.217 那 +207 µs 的形态）；
@@ -829,7 +845,7 @@ D11 `waiter-committed-first > 0` 且 `max` ≈ 停顿 ⇒ **Q9-G 成立**，做�
 | 类 | 文件 | 说明 |
 |---|---|---|
 | design & implementation | `gpu_phy_latency_optimization_design_and_implementation.md` | 现象/机制/仪表/跑腿规范 + **追加式实施记录**（§6.1–§6.121 P0/Q9/P1/P2/V1–V5；**§6.122–§6.141 = 收口、那 ~450 µs 的调查与判决**；**§6.142 = 收口后的理账：文档刷新 + 门禁补盲点 + 旋钮盘点**）+ 杠杆与候选 + 未决 |
-| **旋钮清单** | **`knob_inventory.md`** | ★ **生成物**（`python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > …`）：树里 **113 个 `OCUDU_*`** 的默认值（从守卫表达式读出）、首个读取点、飞过的腿、记录提及，以及**验收腿的旋钮白名单**。**改生成器，不要手改正文** |
+| **旋钮清单** | **`knob_inventory.md`** | ★ **生成物**（`python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > …`）：树里 **122 个 `OCUDU_*`** 的默认值（从守卫表达式读出）、首个读取点、飞过的腿、记录提及，以及**验收腿的旋钮白名单**。**改生成器，不要手改正文** |
 | session handoff memo | **`session_handoff_2026-09-27-3.md`** | **最新交接快照（新会话先读这一份）**：那一跳 ~450 µs 的判决与收口、消去法仪器的两次加固、门禁与文档的账、下一步（LDPC→Metal 或 S-E）。旧的 `session_handoff_2026-09-2[4-7]-*.md` 只作历史 |
 | high level status and plan | **`high_level_status_and_plan.md`** | 本文件（**§0 只作历史；最新读数在文件开头的滚动块**；§1–§5 = 现状，2026-09-27 重写）|
 | 目录约定 | `README.md` | 三类文档的分工、文件命名、引用规范、旧名映射 |

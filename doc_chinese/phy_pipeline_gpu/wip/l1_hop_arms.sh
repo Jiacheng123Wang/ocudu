@@ -64,7 +64,11 @@ ARM=(--metal --device-grid --hop-td "$SLOTS" --hop-pdus "$PDUS")
 
 # The CONTROL arm must ask for it: since 5.9.49 the knob's default is ARMED, so leaving it unset would make
 # this a second candidate arm and the comparison below would compare the hand-over with itself.
-OCUDU_DFT_RELEASE_BLOCK=0 \
+# ⚠ `ref` ALSO carries OCUDU_GPU_STRICT=1 (fixed 2026-10-01; the measurement is in l1_handover_arms.sh):
+# strictness is not part of the hand-over, and this harness never publishes a pipeline mode, so leaving it
+# unset on the control arm alone made the comparison about two POLICIES - which read as "the mechanism
+# changed the data" (16/16 captures) while holding it equal shows the hand-over is data-neutral.
+OCUDU_DFT_RELEASE_BLOCK=0 OCUDU_GPU_STRICT=1 \
   run_arm ref "$TOOL" "$PDU" --out "$WORK/ref" "${ARM[@]}" || echo "  ^ ref arm FAILED" >&2
 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_GPU_STRICT=1 \
   run_arm cand "$TOOL" "$PDU" --out "$WORK/cand" "${ARM[@]}" || echo "  ^ cand arm FAILED (see [l1_hop])" >&2
