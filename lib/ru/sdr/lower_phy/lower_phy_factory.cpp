@@ -47,9 +47,15 @@ static std::shared_ptr<lower_phy_factory> create_lower_phy_factory(const lower_p
   std::shared_ptr<dft_processor_factory> tx_dft_factory = create_dft_processor_factory();
   report_fatal_error_if_not(tx_dft_factory, "Failed to create the TX DFT factory.");
   // Startup diagnostic: which DFT backend each direction actually uses.
-  ocudulog::fetch_basic_logger("PHY").info("[lower_phy] DFT backend: rx={} tx=cpu (expert_phy --pusch_dft_type {})",
-                                          metal_selected ? "metal (GPU)" : "cpu",
-                                          config.dft_processor_type);
+  // Both directions are named, and so is the CPU implementation behind "cpu": since dev doc 6.231 the CPU
+  // side is itself a choice (Apple's vDSP is the platform default, OCUDU_DFT_BACKEND=generic selects the
+  // in-tree chain), and an A/B between those two runs on ONE binary - so a leg that does not print which
+  // one it built cannot be read. "tx=" stays cpu by construction: the TX (IFFT) side is CPU-only here.
+  ocudulog::fetch_basic_logger("PHY").info(
+      "[lower_phy] DFT backend: rx={} tx=cpu (expert_phy --pusch_dft_type {}; CPU implementation: {})",
+      metal_selected ? "metal (GPU)" : "cpu",
+      config.dft_processor_type,
+      create_dft_processor_factory_backend_name());
 
   // Create OFDM modulator factory (TX path: CPU DFT, untouched by the Metal knob).
   ofdm_factory_generic_configuration tx_ofdm_common_config = {.dft_factory = tx_dft_factory};

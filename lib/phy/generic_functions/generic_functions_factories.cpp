@@ -184,6 +184,48 @@ private:
 
 } // namespace
 
+namespace {
+
+/// The ONE place the accelerator decision is made (dev doc 6.231). OCUDU_DFT_BACKEND=vdsp forces it on,
+/// =generic forces it off, unset means the platform default - which is ON for Apple. Everything else in this
+/// file and the startup banner read this, so what a leg reports cannot drift from what it built.
+bool vdsp_backend_requested()
+{
+#if defined(OCUDU_VDSP_DFT)
+  const char* backend = std::getenv("OCUDU_DFT_BACKEND");
+  return (backend == nullptr) || (std::strcmp(backend, "vdsp") == 0);
+#else  // OCUDU_VDSP_DFT
+  return false;
+#endif // OCUDU_VDSP_DFT
+}
+
+} // namespace
+
+std::shared_ptr<dft_processor_factory> ocudu::create_dft_processor_factory()
+{
+  if (vdsp_backend_requested()) {
+    if (std::shared_ptr<dft_processor_factory> vdsp_factory = create_dft_processor_factory_vdsp()) {
+      return vdsp_factory;
+    }
+  }
+  return create_dft_processor_factory_cpu();
+}
+
+const char* ocudu::create_dft_processor_factory_backend_name()
+{
+  if (vdsp_backend_requested() && (create_dft_processor_factory_vdsp() != nullptr)) {
+    return "vdsp";
+  }
+  // Same order as create_dft_processor_factory_cpu().
+  if (create_dft_processor_factory_fftw() != nullptr) {
+    return "fftw";
+  }
+  if (create_dft_processor_factory_fftz() != nullptr) {
+    return "fftz";
+  }
+  return "generic";
+}
+
 std::shared_ptr<dft_processor_factory> ocudu::create_dft_processor_factory_cpu()
 {
   std::shared_ptr<dft_processor_factory> dft_proc_factory;

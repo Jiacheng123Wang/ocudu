@@ -646,6 +646,10 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
 
   std::shared_ptr<dft_processor_factory> dft_factory = create_dft_processor_factory();
   report_fatal_error_if_not(dft_factory, "Invalid DFT factory.");
+  // Which CPU implementation this lane's transforms run on (dev doc 6.231): "vdsp" (Apple's Accelerate,
+  // the platform default) or one of the in-tree ones. Printed because an A/B between them is one binary.
+  ocudulog::fetch_basic_logger("PHY").info("[upper_phy] DFT processor backend: {}",
+                                          create_dft_processor_factory_backend_name());
 
   std::shared_ptr<time_alignment_estimator_factory> ta_est_factory =
       create_time_alignment_estimator_dft_factory(dft_factory);

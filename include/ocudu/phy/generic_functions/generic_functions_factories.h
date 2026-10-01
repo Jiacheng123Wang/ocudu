@@ -101,9 +101,9 @@ std::shared_ptr<dft_processor_factory> create_dft_processor_factory_vdsp();
 ///
 /// This function attempts to create a concrete @ref dft_processor_factory implementation according to the following
 /// priority list:
-/// 1. Apple vDSP (Accelerate) - APPLE ONLY, and ON BY DEFAULT there (dev doc 6.231): it is 1.87x faster than
-///    the in-tree generic path for the 768-point transform the RX front end runs (2.88 -> 1.54us), and it is
-///    the only path in this tree that reaches Apple's matrix units;
+/// 1. Apple vDSP (Accelerate) - APPLE ONLY, and ON BY DEFAULT there (dev doc 6.231): it is 3.7x faster than the
+///    in-tree generic path for the 768-point transform the RX front end runs (3.42 -> 0.92us), and it is the
+///    only path in this tree that reaches Apple's matrix units;
 /// 2. Fastest FFT in the West (FFTW);
 /// 3. AMD Optimized Computing Library FFT for Zen (AOCL-FFTZ); and
 /// 4. Generic DFT which might not support all DFT sizes.
@@ -111,20 +111,15 @@ std::shared_ptr<dft_processor_factory> create_dft_processor_factory_vdsp();
 /// The accelerator can be turned OFF with \c OCUDU_DFT_BACKEND=generic (or forced with \c =vdsp), which is what
 /// lets an A/B arm run on ONE binary - the same contract the fusion knobs follow. On every platform other than
 /// Apple the behaviour is exactly \ref create_dft_processor_factory_cpu, unchanged.
-inline std::shared_ptr<dft_processor_factory> create_dft_processor_factory()
-{
-#if defined(OCUDU_VDSP_DFT)
-  const char* backend  = std::getenv("OCUDU_DFT_BACKEND");
-  const bool  use_vdsp = (backend == nullptr) || (std::strcmp(backend, "vdsp") == 0);
-  if (use_vdsp) {
-    if (std::shared_ptr<dft_processor_factory> dft_proc_factory = create_dft_processor_factory_vdsp()) {
-      return dft_proc_factory;
-    }
-  }
-#endif
+///
+/// Out of line on purpose: the decision lives in ONE place, and \ref create_dft_processor_factory_backend_name
+/// reads that same place instead of re-deriving it (a banner that disagrees with what was built is worse than
+/// no banner).
+std::shared_ptr<dft_processor_factory> create_dft_processor_factory();
 
-  return create_dft_processor_factory_cpu();
-}
+/// \brief Names the implementation \ref create_dft_processor_factory currently selects, for the startup
+/// banner: \c "vdsp" (Apple, the default), \c "generic", \c "fftw" or \c "fftz".
+const char* create_dft_processor_factory_backend_name();
 
 /// \brief Creates a DFT processor factory that prefers the Metal GPU implementation.
 ///

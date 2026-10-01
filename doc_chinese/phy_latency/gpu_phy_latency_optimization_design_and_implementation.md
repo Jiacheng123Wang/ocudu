@@ -14441,6 +14441,17 @@ std::shared_ptr<dft_processor_factory> tx_dft_factory = create_dft_processor_fac
 ⚠ **绝对数不稳定**（同一二进制另一次运行里 generic 768 direct 读到 498 MS/s，差 2.2×）⇒ 表里只用**同一次运行的比值**；
 ★ 与 §6.205 的离线探针（2.88 → 1.54 µs，1.87×）不同，这里是**树内真实路径**的读数。
 
+★★ **但真正要对照的不是 `generic`，而是 `fftw`**：本机的 CPU 链是 **FFTW**（`create_dft_processor_factory_cpu()` 的第一优先），
+所以 `OCUDU_DFT_BACKEND=generic` 这条臂实际选中的是 **FFTW** —— 启动横幅把它写出来了（这正是为什么要加那行）：
+
+| 启动 | 横幅 |
+|---|---|
+| 默认 | `[upper_phy] DFT processor backend: **vdsp**`；`[lower_phy] DFT backend: rx=cpu tx=cpu (… CPU implementation: **vdsp**)` |
+| `OCUDU_DFT_BACKEND=generic` | 同上，两处都读 **`fftw`**（不是 `generic`）|
+
+⇒ 真实的 A/B 是 **vDSP vs FFTW**：768 点 direct **2.33 → 0.92 µs（2.5×）**、inverse **2.25 → 0.42 µs（5.4×）**。
+（"generic" 那个数是**这台机器上没装 FFTW/FFTZ 时**才会走到的实现，§6.205 的离线探针量的就是它。）
+
 #### ③ 预期收益（按 §6.229② 的"只有一个符号暴露"）
 
 每跳暴露 ≈ 1 个 768 点变换 ⇒ 预期 **≈0.6–2.5 µs/跳（取 ~1 µs）**，即 V1 的 **~0.1%**。
