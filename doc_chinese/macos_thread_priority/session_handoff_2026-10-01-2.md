@@ -58,9 +58,13 @@
   清单已重新生成。
 * **Ubuntu 复核**（`ssh jwang@192.168.0.106`，已把该检出快进到本 commit）：
   `macos_compat_test` + `ul_pipeline_probe_test` = **22/22 通过**（1 skip = flow probes 关）；
-  ★ 台架**抓到一个真实的 Linux 编译错误**（`qos_class_t` 在 `#if` 外声明）⇒ 已修（`268f3b1760`）；
-  另做了一次 **Linux + `-DOCUDU_FLOW_PROBES` 的定点编译**（本机 build 是 probes OFF，否则那些分支在 Linux 上永远不会被编译）⇒ 通过。
-  全量 `cmake --build build -j 8` + `ctest -L phy` 已在该台架后台启动，结果见开发文档 §10.10。
+  ★ 台架**抓到两个真实的 Linux 错误**，都已修：
+  ① `qos_class_t` 在新单测里声明在 `#if defined(__APPLE__)` 之外（`268f3b1760`）；
+  ② **`ENABLE_FLOW_PROBES=OFF`（项目默认、也是台架配置）从 `328d273e0f` 起在 Linux 上编不过**
+  —— `spans_stream_start` 只被探针那一臂消费，GCC 以 `-Werror=unused-variable` 拒收；
+  修法 = `[[maybe_unused]]`（`94e93cc482`，行为不变）。**这跟本线无关，但只有台架能看见**。
+  另做了一次 **Linux + `-DOCUDU_FLOW_PROBES` 的定点编译** ⇒ 通过。
+  全量：**`BUILD_RC=0`（0 warning）+ `ctest -L phy` = 184/184 通过**（开发文档 §10.10）。
 
 ---
 
@@ -99,11 +103,11 @@ LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml OCUDU_METAL_GPU_TIME=1 OCUDU_UL
 
 | 项 | 值 |
 |---|---|
-| HEAD | `268f3b1760`（P1+P3 一个 commit + 一个 Linux 编译修复）|
+| HEAD | `95c8ed50bb`（P1+P3 仪器 + 2 个台架抓到的 Linux 修复 + 文档）|
 | 三段戳 | 已重打 = HEAD，且二进制内含该戳 ✔ |
 | 工作树 | 干净（用户的 `configs/*.yml` 不入库）|
 | 本机测试 | `ctest -L phy -j 1` = **207/207**（208 用例，1 禁用）|
-| Ubuntu | 检出已快进到同一 commit；`macos_compat_test`+`ul_pipeline_probe_test` 22/22；全量 build+ctest 在跑（§10.10 记结果）|
+| Ubuntu | 检出已快进到同一 commit；全量 build **0 warning**、`ctest -L phy` **184/184**（§10.10）|
 | 旧腿 | `p181`/`p182` **已过期**（本次改了 `lib/include/utils`）⇒ 需重飞一对 |
 | 新增旋钮 | `OCUDU_SCHED_VERBOSE`（白名单，只打印）、`OCUDU_SCHED_ATTR_QOS`、`OCUDU_SCHED_SKIP_POSIX_RT`（**臂**，fail-closed）|
 
