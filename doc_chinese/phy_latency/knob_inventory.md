@@ -1,7 +1,7 @@
 # OCUDU_* 旋钮清单（**生成物** + 人工判读）
 
 > 生成方式：`python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > doc_chinese/phy_latency/knob_inventory.md`
-> 本次生成：commit `497f0074cd`。**不要手改正文**——改生成器或改人工判读小节。
+> 本次生成：commit `a283a2addb`。**不要手改正文**——改生成器或改人工判读小节。
 > （生成器把**生成那一刻的 HEAD**写进这一行；要把这一行也追平 HEAD，就重跑生成器再提交一次——那一次是纯文档差异。）
 >
 > **默认值**是**从守卫表达式读出来的**（`ON` = 不设或非 0 都开；`OFF` = 必须显式置 1；`AUTO` = 由别处推导；`= 14` / `= "vdsp"` = 默认是一个**值**而不是开关，腿不设它时用的就是这个值；`?` = 需要读注释）。
@@ -178,7 +178,7 @@
 | `OCUDU_UL_RX_POOL_DROP` | ? | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:1171` | 1 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 1 | 17/2 | 0 |
 | `OCUDU_UL_RX_POOL_DROP_FORCE` | = 0 | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:1184` | 1 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 1 | 11/3 | 20 |
 | `OCUDU_UL_RX_POOL_SIZE` | ? | lib | `lib/phy/lower/lower_phy_factory.cpp:226` | 1 | `lib/phy/lower/lower_phy_factory.cpp` | 1 | 8/4 | 12 |
-| `OCUDU_UL_RX_SYMBOLS` | = 1 | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:924` | 2 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 4 | 81/14 | 1,7 |
+| `OCUDU_UL_RX_SYMBOLS` | = 1 | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:924` | 2 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 4 | 83/14 | 1,7 |
 | `OCUDU_UL_SLOT_TRACE` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:703` | 1 | `include/ocudu` | 11 | 43/14 | 512 |
 | `OCUDU_UL_STALE_US` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1440` | 1 | `include/ocudu` | 0 | 4/3 | — |
 | `OCUDU_USRSCTP_MODE` | ? | lib | `lib/gateways/sctp_socket_usrsctp.cpp:117` | 1 | `lib/gateways` | 0 | 2/1 | — |
