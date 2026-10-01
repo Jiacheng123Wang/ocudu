@@ -23,7 +23,7 @@
 
 | 路径 | 是否跟踪 | 放什么 |
 |---|---|---|
-| `wip/*.sh`、`wip/*.py` | ✅ **跟踪** | 腿配方与旁观脚本（它们产出证据，属于"人读了才懂"的东西）|
+| `wip/*.sh`、`wip/*.py` | ✅ **跟踪** | 腿配方与旁观脚本（它们产出证据，属于"人读了才懂"的东西）：`observe_threads.sh`（旁观，默认 light）、`taskpolicy_ab.sh`（P2 档位 A/B）、`spike_census.py`（尖峰普查，读 p99）、`threshold_candidates.py`（按**家族**导出 C1/C2 阈值）|
 | `wip/logs/` | ❌ **忽略**（`doc_chinese/.gitignore` 的 `**/logs/`）| 本线新飞的腿（三件套：`.log` / `.log.stderr` / `.log.stdout`）|
 | `work_tmp/` | ❌ **忽略**（`**/work_tmp/`）| `taskinfo`/`powermetrics`/`sample` 的采样文件、dump、scratch |
 
@@ -37,6 +37,8 @@
 
 * **`../ocudu_env_knobs_inventory_and_leg_whitelist.md`**（生成物）：**整棵树**的 `OCUDU_*` 旋钮默认值/读取点/飞过的腿 + **验收腿白名单**。
   本线的任何新旋钮都必须在**改生成器**（`../phy_latency/wip/gen_knob_inventory.py`）之后重新生成它，并按需加入白名单。
+  本线现状：`OCUDU_SCHED_VERBOSE`（**只打印 ⇒ 在白名单**）、`OCUDU_SCHED_ATTR_QOS` 与 `OCUDU_SCHED_SKIP_POSIX_RT`
+  （**改调度 ⇒ 故意不在白名单**，fail-closed —— 带它们的腿是**臂**，不得进验收结论）。
 * `../README.md`：`doc_chinese/` 的总索引。
 
 ## 引用规则（写文档时必须守）
