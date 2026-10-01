@@ -32,14 +32,16 @@ LABEL="${1:-}"
 ACTION="${2:-}"
 LATENCY=""
 THROUGHPUT=""
+NO_READBACK=0
 for a in "$@"; do
   case "$a" in
     --latency=*)    LATENCY="${a#*=}" ;;
     --throughput=*) THROUGHPUT="${a#*=}" ;;
+    --no-readback)  NO_READBACK=1 ;;
   esac
 done
 if [[ -z $LABEL || -z $ACTION ]]; then
-  echo "usage: sudo -E bash wip/taskpolicy_ab.sh <leg-label> {scan|set|clear} [--latency=N] [--throughput=N]" >&2
+  echo "usage: sudo -E bash wip/taskpolicy_ab.sh <leg-label> {scan|set|clear} [--latency=N] [--throughput=N] [--no-readback]" >&2
   exit 2
 fi
 
@@ -61,7 +63,21 @@ fi
 # The readback. taskinfo needs root and IS NOT FREE - it is one of the tools that produced the 153 ms stall of leg
 # p182_1726 (dev doc 10.3) - so it is taken ONCE per action, at the instant the tier is changed, and its cost is
 # inside the arm's own leg by definition.
+#
+# `--no-readback` skips it, and THAT IS THE RIGHT FLAG FOR THE A/B LEG ITSELF: the tier change is the intervention,
+# not an observation, and a taskinfo at that instant would put the observation cost exactly where the two halves of
+# the comparison meet (the 153 ms lesson). With the flag, the only trace is the printed timestamp, and the tier's
+# OWN effect has to show up in the probe report - which is the question the leg is being flown for.
 readback() {  # <suffix>
+  if [[ $NO_READBACK -eq 1 ]]; then
+    {
+      echo "== $(date -u +%Y-%m-%dT%H:%M:%SZ) pid=$PID action=$ACTION latency=${LATENCY:-<unchanged>} throughput=${THROUGHPUT:-<unchanged>}"
+      echo "-- taskpolicy output --"
+      cat "$1" 2>/dev/null || true
+      echo "-- taskinfo: SKIPPED (--no-readback: the tier change must not be observed with a heavy tool) --"
+    } >>"$BASE.txt"
+    return
+  fi
   {
     echo "== $(date -u +%Y-%m-%dT%H:%M:%SZ) pid=$PID action=$ACTION latency=${LATENCY:-<unchanged>} throughput=${THROUGHPUT:-<unchanged>}"
     echo "-- taskpolicy output --"

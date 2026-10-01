@@ -351,6 +351,8 @@ setschedparam(SCHED_OTHER, 31) 之后再来一次      -> 1 (EPERM)：**不可�
 ### 10.7 2026-10-01 —— P2 的腿配方与**预登记**（判据先写死，再飞）
 
 **脚本**：`wip/taskpolicy_ab.sh`（`scan` / `set --latency=N --throughput=N` / `clear`）。
+★ **正式 A/B 的那一次改档请加 `--no-readback`**：改档是**干预**、不是观察，而 `taskinfo` 恰好会落在"前后两半"
+的交界处（10.3 的 153 ms 教训）；加上它以后腿上只留一行时间戳，档位本身的效果必须从探针报告里看出来。
 **本机实测的档位**：`taskpolicy -l` 接受 **1..5**，**拒绝 6 及以上**（`Could not parse '6' as a qos tier`）；
 数字**越大越偏延迟**（= XNU 的 `LATENCY_QOS_TIER_1`），与常量名字相反，所以 `scan` 会把回读打在旁边。
 `-p` 改**别的**进程需要 root，回读用 `taskinfo`（**重观察**，见 10.3：只能出现在诊断腿上）。
