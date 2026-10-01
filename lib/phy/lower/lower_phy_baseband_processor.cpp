@@ -91,25 +91,11 @@ struct tx_slack_accounting {
   std::atomic<uint64_t> tx_over_1ms{0};
   std::atomic<uint64_t> tx_over_5ms{0};
   std::atomic<int64_t>  tx_call_max_us{0};
-  /// WHICH CALL the maximum belonged to (1-based, out of the calls sampled). The same reason `min_due_ts`
-  /// exists for the margins: "the worst transmit() took 92 ms" is two different findings depending on whether
-  /// it is the FIRST call (the stream spinning up) or one in the middle of the run. Measured 2026-10-01: on
-  /// both the air leg `p163-n78-delivered` (84.5 ms) and the loopback bench (91.9 ms) it is a single call.
-  std::atomic<uint64_t> tx_call_count{0};
-  std::atomic<uint64_t> tx_call_max_index{0};
   std::mutex            tx_call_mutex;
   std::vector<float>    tx_call_us;
   ///@}
   /// The transmit timestamp the smallest margin belonged to (the metadata carries no slot index).
   std::atomic<uint64_t> min_due_ts{0};
-  /// Hand-overs (and their transmit() calls) made AFTER the receive path stopped: outside the window, counted
-  /// but never sampled - see tx_slack_note_excluded(). The report prints them so the exclusion is visible.
-  std::atomic<uint64_t> excluded_after_rx_stop{0};
-  /// transmit() calls left out of [dl_tx_call] because they fell outside the SAME window the margins use
-  /// (no clock map yet, or the stream is stopping): the series and the margins must describe one population -
-  /// measured 2026-10-01, the single `over 5ms` call of a leg was call #1 on the loopback bench (91.9 ms) and
-  /// on the air leg `p163-n78-delivered` (84.5 ms), i.e. the TX stream spinning up, not a downlink property.
-  std::atomic<uint64_t> tx_call_excluded{0};
   /// \name The clock map: the newest (radio timestamp, host instant) pair the receive path delivered.
   /// Written by the receive thread once per receive, read by the transmit thread once per transmit.
   ///@{
@@ -146,8 +132,7 @@ void tx_slack_note_receive(uint64_t radio_ts, int64_t host_ns)
   a.rx_valid.store(true, std::memory_order_release);
 }
 
-/// Records one transmit hand-over (dev doc 6.41). Called from dl_process() on the TX executor, and ONLY while
-/// the receive path is still feeding the clock map (see tx_slack_note_excluded()).
+/// Records one transmit hand-over (dev doc 6.41). Called from dl_process() on the TX executor.
 void tx_slack_note_transmit(int64_t margin_us, uint64_t due_ts)
 {
   tx_slack_accounting& a = tx_slack_accounts();
@@ -176,40 +161,10 @@ void tx_slack_note_transmit(int64_t margin_us, uint64_t due_ts)
   }
 }
 
-/// Records a hand-over that is OUTSIDE the measured window: it happened after the receive path stopped, so the
-/// clock map below is frozen and the margin it would produce is not a property of the downlink.
-///
-/// WHY THIS EXISTS (dev doc 6.219 (6), measured 2026-10-01 on `p163-n78-delivered`). ul_process() and
-/// dl_process() are two INDEPENDENT self-deferring chains, and stop() requests both at once - but the transmit
-/// chain keeps handing slots over for its countdown (2 x max_processing_delay_slots, lower_phy_factory.cpp:278)
-/// so the radio does not underflow on the way out, while the receive chain stops handing blocks over the
-/// instant the request is set (ul_process, "blocks received while stopping are not handed over"). From that
-/// instant `rx_ts`/`rx_host_ns` are frozen, so `(due_ts - rx_ts)/rate` keeps growing with the slot schedule
-/// while `(host_now - rx_host)` grows with wall time only: the margin decays and goes negative for reasons that
-/// are entirely inside the shutdown. Measured on that leg: 23 of its 23 `Real-time failure in RF` messages and
-/// the deepest negative margin (-4479 us) sit in the last 30 ms, within a few ms of `Stopping...`, and 4 of the
-/// 4 symbol-grained legs on record have 8-22 such messages there against 0 in all 5 whole-slot legs.
-///
-/// They are COUNTED, not dropped: the report prints how many, so "the window is clean" cannot be claimed by
-/// hiding a tail that exists.
-void tx_slack_note_excluded()
-{
-  tx_slack_accounts().excluded_after_rx_stop.fetch_add(1, std::memory_order_relaxed);
-}
-
-/// Records a transmit() call left out of [dl_tx_call]: it fell outside the window the margins use (see
-/// tx_slack_accounting::tx_call_excluded).
-void tx_slack_note_call_excluded()
-{
-  tx_slack_accounts().tx_call_excluded.fetch_add(1, std::memory_order_relaxed);
-}
-
-/// Records how long the transmit() call took (dev doc 6.42 (4)). Same window as tx_slack_note_transmit():
-/// a transmit() that blocks while the streams are being torn down measures the teardown, not the downlink.
+/// Records how long the transmit() call took (dev doc 6.42 (4)).
 void tx_slack_note_call_us(int64_t call_us)
 {
   tx_slack_accounting& a = tx_slack_accounts();
-  const uint64_t       index = a.tx_call_count.fetch_add(1, std::memory_order_relaxed) + 1;
   if (call_us > 1000) {
     a.tx_over_1ms.fetch_add(1, std::memory_order_relaxed);
   }
@@ -218,9 +173,6 @@ void tx_slack_note_call_us(int64_t call_us)
   }
   int64_t prev = a.tx_call_max_us.load(std::memory_order_relaxed);
   while ((call_us > prev) && !a.tx_call_max_us.compare_exchange_weak(prev, call_us, std::memory_order_relaxed)) {
-  }
-  if (call_us == a.tx_call_max_us.load(std::memory_order_relaxed)) {
-    a.tx_call_max_index.store(index, std::memory_order_relaxed);
   }
   std::lock_guard<std::mutex> lock(a.tx_call_mutex);
   if (a.tx_call_us.size() < tx_slack_accounting::max_samples) {
@@ -247,10 +199,7 @@ void tx_slack_report()
       us.empty() ? 0.0 : std::accumulate(us.begin(), us.end(), 0.0) / static_cast<double>(us.size());
   std::fprintf(stderr,
                "[dl_tx_slack] transmissions=%llu mean=%.1fus median=%.1fus p1=%.1fus p5=%.1fus p25=%.1fus "
-               "min=%lldus (due_ts=%llu); below 2ms=%llu, below 1ms=%llu, below 500us=%llu, AT/BELOW 0=%llu; "
-               "excluded %llu hand-over(s) after the RECEIVE path stopped (the clock map is frozen there, so "
-               "their margin is the teardown's, not the downlink's - dev doc 6.219 (6)); every number above is "
-               "over the %llu hand-over(s) inside the stream\n",
+               "min=%lldus (due_ts=%llu); below 2ms=%llu, below 1ms=%llu, below 500us=%llu, AT/BELOW 0=%llu\n",
                static_cast<unsigned long long>(n),
                mean,
                static_cast<double>(pct(0.5)),
@@ -262,9 +211,7 @@ void tx_slack_report()
                static_cast<unsigned long long>(a.below_2ms.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(a.below_1ms.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(a.below_500us.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(a.late.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(a.excluded_after_rx_stop.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(n));
+               static_cast<unsigned long long>(a.late.load(std::memory_order_relaxed)));
   // S2b (dev doc 6.42 (4)): the CALL's own duration, so "the radio pushed back inside transmit()" and "UHD's
   // worker was late after an instant return" are told apart by one number.
   std::vector<float> calls;
@@ -277,18 +224,15 @@ void tx_slack_report()
     return calls.empty() ? 0.0F : calls[static_cast<size_t>((calls.size() - 1) * p)];
   };
   std::fprintf(stderr,
-               "[dl_tx_call] calls=%llu median=%.1fus p95=%.1fus p99=%.1fus max=%lldus (at call #%llu); "
-               "over 1ms=%llu, over 5ms=%llu; %llu call(s) outside the window [dl_tx_slack] measures (before "
-               "the clock map exists, or while the streams are stopping)\n",
+               "[dl_tx_call] calls=%llu median=%.1fus p95=%.1fus p99=%.1fus max=%lldus; over 1ms=%llu, "
+               "over 5ms=%llu\n",
                static_cast<unsigned long long>(calls.size()),
                static_cast<double>(cpct(0.5)),
                static_cast<double>(cpct(0.95)),
                static_cast<double>(cpct(0.99)),
                static_cast<long long>(a.tx_call_max_us.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(a.tx_call_max_index.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(a.tx_over_1ms.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(a.tx_over_5ms.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(a.tx_call_excluded.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(a.tx_over_5ms.load(std::memory_order_relaxed)));
 }
 
 const bool tx_slack_report_registered = []() {
@@ -1061,18 +1005,7 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
   // base - the radio time still left before these samples must be on the air (see tx_slack_accounting). It is
   // measured HERE, after the throttling wait and immediately before the hand-over, because that is the instant
   // whose lateness UHD reports as `underflow`.
-  //
-  // THE WINDOW IS THE RECEIVE PATH'S LIFETIME (dev doc 6.219 (6)). stop() sets `rx_stop_requested` and then
-  // requests BOTH chains; the transmit chain keeps handing over for its countdown while the receive chain stops
-  // feeding the clock map at once. A hand-over in that gap is not a sample of this quantity - it is the
-  // teardown - so it is counted apart (tx_slack_note_excluded) instead of entering the distribution, and its
-  // transmit() call is left out of [dl_tx_call] for the same reason.
-  const bool tx_slack_window_open = !rx_stop_requested.load(std::memory_order_acquire);
-  const bool tx_slack_map_live    = tx_slack_accounts().rx_valid.load(std::memory_order_acquire);
-  if (!tx_slack_window_open) {
-    tx_slack_note_excluded();
-  }
-  else if (tx_slack_map_live) {
+  if (tx_slack_accounts().rx_valid.load(std::memory_order_acquire)) {
     const tx_slack_accounting& a          = tx_slack_accounts();
     const auto                 host_now   = std::chrono::steady_clock::now();
     const int64_t              radio_us   = static_cast<int64_t>(
@@ -1087,19 +1020,9 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
   // Transmit buffer (timed: dev doc 6.42 (4), S2b - see tx_slack_accounting::tx_over_1ms).
   const auto tx_call_begin = std::chrono::steady_clock::now();
   transmitter.transmit(result.buffer->get_reader(), result.metadata);
-  // Sampled only inside the SAME window as the margins, checked at BOTH ends of the call. Two kinds of call
-  // fall outside it, and both would otherwise show up as the series' maximum: the ones before the clock map
-  // exists (the TX stream spinning up - call #1 in every run measured) and the one that SPANS the stop (the
-  // driver blocking while it tears the stream down). Leaving them in put an 84-92 ms maximum on a series whose
-  // p99 is 81 us, and the transport-health line reads that maximum as if it were the downlink.
-  if (tx_slack_window_open && tx_slack_map_live && !rx_stop_requested.load(std::memory_order_acquire)) {
-    tx_slack_note_call_us(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
-                                                                                tx_call_begin)
-                              .count());
-  }
-  else {
-    tx_slack_note_call_excluded();
-  }
+  tx_slack_note_call_us(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                              tx_call_begin)
+                            .count());
 
 #if defined(OCUDU_FLOW_PROBES)
   // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES).
