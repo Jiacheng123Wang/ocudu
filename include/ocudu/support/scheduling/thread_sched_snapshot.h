@@ -67,6 +67,11 @@ struct thread_sched_snapshot {
   int64_t tc_period_ns      = -1;
   int64_t tc_computation_ns = -1;
   int64_t tc_constraint_ns  = -1;
+  /// True when this platform can read a time constraint at all (macOS). On Linux the three tc_* fields stay -1,
+  /// and this accessor is the ONLY safe way to tell that apart from "read succeeded, no constraint" (0): the
+  /// fields are nanoseconds, so a consumer that converts to microseconds with integer division turns -1 into 0
+  /// and erases the distinction - which is what the Ubuntu bench caught on 2026-10-01 (dev doc 10.29).
+  bool tc_readable() const { return tc_period_ns >= 0; }
   /// True when the kernel read back an explicit time constraint on this thread.
   bool time_constrained() const { return tc_period_ns > 0; }
   /// The nominal duty cycle the thread declares to the kernel (computation / period). 0 when unconstrained.
