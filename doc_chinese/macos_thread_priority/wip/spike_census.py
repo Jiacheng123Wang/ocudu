@@ -30,22 +30,37 @@ LEG_DIRS = [
     os.path.join(ROOT, "doc_chinese", "phy_pipeline_gpu", "wip", "logs"),
 ]
 
-# The series this census knows about: the name and the regex that reads its line. Deliberately explicit - a
-# generic parser would silently pick up unrelated "samples=… median=…" lines and inflate the table.
+# The series this census knows about. The NAMES are deliberately explicit - a generic parser would silently pick
+# up unrelated "samples=… median=…" lines and inflate the table - but they all carry the same six numbers
+# (samples/mean/median/min/max/p95/p99), so one template reads them.
+#
+# WHY p95/p99 ARE READ AT ALL (added 2026-10-01, same session as the first threshold derivation). The census
+# originally printed median and max only, and the first attempt to derive a criterion from max failed for a
+# reason the data then showed plainly: over the 20 newest n78/gpu legs - ten different commits - the per-leg
+# `ul_channel_estimation` max swung from 201 us to 4792 us while its p99 stayed in 146..173 us and its
+# `ul_time_frequency` p99 in 605..675 us. max is ONE DRAW from a heavy tail; p99 is a property of the
+# population. A criterion therefore needs both, for different jobs (see threshold_candidates.py).
+_STATS = (r"samples=(\d+) mean=([\d.]+)us median=([\d.]+)us min=([\d.]+)us max=([\d.]+)us "
+          r"p95=([\d.]+)us p99=([\d.]+)us")
 SERIES = [
-    ("ul_rx_wait", r"^\[ul_rx_wait\] samples=(\d+) mean=[\d.]+us median=([\d.]+)us min=[\d.]+us max=([\d.]+)us"),
-    ("ul_rx_wait_hop", r"^\[ul_rx_wait_hop\] samples=(\d+) mean=[\d.]+us median=([\d.]+)us min=[\d.]+us max=([\d.]+)us"),
-    ("ul_time_frequency", r"^\[ul_time_frequency\] samples=(\d+) mean=[\d.]+us median=([\d.]+)us min=[\d.]+us max=([\d.]+)us"),
-    ("ul_channel_estimation", r"^\[ul_channel_estimation\] samples=(\d+) mean=[\d.]+us median=([\d.]+)us min=[\d.]+us max=([\d.]+)us"),
-    ("ul_equalization_demod", r"^\[ul_equalization_demod\] samples=(\d+) mean=[\d.]+us median=([\d.]+)us min=[\d.]+us max=([\d.]+)us"),
-    ("ul_ldpc_decode", r"^\[ul_ldpc_decode\] samples=(\d+) mean=[\d.]+us median=([\d.]+)us min=[\d.]+us max=([\d.]+)us"),
-    ("ul_gpu_pipeline", r"^\[ul_gpu_pipeline\] samples=(\d+) mean=[\d.]+us median=([\d.]+)us min=[\d.]+us max=([\d.]+)us"),
-    ("ul_pipeline", r"^\[ul_pipeline\] samples=(\d+) mean=[\d.]+us median=([\d.]+)us min=[\d.]+us max=([\d.]+)us"),
+    (name, r"^\[" + name + r"\] " + _STATS)
+    for name in ("ul_rx_wait", "ul_rx_wait_hop", "ul_time_frequency", "ul_channel_estimation",
+                 "ul_equalization_demod", "ul_ldpc_decode", "ul_gpu_pipeline", "ul_pipeline")
+]
+SERIES.append(
     # NOTE: dl_tx_call's max carries "(at call #N)" and call #1 is the TX stream spin-up (84-85 ms on EVERY leg,
     # dev doc phy_latency 6.219): a census that printed its ratio without saying so would report a 2000x "spike"
-    # that is a startup constant. The pattern captures the call index for exactly that reason.
-    ("dl_tx_call", r"^\[dl_tx_call\] calls=\d+ median=([\d.]+)us p95=[\d.]+us p99=[\d.]+us max=([\d.]+)us(?: \(at call #(\d+)\))?"),
-]
+    # that is a startup constant. The pattern captures the call index for exactly that reason. This series has no
+    # `samples=` field and no `min=`; its fields are mapped onto the same record so the table stays uniform.
+    ("dl_tx_call",
+     r"^\[dl_tx_call\] calls=(\d+) median=([\d.]+)us p95=([\d.]+)us p99=([\d.]+)us max=([\d.]+)us"
+     r"(?: \(at call #(\d+)\))?")
+)
+
+# Field order of one record: the numbers a criterion can be read from, and the sample count that says how much
+# of the run the reading covers. `mean` and `min` are read but NOT kept: no criterion in this line uses them
+# (a mean is dominated by the median, a min by the fastest slot), and carrying them would invite one.
+FIELDS = ("samples", "median", "p95", "p99", "max")
 
 
 def leg_label(name):
@@ -59,23 +74,29 @@ def leg_label(name):
 
 
 def read_leg(path):
-    """[(series, samples, median, max)] - `dl_tx_call` has no samples field, reported as 0."""
+    """{series: {samples, median, p95, p99, max}} - {} when the file cannot be read.
+
+    A series the leg does not report is ABSENT (not zero): a leg whose phase segments were off must not look
+    like a leg whose phase segments were 0 us.
+    """
     try:
-        txt = open(path, errors="replace").read()
+        with open(path, errors="replace") as fh:
+            txt = fh.read()
     except OSError:
-        return []
-    out = []
+        return {}
+    out = {}
     for name, rx in SERIES:
         m = re.search(rx, txt, re.M)
         if m is None:
             continue
         if name == "dl_tx_call":
-            median, mx = float(m.group(1)), float(m.group(2))
-            call = int(m.group(3)) if (m.lastindex or 0) >= 3 and m.group(3) else 0
+            call = int(m.group(6)) if m.group(6) else 0
             # call #1 == the startup spin-up: reported, but marked so nobody reads it as a stall.
-            out.append((name + ("@call#1(startup)" if call == 1 else ""), 0, median, mx))
+            key = name + ("@call#1(startup)" if call == 1 else "")
+            # [calls, median, p95, p99, max] - the call count stands in for `samples`.
+            out[key] = dict(zip(FIELDS, [int(m.group(1))] + [float(m.group(i)) for i in (2, 3, 4, 5)]))
         else:
-            out.append((name, int(m.group(1)), float(m.group(2)), float(m.group(3))))
+            out[name] = dict(zip(FIELDS, [int(m.group(1))] + [float(m.group(i)) for i in (2, 6, 7, 5)]))
     return out
 
 
@@ -125,14 +146,17 @@ def main():
 
     rows = []
     for f in files:
-        for series, samples, median, mx in read_leg(f):
-            ratio = (mx / median) if median > 0 else float("inf")
-            rows.append((leg_label(os.path.basename(f)), series, samples, median, mx, ratio))
+        for series, st in read_leg(f).items():
+            ratio = (st["max"] / st["median"]) if st["median"] > 0 else float("inf")
+            rows.append((leg_label(os.path.basename(f)), series, st, ratio))
 
-    print(f"{'leg':34s} {'series':24s} {'samples':>9s} {'median':>9s} {'max':>10s} {'max/med':>8s}")
-    for leg, series, samples, median, mx, ratio in rows:
+    # p99 sits between the two columns it explains: it is the highest number in the report that a CRITERION can
+    # be read from, because it describes the population; `max` is one draw from the tail and moves by 30x between
+    # legs of the same family (see the SERIES comment).
+    print(f"{'leg':34s} {'series':24s} {'samples':>9s} {'median':>9s} {'p99':>9s} {'max':>10s} {'max/med':>8s}")
+    for leg, series, st, ratio in rows:
         r = "   inf" if ratio == float("inf") else f"{ratio:8.1f}"
-        print(f"{leg:34s} {series:24s} {samples:9d} {median:9.1f} {mx:10.1f} {r}")
+        print(f"{leg:34s} {series:24s} {st['samples']:9d} {st['median']:9.1f} {st['p99']:9.1f} {st['max']:10.1f} {r}")
 
     print()
     print(f"== worst max/median ratios (top {top}) ==")
@@ -141,9 +165,9 @@ def main():
     # Sort by ratio, and BY THE MAX on a tie: every median-0 series is "inf", so ordering on the ratio alone
     # leaves the biggest spike wherever the table happened to put it (measured: the 153 ms row was hidden behind
     # smaller inf rows until this secondary key was added).
-    for leg, series, samples, median, mx, ratio in sorted(rows, key=lambda r: (-r[5], -r[4]))[:top]:
+    for leg, series, st, ratio in sorted(rows, key=lambda r: (-r[3], -r[2]["max"]))[:top]:
         r = "inf (median 0)" if ratio == float("inf") else f"x{ratio:.1f}"
-        print(f"  {r:16s} {series:24s} median={median:8.1f}us max={mx:9.1f}us  [{leg}]")
+        print(f"  {r:16s} {series:24s} median={st['median']:8.1f}us max={st['max']:9.1f}us  [{leg}]")
     return 0
 
 

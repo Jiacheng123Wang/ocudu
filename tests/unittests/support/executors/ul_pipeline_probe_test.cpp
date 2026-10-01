@@ -143,6 +143,25 @@ std::array<long long, 5> dft_window_counts(const std::string& report)
           num(R"(offset last -?\d+us over (\d+) sample)")};
 }
 
+/// The whole line that contains \p needle (bounded by newlines), or "" when there is none.
+///
+/// The P1 cases below assert on FIELDS of one event line, and a whole-report search would happily find the same
+/// field on a NEIGHBOURING line: the wall-clock arm above documents that exact mistake (a broken receive stamp
+/// stayed green because the DL line's stamp was found instead). Restricting the search to one line is what makes
+/// these assertions about the line they name.
+std::string line_with(const std::string& report, const std::string& needle)
+{
+  const size_t at = report.find(needle);
+  if (at == std::string::npos) {
+    return {};
+  }
+  const size_t bol   = report.rfind('\n', at);
+  const size_t begin = (bol == std::string::npos) ? 0 : bol + 1;
+  const size_t eol   = report.find('\n', at);
+  const size_t end   = (eol == std::string::npos) ? report.size() : eol;
+  return report.substr(begin, end - begin);
+}
+
 /// Offset of the "<name>] samples=" header of a series, or npos when the report carries no line for it.
 size_t series_pos(const std::string& report, const std::string& name)
 {
@@ -1185,8 +1204,10 @@ TEST(ul_pipeline_probe_test, worst_timing_events_carry_the_wall_clock_and_stay_b
     EXPECT_TRUE(std::regex_search(rx_line, std::regex(R"(began_ms=[1-9][0-9]{12,})"))) << rx_line;
     // THE CPU READING (dev doc 6.243). No baseline has been taken in this case yet, so the line must SAY SO with
     // "-" rather than print a zero: "the process used no CPU" and "nobody measured" are different statements, and
-    // a zero here would read as the strongest possible evidence of host scheduling.
-    EXPECT_NE(rx_line.find(" cpu=- ivcsw=- nvcsw=- win="), std::string::npos) << rx_line;
+    // a zero here would read as the strongest possible evidence of host scheduling. `tcpu` is the THREAD half
+    // added by P1 and it obeys the same rule - and it is refused here for a second reason too (no baseline at
+    // all), which the dedicated P1 case below separates from "the baseline was another thread's".
+    EXPECT_NE(rx_line.find(" cpu=- tcpu=- ivcsw=- ivcsw_rate=- nvcsw=- win="), std::string::npos) << rx_line;
     EXPECT_NE(rx_line.find(" base_age=-"), std::string::npos) << rx_line;
     {
       const std::regex  ends(R"(epoch_ms=([0-9]+) began_ms=([0-9]+))");
@@ -1298,12 +1319,153 @@ TEST(ul_pipeline_probe_test, worst_timing_events_carry_the_wall_clock_and_stay_b
       EXPECT_GT(cpu_ms, 0.2) << line;
       EXPECT_LT(cpu_ms, wait_ms + 5.0) << "the process cannot have used more CPU than the window plus 5 ms: " << line;
     }
-    EXPECT_TRUE(std::regex_search(line, std::regex(R"(ivcsw=\+[0-9]+ nvcsw=\+[0-9]+ win=[0-9]+us base_age=[0-9]+us)")))
-        << "the switch counts and the baseline's age must be printed, not implied: " << line;
+    EXPECT_TRUE(std::regex_search(line, std::regex(R"(ivcsw=\+[0-9]+ ivcsw_rate=[0-9]+\.[0-9]{2}/ms nvcsw=\+[0-9]+ win=[0-9]+us base_age=[0-9]+us)")))
+        << "the switch counts, their normalized rate and the baseline's age must be printed, not implied: " << line;
   }
 
   ::unsetenv("OCUDU_UL_TIMING_EVENTS");
   ::unsetenv("OCUDU_UL_PHASE_SEGMENTS");
+}
+
+/// \brief P1: an event says WHICH THREAD recorded it and how much CPU THAT THREAD got over its window.
+///
+/// THE QUESTION THIS PINS (high level 5.1, "可归因"). A 12 ms receive wait has two owners that the process-wide
+/// `cpu=` cannot separate: the whole process was off-CPU, or THIS thread was off-CPU while its siblings ran. The
+/// second is the one macOS can actually cause - it has no hard real time, so the "RT" threads are QoS-elevated
+/// threads the scheduler may still preempt (high level 4).
+///
+/// ARMS
+///  * same thread: a baseline, real CPU burned, an event -> `tcpu=` is a positive reading bounded by the window;
+///  * ANOTHER thread: the baseline belongs to this thread, the event is recorded by a worker -> `tcpu=-`. This is
+///    the reverse arm of the field: an implementation that subtracts two threads' cumulative counters (or that
+///    silently prints 0) turns this arm red, and the hand-over lines in a leg would then carry a plausible
+///    number that means nothing;
+///  * `thread=` names the recording thread, and the id is non-zero - without it an event cannot be attributed.
+TEST(ul_pipeline_probe_test, timing_events_name_the_thread_and_carry_its_own_cpu)
+{
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+  ::setenv("OCUDU_UL_TIMING_EVENTS", "4", 1);
+
+  const auto steady_now = []() {
+    return std::chrono::nanoseconds(std::chrono::steady_clock::now().time_since_epoch()).count();
+  };
+  // ---- same thread: a real per-thread delta ---------------------------------------------------------------------
+  const int64_t begin_ns = steady_now();
+  probe.timing_event_snapshot(begin_ns);
+  volatile double sink = 0.0;
+  for (int i = 0; i != 20000000; ++i) {
+    sink += static_cast<double>(i) * 1e-9;
+  }
+  (void)sink;
+  const int64_t end_ns = steady_now();
+  probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::milliseconds(200)).count(), false, begin_ns, end_ns, 35, 468);
+  {
+    const std::string report = capture_report();
+    const std::string line   = line_with(report, "  rx  #1 wait=200000us");
+    ASSERT_FALSE(line.empty()) << report;
+    // The thread identity: a name (the gtest main thread's, which is what this thread is called) and a non-zero id.
+    EXPECT_TRUE(std::regex_search(line, std::regex(R"(thread=\S+#[1-9][0-9]*)")))
+        << "an event must name the thread that recorded it: " << line;
+    // The reading is positive and cannot exceed the window plus slack (the slack covers the fact that the same
+    // thread may also burn CPU in the reporting path).
+    std::smatch m;
+    ASSERT_TRUE(std::regex_search(line, m, std::regex(R"(tcpu=([0-9]+)\.([0-9]{2})ms)")))
+        << "a same-thread baseline plus real CPU work must produce a per-thread delta: " << line;
+    const double tcpu_ms = std::stod(m[1].str() + "." + m[2].str());
+    EXPECT_GT(tcpu_ms, 0.2) << line;
+    EXPECT_LT(tcpu_ms, 205.0) << line;
+  }
+
+  // ---- ANOTHER thread: the field must REFUSE, not subtract two unrelated counters -------------------------------
+  {
+    const int64_t fresh = steady_now();
+    probe.timing_event_snapshot(fresh); // baseline taken by THIS thread...
+    std::string worker_line;
+    std::thread worker([&]() {
+      // ... and the event recorded by a DIFFERENT one, with a window after the baseline so the time-based
+      // admission test passes and only the thread-identity test can refuse the delta.
+      probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::milliseconds(150)).count(), false, fresh + 1,
+                           steady_now(), 35, 468);
+      worker_line = line_with(capture_report(), "wait=150000us");
+    });
+    worker.join();
+    ASSERT_FALSE(worker_line.empty()) << "the worker's event must be in the ranked list";
+    EXPECT_NE(worker_line.find("tcpu=- "), std::string::npos)
+        << "a baseline taken by another thread must NOT be subtracted from this thread's CPU - the two counters "
+           "are unrelated, and the resulting number would look perfectly plausible: "
+        << worker_line;
+    // ... while the PROCESS-wide reading is still valid there, because RUSAGE_SELF is thread-agnostic. That
+    // asymmetry is the point: the column that exists is the column that is printed.
+    EXPECT_TRUE(std::regex_search(worker_line, std::regex(R"(cpu=[0-9]+\.[0-9]{2}ms)"))) << worker_line;
+  }
+
+  ::unsetenv("OCUDU_UL_TIMING_EVENTS");
+}
+
+/// \brief P1: the four PHASE segments get the worst-K event list the receive and hand-over series already had.
+///
+/// WHY (high level 2.1). `[ul_channel_estimation]` max reads ~20x its median on every leg - the observation this
+/// whole workstream started from - and until P1 the probe kept only the aggregate, so the one number that moved
+/// could not be attributed to a slot, an instant or a thread. The series is recorded on a POOL thread, which is
+/// exactly the thread an operator cannot guess.
+///
+/// ARMS: a stub series below each floor keeps nothing (and still counts its candidates); one above a floor is kept
+/// and printed with its thread; the bound and the ranking hold; and with the knob unset the whole block - and the
+/// capture path behind it - is silent.
+TEST(ul_pipeline_probe_test, phase_segment_tails_are_ranked_and_attributed)
+{
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+
+  // ---- OFF: nothing at all, and nothing recorded (the "byte-identical report" half of the contract) -------------
+  {
+    ::unsetenv("OCUDU_UL_TIMING_EVENTS");
+    probe.record_phase_timing_event(ocudu::ul_pipeline_probe::timing_event_kind::phase_ce, 50000, 1, 2);
+    const std::string report = capture_report();
+    EXPECT_EQ(report.find("[ul_timing_events]"), std::string::npos) << report;
+    EXPECT_EQ(report.find("ce   :"), std::string::npos) << report;
+  }
+
+  // ---- ON: floors, ranking, bound, and the thread that completed the segment ------------------------------------
+  ::setenv("OCUDU_UL_TIMING_EVENTS", "2", 1);
+  {
+    // Below its floor (1 ms): one candidate, nothing kept. This is what keeps a healthy leg's report empty.
+    probe.record_phase_timing_event(ocudu::ul_pipeline_probe::timing_event_kind::phase_ce, 900, 100, 200);
+    // Above it, worst first, with a third that must be dropped by the bound of 2.
+    probe.record_phase_timing_event(ocudu::ul_pipeline_probe::timing_event_kind::phase_ce, 1200, 300, 400);
+    probe.record_phase_timing_event(ocudu::ul_pipeline_probe::timing_event_kind::phase_ce, 13267, 500, 600);
+    probe.record_phase_timing_event(ocudu::ul_pipeline_probe::timing_event_kind::phase_ce, 4000, 700, 800);
+    // ... and one of another series, which must land in ITS block and not in the CE one.
+    probe.record_phase_timing_event(ocudu::ul_pipeline_probe::timing_event_kind::phase_ldpc, 961, 900, 1000);
+
+    const std::string report = capture_report();
+    const size_t      block  = report.find("[ul_timing_events] limit=2");
+    ASSERT_NE(block, std::string::npos) << report;
+    const std::string events = report.substr(block);
+
+    const size_t worst = events.find("  ce  #1 took=13267us");
+    const size_t next  = events.find("  ce  #2 took=4000us");
+    EXPECT_NE(worst, std::string::npos) << events;
+    EXPECT_NE(next, std::string::npos) << events;
+    EXPECT_LT(worst, next) << "the phase list is ranked worst first, like the receive list";
+    EXPECT_EQ(events.find("took=1200us"), std::string::npos) << "only two are kept (the knob bounds the list)";
+    EXPECT_EQ(events.find("took=900us"), std::string::npos)
+        << "a phase event below its floor must never enter the list - that is what makes a healthy leg's report "
+           "silent instead of full of normal values: "
+        << events;
+    // The thread and the CPU columns, on the same line as the duration: this is what makes the tail attributable.
+    const std::string ce_line = line_with(events, "  ce  #1 ");
+    EXPECT_NE(ce_line.find("thread="), std::string::npos) << ce_line;
+    EXPECT_TRUE(std::regex_search(ce_line, std::regex(R"(thread=\S+#[1-9][0-9]*)"))) << ce_line;
+    EXPECT_NE(ce_line.find(" cpu="), std::string::npos) << ce_line;
+    EXPECT_NE(ce_line.find(" tcpu="), std::string::npos) << ce_line;
+    // The other series has its own block, its own floor (500 us for ldpc) and its own name.
+    EXPECT_NE(events.find("  ldpc#1 took=961us"), std::string::npos) << events;
+    // A series that saw nothing must SAY so, with its candidate count: "off" and "on and quiet" must not look alike.
+    EXPECT_NE(events.find("  t2f : none above the 2000 us floor"), std::string::npos) << events;
+    EXPECT_EQ(events.find("  ce  : none above"), std::string::npos)
+        << "a series with kept events must not also print the empty-list line: " << events;
+  }
+  ::unsetenv("OCUDU_UL_TIMING_EVENTS");
 }
 
 #endif // OCUDU_FLOW_PROBES

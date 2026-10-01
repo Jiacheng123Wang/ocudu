@@ -223,5 +223,171 @@ sudo taskinfo $(pgrep -f 'build/apps/gnb/gnb') | grep -E 'qos|latency|thruput'  
 2. **腿配方**更新：真实腿（default/stress）只允许 light；要跑 heavy 就**另飞一条诊断腿**，并给它单独的标签（如 `<label>-diag`）。
 3. 审计/门的口径不变：一条带 `gaps>0` 的腿本来就不合格（`[ul_rx]` 是判据）——这条腿**不得**进入任何验收结论。
 
-### 10.4 待补
+### 10.4 2026-10-01 —— P0 的**阈值规则被它自己的第一次运行推翻**（更正 §2.3）
+
+**预登记的规则**（§2.3，先写后跑）："阈值 = 最近 N 条腿里最坏的 per-leg `max` × 1.25"。
+**第一次运行的读数**（`wip/threshold_candidates.py`，n78/gpu 家族，最近 20 条腿、**10 个不同 commit**、其中无任何调度改动）：
+
+| 序列 | per-leg `p99` 的范围 | per-leg `max` 的范围 | max 的离散度 |
+|---|---|---|---|
+| `ul_channel_estimation` | **146.2 … 173.5 µs** | **201 … 4792 µs** | **×24** |
+| `ul_time_frequency` | **605.5 … 674.6 µs** | 605 … 21235 µs | ×35（含被观察腿）|
+| `ul_ldpc_decode` | 67 … 210 µs | 86 … 713 µs | ×8 |
+
+**结论**：`max` 是**重尾里的一次抽样**，`p99` 是**总体的性质**。用 max 立阈值只有两个选择，两个都错：
+把它立宽到能容下 ×24 的抖动（则真正的回归躲在它下面），或者立窄（则每次平台打嗝都要重判）。
+⇒ **规则改为两条，且都要过**（高层 §5.2 已按此重写）：
+
+* **C1（总体没动）**：`p99 ≤ ceil_nice(1.25 × 最近 N 条腿 per-leg p99 的中位)`；
+* **C2（活儿没变慢）**：`median ≤ ceil_nice(1.25 × 最近 N 条腿 per-leg median 的中位)`；
+* **`max` 降级为读数**，不再承载判据 —— 它的归属由 `OCUDU_UL_TIMING_EVENTS` 的最慢 K 条（P1 起带线程名与线程 CPU）回答。
+
+两条判据**失败的方式不同**，这正是要两条的原因：整体变慢的腿过 C1 而挂 C2；只多了新尾巴的腿挂 C1 而过 C2 ——
+而"线程运行稳定性"说的正是后者。
+
+**第三条更正（种群）**：家族键必须是 **`pipeline mode` + `cell config` + 接收策略**，且**只取同家族的腿**。
+第一次运行的实现**只在显式给了 `--family` 时才过滤**，于是默认运行把 5 MHz n1 腿、cpu 模式腿、whole-slot 接收腿
+混在一张表里，还顶着 `family: gpu/…/rx1` 的标题 —— "标题说一件事、表说另一件事"。
+修好后（`rx1` = 每符号一块，`rxslot` = 整槽一块，旧腿从 `[ul_rx_pool]` 的措辞里读出来）：
+`default` 家族只剩 **1 条**腿（p181），`stress` 家族 **7 条**。**p99 的稳定性正是靠这 7 条跨 7 个 commit 的腿成立的。**
+
+### 10.5 ★★★ 2026-10-01 —— **我们请求的 QoS 类从来没有生效过：把它抹掉的正是我们自己的 POSIX 调用**（回答 §3.1 的悬案，更正 §1/§3.1 的插入点与 `utils/macos_compat` 的旧注释）
+
+**这是本线开线的那个问题**（高层 §4：`taskinfo` 显示 UI/IN 计费 0 s、天花板 `THREAD_QOS_LEGACY`，
+"请求的档到底生效没有"没有任何读数）。P1 的 `[sched]` 自读（`OCUDU_SCHED_VERBOSE=1`）**第一次运行就给出了答案**。
+
+**读数 1：真实进程**（本机 loopback 台架，两条臂同一个二进制，只差一个环境变量）
+
+| 臂 | 代表性输出 |
+|---|---|
+| 默认（历史行为） | `[sched] thread=main_pool#0 id=… rt_intent=1 req=USER_INTERACTIVE eff=UNSPECIFIED run=running posix=FIFO/44` |
+| `OCUDU_SCHED_SKIP_POSIX_RT=1` | `[sched] thread=main_pool#0 id=… rt_intent=1 req=USER_INTERACTIVE eff=USER_INTERACTIVE run=running posix=OTHER/31` |
+
+同一份 stderr 里还有一条**自洽性证据**：`io_timer_tick`（`rt_intent=0`，**从不调用** `pthread_setschedparam`）
+回读 `req=USER_INITIATED eff=USER_INITIATED` —— 即"调用过的那条路丢了档，没调用的那条路留着档"。
+⇒ 今天的真实状态是：**数据面线程没有任何 QoS 档**（`UNSPECIFIED`），**比它们本该压制的 `io_timer`/`io_broker` 还低一档**。
+
+**读数 2：机制**（微实验，`/tmp/qos_probe*.c`，本机 SDK）
+
+```
+set_qos_class_self_np(USER_INTERACTIVE)          -> 0，回读 USER_INTERACTIVE
+pthread_setschedparam(SCHED_FIFO, 46)            -> 0，回读 UNSPECIFIED   ← 档被抹掉
+set_qos_class_self_np(USER_INTERACTIVE) 再来一次 -> 1 (EPERM)，档仍是 UNSPECIFIED
+setschedparam(SCHED_OTHER, 31) 之后再来一次      -> 1 (EPERM)：**不可恢复**
+```
+
+* **属性上声明的档同样保不住**：`pthread_attr_set_qos_class_np(USER_INTERACTIVE)` → 线程起来时回读
+  `USER_INTERACTIVE`，**同一个 `pthread_setschedparam` 之后回读 `UNSPECIFIED`** ⇒ **P3 单独做没有意义**，
+  必须与"跳过 POSIX 调用"一起做。
+* **Mach 时间约束（P4）同样与 QoS 互斥**：`thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)` **成功**（rc=0），
+  但它**也把 QoS 档清成 0**；而且此后 `pthread_setschedparam(SCHED_FIFO,46)` **返回 22 (EINVAL)**。
+* 规则一句话：**Darwin 上线程要么由 QoS 管、要么是显式调度（POSIX 参数 / Mach 时间约束），不能两者兼有；
+  显式调度那一侧会把 QoS 档静默清掉且不可恢复。**
+
+**这条同时追认了两件旧事**
+1. `taskinfo` 的 `UI 0.000 / IN 0.000 / ceiling THREAD_QOS_LEGACY` 不再需要猜测：**根本没有档**；
+   P 核 99.55% 来自**进程级 boost/donation**（§2.2 的 `req other=boosted`、`imp_donor=CURRENTLY`），不是我们的 per-thread QoS。
+2. 2026-09-01 那次"自动施用时间约束 + OAI-UE 随机接入回归"（§6/§4 层 4）：时间约束**不只是**加了一个策略，
+   它**顺带把每个实时 worker 的 QoS 档清掉了** —— 当时被记为"改变了运行语义"，现在知道改的是什么。
+
+**由谁来修（未决）**：跳过 POSIX 调用是一个**行为改变**（尽管 SCHED_FIFO 在本机只是被"记录"），
+所以实现成 **A/B 开关**而不是新默认：`OCUDU_SCHED_SKIP_POSIX_RT=1`。是否把哪一臂立为默认，**需要用户裁决**（高层 §10）。
+
+### 10.6 2026-10-01 —— P1 的实施记录（仪器、字段、判据、反向臂）
+
+**新增/改动的文件**
+
+| 文件 | 改动 |
+|---|---|
+| `include/ocudu/support/scheduling/thread_sched_snapshot.h`（**新**）| `thread_sched_snapshot{cpu_ns, nvcsw, ivcsw, wall_ns, run_state, qos_class, posix_policy, posix_prio, thread_id}`、`this_thread_sched_snapshot()`、`qos_class_name()`、`thread_run_state_name()`、`log_this_thread_scheduling()` |
+| `lib/support/scheduling/thread_sched_snapshot.cpp`（**新**，进 `ocudu_support`）| macOS：`THREAD_BASIC_INFO`（user+system `time_value_t`）+ `pthread_get_qos_class_np` + `pthread_getschedparam` + `pthread_threadid_np`；Linux：`RUSAGE_THREAD` + `getpid`/`gettid` + `pthread_getschedparam` |
+| `lib/support/executors/unique_thread.cpp` | 在**所有**调度调用之后调用 `log_this_thread_scheduling(prio, name)`；新增 `configure_worker_thread_attributes_qos(attr, prio)` 调用（P3）|
+| `include/ocudu/support/macos_compat.h` / `utils/macos_compat/macos_compat.cpp` | `configure_worker_thread_attributes_qos()`（`OCUDU_SCHED_ATTR_QOS`，默认关，Linux 不读环境变量）；`posix_realtime_priority_is_enforceable()` 在 macOS 上受 `OCUDU_SCHED_SKIP_POSIX_RT` 影响（默认关 = 历史行为）|
+| `include/ocudu/support/executors/ul_pipeline_probe.h` | `timing_event` 新增 `kind`/`thread_id`/`thread_name`/`tcpu_ns`；`cpu_snapshot` 新增线程半边与 `leg_base`；新增 4 条相位序列的 worst-K（`record_phase_timing_event`，带每序列 floor）；新增 `rate_str()` 与 `to_ns()`；报告新增 `thread=`/`tcpu=`/`ivcsw_rate=` 与 `leg :` 基线行 |
+| `tests/unittests/support/{macos_compat_test.cpp,executors/ul_pipeline_probe_test.cpp}` | 新增 4 个用例（见下）|
+| `doc_chinese/phy_pipeline_gpu/wip/{leg_gate.sh,milestone_audit.sh}` | 白名单加入 `OCUDU_SCHED_VERBOSE`（**只打印**）；两个**改调度**的开关**故意不在**白名单（fail-closed）|
+| `doc_chinese/phy_latency/wip/gen_knob_inventory.py` | 扫描根加入 `utils/`；新增一条"复合守卫"分类规则（放在链条**最后**，见下）|
+
+**`[sched]` 自读的两把钥匙**：`ENABLE_FLOW_PROBES`（编译）+ `OCUDU_SCHED_VERBOSE`（运行，默认关）。
+两者缺一即**一个字都不打印**（两平台都是）。插入点**改在 `unique_thread` 里、所有调度调用之后**，
+而不是预登记的 `apply_worker_thread_scheduling()` 内部：那个位置在 `pthread_setschedparam` **之前**，
+读到的 `posix=` 是线程还没到达的状态 —— 而"请求 vs 实际"正是这台仪器要分的那件事（10.5 的读数就来自这一点）。
+
+**`tcpu=` 的三条规则**（每条都有反向臂）
+1. 只有**基线与本事件由同一条线程**记录时才给值（累计计数器只能与同线程的读数相减）；
+   跨线程时打 `-`，**绝不打 0**。反向臂：`timing_events_name_the_thread_and_carry_its_own_cpu` 在**另一条线程**上
+   记录事件，断言 `tcpu=-` 而 `cpu=` 仍是有效值。
+2. `cpu=`（进程，`RUSAGE_SELF`）与 `tcpu=`（线程）**并列打印**，判读写在报告头：
+   `cpu=12.00ms tcpu=0.00ms` = "这条线程丢了核、兄弟线程在跑"（调度问题）；`cpu=0.00ms` = "整个进程没跑"；
+   两者都 ≈ `win` = "这条线程一直在跑，是活儿/IO 本身慢"。
+3. `ivcsw_rate=`（每条事件的自愿/非自愿切换 ÷ 窗口 ms）+ 报告头一条 `leg :` 行给出**本腿基线速率**
+   （例：loopback 20.1 s 内 7 729 356 次非自愿切换 = **384.05/ms**）—— 没有基线速率的归一化数字读不出异常。
+
+**相位尾部（`ce`/`ldpc`/`t2f`/`eqdem`）**：这四条序列此前**只有聚合值**，而 `ce` max ≈ 20× 中位正是本线的起点现象。
+现在它们进同一套 worst-K，每序列一个 floor（**先写后跑**，取自 P0 的 p99 分布：t2f 2 ms / ce 1 ms / eqdem 3 ms / ldpc 500 µs，
+每个 floor 都在该序列 p99 的 ~6 倍以上，健康腿因此一条都不留）。事件带 `thread=`（**完成**该段的那条线程）
+与窗口两端 `begin_ns`/`end_ns`（`phases_entry` 新增三个瞬时；`to_ns()` 把 `high_resolution_clock` 的瞬时
+**重基到 steady 轴**——`high_resolution_clock` 在 libc++ 上是 `steady_clock`、在 libstdc++ 上是 `system_clock`，
+不重基就会让两个平台的相位事件落在不同时间轴上）。
+
+**测试（4 个新用例，两平台都跑）**
+* `macos_compat_sched_test.thread_sched_snapshot_is_a_per_thread_reading`：CPU 单调、**上界 = 流逝的墙钟**、
+  换线程换计数器；macOS 断言 `nvcsw/ivcsw == -1`（**本机没有任何 Mach thread-info flavor 带切换计数**，SDK 已核）
+  且 `qos_class` 可读；Linux 断言 `qos_class == -1`、切换计数可读。
+* `macos_compat_sched_test.sched_self_read_is_env_gated_and_reports_requested_vs_effective`：
+  环境变量不设 ⇒ **空输出**；设了 ⇒ 一行且 `req=`/`eff=` 都在。
+* `macos_compat_sched_test.attr_qos_is_opt_in_and_platform_gated`：不设变量 ⇒ 属性**不变**；
+  设了 ⇒ 属性上就是 `USER_INTERACTIVE`；Linux 两臂都断言不变。
+* `ul_pipeline_probe_test.timing_events_name_the_thread_and_carry_its_own_cpu` +
+  `ul_pipeline_probe_test.phase_segment_tails_are_ranked_and_attributed`：见上面的反向臂；相位用例还断言
+  "低于 floor 的不进列表"、"空序列要打印 candidate 计数"（"关着"与"开着但安静"不能长得一样）。
+
+**回归**：`ctest -L phy -j 1` = **207/207 通过**（208 个用例，1 个禁用）；loopback 台上两条臂都跑过（10.5 的表）。
+
+**一处实现修正**：`record_ldpc_start()` 在**持锁**状态下组装三个相位时长，所以相位记录分成
+`record_phase_timing_event()`（自己加锁）与 `..._locked()`（调用者已持锁）两份 —— 本探针的 mutex 是普通
+`std::mutex`，重入即死锁。
+
+### 10.7 2026-10-01 —— P2 的腿配方与**预登记**（判据先写死，再飞）
+
+**脚本**：`wip/taskpolicy_ab.sh`（`scan` / `set --latency=N --throughput=N` / `clear`）。
+**本机实测的档位**：`taskpolicy -l` 接受 **1..5**，**拒绝 6 及以上**（`Could not parse '6' as a qos tier`）；
+数字**越大越偏延迟**（= XNU 的 `LATENCY_QOS_TIER_1`），与常量名字相反，所以 `scan` 会把回读打在旁边。
+`-p` 改**别的**进程需要 root，回读用 `taskinfo`（**重观察**，见 10.3：只能出现在诊断腿上）。
+
+**预登记（飞之前就写在这里）**
+
+```
+### 预登记 2026-10-01 / P2 档位 A/B
+* 目的：判据是「尾部率是否跟档位走」——跟 ⇒ 机制在宿主调度层；不跟 ⇒ 指向电台/USB。
+* 自变量：同一条腿内 `taskpolicy -l <tier>` 的前后半段（同一二进制、同一电台、同一手机、同一热状态）；
+  另加一条 `-t <thr>` 的独立腿，避免两个档位混淆。
+* 载荷：stress（真加载，先过 ul_load.sh 资格）；时长 ≥ 15 min，改档点在第 6~8 分钟。
+* 判据（读数载体，与高层 §5.2 一致）：
+  C1 `p99`（rx_wait / t2f / ce / eqdam / ldpc / gpu_pipeline）在**改档前后**是否变化；
+  `[ul_timing_events]` 的 `leg :` 基线切换速率、每条事件 `ivcsw_rate=` 与 `tcpu=` 的分布是否变化。
+* 反例判据（必须同时满足，否则判"档位无效"而不是"档位有效"）：
+  ① 改档前后的 `median`（C2）**不得**移动（移动说明是热/载荷漂移，不是档位）；
+  ② 同一条腿上改档点两侧的**载荷资格**（CRC-OK 率、TBS 分布）不得变化；
+  ③ `gaps`/`rx_overflows` 必须仍为 0。
+* 回退条件：出现 `gaps>0`、`rx_overflows>0`、契约红、或手机掉线 ⇒ 立刻 `clear`，该腿作废。
+* 读数位置：`work_tmp/taskpolicy_<label>_*.txt`（含改档瞬时）、腿的 stderr（`[ul_timing_events]`）、
+  `.log` 的 `[RF]` 行。
+* ⚠ 这条腿是**臂**：`taskpolicy` 改的是调度，`leg_gate.sh` 的白名单里**没有**它，所以它**不得**进任何验收结论。
+```
+
+### 10.8 P4 参数标定（用 P0 的 p99 分布填 §9；**仍未施用**）
+
+| 线程 | 期望周期 | p99（最近 7 条 n78/gpu/rx1 腿）| 候选 computation | 候选 constraint | 备注 |
+|---|---|---|---|---|---|
+| `lower_phy_ul#0` | 500 µs（一槽）| t2f **619.9 µs**（含接收等待）| 不应期定：t2f 的固定部分 ≈ 619.9 − 174 = **446 µs** 已接近一槽 | 若能做，只能给"固定部分" | ★ 值已接近周期，**没有余量** |
+| `lower_phy_rx#0` | 35.7 µs（一符号）| rx_wait p99 **174 µs**（等待，不是计算）| 未测（本机没有"收包本身耗时"的序列）| — | 缺 computation 的读数 |
+| `main_pool#N` | 500 µs | ce 162.9 / eqdem 898.3 / ldpc 115 µs | ce+eqdem+ldpc 的 p99 之和 ≈ **1.18 ms** > 一槽 | — | 池线程每槽要跑**多个** hop，周期不是 500 µs |
+
+**结论（写给用户裁决）**：P4 的两个前提现在都**不成立**：
+① 参数标定需要的"每线程计算量的 p99"只对 ce/ldpc 有（eqdem 是 898 µs，池线程一槽要跑好几跳）；
+② 更硬的一条 —— 10.5 实测**时间约束与 QoS 互斥**，施用它会**再次**把 QoS 档清掉并把 `pthread_setschedparam` 变成 EINVAL。
+⇒ 建议 P4 **维持"最后选项"并且暂不施用**；真要试，必须**一次只改一个线程**（现在 `bind_thread_to_performance_core()` 没有线程过滤）。
+
+### 10.9 待补
 （每次飞腿/改动后追加：做了什么、读数、判据是否满足、更正了哪一条。）

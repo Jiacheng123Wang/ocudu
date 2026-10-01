@@ -4,6 +4,8 @@
 #pragma once
 
 #include "ocudu/phy/phy_pipeline_mode.h"
+#include "ocudu/support/scheduling/thread_sched_snapshot.h" // this_thread_sched_snapshot (P1: per-thread CPU)
+#include "ocudu/support/executors/unique_thread.h"          // this_thread_name()
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -357,8 +359,26 @@ public:
       const int64_t eqdem_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - ce_it->second.tp).count();
       // Negative durations can only come from a mismatched (shifted-slot) pairing: drop the entry.
       if (t2f_ns >= 0 && ce_ns >= 0 && eqdem_ns >= 0) {
-        pending_phases[slot] = {now, t2f_ns, ce_ns, eqdem_ns, next_start_seq++};
+        // The three instants ride along with the durations (P1): the phase-tail events quote a window as well as
+        // a duration, and by the time the CRC-OK completion records them the landmarks themselves are gone from
+        // the pending maps. They are also what makes a phase event's `cpu=` a reading of ITS OWN window instead
+        // of a reading of "whatever happened since the last baseline".
+        const int64_t t2f_begin_ns = to_ns(start_it->second.tp);
+        const int64_t t2f_end_ns   = to_ns(t2f_it->second.tp);
+        const int64_t ce_end_ns    = to_ns(ce_it->second.tp);
+        const int64_t now_ns       = to_ns(now);
+        pending_phases[slot]       = {now, t2f_ns, ce_ns, eqdem_ns, t2f_begin_ns, t2f_end_ns, ce_end_ns, next_start_seq++};
         evict_oldest(pending_phases);
+        // ... and the three segments that END here are recorded as tail events immediately: their durations are
+        // final at this instant (t2f ends at the FFT completion, ce at the channel-estimation completion, and
+        // eqdem at this call - the first codeblock decode invocation). TWO of them therefore end on THIS thread
+        // and one on another; the event says which thread completed it, which is what a reader needs in order to
+        // know whose stack to look at.
+        //
+        // The lock is already held (see record_phase_timing_event_locked): taking it again would deadlock.
+        record_phase_timing_event_locked(timing_event_kind::phase_t2f, t2f_ns / 1000, t2f_begin_ns, t2f_end_ns);
+        record_phase_timing_event_locked(timing_event_kind::phase_ce, ce_ns / 1000, t2f_end_ns, ce_end_ns);
+        record_phase_timing_event_locked(timing_event_kind::phase_eqdem, eqdem_ns / 1000, ce_end_ns, now_ns);
       }
     }
   }
@@ -474,6 +494,14 @@ public:
     if (ldpc_it != pending_ldpc_starts.end()) {
       const auto ldpc_us =
           std::chrono::duration_cast<std::chrono::microseconds>(now - ldpc_it->second.tp);
+      // The decode's own tail event (P1): both ends of this segment are recorded on a POOL thread (the codeblock
+      // task starts the decoder, the notifier completes it), so this is the one series whose window a single
+      // thread owns end to end - and therefore the one whose `tcpu=` is a real per-thread reading whenever the
+      // baseline happens to have been taken by that same thread.
+      record_phase_timing_event_locked(timing_event_kind::phase_ldpc,
+                                       ldpc_us.count(),
+                                       to_ns(ldpc_it->second.tp),
+                                       to_ns(now));
       pending_ldpc_starts.erase(ldpc_it);
       ldpc_latencies_us.push_back(static_cast<double>(ldpc_us.count()));
       mac_pdu_sizes_bytes.push_back(static_cast<double>(mac_pdu_bytes));
@@ -552,6 +580,20 @@ public:
   ///       block. Compare its counts against the policy in force, not against [ul_pipeline]'s. For the hop-scoped
   ///       companion see record_slot_rx_wait().
   // ---- the worst timing events, with host instants (OCUDU_UL_TIMING_EVENTS, dev doc 6.240/6.241) ------------
+  /// Which series an event belongs to. The first two existed from the beginning (6.240/6.241) and were told
+  /// apart by the list they lived in; P1 added the four phase segments, whose tails have the same shape as the
+  /// receive wait's (measured over the 7 newest n78/gpu legs: `ul_channel_estimation` p99 163..166 us against a
+  /// max of 1228..4792 us) but which had NO event record at all before - only an aggregate.
+  enum class timing_event_kind : unsigned {
+    rx_wait    = 0, ///< [ul_rx_wait]: how long the receive blocked (floor 1 ms).
+    dl_handover = 1, ///< [dl_tx_slack]: a hand-over's margin (floor 500 us, ranked downwards).
+    phase_t2f  = 2, ///< [ul_time_frequency]
+    phase_ce   = 3, ///< [ul_channel_estimation]
+    phase_eqdem = 4, ///< [ul_equalization_demod]
+    phase_ldpc = 5, ///< [ul_ldpc_decode]
+    count      = 6
+  };
+
   /// One kept event: the quantity it is ranked by, its own window on the steady clock, the WALL clock at the
   /// instant it was kept, the load average then, and (for a receive) the block's air time.
   ///
@@ -561,12 +603,36 @@ public:
   /// well as the ISO string means the alignment survives any timezone or format difference between the two files.
   struct timing_event {
     int64_t  value_us   = 0;  ///< the ranked quantity: the receive wait, or a hand-over's margin (negative = late)
+    /// WHICH SERIES this event belongs to. Until P1 the list only had two kinds and the kind was implicit in the
+    /// list it lived in; the phase segments (t2f/ce/eqdem/ldpc) are four more, and a reader must be able to tell
+    /// "the receive blocked 12 ms" from "the channel-estimation segment took 12 ms" without knowing which block
+    /// of the report it came from.
+    timing_event_kind kind = timing_event_kind::rx_wait;
     int64_t  begin_ns   = 0;  ///< steady-clock instant the measured window began (0 when the caller had none)
     int64_t  end_ns     = 0;  ///< ... and ended
     int64_t  wall_ms    = 0;  ///< system_clock at the moment the event was KEPT (see record_timing_event_rx)
     int64_t  air_us     = 0;  ///< the block's air time, receive events only (0 = not reported)
     int64_t  due_ts     = 0;  ///< the radio's due timestamp, hand-over events only
     int64_t  load1_x100 = -1; ///< getloadavg(1) at that instant, x100 (-1 = the caller had none)
+    /// WHICH THREAD recorded the event (dev doc P1, "可归因"). The name is a bounded COPY, not a pointer: the
+    /// probe keeps events for the whole run and hands them out at report time, so a pointer into the recording
+    /// thread's storage would dangle (or, worse, name the reporting thread).
+    uint64_t thread_id       = 0;
+    char     thread_name[16] = {};
+    /// THIS THREAD'S OWN CPU over the event's window (P1). It is the reading the process-wide `cpu=` below
+    /// cannot give: `cpu` says "the process got the CPU", this says "THIS thread got it". A thread that was
+    /// descheduled inside a 12 ms wait shows ~0 here while the process shows 12 ms - which is the difference
+    /// between a scheduling problem and a work/IO problem, and the whole reason this workstream exists.
+    ///
+    /// -1 means NO READING, never zero, and it has two causes worth telling apart in the report's footnote:
+    ///   * the platform does not expose per-thread CPU (none today: both do), or
+    ///   * the baseline was taken by ANOTHER thread. A cumulative counter can only be subtracted from a reading
+    ///     of the SAME thread, and the receive path is the only caller that maintains a baseline, so a
+    ///     hand-over event (recorded on the transmit thread) always prints `tcpu=-`. That is deliberate: the
+    ///     window's process-wide reading is still valid there, and inventing a thread delta across two threads
+    ///     would be exactly the kind of plausible-looking wrong number this project keeps writing post-mortems
+    ///     about (dev doc phy_latency 6.245).
+    int64_t tcpu_ns = -1;
     /// THE PROCESS'S OWN CPU TIME AND INVOLUNTARY SWITCHES over the event's window (dev doc 6.243), measured
     /// against a baseline the caller takes just before the window (see timing_event_snapshot_wanted). This is what
     /// separates the two owners a long wait can have, and `load1` CANNOT do it: a 60 s average is blind to a
@@ -588,13 +654,23 @@ public:
   /// The baseline for the deltas above: process-wide CPU time and switch counts, taken by the caller just before
   /// the measured call, at most once per timing_event_cpu_period_ns() so the instrument stays cheap.
   struct cpu_snapshot {
-    int64_t ns     = 0;
-    int64_t cpu_ns = 0;
-    int64_t nvcsw  = 0;
-    int64_t ivcsw  = 0;
-    bool    valid  = false;
+    int64_t  ns            = 0;
+    int64_t  cpu_ns        = 0;
+    int64_t  nvcsw         = 0;
+    int64_t  ivcsw         = 0;
+    /// THE SAME READING FOR THE THREAD THAT TOOK IT (P1). Both halves are needed and they answer different
+    /// questions: cpu_ns is RUSAGE_SELF (every thread), thread_cpu_ns is the calling thread alone. Keeping the
+    /// thread id beside the value is what makes the subtraction legal - see timing_event::tcpu_ns.
+    uint64_t thread_id     = 0;
+    int64_t  thread_cpu_ns = -1;
+    bool     valid         = false;
   };
   cpu_snapshot cpu_base{};
+  /// The FIRST baseline of the run, which is what turns the per-event deltas into a leg-wide RATE: the switch
+  /// counts in between are meaningless per event without knowing the window, and meaningless across events
+  /// without knowing this leg's own base rate. Taken once (the first snapshot of the leg) and never refreshed.
+  cpu_snapshot leg_base{};
+  bool         leg_base_valid = false;
   /// 1 ms: the baseline is then at most 1 ms older than the window it is subtracted from, i.e. <=8% of a 12 ms
   /// stall, while the cost is bounded at <=1000 getrusage calls/s on the receive thread (it runs at ~28k
   /// receive calls/s and spends ~96% of that time blocked, so this is a few percent of its own CPU).
@@ -606,17 +682,37 @@ public:
   /// margin at or above 500 us are not kept at all (the report already counts them in its buckets).
   static constexpr int64_t timing_event_rx_floor_ns = 1000000;
   static constexpr int64_t timing_event_tx_floor_us = 500;
+  /// ... and the same idea for the four PHASE segments, whose floors are read off the same distribution the
+  /// thresholds come from (P0's census over the 7 newest n78/gpu legs): each floor sits ~6x above that series'
+  /// own p99, so a healthy leg keeps nothing and a spike is kept with plenty of margin to spare.
+  ///   series        p99 (per leg)      max (per leg)        floor
+  ///   t2f           619.9 .. 622.5 us  686 .. 21235 us      2 ms
+  ///   ce            162.9 .. 166.1 us  966 .. 13267 us      1 ms
+  ///   eqdem         898.3 .. 913.6 us  3157 .. 20977 us     3 ms
+  ///   ldpc          115 .. 148 us      441 .. 961 us        500 us
+  static constexpr int64_t timing_event_phase_floor_us[4] = {2000, 1000, 3000, 500};
   std::vector<timing_event> worst_rx_events{};
   std::vector<timing_event> worst_tx_events{};
+  /// One worst-K list per phase series, indexed by timing_event_kind minus phase_t2f (see the floors above).
+  std::array<std::vector<timing_event>, 4> worst_phase_events{};
   /// Candidates SEEN above the floor, kept or not (the list is bounded, this is not): it is what separates "the
   /// instrument was on and nothing was slow" from "the instrument was never called", which otherwise look alike.
   uint64_t rx_event_candidates{0};
   uint64_t tx_event_candidates{0};
+  std::array<uint64_t, 4> phase_event_candidates{};
   /// Events whose baseline was taken INSIDE their own window and was therefore refused (`cpu=-`). It is counted and
   /// printed because the alternative is what happened on `p179-n78-stress`: the receive path stamped the baseline
   /// AFTER the window's start, every event printed `-`, and the leg's question stayed unanswered with nothing on
   /// the report to say why (dev doc 6.244).
+  ///
+  /// \note Phase events are NOT counted here even when their window starts before the baseline: the baseline
+  ///       belongs to the receive path (~1 ms cadence) and a phase segment legitimately begins inside that
+  ///       cadence, so a refusal there is arithmetic, not a caller's ordering mistake. Counting both in one
+  ///       number would turn a routine `cpu=-` into a warning that says "fix the call site".
   uint64_t late_baselines{0};
+  /// Phase events refused a process-wide delta because the maintained baseline did not precede their window.
+  /// Printed apart from late_baselines for the reason above.
+  uint64_t phase_baseline_misses{0};
 
   void record_rx_wait(int64_t wait_ns,
                       bool    spans_stream_start = false,
@@ -710,19 +806,38 @@ public:
     take_tx_timing_event(ev);
   }
 
-  /// \brief Fills \p ev's CPU fields from the process-wide baseline. Caller holds the lock.
+  /// \brief Fills \p ev's CPU fields from the baselines. Caller holds the lock.
   ///
   /// The window is [\p begin_ns, \p end_ns] and the baseline must PRECEDE it; when it does not (or was never
   /// taken) the fields stay -1 and the report prints `cpu=-`, because "no reading" must not look like "zero CPU".
-  void attach_cpu_delta(timing_event& ev, int64_t begin_ns, int64_t end_ns)
+  ///
+  /// \param[in] count_late Whether a baseline that falls INSIDE the window is a caller's ordering mistake (true
+  ///            for the receive path, which owns the baseline; false for a phase event, whose window legitimately
+  ///            starts inside the receive path's ~1 ms cadence - see phase_baseline_misses).
+  void attach_cpu_delta(timing_event& ev, int64_t begin_ns, int64_t end_ns, bool count_late = true)
   {
+    // The identity of the recording thread is filled FIRST and unconditionally: it costs two calls that are
+    // already made once per event above the ranking bar, and an event whose thread is unknown cannot be
+    // attributed at all - which is the only thing this line is for.
+    const thread_sched_snapshot self = this_thread_sched_snapshot();
+    ev.thread_id                     = self.thread_id;
+    std::snprintf(ev.thread_name, sizeof(ev.thread_name), "%s", this_thread_name());
     // The width is known even when there is no baseline, so it is set first and always printed.
     ev.win_us = (end_ns >= begin_ns) ? ((end_ns - begin_ns) / 1000) : -1;
     if (!cpu_base.valid || (cpu_base.ns > begin_ns)) {
       if (cpu_base.valid) {
-        ++late_baselines; // stamped inside the window: the caller's ordering is wrong, and the report says so
+        if (count_late) {
+          ++late_baselines; // stamped inside the window: the caller's ordering is wrong, and the report says so
+        } else {
+          ++phase_baseline_misses;
+        }
       }
       return;
+    }
+    // THIS thread's own CPU over the window, and only when the baseline was taken by this same thread: two
+    // cumulative counters can be subtracted only when they describe the same thread (see timing_event::tcpu_ns).
+    if (self.valid() && (cpu_base.thread_cpu_ns >= 0) && (cpu_base.thread_id == self.thread_id)) {
+      ev.tcpu_ns = self.cpu_ns - cpu_base.thread_cpu_ns;
     }
 #if !defined(_WIN32)
     rusage ru{};
@@ -793,6 +908,88 @@ public:
     ev.wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::system_clock::now().time_since_epoch())
                      .count();
+  }
+
+  /// Index of a phase series in the per-series arrays (0..3), or 4 when \p kind is not a phase series.
+  static constexpr size_t timing_event_phase_floor_us_size = 4;
+  static constexpr size_t phase_index(timing_event_kind kind)
+  {
+    return static_cast<size_t>(kind) - static_cast<size_t>(timing_event_kind::phase_t2f);
+  }
+
+  /// Whether a phase segment is worth keeping: the floor is what keeps a healthy leg's list empty and its cost
+  /// zero (see timing_event_phase_floor_us).
+  static bool timing_event_wanted_phase(timing_event_kind kind, int64_t value_us)
+  {
+    if (timing_events_limit() == 0) {
+      return false;
+    }
+    const size_t idx = phase_index(kind);
+    return (idx < timing_event_phase_floor_us_size) && (value_us >= timing_event_phase_floor_us[idx]);
+  }
+
+  /// \brief Records one PHASE-SEGMENT tail event (P1): [ul_time_frequency], [ul_channel_estimation],
+  /// [ul_equalization_demod] and [ul_ldpc_decode] get the worst-K list the receive and hand-over series already had.
+  ///
+  /// WHY THIS IS A SEPARATE ENTRY POINT AND NOT record_rx_wait(). The two ends of a phase segment are NOT on the
+  /// same thread - a hop is handed from the receive thread to the uplink thread to a pool thread - so the probe
+  /// cannot cite "the thread it measured" for the whole span, and the windows are assembled from timestamps the
+  /// caller already holds. What it CAN say, and what this records, is the segment's duration, its two instants,
+  /// the thread that COMPLETED it, and the process-wide CPU/switches over its window (which is the same reading
+  /// the receive events carry, so the two are comparable on the same leg).
+  ///
+  /// \param[in] kind      Which series (phase_t2f / phase_ce / phase_eqdem / phase_ldpc).
+  /// \param[in] value_us  The segment's duration in microseconds (what the series' aggregate distribution holds).
+  /// \param[in] begin_ns  Steady instant the segment's window began (its own start landmark).
+  /// \param[in] end_ns    Steady instant it ended (the call site's `now`).
+  void record_phase_timing_event(timing_event_kind kind, int64_t value_us, int64_t begin_ns, int64_t end_ns)
+  {
+    if (!timing_event_wanted_phase(kind, value_us)) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    record_phase_timing_event_locked(kind, value_us, begin_ns, end_ns);
+  }
+
+  /// The body of the above for a caller that already holds \p mutex (record_ldpc_start assembles the three
+  /// segment durations under the lock, and this probe's mutex is a plain std::mutex: re-entering it deadlocks).
+  void record_phase_timing_event_locked(timing_event_kind kind, int64_t value_us, int64_t begin_ns, int64_t end_ns)
+  {
+    const size_t idx = phase_index(kind);
+    ++phase_event_candidates[idx];
+    timing_event ev;
+    ev.kind     = kind;
+    ev.value_us = value_us;
+    ev.begin_ns = begin_ns;
+    ev.end_ns   = end_ns;
+    // count_late=false: a phase window may legitimately begin inside the receive path's own baseline cadence
+    // (see the parameter's comment); the refusal is counted separately and the line still prints `cpu=-`.
+    attach_cpu_delta(ev, begin_ns, end_ns, /*count_late=*/false);
+    take_phase_timing_event(idx, ev);
+  }
+
+  /// \brief Keeps \p ev if it is among the worst `timing_events_limit()` events of its phase series.
+  ///
+  /// Sorted DESCENDING like the receive list (the worst is the LARGEST duration), so `back()` is the admission bar
+  /// and the wall-clock read happens only for an event that is actually kept.
+  void take_phase_timing_event(size_t idx, timing_event& ev)
+  {
+    std::vector<timing_event>& list = worst_phase_events[idx];
+    const size_t                limit = timing_events_limit();
+    if (limit == 0) {
+      return;
+    }
+    if (list.size() >= limit) {
+      if (ev.value_us <= list.back().value_us) {
+        return;
+      }
+      list.pop_back();
+    }
+    stamp_wall_clock(ev);
+    list.push_back(ev);
+    std::sort(list.begin(), list.end(), [](const timing_event& lhs, const timing_event& rhs) {
+      return lhs.value_us > rhs.value_us;
+    });
   }
 
   /// \brief Records the receive wait of the block that COMPLETED \p slot, for the hop-scoped [ul_rx_wait_hop].  ///
@@ -973,12 +1170,20 @@ public:
     return !cpu_base.valid || ((now_ns - cpu_base.ns) >= timing_event_cpu_period_ns);
   }
 
-  /// Takes the process-wide baseline. Called from the receive and transmit paths just before the measured call, so
-  /// the snapshot always PRECEDES the window it will be subtracted from (its age is reported as base_age_us).
+  /// Takes the process-wide AND thread-local baseline. Called from the receive path just before the measured
+  /// call, so the snapshot always PRECEDES the window it will be subtracted from (its age is reported as
+  /// base_age_us).
   ///
   /// getrusage(RUSAGE_SELF) is the whole process (every thread), which is the question: "did this process get the
-  /// CPU while the call was outstanding". A thread-scoped reading would not answer it - the blocked thread burns no
-  /// CPU either way - and RUSAGE_THREAD does not exist on macOS in any case (checked on this SDK).
+  /// CPU while the call was outstanding". The THREAD half (P1) is the sharper one and it is a different question
+  /// again: "did THIS thread get the CPU". The blocked receive thread burns no CPU either way, so `cpu=` alone
+  /// cannot tell "this thread was descheduled while its siblings ran" from "nothing in this process ran", and
+  /// those two have different fixes.
+  ///
+  /// \note RUSAGE_THREAD does not exist on macOS (checked on this SDK); the thread half comes from Mach there
+  ///       (THREAD_BASIC_INFO) and from RUSAGE_THREAD on Linux, behind one interface - see
+  ///       ocudu/support/scheduling/thread_sched_snapshot.h. Both are taken while holding this probe's lock: they
+  ///       are pure reads with no callback into it.
   void timing_event_snapshot(int64_t now_ns)
   {
     std::lock_guard<std::mutex> lock(mutex);
@@ -987,12 +1192,22 @@ public:
     if (getrusage(RUSAGE_SELF, &ru) != 0) {
       return;
     }
+    const thread_sched_snapshot self = this_thread_sched_snapshot();
     cpu_base.ns     = now_ns;
     cpu_base.cpu_ns = (static_cast<int64_t>(ru.ru_utime.tv_sec) + static_cast<int64_t>(ru.ru_stime.tv_sec)) * 1000000000LL +
                       (static_cast<int64_t>(ru.ru_utime.tv_usec) + static_cast<int64_t>(ru.ru_stime.tv_usec)) * 1000LL;
     cpu_base.nvcsw  = static_cast<int64_t>(ru.ru_nvcsw);
     cpu_base.ivcsw  = static_cast<int64_t>(ru.ru_nivcsw);
+    cpu_base.thread_id     = self.thread_id;
+    cpu_base.thread_cpu_ns = self.cpu_ns;
     cpu_base.valid  = true;
+    // The leg's own base rate, kept from the FIRST baseline of the run: the per-event switch deltas below are
+    // only readable against it ("+412 involuntary switches" means nothing without "this process switches 194k
+    // times a second", which is what taskinfo measured on the reference leg).
+    if (!leg_base_valid) {
+      leg_base       = cpu_base;
+      leg_base_valid = true;
+    }
 #else
     (void)now_ns;
 #endif
@@ -1364,19 +1579,55 @@ public:
       return;
     }
     std::fprintf(stderr,
-                 "[ul_timing_events] limit=%u (OCUDU_UL_TIMING_EVENTS=%u): the worst receive waits and hand-over "
-                 "margins, with the host wall clock\n",
+                 "[ul_timing_events] limit=%u (OCUDU_UL_TIMING_EVENTS=%u): the worst receive waits, hand-over "
+                 "margins and phase segments, with the host wall clock\n",
                  limit,
                  limit);
     std::fprintf(stderr,
                  "  line them up against the .log's `[RF] Real-time failure in RF: ...` lines; wall= is UTC, "
                  "epoch_ms= is the same instant as an integer\n");
+    // WHAT EACH CPU COLUMN IS, printed once because the two are read together and mean different things:
+    // `cpu=` is the PROCESS over the window (every thread) and `tcpu=` is the RECORDING THREAD alone. A stall with
+    // `cpu=12.00ms tcpu=0.00ms` is "this thread lost the core while its siblings ran" - a scheduling problem -
+    // while `cpu=0.00ms` is "the process lost the core" and `cpu≈win tcpu≈win` is "this thread ran the whole time
+    // and the work/IO itself took that long". `tcpu=-` means no reading (the baseline was another thread's).
+    std::fprintf(stderr,
+                 "  cpu= is the PROCESS over the event's window (win=); tcpu= is the RECORDING THREAD alone; "
+                 "ivcsw_rate= is the process's involuntary switches per ms over that window (compare it against "
+                 "the leg rate below)\n");
+    if (leg_base_valid && (leg_last_ns > leg_first_ns)) {
+      // The leg-wide base rate, measured over the SAME counters the per-event deltas use, so the two are
+      // commensurable by construction (an outside tool's csw/s is a different measurement of the same process).
+      const int64_t span_ms = (leg_last_ns - leg_first_ns) / 1000000;
+#if !defined(_WIN32)
+      rusage ru{};
+      if ((span_ms > 0) && (getrusage(RUSAGE_SELF, &ru) == 0)) {
+        const int64_t ivcsw = static_cast<int64_t>(ru.ru_nivcsw) - leg_base.ivcsw;
+        const int64_t nvcsw = static_cast<int64_t>(ru.ru_nvcsw) - leg_base.nvcsw;
+        std::fprintf(stderr,
+                     "  leg : over %.1fs of receive activity the process made %lld involuntary and %lld voluntary "
+                     "switch(es) = %.2f/ms and %.2f/ms\n",
+                     static_cast<double>(span_ms) / 1000.0,
+                     static_cast<long long>(ivcsw),
+                     static_cast<long long>(nvcsw),
+                     static_cast<double>(ivcsw) / static_cast<double>(span_ms),
+                     static_cast<double>(nvcsw) / static_cast<double>(span_ms));
+      }
+#endif
+    }
     if (late_baselines != 0) {
       std::fprintf(stderr,
                    "  ⚠ %llu event(s) had their CPU baseline stamped INSIDE the window and were refused "
                    "(cpu=-): the caller's ordering is wrong, fix the call site rather than reading the `-` as "
                    "zero CPU\n",
                    static_cast<unsigned long long>(late_baselines));
+    }
+    if (phase_baseline_misses != 0) {
+      std::fprintf(stderr,
+                   "  note: %llu phase event(s) started before the receive path's last baseline and print "
+                   "cpu=- tcpu=- (arithmetic, not a caller's mistake: the baseline is refreshed every ~1 ms by "
+                   "the receive path, and a phase window can begin inside that cadence)\n",
+                   static_cast<unsigned long long>(phase_baseline_misses));
     }
     if (worst_rx_events.empty()) {
       std::fprintf(stderr,
@@ -1394,7 +1645,7 @@ public:
       // `epoch_ms - wait`, computed here rather than stored, so the two cannot drift apart.
       std::fprintf(stderr,
                    "  rx  #%u wait=%lldus air=%lldus wall=%s epoch_ms=%lld began_ms=%lld steady_end_ns=%lld "
-                   "load1=%s cpu=%s ivcsw=%s nvcsw=%s win=%s base_age=%s\n",
+                   "thread=%s#%llu load1=%s cpu=%s tcpu=%s ivcsw=%s ivcsw_rate=%s nvcsw=%s win=%s base_age=%s\n",
                    ++rank,
                    static_cast<long long>(ev.value_us),
                    static_cast<long long>(ev.air_us),
@@ -1402,9 +1653,13 @@ public:
                    static_cast<long long>(ev.wall_ms),
                    static_cast<long long>(ev.wall_ms) - static_cast<long long>(ev.value_us) / 1000,
                    static_cast<long long>(ev.end_ns),
+                   ev.thread_name,
+                   static_cast<unsigned long long>(ev.thread_id),
                    load1_str(ev.load1_x100).c_str(),
                    cpu_str(ev.cpu_ns).c_str(),
+                   cpu_str(ev.tcpu_ns).c_str(),
                    delta_str(ev.ivcsw).c_str(),
+                   rate_str(ev.ivcsw, ev.win_us).c_str(),
                    delta_str(ev.nvcsw).c_str(),
                    age_str(ev.win_us).c_str(),
                    age_str(ev.base_age_us).c_str());
@@ -1422,9 +1677,13 @@ public:
       format_wall_utc(ev.wall_ms, wall, sizeof(wall));
       // `due_ms=` is when the hand-over SHOULD have happened (`epoch_ms + margin`, negative margin = in the
       // past), i.e. the same two ends for the transmit direction.
+      //
+      // `tcpu=-` HERE ALWAYS, and by construction: this event is recorded on the TRANSMIT thread while the only
+      // baseline is the one the RECEIVE path maintains, and two different threads' cumulative CPU counters
+      // cannot be subtracted (see timing_event::tcpu_ns). The process-wide `cpu=` is still a reading.
       std::fprintf(stderr,
                    "  dl  #%u margin=%lldus due_ts=%lld wall=%s epoch_ms=%lld due_ms=%lld steady_end_ns=%lld "
-                   "load1=%s cpu=%s ivcsw=%s nvcsw=%s win=%s\n",
+                   "thread=%s#%llu load1=%s cpu=%s tcpu=%s ivcsw=%s ivcsw_rate=%s nvcsw=%s win=%s\n",
                    ++rank,
                    static_cast<long long>(ev.value_us),
                    static_cast<long long>(ev.due_ts),
@@ -1432,12 +1691,74 @@ public:
                    static_cast<long long>(ev.wall_ms),
                    static_cast<long long>(ev.wall_ms) + static_cast<long long>(ev.value_us) / 1000,
                    static_cast<long long>(ev.end_ns),
+                   ev.thread_name,
+                   static_cast<unsigned long long>(ev.thread_id),
                    load1_str(ev.load1_x100).c_str(),
                    cpu_str(ev.cpu_ns).c_str(),
+                   cpu_str(ev.tcpu_ns).c_str(),
                    delta_str(ev.ivcsw).c_str(),
+                   rate_str(ev.ivcsw, ev.win_us).c_str(),
                    delta_str(ev.nvcsw).c_str(),
                    age_str(ev.win_us).c_str());
     }
+    // The four PHASE series, one block each, in the same shape as the two above: this is what turns "the CE max is
+    // 20x its median" (the observation this whole workstream started from) into "THAT slot's CE segment took 1.2 ms
+    // and the thread that completed it is main_pool#3".
+    for (size_t i = 0; i != timing_event_phase_floor_us_size; ++i) {
+      const timing_event_kind kind =
+          static_cast<timing_event_kind>(static_cast<size_t>(timing_event_kind::phase_t2f) + i);
+      const char* name = phase_series_name(kind);
+      if (worst_phase_events[i].empty()) {
+        std::fprintf(stderr,
+                     "  %-4s: none above the %lld us floor in %llu candidate check(s)\n",
+                     name,
+                     static_cast<long long>(timing_event_phase_floor_us[i]),
+                     static_cast<unsigned long long>(phase_event_candidates[i]));
+        continue;
+      }
+      rank = 0;
+      for (const timing_event& ev : worst_phase_events[i]) {
+        char wall[32];
+        format_wall_utc(ev.wall_ms, wall, sizeof(wall));
+        std::fprintf(stderr,
+                     "  %-4s#%u took=%lldus wall=%s epoch_ms=%lld steady_end_ns=%lld thread=%s#%llu cpu=%s "
+                     "tcpu=%s ivcsw=%s ivcsw_rate=%s nvcsw=%s win=%s base_age=%s\n",
+                     name,
+                     ++rank,
+                     static_cast<long long>(ev.value_us),
+                     wall,
+                     static_cast<long long>(ev.wall_ms),
+                     static_cast<long long>(ev.end_ns),
+                     ev.thread_name,
+                     static_cast<unsigned long long>(ev.thread_id),
+                     cpu_str(ev.cpu_ns).c_str(),
+                     cpu_str(ev.tcpu_ns).c_str(),
+                     delta_str(ev.ivcsw).c_str(),
+                     rate_str(ev.ivcsw, ev.win_us).c_str(),
+                     delta_str(ev.nvcsw).c_str(),
+                     age_str(ev.win_us).c_str(),
+                     age_str(ev.base_age_us).c_str());
+      }
+    }
+  }
+
+  /// The short report tag of a phase series ("t2f", "ce", "eqd", "ldpc"), i.e. the same words the aggregate lines
+  /// are read with, shortened to keep the event lines inside a terminal.
+  static const char* phase_series_name(timing_event_kind kind)
+  {
+    switch (kind) {
+      case timing_event_kind::phase_t2f:
+        return "t2f";
+      case timing_event_kind::phase_ce:
+        return "ce";
+      case timing_event_kind::phase_eqdem:
+        return "eqd";
+      case timing_event_kind::phase_ldpc:
+        return "ldpc";
+      default:
+        break;
+    }
+    return "?";
   }
 
   /// The process CPU time consumed over the window, in ms with two decimals, or `-` when there was no baseline.
@@ -1468,6 +1789,23 @@ public:
     }
     char buf[16];
     std::snprintf(buf, sizeof(buf), "+%lld", static_cast<long long>(v));
+    return buf;
+  }
+
+  /// The same delta NORMALIZED by the window it was measured over, in switches per millisecond.
+  ///
+  /// WHY (P1). An unnormalized delta cannot be read: the receive events' windows are ~1 ms in steady state but can
+  /// be a whole stall wide, and a hand-over's window is whatever the receive path's last baseline was - so
+  /// "+412 involuntary switches" is large for one event and small for another purely because of the window. The
+  /// rate is what makes two events, and two legs, comparable; it is printed next to the delta rather than
+  /// replacing it, because the delta is what the counters actually said.
+  static std::string rate_str(int64_t switches, int64_t win_us)
+  {
+    if ((switches < 0) || (win_us <= 0)) {
+      return "-";
+    }
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "%.2f/ms", static_cast<double>(switches) * 1000.0 / static_cast<double>(win_us));
     return buf;
   }
 
@@ -1849,12 +2187,17 @@ private:
   using start_registry = std::map<uint64_t, start_entry>;
 
   /// Registry entry: the three phase-segment durations of one PUSCH, the assembly timestamp (for the staleness
-  /// gate) and the same insertion sequence as above.
+  /// gate) and the same insertion sequence as above. The three instants are the segment BOUNDARIES on the steady
+  /// clock (P1): they are what lets the phase-tail events quote a window instead of only a duration, and they
+  /// cannot be recovered later because the landmark maps have moved on by the time the completion is recorded.
   struct phases_entry {
     std::chrono::time_point<std::chrono::high_resolution_clock> tp;
     int64_t  t2f_ns;
     int64_t  ce_ns;
     int64_t  eqdem_ns;
+    int64_t  t2f_begin_ns; ///< the slot's first samples arrived (record_start).
+    int64_t  t2f_end_ns;   ///< the FFT of the whole slot completed (record_t2f_end).
+    int64_t  ce_end_ns;    ///< the channel estimates were ready (record_ce_end).
     uint64_t seq;
   };
 
@@ -1888,6 +2231,27 @@ private:
   {
     const char* env = std::getenv("OCUDU_UL_STALE_US");
     return ((env != nullptr) && (std::strtoul(env, nullptr, 10) != 0)) ? std::strtoul(env, nullptr, 10) : 8000UL;
+  }
+
+  /// A registry instant, expressed on the SAME clock the receive-side events are stamped with (steady nanoseconds).
+  ///
+  /// The probe keeps its windows in two forms on purpose: the registries use \c high_resolution_clock time_points
+  /// (they subtract them, and duration arithmetic is clearer that way), while an event carries plain nanoseconds
+  /// because it has to be comparable with the receive path's `begin_ns`/`end_ns` and with the `tcpu` snapshot's
+  /// instant. One conversion helper keeps the two from drifting into different epochs.
+  ///
+  /// \note The rebasing is not cosmetic: `high_resolution_clock` IS `steady_clock` on libc++ (macOS) but is an
+  ///       alias of `system_clock` on libstdc++ (Linux), whose epoch is unrelated to the steady clock's. Printing
+  ///       a registry instant raw would therefore put the phase events on a different axis from the receive events
+  ///       on Linux and on the same axis on macOS - a platform difference inside a reading, which is exactly what
+  ///       the Linux-unchanged invariant forbids. The residual error is the interval between the two `now()`
+  ///       reads (~tens of nanoseconds), and it is documented rather than chased.
+  static int64_t to_ns(const std::chrono::high_resolution_clock::time_point& tp)
+  {
+    const auto hr_now = std::chrono::high_resolution_clock::now();
+    const auto st_now = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(st_now.time_since_epoch()).count() +
+           std::chrono::duration_cast<std::chrono::nanoseconds>(tp - hr_now).count();
   }
 
   /// Finds the entry of \c registry for \c slot with the completion-time tolerance (slot, slot-1, slot-2),

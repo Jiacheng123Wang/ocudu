@@ -155,6 +155,23 @@ void bind_thread_to_performance_core();
 ///        overflow it. Linux: no-op (the 8 MiB default is kept).
 void configure_worker_thread_attributes(::pthread_attr_t& attr);
 
+/// \brief Declares the worker's QoS class on the pthread attributes, so the thread starts on the performance
+///        cores from its FIRST instruction (stage P3 of doc_chinese/macos_thread_priority).
+///
+/// WHY IT IS A SEPARATE, OPT-IN CALL. macOS applies the QoS class of the ATTRIBUTES at creation, while the class
+/// set from inside the thread (apply_worker_thread_scheduling -> pthread_set_qos_class_self_np) takes effect
+/// only once that thread is already running - a window in which a latency-critical worker can be placed on an
+/// efficiency core. The historical port never declared it at creation (set_pthread_attr_qos_class() "has been
+/// implemented but never used", dev doc 1), so turning it on is a BEHAVIOUR CHANGE on macOS and not an
+/// instrument: it is therefore off by default and enabled with OCUDU_SCHED_ATTR_QOS (any value but "0"), which
+/// lets the two arms be compared on ONE binary instead of across two builds.
+///
+/// Adoption is conditional, not automatic: stage P3 is entered only if the [sched] readback shows the requested
+/// class is clamped, or if the P2 tier A/B shows the tier moves the tail (dev doc 5).
+///
+/// Linux: no-op, and it does not even read the environment variable.
+void configure_worker_thread_attributes_qos(::pthread_attr_t& attr, const os_thread_realtime_priority& prio);
+
 /// \brief Sets the name of the calling thread.
 ///
 /// Hides the pthread_setname_np signature difference between the two
@@ -194,12 +211,21 @@ bool set_thread_affinity(::pthread_t                      thread,
 void print_thread_affinity_info(::pthread_t thread);
 
 /// \brief Returns whether the POSIX real-time priority API (SCHED_FIFO via
-///        pthread_setschedparam) is enforceable on this platform.
+///        pthread_setschedparam) should be applied to a real-time worker.
 ///
-/// Always true: the historical port attempts pthread_setschedparam on macOS as
-/// well (it succeeds without privileges; the QoS class remains the effective
-/// scheduling mechanism there). The return value exists so the platform
-/// decision stays inside the compat layer.
+/// Linux: always true - SCHED_FIFO is the native, enforced mechanism there.
+///
+/// macOS: true by default (the historical behaviour), and FALSE when OCUDU_SCHED_SKIP_POSIX_RT is set to something
+/// other than "0". The switch exists because of a measurement (2026-10-01, dev doc 10.5) that contradicts what
+/// this function used to assume: a Darwin thread is either QoS-managed or explicitly scheduled, and the POSIX call
+/// SILENTLY REMOVES the QoS class the compat layer set a moment earlier - irreversibly (setting it again returns
+/// EPERM for the rest of the thread's life, even after switching back to SCHED_OTHER). Measured on a loopback run:
+/// a real-time worker reads back `req=USER_INTERACTIVE eff=UNSPECIFIED`, while a non-real-time worker - which
+/// never makes this call - reads back `eff=USER_INITIATED`. With the switch on, the call is skipped and the class
+/// survives; with it off, the behaviour is byte-for-byte the historical one.
+///
+/// \note The decision to make either arm the default belongs to the A/B (a P2-style leg pair), not to this switch:
+///       both arms are reachable from one binary on purpose.
 bool posix_realtime_priority_is_enforceable();
 
 /// \brief Returns the real-time priority the radio (RU) worker should be

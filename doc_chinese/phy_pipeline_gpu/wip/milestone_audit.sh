@@ -235,7 +235,11 @@ leg_commit_check() {   # <label> <leg .stderr path> <kind>
 # refused below.
 # OCUDU_UL_TIMING_EVENTS joined 2026-10-01 (dev doc 6.241): a report-only probe by the same category rule -
 # it prints the worst receive waits / hand-over margins with host wall clocks and decides nothing.
-kNOB_ANY=" OCUDU_METAL_GPU_TIME OCUDU_UL_PHASE_SEGMENTS OCUDU_UL_SLOT_TRACE OCUDU_UL_TIMING_EVENTS "
+# OCUDU_SCHED_VERBOSE joined 2026-10-01 (macos_thread_priority dev doc 10.5): also report-only - one line per
+# worker thread saying which QoS class / POSIX policy the kernel actually GRANTED it, printed once at creation.
+# The two knobs that change macOS scheduling (OCUDU_SCHED_SKIP_POSIX_RT, OCUDU_SCHED_ATTR_QOS) are arms and stay
+# refused, exactly like OCUDU_DFT_BACKEND=generic.
+kNOB_ANY=" OCUDU_METAL_GPU_TIME OCUDU_UL_PHASE_SEGMENTS OCUDU_UL_SLOT_TRACE OCUDU_UL_TIMING_EVENTS OCUDU_SCHED_VERBOSE "
 # `== the delivery default`. SINCE 2026-09-30 (dev doc 6.215) the delivered lane writes the grid from the HOST,
 # so the three DFT entries are MOOT on a delivery leg (that engine is not on the path at all) while
 # `CE_LANE_ORDER=merged` still is the delivered value. A delivery leg should set NONE of them - that is the

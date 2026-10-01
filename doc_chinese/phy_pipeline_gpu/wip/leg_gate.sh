@@ -144,7 +144,13 @@ is_n1_fdd  = ("fdd_n1" in leg_cfg)
 # states). OCUDU_UL_TIMING_EVENTS joined 2026-10-01 with dev doc 6.241: it PRINTS the worst receive waits and
 # hand-over margins with their host wall clocks and changes no delivery decision; when unset it reads no clock
 # and prints nothing, and when set it stores at most 64 events (only above a 1 ms / 500 us floor).
-KNOB_ANY = ("OCUDU_METAL_GPU_TIME", "OCUDU_UL_PHASE_SEGMENTS", "OCUDU_UL_SLOT_TRACE", "OCUDU_UL_TIMING_EVENTS")
+# OCUDU_SCHED_VERBOSE joined 2026-10-01 with doc_chinese/macos_thread_priority/ dev doc 10.5: it reads back each
+# worker thread's granted QoS class / POSIX policy ONCE at thread creation and PRINTS one line; it changes no
+# scheduling parameter, reads no clock, and prints nothing when unset. The two knobs that DO change macOS
+# scheduling (OCUDU_SCHED_SKIP_POSIX_RT, OCUDU_SCHED_ATTR_QOS) are deliberately NOT here: they are arms, and an
+# arm can satisfy every other criterion in this file.
+KNOB_ANY = ("OCUDU_METAL_GPU_TIME", "OCUDU_UL_PHASE_SEGMENTS", "OCUDU_UL_SLOT_TRACE", "OCUDU_UL_TIMING_EVENTS",
+            "OCUDU_SCHED_VERBOSE")
 KNOB_EQ  = ("OCUDU_DFT_BATCH_SYMBOLS=14", "OCUDU_DFT_OPEN_BLOCK=1", "OCUDU_DFT_RELEASE_BLOCK=1",
             "OCUDU_CE_LANE_ORDER=merged",
             # OCUDU_DFT_BACKEND=vdsp joined 2026-10-01: on Apple that IS the value an unset leg resolves to

@@ -19,6 +19,7 @@ set(SOURCES
         executors/unique_thread.cpp
         executors/execution_context_description.cpp
         scheduling/darwin_thread_scheduling.cpp
+        scheduling/thread_sched_snapshot.cpp
         executors/executor_decoration_factory.cpp
         network/io_broker_factory.cpp
         network/io_timer_source.cpp

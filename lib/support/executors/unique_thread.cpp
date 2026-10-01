@@ -5,6 +5,7 @@
 #include "ocudu/adt/scope_exit.h"
 #include "ocudu/adt/static_vector.h"
 #include "ocudu/support/macos_compat.h"
+#include "ocudu/support/scheduling/thread_sched_snapshot.h" // log_this_thread_scheduling (OCUDU_SCHED_VERBOSE)
 #include "fmt/std.h"
 #include <cstdio>
 #include <mutex>
@@ -236,6 +237,11 @@ unique_thread::thread_handle_impl unique_thread::make_thread(const std::string& 
   // stack (512 KiB) is too small for the gNB's deep call chains, so the compat
   // layer enlarges it to 16 MiB (Linux keeps its 8 MiB default).
   compat::configure_worker_thread_attributes(attr);
+  // ... and, on macOS only and only when OCUDU_SCHED_ATTR_QOS asks for it, the QoS class is declared HERE
+  // rather than from inside the thread: a class set from inside the thread takes effect after the thread has
+  // already been placed, so the worker may spend its first instructions on an efficiency core (stage P3, dev
+  // doc 5). Linux: a no-op that does not even read the variable.
+  compat::configure_worker_thread_attributes_qos(attr, prio);
 
   auto* thread_callable = new unique_function<void()>([name, prio, cpu_mask, callable = std::move(callable)]() {
     std::string fixed_name = name;
@@ -275,6 +281,14 @@ unique_thread::thread_handle_impl unique_thread::make_thread(const std::string& 
       thread_set_affinity(::pthread_self(), cpu_mask, name);
     }
 #endif
+
+    // Read back what the kernel actually granted (doc_chinese/macos_thread_priority, stage P1). It prints ONLY
+    // when OCUDU_FLOW_PROBES was defined at build time AND OCUDU_SCHED_VERBOSE is set in the environment, so
+    // both arms are unchanged by default; and it is the LAST thing before the worker runs because every
+    // scheduling call above has to have happened: a readback taken earlier reports a state the thread has not
+    // reached yet, which is how "requested" and "effective" get confused for one another (the open question of
+    // high level 4 - a requested QoS class that nothing ever read back).
+    log_this_thread_scheduling(prio, name);
 
     // Initialize unique thread index.
     unique_thread_index = get_thread_index_manager().get_free_identifier();

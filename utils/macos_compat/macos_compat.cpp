@@ -272,6 +272,30 @@ void configure_worker_thread_attributes(::pthread_attr_t& attr)
 #endif
 }
 
+void configure_worker_thread_attributes_qos(::pthread_attr_t& attr, const os_thread_realtime_priority& prio)
+{
+#if defined(__APPLE__)
+  // Off by default, and gated by the environment rather than by a build option so the two arms can be compared
+  // on ONE binary: the A/B this switch exists for is "does the worker start on a P-core", and rebuilding
+  // between arms would put the build itself into the comparison.
+  //
+  // The variable is read ON EVERY CALL rather than cached in a static, for the reason the probes' own knobs give
+  // (see ul_pipeline_probe::stale_after_us): a cached answer cannot be moved by a test, and a switch nobody can
+  // exercise in a unit test is a switch nobody can trust. The cost is one getenv per thread creation.
+  const char* env = std::getenv("OCUDU_SCHED_ATTR_QOS");
+  if ((env == nullptr) || (env[0] == '\0') || ((env[0] == '0') && (env[1] == '\0'))) {
+    return;
+  }
+  set_pthread_attr_qos_class(attr, darwin_qos_class_for_prio(prio));
+#else
+  // Linux: the POSIX priority applied by the thread wrapper is the native mechanism and is enforced there, so
+  // there is nothing to declare on the attributes - and this arm must not even look at the environment, so a
+  // Linux run is byte-identical whether the variable is set or not.
+  (void)attr;
+  (void)prio;
+#endif
+}
+
 bool set_thread_name(::pthread_t thread, const char* name)
 {
 #if defined(__APPLE__)
@@ -388,10 +412,35 @@ bool set_thread_affinity(::pthread_t                      thread,
 bool posix_realtime_priority_is_enforceable()
 {
 #if defined(__APPLE__)
-  // Historical behaviour: pthread_setschedparam(SCHED_FIFO) is attempted on macOS as well (it succeeds without
-  // privileges and is recorded by the kernel, even though the QoS class is the effective scheduling mechanism).
-  return true;
+  // ★★ MEASURED 2026-10-01, AND IT REVERSES WHAT THIS FUNCTION USED TO SAY (dev doc 10.5). The claim used to be
+  // "pthread_setschedparam(SCHED_FIFO) succeeds without privileges and is recorded by the kernel, while the QoS
+  // class remains the effective scheduling mechanism". The second half is FALSE, and the first half is what makes
+  // it false: on Darwin a thread is EITHER QoS-managed OR explicitly scheduled, never both, and the POSIX call
+  // silently converts it to the latter -
+  //
+  //   set_qos_class_self_np(USER_INTERACTIVE)          -> 0, readback USER_INTERACTIVE
+  //   pthread_setschedparam(SCHED_FIFO, 46)            -> 0, readback UNSPECIFIED   <- the class is GONE
+  //   set_qos_class_self_np(USER_INTERACTIVE)  (again) -> 1 (EPERM), class stays UNSPECIFIED - for the lifetime
+  //                                                       of the thread, even after switching back to SCHED_OTHER
+  //
+  // and the same happens to a class declared on the ATTRIBUTES at creation (so P3's attr-QoS cannot help while
+  // this call remains). The end-to-end consequence was measured on a loopback run with OCUDU_SCHED_VERBOSE=1: a
+  // real-time worker printed `req=USER_INTERACTIVE eff=UNSPECIFIED posix=FIFO/44`, while a NON-real-time worker
+  // (which never calls this function) printed `req=USER_INITIATED eff=USER_INITIATED`. That is, the data-plane
+  // threads have been running with NO QoS class at all - below the io_timer/io_broker threads they are supposed
+  // to outrank - since the day the POSIX call was added, and nothing could see it because nothing read it back.
+  //
+  // THE OPT-IN. OCUDU_SCHED_SKIP_POSIX_RT=1 (any value but "0") answers "no": the thread wrapper then leaves the
+  // POSIX parameters alone, so the QoS class applied a moment earlier SURVIVES. It is opt-in because skipping a
+  // call is still a behaviour change on macOS, and it is an environment switch rather than a build option so both
+  // arms can be compared on ONE binary (a rebuild between arms would put the build itself into the comparison).
+  // Whether the QoS class is worth more than the (recorded, and to our knowledge unenforced) SCHED_FIFO policy is
+  // exactly what the A/B is for - it is a user decision, registered in the dev doc.
+  const char* env     = std::getenv("OCUDU_SCHED_SKIP_POSIX_RT");
+  const bool  skip    = (env != nullptr) && (env[0] != '\0') && !((env[0] == '0') && (env[1] == '\0'));
+  return !skip;
 #else
+  // Linux: SCHED_FIFO IS the mechanism there and it is enforced, so it is always applied.
   return true;
 #endif
 }

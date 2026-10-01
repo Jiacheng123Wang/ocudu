@@ -49,7 +49,10 @@ READ_RX = re.compile(r'getenv\(\s*"(OCUDU_[A-Z0-9_]+)"\s*\)')
 
 
 def tracked_files():
-    out = subprocess.run(["git", "-C", ROOT, "ls-files", "lib", "apps", "include", "tests"],
+    # `utils` joined the roots on 2026-10-01: the compat layer (utils/macos_compat) is where the macOS scheduling
+    # knobs live, and a scope that skipped it would report "the whole tree" while missing exactly the switches the
+    # thread-stability workstream adds (OCUDU_SCHED_VERBOSE / _ATTR_QOS / _SKIP_POSIX_RT).
+    out = subprocess.run(["git", "-C", ROOT, "ls-files", "lib", "apps", "include", "tests", "utils"],
                          capture_output=True, text=True, check=True).stdout
     return [p for p in out.split("\n") if p.endswith(SRC_EXT)]
 
@@ -134,6 +137,16 @@ def classify_default(window):
                       r"([0-9][0-9.eE+-]*[uUfF]?|\"[^\"]*\")\s*:", w)
         if m:
             return f"= {m.group(1).rstrip('uUfF')}"
+    # LAST, so that every more specific shape above still wins: the same OFF written as a COMPOUND guard,
+    # `if ((env == nullptr) || (env[0] == '\0') || ...) { return; }` - the "set = on, unset = off" idiom the macOS
+    # scheduling knobs use. Placed before the value rules it would have read OCUDU_DFT_BACKEND's
+    # `(name == nullptr) || (strcmp(name, "vdsp") == 0)` as OFF and hidden its real default; the first attempt did
+    # exactly that, which is why the rule lives here (2026-10-01, with the three OCUDU_SCHED_* knobs).
+    # The `return` has to be the VOID one: OCUDU_UL_RX_POOL_DROP's `return (v == nullptr) || (atoi(v) != 0);` is
+    # the same shape syntactically and means the OPPOSITE (unset = ON), so a rule that fired on any `return` would
+    # have replaced its honest `?` with a wrong OFF. Both were tried while adding these knobs.
+    if re.search(r"==\s*nullptr\s*\)\s*\|\|", w) and re.search(r"\breturn\s*;", w):
+        return "OFF"
     return "?"
 
 
@@ -293,6 +306,10 @@ def main():
         "OCUDU_DFT_BACKEND": "前端变换的**后端选择**：`=vdsp`（Apple 上**不设就是它**，所以白名单接受）｜`=generic`（**A/B 对照臂**，n78 p170/p171、n1 p172/p173 用它跑 generic 那一侧）。非 Apple 平台根本不编进这条分支，所以这一行的「默认」只在 Apple 上有意义",
         "OCUDU_DFT_BATCH_SYMBOLS": "前端批量：不设 = `AUTO`（= 一个时隙自己的符号数，n78 上是 **14**）｜`=1` = 每符号对照臂｜`=7`/`=2` 是中间臂。白名单只接受与 AUTO 等价的 `=14`",
         "OCUDU_CE_LANE_ORDER": "信道估计的四种车道顺序：`merged`（**默认**，估计器的派发搭车道共享 cb）｜`event`｜`wait`/`host_wait`｜`burst`（旧名 `OCUDU_CE_FUSED_BURST`）。拼错的值打 error 并按 `merged` 跑（代码里那条 warning 的原文就写着 \"using merged\"）。白名单只接受 `=merged`",
+        # ---- macOS 线程运行稳定性（doc_chinese/macos_thread_priority/，2026-10-01）--------------------------
+        "OCUDU_SCHED_VERBOSE": "**探针（只打印，白名单可带）**：每个 worker 线程创建后**回读**它真正拿到的调度状态，一行 `[sched] thread=… id=… rt_intent=… req=… eff=… run=… posix=…/…`。★ 它回答的是本线开线时的悬案「我们请求的 QoS 到底生效没有」——**第一次跑就给了答案**：请求 `USER_INTERACTIVE` 的线程回读 `eff=UNSPECIFIED`，而**不调用** `pthread_setschedparam` 的非实时线程回读 `eff=USER_INITIATED`（开发文档 10.5）。两把钥匙：`ENABLE_FLOW_PROBES` 编译 + 本变量非 `0`；两者缺一即**一个字都不打印**（默认关）",
+        "OCUDU_SCHED_ATTR_QOS": "**实验臂（改 macOS 调度，**不在**白名单，fail-closed）**：把 QoS 类**声明在线程属性上**（`pthread_attr_set_qos_class_np`），让关键线程**从第一条指令**就在目标档上。默认关 = 历史行为。★ 现在的认识：只要 `pthread_setschedparam` 还在后面调用，attr 上声明的档**同样会被抹掉**（实测，开发文档 10.5），所以这一臂必须与 `OCUDU_SCHED_SKIP_POSIX_RT` 一起用",
+        "OCUDU_SCHED_SKIP_POSIX_RT": "**实验臂（改 macOS 调度，**不在**白名单，fail-closed）**：`=1` 时**不再**对实时意图线程调用 `pthread_setschedparam(SCHED_FIFO,prio)`。默认关 = 历史行为。存在的理由是一条实测：Darwin 上线程**要么**由 QoS 管、**要么**是显式调度，POSIX 调用会把刚设好的 QoS 类**静默抹掉且不可恢复**（再设返回 EPERM）；跳过它，`[sched]` 就回读 `eff=USER_INTERACTIVE`（同一条腿的 A/B 见开发文档 10.5）",
     }
     for knob, note in curated_new.items():
         rows = hits.get(knob, [])
@@ -303,7 +320,9 @@ def main():
     print("> ⚠ **验收腿的旋钮白名单**（`milestone_audit.sh` 的 `kNOB_ANY`/`kNOB_EQ` 与 `leg_gate.sh` 的 `KNOB_ANY`/`KNOB_EQ` **就是它**，两边逐字一致）。")
     print("> **任意值**（探针）：`OCUDU_METAL_GPU_TIME`、`OCUDU_UL_PHASE_SEGMENTS`、`OCUDU_UL_SLOT_TRACE`、"
           "`OCUDU_UL_TIMING_EVENTS`（2026-10-01 加入：只**打印**最慢的接收等待 / 迟到交接及其宿主墙钟与进程 CPU 增量，"
-          "不改变任何交付决定；关着不读时钟、不打印，开着最多存 64 条事件 —— 见开发文档 6.240/6.241）。")
+          "不改变任何交付决定；关着不读时钟、不打印，开着最多存 64 条事件 —— 见开发文档 6.240/6.241）、"
+          "`OCUDU_SCHED_VERBOSE`（2026-10-01 加入：每个 worker 线程**回读一次**自己的 QoS/POSIX 档并打一行，"
+          "只打印、不改调度；默认关时一个字都不打印 —— 见 `doc_chinese/macos_thread_priority/` 开发文档 10.5）。")
     print("> **视为「等于交付默认」**：`OCUDU_DFT_BATCH_SYMBOLS=14`、`OCUDU_DFT_OPEN_BLOCK=1`、`OCUDU_DFT_RELEASE_BLOCK=1`、`OCUDU_CE_LANE_ORDER=merged`、"
           "`OCUDU_DFT_BACKEND=vdsp`（2026-10-01 加入：Apple 上这就是不设它时的值）。其余一律判 FAIL（**fail-closed**）。")
     print("> `OCUDU_DFT_BACKEND=generic` **故意不**在白名单里：那是一条 A/B **臂**——臂可以满足其余所有判据（p84 就是这样），闸门拦的就是它。")
