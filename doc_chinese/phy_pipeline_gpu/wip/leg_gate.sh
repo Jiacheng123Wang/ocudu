@@ -303,10 +303,13 @@ tx_pop      = f(leg_err, r"\[dl_tx_slack\][^\n]*; every number above is over the
 late_in     = f(leg_err, r"\[dl_tx_slack\][^\n]*AT/BELOW 0=(\d+)")
 slips       = f(leg_err, r"\[ul_rx_timing\][^\n]*slip\(max=\d+us over 1ms=(\d+)")
 recvs       = f(leg_err, r"\[ul_rx_timing\][^\n]*recv\(max=\d+us over 1ms=(\d+)")
+# The denominator of BOTH slip and recv (they are counted per receive() call). It is read here rather than
+# derived, because a rate whose population is guessed is worse than a count.
+rx_calls    = f(leg_err, r"\[ul_rx_timing\] calls=(\d+)")
 gaps_txt    = f(leg_err, r"radio sample continuity: (\d+) gaps")
-tx_name = ("VALIDITY (6.198 (4) restated; AT/BELOW 0 became a RATE on 2026-10-01 by user ruling): "
-           "AT/BELOW 0 / transmissions <= 0.0025% AND no transport storm "
-           "(slip over 1ms <= 22, recv over 1ms <= 19, gaps = 0)")
+tx_name = ("VALIDITY (6.198 (4) restated; ALL THREE bounds became RATES by user ruling, AT/BELOW 0 on "
+           "2026-10-01 and slip/recv on 2026-10-02): AT/BELOW 0 / transmissions <= 0.0025%, "
+           "slip over 1ms / receive calls <= 0.0005%, recv over 1ms / receive calls <= 0.0004%, gaps = 0")
 # ★ THE STORM BOUNDS WERE RE-REGISTERED PROSPECTIVELY ON 2026-10-01 (user ruling), and this is the derivation
 # so the number is checkable rather than remembered. Population: the 23 legs of the CURRENT family
 # (gpu/gnb_rf_b200_tdd_n78_20mhz.yml/rx1 - pipeline mode + cell config + symbol-grained receive), the observed
@@ -347,20 +350,43 @@ if tx_windowed is None:
                 reason="the window-scoped reading needs the 2026-10-01 instrument ([dl_tx_slack] carrying "
                        "'excluded N hand-over(s)'); this leg predates it, so its AT/BELOW 0 counts the "
                        "teardown tail too")
-elif None in (late_in, slips, recvs, gaps_txt):
-    check(tx_name, None, f"cannot read every term: AT/BELOW 0={late_in} slip={slips} recv={recvs} gaps={gaps_txt}")
+elif None in (late_in, slips, recvs, gaps_txt, rx_calls):
+    check(tx_name, None,
+          f"cannot read every term: AT/BELOW 0={late_in} slip={slips} recv={recvs} calls={rx_calls} "
+          f"gaps={gaps_txt}")
 else:
-    # The population is the same one every number in that line is over ("every number above is over the N
-    # hand-over"), so the rate is the count divided by it - and when the population cannot be read the row says so
-    # instead of quietly judging the count.
+    # ALL THREE BOUNDS ARE RATES (2026-10-02, user ruling: "两件都做"). The AT/BELOW 0 count was converted on
+    # 2026-10-01 because it grew with the leg; the slip/recv counts had exactly the same defect, and the family
+    # rates show it plainly:
+    #     p182_1726  124 slip of 38 842 391 calls = 0.000319%   <- 5.6x the COUNT of p177, and a LOWER rate
+    #     p177        22 slip of  5 922 689 calls = 0.000371%   <- the family's worst RATE
+    # A count bound ranks those two backwards. Both populations come from the same line, so both rates are the
+    # count over it: the hand-over count for AT/BELOW 0, the receive-call count for slip/recv.
+    #
+    # DERIVATION of the slip/recv bounds (same rule as the others: worst reference rate x 1.25, prospective):
+    # current family (gpu / gnb_rf_b200_tdd_n78_20mhz.yml / rx1) with >= 5M receive calls so the rate is
+    # estimable, EXCLUDING p182_1726 (the observed leg, whose run the observation itself disturbed):
+    #     worst slip = p177 0.000371%  -> x1.25 = 0.000464% -> bound 0.0005%
+    #     worst recv = p177 0.000321%  -> x1.25 = 0.000401% -> bound 0.0004%
+    # The delivery pair (p189 0.000220/0.000147, p190 below both), the two quiet legs (p193/p194 ~0.0001/0.00007)
+    # and the P4 pair (0.000127/0.000089 and 0.000132/0.000120) all sit an order of magnitude inside.
     pop           = int(tx_pop) if (tx_pop is not None and tx_pop.isdigit() and int(tx_pop) > 0) else None
     late_rate_pct = (100.0 * int(late_in) / pop) if pop is not None else None
-    ok = ((late_rate_pct is not None) and (late_rate_pct <= 0.0025) and (int(slips) <= 22)
-          and (int(recvs) <= 19) and (gaps_txt == "0"))
-    rate_txt = f"{late_rate_pct:.5f}%" if late_rate_pct is not None else "n/a (population unreadable)"
+    calls         = int(rx_calls) if rx_calls.isdigit() and int(rx_calls) > 0 else None
+    slip_rate_pct = (100.0 * int(slips) / calls) if calls is not None else None
+    recv_rate_pct = (100.0 * int(recvs) / calls) if calls is not None else None
+    ok = ((late_rate_pct is not None) and (late_rate_pct <= 0.0025)
+          and (slip_rate_pct is not None) and (slip_rate_pct <= 0.0005)
+          and (recv_rate_pct is not None) and (recv_rate_pct <= 0.0004) and (gaps_txt == "0"))
+    rate_txt  = f"{late_rate_pct:.5f}%" if late_rate_pct is not None else "n/a (population unreadable)"
+    slip_txt  = f"{slips}={slip_rate_pct:.6f}%" if slip_rate_pct is not None else f"{slips}=n/a"
+    recv_txt  = f"{recvs}={recv_rate_pct:.6f}%" if recv_rate_pct is not None else f"{recvs}=n/a"
+    pop_txt   = f"{pop} hand-over(s)" if pop is not None else f"unreadable (was {tx_pop})"
+    calls_txt = f"{calls} receive call(s)" if calls is not None else f"unreadable (was {rx_calls})"
     check(tx_name, ok,
-          f"in-stream AT/BELOW 0={late_in} of {tx_pop} hand-over(s) = {rate_txt} (bound 0.0025%), "
-          f"slip={slips}, recv={recvs}, gaps={gaps_txt}"
+          f"in-stream AT/BELOW 0={late_in} of {pop_txt} = {rate_txt} (bound 0.0025%); "
+          f"slip over 1ms {slip_txt} of {calls_txt} (bound 0.0005%); recv over 1ms {recv_txt} (bound 0.0004%); "
+          f"gaps={gaps_txt}"
           + ("" if ok else "  <- the p153 shape was 'late AND a slip/recv storm'; a small RATE with a clean "
                            "transport is NOT a transport fault (6.230)"))
 
