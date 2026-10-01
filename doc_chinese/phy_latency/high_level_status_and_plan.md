@@ -479,6 +479,14 @@
 > ③ **欠账 = 触发条件未知**：`ivcsw` 慢性 **150–320/ms**（迟到与正常窗口相同）⇒ "被抢占"当不了信号；进程级 `cpu` 证不了"**接收线程那一瞬间**在跑"；
 > ④ **重开条件**（命中任一条才重开）：SLO 开始管 max/p99；交付腿出现 `gaps>0` 或 `rx_overflows>0`；换平台/电台（USB→PCIe）；**合法加载且传输干净的腿上** `AT/BELOW 0 > 10`；出现新形状（`[RF]` 与 `rx`/`dl` **都不重合** —— `p179` 的 04:50:14 已出现一次）；
 > ⑤ **重开第一步（已预登记）**：①把读数升级为**线程级 `cpu`**（macOS `thread_info(mach_thread_self(), THREAD_BASIC_INFO)`）+ **归一化 `ivcsw`**（per ms、对本腿中位）；②`host_sched_watch.sh` 的 **QoS 档零代码 A/B**（`taskpolicy -l/-t` + `taskinfo` + `powermetrics --show-process-wait-times` + `sample`），判据 = 尾部率是否**跟着档位走**；
+>
+> **2026-10-01 ★★ 规划（用户指示）：在 macOS 上如何测量 PHY 关键线程的时间延迟稳定性（开发文档 §6.249）** ——
+> ① **问题形状（已量化）**：尖峰在**每条**序列上都有，且分属**不同线程** —— `[ul_rx_wait]` max 2049/2159 µs（rx 线程）、`[ul_time_frequency]` max 686–1658（ul 线程）、**`[ul_channel_estimation]` max ~1228 µs ≈ 20× 中位**、`[ul_ldpc_decode]` max ~444 ≈ 8–15×（都是**池线程**）、V1 max 4374–5033（~4× 中位）、`[dl_tx_call]` max 84.5 ms（p163 的 call #1 启动项）；中位数是稳的 ⇒ 判据必须**按线程 + 按序列**，不能看进程平均；
+> ② **三层测量**：**(1) 线程级**（新）`thread_info(THREAD_BASIC_INFO)` + `pthread_get_qos_class_np`（**请求档 vs 实际档**，正好回答"QoS 有没有生效"的悬案）/ Linux 用 `RUSAGE_THREAD`；**(2) 事件级**（扩）最慢 K 条加**线程名/线程 CPU**、`ivcsw` **归一化**，并把 `ce`/`ldpc`/`t2f` 的尾部也纳入同一机制；**(3) 平台旁观**（零代码）`taskinfo` + `powermetrics`(qos-tiers/wait-times/amp) + `sample`，**固化成腿配方**（开始/中段/结束各一次）；
+> ③ **Linux 逐字不变的三条保证**：只动 `utils/macos_compat` 与 `darwin_thread_scheduling.*`；跨平台 `#else` 只写 no-op；**两把钥匙**（env 默认关 + 编译期开关）⇒ 关着时两个平台的报告逐字节不变；验证 = 逐行审 diff + 两平台单测 + Ubuntu 侧编译/单测复核（**写进判据**）；
+> ④ **五阶段**：**P0** 固化旁观配方 + 扩尖峰清单与阈值候选（**不动代码**）→ **P1** 线程级读数 + `[sched]` 启动自读（动代码，**一次改动合并**）→ **P2** `taskpolicy` 档位零代码 A/B → **P3** 把已存在但未用的 **attr-QoS** 接到线程创建 → **P4** 最硬：**Mach time constraint**（离线标定参数 + 单腿 + 预登记回退条件，背着 2026-09-01 那次 OAI-UE RA 回归的历史）；
+> ⑤ ⚠ **成本**：任何 `lib/` 改动都会让 `p181`/`p182`（当前唯一全量 GREEN 的证据）**过期** ⇒ P1/P3/P4 应合并成一次改动再飞一对腿；P0/P2 可先做；
+> ⑥ 本节**不重开** Q27（仍结案存档），它是"若要重开，从这里开始"的可执行版本。
 > ⑥ **保留仪器**：`OCUDU_UL_TIMING_EVENTS`（两把钥匙、六个反向臂、四列已修）、`[ul_rx_timing]`/`[dl_tx_slack]`（含 `excluded`）、`leg_gate` 的 transport-health INFO、`leg_triage.sh`、`host_sched_watch.sh`、`ul_load.sh`。**引用规则**：结论必须带腿级输运协变量（纪律 20）；`[ul_rx_wait]` 跨 6.215 不可比（纪律 77）；报"停顿"必须同时给 `cpu`/`win`/`ivcsw` 与同秒 `[RF]`。
 
 

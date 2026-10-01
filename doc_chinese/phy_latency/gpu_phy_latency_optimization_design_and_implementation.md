@@ -15096,6 +15096,64 @@ offline acceptance: GREEN
 `OCUDU_UL_TIMING_EVENTS`（两把钥匙、六个反向臂、格式化器缺陷已修 —— `win`/`base_age`/`ivcsw`/`nvcsw` 四列可信）、`[ul_rx_wait]`/`[ul_rx_wait_hop]`/`[ul_rx_timing]`/`[ul_rx]`、`[dl_tx_slack]`/`[dl_tx_call]`（含 `excluded` 与窗口语义）、`leg_gate` 的 transport-health INFO 行、`leg_triage.sh`、`host_sched_watch.sh`、`wip/ul_load.sh`（载荷资格）。
 ⚠ **引用规则**：① 本线任何结论必须带**腿级"输运健康"协变量**（纪律 20）；② `[ul_rx_wait]` 的口径跨 6.215（整槽 → 逐符号）**不可比**（纪律 77，量子变了）；③ 报"停顿"必须同时给 **`cpu`/`win`/`ivcsw`/`base_age`** 与**同秒的 `[RF]` 行**，否则读者无法区分"派生量"与"独立故障"（③-2）。
 
+### 6.249 ★★ **规划（用户指示 2026-10-01）：在 macOS 上如何测量"PHY 流水线关键线程的时间延迟稳定性"** —— 三层测量 + 五阶段执行 + **Linux 行为不变**的三条保证；**先登记判据再飞腿**（本节是计划，不是结论）
+
+**① 问题的形状（先量化"尖峰到处都有"，用户观察成立）**：同一个"max 尾巴"出现在**每一条**已插桩的序列上，而它们分属**不同线程**：
+
+| 序列 | 中位 | max | max/中位 | 归属线程（§6.247/§6.249 的线程图）|
+|---|---|---|---|---|
+| `[ul_rx_wait]` | 0 µs | 760 / **2049** / **2159** µs（p163/p180/p182）| — | `lower_phy_rx#0`（UHD USB 收包）|
+| `[ul_time_frequency]`(t2f) | ~490 µs | 1658 / 686 / 721 | ~1.4–3.4× | `lower_phy_ul#0`（host 前端变换）|
+| `[ul_channel_estimation]`(ce) | ~60 µs | **1256 / 1218 / 1228** | **~20×** | `main_pool#N`（Metal CE 派发/提交）|
+| `[ul_ldpc_decode]` | 27–60 µs | 425 / 455 / 444 | ~8–15× | `main_pool#N`（CPU LDPC）|
+| `[ul_gpu_pipeline]`(V1) | 1246–1257 µs | 4374 / 5033 / 4916 | ~4× | 整跳（含以上全部）|
+| `[dl_tx_call]` | 38 µs | **84498**（p163，= call #1 启动项）/ 232 / 221 | — | `lower_phy_tx#0`（UHD USB 发包）|
+| `[ul_rx_timing] recv max` | — | 100.3–100.6 **ms**（每条腿都是这个数）| 常量 | 启动伪读数（§6.146）|
+
+⇒ **三件事**：**(a)** 尾巴不是"接收线程独有"，`ce`/`ldpc`/`t2f` 各有自己的 max（**跨线程**）；**(b)** 每条序列的 max 都由**调度/IO 事件**支配，而不是模块自身的算力；**(c)** 中位数是稳的（这就是为什么交付判据一直绿）。⇒ 判据必须**按线程 + 按序列**成立，而不是"进程平均"。
+
+**② 目标与判据（先写死；macOS 不承诺"达到 Linux"）**：
+1. **可测**：每条关键线程都能给出"**它自己**"的 CPU/调度读数（不是进程级）；
+2. **可归因**：任一 max 尖峰能落到"哪条线程 + 哪一类原因（CPU 被抢 / 等 IO / 等同步 / 等 GPU）"；
+3. **可设置**：能对关键线程施加并**回读**优先级/QoS/时间约束，且**有档位对照**；
+4. **Linux 逐字不变**：见 ④ 的三条保证。
+> 阈值**不在这里拍**：先从最近 N 条腿的分布取 p99.9（或"max ≤ k×中位"）作为候选，**飞行前登记**（§5.2 第 2 条）。
+
+**③ 三层测量**（由内到外；第 1 层是新的，第 2 层已有需扩，第 3 层零代码）：
+1. **线程级（进程内，新增）**：关键线程记录**自己**的 `cpu_usage` / 调度状态 / 被抢次数：
+   * macOS：`thread_info(mach_thread_self(), THREAD_BASIC_INFO)`（`run_state`、`cpu_usage`、`policy`）+ `pthread_get_qos_class_np()`（**请求档 vs 实际档**——现在就缺这一条，见 §6.249① 的悬案）；
+   * Linux：`RUSAGE_THREAD`（同一接口的 `#else` 分支）；
+   * 落点：现有 `OCUDU_UL_TIMING_EVENTS` 的字段（`cpu`/`ivcsw`/`nwin`）从**进程级**升级为**线程级 + 进程级并列**，并**归一化**（`ivcsw`/ms、对本腿中位）。
+2. **事件级（已有，扩展）**：`OCUDU_UL_TIMING_EVENTS` 的每条事件加 **线程 id + 线程名**（`pthread_threadid_np`）、**窗口两端墙钟**（有）、**当时该线程的 CPU 增量**（新）；并把 `ce`/`ldpc`/`t2f` 这三条"非接收"的尾部也纳入同一套"最慢 K 条"机制（它们现在只有聚合值）。
+3. **平台旁观（零代码，固化成腿配方）**：`sudo taskinfo <pid>`（QoS 计费/ceiling/P-E/csw/wakeups）、`sudo powermetrics --samplers tasks --show-process-qos-tiers --show-process-wait-times --show-process-amp -n 3`、`sample <pid> 3 -file …`（每线程栈）。**这三条命令必须在腿的**开始、中段、结束**各跑一次并存档**（现在只在出问题时手跑）。
+
+**④ Linux 行为不变的三条保证**：
+1. **只动 macOS 层**：新增代码放在 `utils/macos_compat/` 与 `lib/support/scheduling/darwin_thread_scheduling.*`（已有分层）；头文件只暴露平台中立接口（`os_thread_realtime_priority` / `compat::` 包装），**跨平台 `#else` 分支只写 no-op**；
+2. **两把钥匙**：全部读数 `env` 门控（默认关）+ 已有编译期开关；**关着时 Linux 与 macOS 的报告都逐字节不变**；
+3. **验证方式**：① `git diff` 逐行审"`#if defined(__APPLE__)` 之外是否有改动"；② 新增单测在**两个平台**都跑（`macos_compat_test` 已有先例，Linux 上断言 no-op）；③ 飞腿前跑 `ctest -L phy`，Linux 侧至少**编译 + 单测**必须绿（本仓当前只有 macOS 台架 ⇒ Linux 由 CI/用户在 Ubuntu 上复核，**必须明确写进判据**）。
+
+**⑤ 五阶段执行计划（每阶段：交付物 + 判据 + 成本）**：
+
+| 阶段 | 做什么 | 交付物 | 判据 | 是否动代码 |
+|---|---|---|---|---|
+| **P0** | 把 §③3 的三条旁观命令**固化成腿配方**；用现有腿把"尖峰清单"（① 的表）**扩到全部序列**并**登记阈值候选** | 更新 `run_leg.sh` 的收尾提示 + 文档表 | 配方可复现；阈值候选从分布得出（不是拍的）| 否（只改脚本/文档）|
+| **P1** | 线程级读数（§③1）+ 事件加线程名/线程 CPU（§③2）+ `ivcsw` 归一化；**加 `[sched]` 启动自读**（每线程：请求 vs 实际 QoS、POSIX prio、是否 RT）| 新字段 + 单测 + 反向臂 | 单测双向（开着有值、关着逐字不变）；~~loopback 6 秒~~能读出真实档位 ⇒ **回答"QoS 到底有没有生效"这个悬案** | 是（`lib/`+`utils/`）|
+| **P2** | **零代码 A/B**：`taskpolicy -l/-t` 各档 + `powermetrics` 对照，同一二进制 | 一对腿 + 对照表 | 尾部率（`max`/p99.9/`over 1ms` 计数）是否**跟着档位走** | 否 |
+| **P3** | 若 P1 表明"请求被钳"或 P2 表明档位有效但不足：把**attr-QoS**（`set_pthread_attr_qos_class`，已存在但未被生产路径使用）接到线程创建 | 小改动 + A/B 腿 | 关键线程从第一条指令起就在 P 核；尾部不劣 | 是 |
+| **P4** | 最硬手段：**Mach time constraint**（`bind_thread_to_performance_core()`）—— 参数先用 `[ul_rx_wait]`/`t2f` 的分布**离线标定**（period/computation/constraint/preemptible），再单腿 A/B | 标定报告 + 单腿 | ★ 预登记**回退条件**：出现 `gaps>0`、`rx_overflows>0`、契约红、或 OAI-UE 随机接入异常 ⇒ 立即回退（2026-09-01 的历史）| 是 |
+
+⚠ **成本提示（必须写清）**：**任何 `lib/` 代码改动都会让现有腿按审计规则过期**（`p181`/`p182` 是当前唯一全量 GREEN 的证据）⇒ **P1 与 P3/P4 的改动应当合并成一次**、或接受"每次改动都要重飞一对腿"。P0/P2 不动代码，可以先做。
+
+**⑥ 最小读数集（每条腿都要采）**：
+* 每线程：`cpu_ns`（线程级）、`ivcsw`/ms（含本腿中位）、唤醒/抢占计数、P/E 时间占比；
+* 每序列：`max`、p99.9、`over 1ms` 计数（`rx_wait`/`slip`/`ce`/`ldpc`/`t2f`/`dl_tx_call`）；
+* 平台：`taskinfo`（QoS 计费 + ceiling + P/E + csw + wakeups）、`powermetrics` 三档、`sample` 栈；
+* 腿级协变量（纪律 20）：载荷（`ul_load.sh`）、`[RF]` 率、`gaps`。
+
+**⑦ 与已收口线条的关系**：本节**不重开** Q27（ms 级停顿仍结案存档）；它是"**如果要重开，从这里开始**"的可执行版本，且 P0/P1 的产物对**任何**未来的尾部问题都有用（线程级读数 + 平台档位回读）。
+
+## 7. 杠杆与候选改动（技术账）
+
 ## 7. 杠杆与候选改动（技术账）
 
 ## 7. 杠杆与候选改动（技术账）
