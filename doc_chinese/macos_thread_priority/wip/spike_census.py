@@ -231,6 +231,21 @@ def main():
 # 10.17(3)) will look "unstable" for a reason that has nothing to do with scheduling. The payload block below the
 # table is therefore part of the reading, not decoration.
 def print_stability(files, want_regime, top, excluded=()):
+    """THE STABILITY VIEW, and it is the user's definition (2026-10-01, third and final wording):
+
+        "同一任务重复执行时耗时应该变化不大；最稳定的情况就是 min == max"
+
+    So stability is the DISPERSION OF ONE RUN'S OWN DISTRIBUTION, measured against the ideal 1.00:
+    every repetition of the same task should take the same time, i.e. min = median = p95 = p99 = max.
+    The ratios below are therefore "how far from that ideal this series is, in this run".
+
+    WHAT THIS VIEW IS NOT (two earlier versions of it were wrong, both recorded in dev doc 10.19/10.20):
+     * not the spread of a statistic ACROSS legs - different runs legitimately differ (radio environment,
+       traffic type), so that answers a different question and is kept only as background;
+     * not the drift of a statistic across time windows INSIDE a run - that is a useful reading (the probe's
+       [ul_stability] block) but it says "nothing changed during the run", which a run whose every sample is
+       equally slow would also pass.
+    """
     legs = []
     for f in files:
         label = leg_label(os.path.basename(f))
@@ -241,39 +256,38 @@ def print_stability(files, want_regime, top, excluded=()):
         st = read_leg(f)
         if not st:
             continue
-        payload = payload_of(f)
-        legs.append((os.path.getmtime(f), label, st, payload))
+        legs.append((os.path.getmtime(f), label, st, payload_of(f)))
     if not legs:
         print("no leg matched", file=sys.stderr)
         return 2
-    legs.sort()  # oldest first: the table reads left to right in time
-    print(f"# stability: {len(legs)} leg(s) - spread of EVERY statistic across legs (older -> newer)")
-    print(f"# legs: " + ", ".join(lab for _m, lab, _s, _p in legs))
+    legs.sort()  # oldest first
+    print(f"# stability = dispersion of ONE run's own distribution; the ideal is min == max (all ratios 1.00)")
+    print(f"# {len(legs)} leg(s), older -> newer; quarantined legs excluded and named at the end")
+    print()
+    # One block per series: the ideal is a row of 1.00. `max/min` is the plainest reading of "min == max";
+    # p99/median and p95/median show where the spread comes from (a tight body with a tail, or a body that is
+    # itself wide). min/median is printed because a low min is a separate disease from a high max.
+    for series, _rx in SERIES:
+        rows = [(lab, st[series]) for _m, lab, st, _p in legs if series in st]
+        if not rows:
+            continue
+        print(f"== {series}")
+        print(f"   {'leg':34s} {'min':>9s} {'median':>9s} {'p95':>9s} {'p99':>9s} {'max':>9s} "
+              f"{'max/min':>8s} {'p99/med':>8s} {'p95/med':>8s} {'min/med':>8s}")
+        for lab, st in rows:
+            med = st["median"]
+            if med <= 0:
+                # A series with a 0 median (a symbol-grained receive) has no meaningful ratio: say so instead of
+                # printing an infinity that reads like a catastrophe.
+                print(f"   {lab:34s} {st['min']:9.1f} {med:9.1f} {st['p95']:9.1f} {st['p99']:9.1f} {st['max']:9.1f} "
+                      f"{'n/a':>8s} {'n/a':>8s} {'n/a':>8s} {'n/a':>8s}")
+                continue
+            print(f"   {lab:34s} {st['min']:9.1f} {med:9.1f} {st['p95']:9.1f} {st['p99']:9.1f} {st['max']:9.1f} "
+                  f"{st['max'] / st['min'] if st['min'] > 0 else float('nan'):8.2f} "
+                  f"{st['p99'] / med:8.2f} {st['p95'] / med:8.2f} {st['min'] / med:8.3f}")
+        print()
     if excluded:
         print(f"# excluded (perturbed by construction, dev doc 10.3/10.17): " + ", ".join(excluded))
-    print()
-    print(f"{'series':24s} {'stat':7s} {'min over legs':>14s} {'max over legs':>14s} {'spread':>9s}   witness")
-    for series, _rx in SERIES:
-        stats = [(lab, st[series]) for _m, lab, st, _p in legs if series in st]
-        if len(stats) < 2:
-            continue
-        for stat in STABILITY_STATS:
-            vals = [(lab, st[stat]) for lab, st in stats if st.get(stat) is not None]
-            if len(vals) < 2:
-                continue
-            lo_lab, lo = min(vals, key=lambda t: t[1])
-            hi_lab, hi = max(vals, key=lambda t: t[1])
-            # A statistic that is 0 on every leg (a symbol-grained receive has median 0) has no meaningful
-            # ratio: say so instead of printing `inf`, which reads like a catastrophic instability.
-            if lo <= 0:
-                sp = "n/a" if hi == lo else "0->{:.1f}".format(hi)
-            else:
-                sp = f"{(hi - lo) / lo * 100.0:+.1f}%"
-            # The witnesses are worth the width: "stable" without the legs that held the ends is unfalsifiable -
-            # and they are printed IN FULL, because a truncated label is not something a reader can look up.
-            wit = "" if lo_lab == hi_lab else f"low {lo_lab}   high {hi_lab}"
-            print(f"{series:24s} {stat:7s} {lo:14.1f} {hi:14.1f} {sp:>9s}   {wit}")
-        print()
     print("# the work each leg did (a series whose duration follows the payload cannot be read without this):")
     for _m, lab, _st, payload in legs:
         print(f"#   {lab:34s} {payload}")
