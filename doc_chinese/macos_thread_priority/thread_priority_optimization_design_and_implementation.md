@@ -389,5 +389,46 @@ setschedparam(SCHED_OTHER, 31) 之后再来一次      -> 1 (EPERM)：**不可�
 ② 更硬的一条 —— 10.5 实测**时间约束与 QoS 互斥**，施用它会**再次**把 QoS 档清掉并把 `pthread_setschedparam` 变成 EINVAL。
 ⇒ 建议 P4 **维持"最后选项"并且暂不施用**；真要试，必须**一次只改一个线程**（现在 `bind_thread_to_performance_core()` 没有线程过滤）。
 
-### 10.9 待补
+### 10.10 Linux 复核（Ubuntu 台架 `jwang@192.168.0.106:~/work/ocudu`，2026-10-01）
+
+**怎么把 commit 送过去**：本机 `git bundle create <file> apple-silicon` → `scp` → 台架 `git fetch <bundle> apple-silicon`
+→ `git merge --ff-only FETCH_HEAD`（台架的 `032948b560` 是本 commit 的祖先，所以是快进；**不动共享远端**）。
+
+| 检查 | 结果 |
+|---|---|
+| `cmake --build build --target macos_compat_test ul_pipeline_probe_test` | ★ **抓到第 1 个真实错误**：`attr_qos_is_opt_in_and_platform_gated` 里 `qos_class_t qos` 声明在 `#if defined(__APPLE__)` **外面**（该类型只有 Darwin 有）。已修（commit `268f3b1760`，把声明移进守卫内）。**这就是跑台架的理由** |
+| `ctest -R "macos_compat\|ul_pipeline_probe"` | **22/22 通过**（1 skip = `compiled_out_without_flow_probes`，因为台架的 build 是 `ENABLE_FLOW_PROBES=OFF`）|
+| **Linux + `-DOCUDU_FLOW_PROBES` 定点编译** | ✅ 通过。台架的 build 是 probes **OFF**，所以 P1 那些分支在 Linux 上永远不会被编译到；用一个只 include 探针头并**实例化**新接口的 TU（`-Werror -Wall -Wextra-semi -Wshadow`，用台架自己的 flags）补上这一格 |
+| 全量 `cmake --build build -j 8` | ★ **抓到第 2 个真实错误，而且是"默认配置根本编不过"**（见下），已修（commit `94e93cc482`）⇒ 修后 **`BUILD_RC=0`、`warning:` 计数 = 0** |
+| 全量 `ctest -L phy -j 4` | ✅ **184/184 通过，0 失败**（1 skip = `lower_phy_uplink_processor_assembly_arm`，登记的禁用臂）。本机 macOS 同一标签是 208 个用例（平台差异：memcheck/仅 Apple 的用例），**两边的通过率都是 100%** |
+
+**第 2 个错误（与本线无关，但只有台架能看见）**：`ENABLE_FLOW_PROBES=OFF` —— **项目的默认值**，也是台架用的配置 ——
+在 `lib/phy/lower/lower_phy_baseband_processor.cpp` 上被 GCC 以 `-Werror=unused-variable` 拒收：
+`spans_stream_start` 只被 `#if defined(OCUDU_FLOW_PROBES)` 那一臂消费，而 `ul_rx_note_call()` **本身不是可选的**
+（它的副作用就是 `[ul_rx_timing]` 那条**每平台都判**的交付序列），所以调用必须留着、只有返回的标志是条件性的。
+本机是 **clang + probes ON**，两个条件都不满足 ⇒ 这条线从 `328d273e0f` 起就一直是断的，没人看见。
+修法 = `[[maybe_unused]]`，**任何平台、任何配置下行为不变**。
+
+**"关着时逐字节不变"的两条实证**
+1. **结构**：`git diff` 里**没有任何既有的打印语句被修改** —— 新字段/新块全部落在已经由 `OCUDU_UL_TIMING_EVENTS` 门控的
+   `print_timing_events()` 内部，`[sched]` 是一个**新行**且由 `OCUDU_FLOW_PROBES` + `OCUDU_SCHED_VERBOSE` 双门控。
+2. **实测**（本机 loopback，全部旋钮不设）：完整一条腿（`contract MET`），stderr 里
+   `tcpu=` / `ivcsw_rate=` / `thread=…#` / `[sched]` / `none above the … floor` 的出现次数 **全部为 0**。
+
+### 10.11 ★ 第一对腿的**预登记**（仪器本身怎么算"装好了"）
+
+飞之前登记，免得事后挑解释。**读数腿** = 与验收腿同配方 + `OCUDU_SCHED_VERBOSE=1`；**验收腿**不设任何新开关。
+
+| 检查 | 期望（默认臂）| 反向（说明仪器或修复坏了）|
+|---|---|---|
+| `[sched]` 行数 | = 该腿的 `unique_thread` 线程数（loopback 11、真电台 ≥ 24）| 0 行 ⇒ 两把钥匙没同时开 |
+| RT 线程（`rt_intent=1`）| `req=USER_INTERACTIVE eff=UNSPECIFIED posix=FIFO/44..46` —— **这正是今天的真实现状**，不是故障 | `eff=USER_INTERACTIVE` ⇒ **10.5 的机制被推翻了**，必须重开那一节 |
+| 非 RT 线程（`rt_intent=0`）| `req=USER_INITIATED eff=USER_INITIATED posix=OTHER/…` | `eff=UNSPECIFIED` ⇒ 两条路的差别消失，机制另说 |
+| B 臂（`OCUDU_SCHED_SKIP_POSIX_RT=1`）| RT 线程 `eff=USER_INTERACTIVE posix=OTHER/31` | 仍是 `UNSPECIFIED` ⇒ 跳过没生效或档另有来路 |
+| `[ul_timing_events]` 头 | 有 `leg : over …s … = …/ms` 一行（非零速率）| 缺行 ⇒ 接收路径没跑起来 |
+| 每条事件 | 都有 `thread=<名>#<id>`；rx 事件有 `tcpu=`（`-` 也算**合法**读数，见规则 1）；`ivcsw_rate=` 与 `ivcsw/win` 自洽 | 事件行缺 `thread=` ⇒ 归因链断了 |
+| **相位块**（加载腿）| `ce`/`t2f`/`eqd`/`ldpc` 四块**应各有一到数条**（历史 max：ce 1.2 ms > 1 ms floor、t2f 0.7–13 ms > 2 ms、eqd 3–13 ms > 3 ms、ldpc 441–961 µs > 500 µs）| 全 "none above the floor" 而**载荷资格成立** ⇒ 相位 floor 定得不对，回 P0 重导 |
+| 判据 | C1/C2（高层 §5.2）在**当前 HEAD** 上成立 | 挂 C2 而 C1 过 ⇒ "整体变慢"，先查是不是本次改动带进来的 |
+
+### 10.12 待补
 （每次飞腿/改动后追加：做了什么、读数、判据是否满足、更正了哪一条。）
