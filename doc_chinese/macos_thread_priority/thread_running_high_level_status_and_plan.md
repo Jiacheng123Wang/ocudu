@@ -206,3 +206,5 @@
 | 临时产物 | `work_tmp/`（**git ignore**）| 采样文件、dump、scratch |
 
 **上游（历史）**：`../phy_latency/`（Q27 收口 §6.248、macOS 规划 §6.249）、`../phy_pipeline_gpu/`（更早的阶段）。
+
+**树级文档**：`../ocudu_env_knobs_inventory_and_leg_whitelist.md`（生成物：全部 `OCUDU_*` 旋钮的默认值/读取点/腿 + 验收腿白名单）—— 本线新增的任何旋钮都要在那里出现。

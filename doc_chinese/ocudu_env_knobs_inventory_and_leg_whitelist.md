@@ -1,7 +1,10 @@
-# OCUDU_* 旋钮清单（**生成物** + 人工判读）
+# OCUDU_* 环境旋钮清单 + 验收腿白名单（**生成物** + 人工判读）
 
-> 生成方式：`python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > doc_chinese/phy_latency/knob_inventory.md`
-> 本次生成：commit `c1b59d0aa5`。**不要手改正文**——改生成器或改人工判读小节。
+> 范围是**整棵树**（`lib/`、`apps/`、`include/`、`tests/` 里的 `getenv("OCUDU_*")`），不限于某一条工作线。
+> 2026-10-01 从 `phy_latency/knob_inventory.md` 上移到本目录并改名（旧路径只作历史）。
+
+> 生成方式：`python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > doc_chinese/ocudu_env_knobs_inventory_and_leg_whitelist.md`
+> 本次生成：commit `d73d0864bd`。**不要手改正文**——改生成器或改人工判读小节。
 > （生成器把**生成那一刻的 HEAD**写进这一行；要把这一行也追平 HEAD，就重跑生成器再提交一次——那一次是纯文档差异。）
 >
 > **默认值**是**从守卫表达式读出来的**（`ON` = 不设或非 0 都开；`OFF` = 必须显式置 1；`AUTO` = 由别处推导；`= 14` / `= "vdsp"` = 默认是一个**值**而不是开关，腿不设它时用的就是这个值；`?` = 需要读注释）。
@@ -162,7 +165,7 @@
 | `OCUDU_LANE_ABLATE_EVERY` | ? | lib | `lib/phy/metal/ocudu_metal_burst.mm:455` | 3 | `lib/phy/metal/ocudu_metal_burst.mm` | 15 | 12/3 | 8 |
 | `OCUDU_LANE_ABLATE_STAGE` | OFF | lib | `lib/phy/metal/ocudu_metal_burst.mm:284` | 1 | `lib/phy/metal/ocudu_metal_burst.mm` | 10 | 19/5 | all,ce,demap,eq,front_end |
 | `OCUDU_LANE_DIAG_SPLIT` | ? | lib | `lib/phy/metal/ocudu_metal_burst.mm:884` | 1 | `lib/phy/metal/ocudu_metal_burst.mm` | 3 | 29/7 | 1 |
-| `OCUDU_METAL_GPU_TIME` | OFF | lib | `lib/phy/metal/ocudu_metal_queue.mm:325` | 2 | `lib/phy/metal/ocudu_metal_queue.mm` | 114 | 128/23 | 1 |
+| `OCUDU_METAL_GPU_TIME` | OFF | lib | `lib/phy/metal/ocudu_metal_queue.mm:325` | 2 | `lib/phy/metal/ocudu_metal_queue.mm` | 114 | 130/25 | 1 |
 | `OCUDU_MMSE_DEBUG` | ? | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_metal_mmse_engine.mm:412` | 2 | `lib/phy/upper/signal_processors` | 0 | 21/7 | — |
 | `OCUDU_PROBE_GAPPED` | ? | test | `lib/phy/upper/channel_processors/metal/test/metal_chain_probe.cpp:268` | 1 | `lib/phy/upper/channel_processors` | 0 | 8/2 | — |
 | `OCUDU_PROBE_RE` | = 1272 | test | `lib/phy/upper/channel_processors/metal/test/metal_dispatch_probe.cpp:57` | 1 | `lib/phy/upper/channel_processors` | 0 | 0/0 | — |
@@ -175,14 +178,14 @@
 | `OCUDU_UL_DUMP_MAX_RB` | = 0 | lib | `lib/phy/upper/channel_processors/pusch/ul_capture.cpp:52` | 1 | `lib/phy/upper/channel_processors` | 0 | 3/2 | — |
 | `OCUDU_UL_DUMP_TD` | ? | lib | `lib/phy/lower/processors/uplink/puxch/puxch_processor_impl.cpp:35` | 2 | `lib/phy/lower/processors` | 0 | 14/7 | — |
 | `OCUDU_UL_DUMP_TD_SLOTS` | = 4 | lib | `lib/phy/lower/processors/uplink/puxch/puxch_processor_impl.cpp:45` | 1 | `lib/phy/lower/processors` | 0 | 2/2 | — |
-| `OCUDU_UL_PHASE_SEGMENTS` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1814` | 1 | `include/ocudu` | 155 | 125/21 | 1 |
+| `OCUDU_UL_PHASE_SEGMENTS` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1814` | 1 | `include/ocudu` | 155 | 127/23 | 1 |
 | `OCUDU_UL_RX_POOL_DROP` | ? | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:1190` | 1 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 1 | 17/2 | 0 |
 | `OCUDU_UL_RX_POOL_DROP_FORCE` | = 0 | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:1203` | 1 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 1 | 11/3 | 20 |
 | `OCUDU_UL_RX_POOL_SIZE` | ? | lib | `lib/phy/lower/lower_phy_factory.cpp:226` | 1 | `lib/phy/lower/lower_phy_factory.cpp` | 1 | 8/4 | 12 |
 | `OCUDU_UL_RX_SYMBOLS` | = 1 | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:943` | 2 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 4 | 83/14 | 1,7 |
 | `OCUDU_UL_SLOT_TRACE` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:905` | 1 | `include/ocudu` | 11 | 43/14 | 512 |
 | `OCUDU_UL_STALE_US` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1889` | 1 | `include/ocudu` | 0 | 4/3 | — |
-| `OCUDU_UL_TIMING_EVENTS` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:939` | 1 | `include/ocudu` | 5 | 14/2 | 16 |
+| `OCUDU_UL_TIMING_EVENTS` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:939` | 1 | `include/ocudu` | 5 | 21/6 | 16 |
 | `OCUDU_USRSCTP_MODE` | ? | lib | `lib/gateways/sctp_socket_usrsctp.cpp:117` | 1 | `lib/gateways` | 0 | 2/1 | — |
 
 ### 3.1 既没有腿登记行、也从未在记录里出现过：8 个

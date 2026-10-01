@@ -873,7 +873,7 @@ D11 `waiter-committed-first > 0` 且 `max` ≈ 停顿 ⇒ **Q9-G 成立**，做�
 |---|---|---|
 | 1 | **刷新本文件 §1–§5**（原文停在 09-25/26，与 §0 的现状不一致）| ✅ **本次完成**（§1–§5 已按 `ee8eb8679e` 重写并加口径说明）|
 | 2 | ★ **门禁的两处盲点**：`milestone_audit.sh` 与 `leg_gate.sh` **都不看 `knob` 行、也不看 CRC** ⇒ **一条带测量旋钮的臂腿可以冒充验收腿**（`p84`：契约 9/9、0 gaps、crossings 0、stale 0，唯 CRC-OK 只有 48%）| ✅ **已完成**（两条检查 + `leg_gate.sh` 的三处绑定错与两处字面量过期；验证：审计 23/2/0→**28/0/0**、`leg_gate` 在 `p72`/`p85`/`p86` 上 9/9、在 `p84` 上点名失败）|
-| 3 | ★ **旋钮盘点**：树里 **~110 个 `OCUDU_*`** 的"交付 / 测量 / 已死 + 默认值 + 出处"清单 | ✅ **本次做**（`knob_inventory.md` + 生成脚本）|
+| 3 | ★ **旋钮盘点**：树里 **~110 个 `OCUDU_*`** 的"交付 / 测量 / 已死 + 默认值 + 出处"清单 | ✅ **本次做**（`knob_inventory.md` + 生成脚本；**2026-10-01 上移并改名为 `../ocudu_env_knobs_inventory_and_leg_whitelist.md`**）|
 | 4 | **空口腿欠账**：一对 **HEAD 上**的腿 | ✅ **已完成（2026-09-27）**：`p85-n78-default` + `p86-n78-stress`（`b4267fb8b6`）⇒ 审计 **28 PASS / 0 FAIL / 0 RED ⇒ GREEN** |
 | 5 | 可选：`p83` 那次**电台侧 1 gap / 1 rx overflow** 的概率累积（V3 家族偶发，机制在电台/USB 侧）| ⏳ 低优先 |
 
@@ -950,7 +950,7 @@ D11 `waiter-committed-first > 0` 且 `max` ≈ 停顿 ⇒ **Q9-G 成立**，做�
 | 类 | 文件 | 说明 |
 |---|---|---|
 | design & implementation | `gpu_phy_latency_optimization_design_and_implementation.md` | 现象/机制/仪表/跑腿规范 + **追加式实施记录**（§6.1–§6.121 P0/Q9/P1/P2/V1–V5；**§6.122–§6.141 = 收口、那 ~450 µs 的调查与判决**；**§6.142 = 收口后的理账：文档刷新 + 门禁补盲点 + 旋钮盘点**）+ 杠杆与候选 + 未决 |
-| **旋钮清单** | **`knob_inventory.md`** | ★ **生成物**（`python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > …`）：树里 **122 个 `OCUDU_*`** 的默认值（从守卫表达式读出）、首个读取点、飞过的腿、记录提及，以及**验收腿的旋钮白名单**。**改生成器，不要手改正文** |
+| **旋钮清单**（2026-10-01 上移+改名）| **`../ocudu_env_knobs_inventory_and_leg_whitelist.md`** | ★ **生成物**（`python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > doc_chinese/ocudu_env_knobs_inventory_and_leg_whitelist.md`）：**整棵树**里 **123 个 `OCUDU_*`** 的默认值（从守卫表达式读出，不是读注释）、首个读取点、飞过的腿、记录提及，以及**验收腿的旋钮白名单**。**改生成器，不要手改正文**（旧路径 `phy_latency/knob_inventory.md` 只作历史）|
 | session handoff memo | **`session_handoff_2026-09-27-3.md`** | **最新交接快照（新会话先读这一份）**：那一跳 ~450 µs 的判决与收口、消去法仪器的两次加固、门禁与文档的账、下一步（LDPC→Metal 或 S-E）。旧的 `session_handoff_2026-09-2[4-7]-*.md` 只作历史 |
 | high level status and plan | **`high_level_status_and_plan.md`** | 本文件（**§0 只作历史；最新读数在文件开头的滚动块**；§1–§5 = 现状，2026-09-27 重写）|
 | 目录约定 | `README.md` | 三类文档的分工、文件命名、引用规范、旧名映射 |

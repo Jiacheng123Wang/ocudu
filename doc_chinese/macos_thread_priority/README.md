@@ -33,6 +33,12 @@
 * `../phy_pipeline_gpu/`：更早的阶段（融合车道、门与腿脚本的**历史**位置）。
 * `../macos_compat_refactor/`、`../test_environment/`：macOS 兼容层与台架的历史记录。
 
+## 相关的树级文档
+
+* **`../ocudu_env_knobs_inventory_and_leg_whitelist.md`**（生成物）：**整棵树**的 `OCUDU_*` 旋钮默认值/读取点/飞过的腿 + **验收腿白名单**。
+  本线的任何新旋钮都必须在**改生成器**（`../phy_latency/wip/gen_knob_inventory.py`）之后重新生成它，并按需加入白名单。
+* `../README.md`：`doc_chinese/` 的总索引。
+
 ## 引用规则（写文档时必须守）
 
 1. **一台仪器两把钥匙**：编译期开关 + env，默认关；**关着时报告逐字节不变**。

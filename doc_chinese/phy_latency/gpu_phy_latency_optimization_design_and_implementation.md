@@ -14571,6 +14571,8 @@ LEG_CONFIG=... OCUDU_DFT_BACKEND=generic run_leg.sh gpu p171-n78-novdsp --regime
 
 ### 6.234 ★ `knob_inventory.md` 追平代码：**+1 旋钮、13 行默认值改正**（其中 2 行是**分类**错误 —— 一个诊断被印成交付形态、一个真交付成员被漏掉）；生成器**四个**缺陷一并修掉（用户要求"根据最新的代码更新文档，包括新加的和与实际代码不一致的"；2026-10-01）
 
+> ➡ **2026-10-01 路径变更（用户指示）**：本清单已**上移并改名为** `doc_chinese/ocudu_env_knobs_inventory_and_leg_whitelist.md`（范围是**整棵树**，不限于 `phy_latency/` 这一条线）；生成器仍在 `doc_chinese/phy_latency/wip/gen_knob_inventory.py`。本节以下（以及 §6.142 / 会话快照里）的 `knob_inventory.md` 一律指这份文件。
+
 **① 要求与做法**：`knob_inventory.md` 是**生成物**（正文不许手改，见文件头），所以"更新文档" = **改生成器 + 重跑 + 只动人工判读小节**。每个数字都是"重跑 + 逐行读源码"得来的，不是读文档得来的。
 
 **② 机械差**（`git show HEAD:doc_chinese/phy_latency/knob_inventory.md` vs 重跑，逐行）：

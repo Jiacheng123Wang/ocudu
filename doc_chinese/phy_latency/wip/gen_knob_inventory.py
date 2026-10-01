@@ -32,7 +32,7 @@
 #     Recognised in the ternary and strcmp forms; `?` remains for the "set = on" inline predicates, which are
 #     deliberately NOT read as ON - section 1 is a whitelist and a probe must never enter it.
 #
-# usage:  python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > doc_chinese/phy_latency/knob_inventory.md
+# usage:  python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > doc_chinese/ocudu_env_knobs_inventory_and_leg_whitelist.md
 
 import collections
 import os
@@ -42,7 +42,7 @@ import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
 LOGDIR = os.path.join(ROOT, "doc_chinese", "phy_pipeline_gpu", "wip", "logs")
-SELF = os.path.join(ROOT, "doc_chinese", "phy_latency", "knob_inventory.md")  # this script's own output
+SELF = os.path.join(ROOT, "doc_chinese", "ocudu_env_knobs_inventory_and_leg_whitelist.md")  # own output
 SRC_EXT = (".cpp", ".h", ".mm", ".metal")
 
 READ_RX = re.compile(r'getenv\(\s*"(OCUDU_[A-Z0-9_]+)"\s*\)')
@@ -231,9 +231,11 @@ def main():
     head = subprocess.run(["git", "-C", ROOT, "rev-parse", "--short=10", "HEAD"],
                           capture_output=True, text=True).stdout.strip()
 
-    print("# OCUDU_* 旋钮清单（**生成物** + 人工判读）")
+    print("# OCUDU_* 环境旋钮清单 + 验收腿白名单（**生成物** + 人工判读）\n")
+    print("> 范围是**整棵树**（`lib/`、`apps/`、`include/`、`tests/` 里的 `getenv(\"OCUDU_*\")`），不限于某一条工作线。")
+    print("> 2026-10-01 从 `phy_latency/knob_inventory.md` 上移到本目录并改名（旧路径只作历史）。")
     print()
-    print("> 生成方式：`python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > doc_chinese/phy_latency/knob_inventory.md`")
+    print("> 生成方式：`python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > doc_chinese/ocudu_env_knobs_inventory_and_leg_whitelist.md`")
     print(f"> 本次生成：commit `{head}`。**不要手改正文**——改生成器或改人工判读小节。")
     print("> （生成器把**生成那一刻的 HEAD**写进这一行；要把这一行也追平 HEAD，就重跑生成器再提交一次——那一次是纯文档差异。）")
     print(">")
