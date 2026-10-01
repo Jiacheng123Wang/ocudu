@@ -3,6 +3,9 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ocudu/phy/generic_functions/generic_functions_factories.h"
+#if defined(OCUDU_VDSP_DFT)
+#include "dft_processor_vdsp.h"
+#endif
 #include "dft_processor_generic_impl.h"
 #include "ocudu/support/cpu_features.h"
 #include "ocudu/support/error_handling.h"
@@ -147,7 +150,63 @@ private:
 };
 #endif // OCUDU_METAL_DFT
 
+#if defined(OCUDU_VDSP_DFT)
+/// \brief Decorator that runs the vDSP-backed DFT for the sizes it covers and the CPU chain for the rest.
+///
+/// Apple only, and on by default there (dev doc 6.231). Modelled on dft_processor_factory_metal: the
+/// accelerator is a DECORATOR over the CPU chain, never part of it, so a configuration vDSP cannot take
+/// (any length that is not f * 2^n with f in {1, 3, 5, 15} - 18432, which this tree uses, is one) falls
+/// back transparently instead of failing. dft_processor_vdsp::is_valid() is what decides: the constructor
+/// declines a size it cannot take.
+class dft_processor_factory_vdsp : public dft_processor_factory
+{
+public:
+  dft_processor_factory_vdsp() : fallback(create_dft_processor_factory_cpu())
+  {
+    report_fatal_error_if_not(fallback != nullptr, "Failed to create the fallback DFT factory.");
+  }
+
+private:
+  std::unique_ptr<dft_processor> create(const dft_processor::configuration& dft_config) override
+  {
+    if (dft_processor_vdsp::is_supported_size(dft_config.size)) {
+      auto dft = std::make_unique<dft_processor_vdsp>(dft_config);
+      if (dft->is_valid()) {
+        return dft;
+      }
+    }
+    return fallback->create(dft_config);
+  }
+
+  std::shared_ptr<dft_processor_factory> fallback;
+};
+#endif // OCUDU_VDSP_DFT
+
 } // namespace
+
+std::shared_ptr<dft_processor_factory> ocudu::create_dft_processor_factory_cpu()
+{
+  std::shared_ptr<dft_processor_factory> dft_proc_factory;
+
+  if ((dft_proc_factory = create_dft_processor_factory_fftw())) {
+    return dft_proc_factory;
+  }
+
+  if ((dft_proc_factory = create_dft_processor_factory_fftz())) {
+    return dft_proc_factory;
+  }
+
+  return create_dft_processor_factory_generic();
+}
+
+std::shared_ptr<dft_processor_factory> ocudu::create_dft_processor_factory_vdsp()
+{
+#if defined(OCUDU_VDSP_DFT)
+  return std::make_shared<dft_processor_factory_vdsp>();
+#else  // OCUDU_VDSP_DFT
+  return nullptr;
+#endif // OCUDU_VDSP_DFT
+}
 
 std::shared_ptr<dft_processor_factory> ocudu::create_dft_processor_factory_generic()
 {

@@ -12,3 +12,9 @@ add_test(dft_processor_generic_benchmark dft_processor_benchmark -F generic -R 1
 if (ENABLE_FFTW AND FFTW3F_FOUND)
     add_test(dft_processor_fftw_benchmark dft_processor_benchmark -F fftw -R 10 -s)
 endif (ENABLE_FFTW AND FFTW3F_FOUND)
+if (APPLE)
+    # Apple's vDSP (Accelerate) DFT - the platform default since dev doc 6.231. NOTE: no `-s` here, unlike
+    # the two entries above: `-s` turns the benchmarker SILENT, so those two tests print nothing, measure
+    # nothing and pass trivially. This one actually creates and runs a processor for every size.
+    add_test(dft_processor_vdsp_benchmark dft_processor_benchmark -R 10)
+endif (APPLE)

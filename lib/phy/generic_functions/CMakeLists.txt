@@ -48,11 +48,28 @@ if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
     set_source_files_properties(dft_processor_ci16_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;")
 endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
 
+# Apple vDSP (Accelerate) DFT processor: the only path in this tree that reaches Apple's matrix units, and
+# measured 1.87x faster than the in-tree generic implementation for the 768-point transform the RX front end
+# runs (dev doc 6.231). Apple only, and ON BY DEFAULT there (see create_dft_processor_factory() in
+# generic_functions_factories.h); OCUDU_DFT_BACKEND=generic turns it off so an A/B arm can run on ONE binary.
+# Every other platform is untouched: the source, the framework and the define are all gated by APPLE.
+if (APPLE)
+    list(APPEND OCUDU_DFT_SOURCES dft_processor_vdsp.cpp)
+    list(APPEND OCUDU_DFT_LIBRARIES "-framework Accelerate")
+endif (APPLE)
+
 add_library(ocudu_dft STATIC ${OCUDU_DFT_SOURCES})
 target_include_directories(ocudu_dft PRIVATE ${OCUDU_DFT_INCLUDE_DIRS})
 target_link_directories(ocudu_dft PRIVATE ${OCUDU_DFT_LIBRARY_DIRS})
 target_link_libraries(ocudu_dft PRIVATE ${OCUDU_DFT_LIBRARIES} ocuduvec ocudulog)
 target_compile_definitions(ocudu_dft PRIVATE ${OCUDU_DFT_DEFINITIONS})
+
+# PUBLIC, exactly like OCUDU_METAL_DFT below: a consumer that wants to know whether the accelerator exists
+# (the DFT unit test adds a "vdsp" case under this define) has to see it. PRIVATE here means the tests
+# silently stop covering the backend, which is what happened on the first build of this commit.
+if (APPLE)
+    target_compile_definitions(ocudu_dft PUBLIC OCUDU_VDSP_DFT)
+endif (APPLE)
 
 # Metal GPU DFT processor (Apple Silicon): engine + adapter live in metal/.
 if(ENABLE_METAL_DFT)

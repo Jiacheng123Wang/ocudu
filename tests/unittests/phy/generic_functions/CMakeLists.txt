@@ -8,7 +8,12 @@ set_directory_properties(PROPERTIES LABELS "phy")
 add_subdirectory(precoding)
 
 add_executable(dft_processor_test dft_processor_test.cpp)
-target_include_directories(dft_processor_test PRIVATE ${CMAKE_SOURCE_DIR}/tests/unittests)
+# The private generic_functions dir is needed because the Apple vDSP case asserts the accelerator's SIZE
+# CONTRACT (f * 2^n, f in {1,3,5,15}) against dft_processor_vdsp::is_supported_size, i.e. the rule the
+# transparent fallback hangs on. Everywhere else the public factory header is enough.
+target_include_directories(dft_processor_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/unittests
+    ${CMAKE_SOURCE_DIR}/lib/phy/generic_functions)
 target_link_libraries(dft_processor_test ocudulog ocudu_dft GTest::gtest GTest::gtest_main)
 add_test(dft_processor_test dft_processor_test)
 

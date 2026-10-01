@@ -6,6 +6,9 @@
 #include "ocudu/adt/format.h"
 #include "ocudu/phy/generic_functions/generic_functions_factories.h"
 #include "ocudu/ran/transform_precoding/transform_precoding_helpers.h"
+#ifdef OCUDU_VDSP_DFT
+#include "dft_processor_vdsp.h"
+#endif
 #include "ocudu/support/math/math_utils.h"
 #include "fmt/ostream.h"
 #include <cmath>
@@ -74,6 +77,10 @@ protected:
       dft_factory = create_dft_processor_factory_fftw_slow();
     } else if (dft_factory_str == "fftz") {
       dft_factory = create_dft_processor_factory_fftz();
+    } else if (dft_factory_str == "vdsp") {
+      // Apple's vDSP (Accelerate) DFT, the platform default since dev doc 6.231. nullptr on other platforms,
+      // which is why the parameter is added only under the same define the CMake uses.
+      dft_factory = create_dft_processor_factory_vdsp();
     }
   }
 
@@ -125,6 +132,69 @@ protected:
     ditfft(output, input, exp, N, 1);
   }
 };
+
+#ifdef OCUDU_VDSP_DFT
+// The size contract of the Apple accelerator: vDSP_DFT takes f * 2^n with f in {1, 3, 5, 15} ONLY, and the
+// factory is a decorator that must fall back TRANSPARENTLY for every other length - a configuration it
+// silently mangled or refused would be far worse than a slower transform. The shape that matters here is
+// 18432 = 9 * 2^11: its odd part is 9, not one of the four radices, and it IS one of the OFDM sizes in the
+// tree's own list (the generic chain supports it, the accelerator does not).
+//
+// This case is deliberately outside the parameterised list above, whose sizes are all vDSP-compatible:
+// it is the only place where "the decorator declined and the CPU chain answered" is checked, and it
+// compares the result against the generic factory's own processor rather than against the reference DFT,
+// so a wrong answer from either side fails.
+TEST(DFTProcessorVdsp, UnsupportedSizeFallsBackToTheCpuChain)
+{
+  const std::vector<unsigned> vdsp_ok  = {12, 120, 768, 1024, 1536, 6144};
+  const std::vector<unsigned> vdsp_not = {28, 1000, 9216, 18432};
+
+  for (unsigned size : vdsp_ok) {
+    ASSERT_TRUE(dft_processor_vdsp::is_supported_size(size)) << "size " << size << " should be vDSP-compatible";
+  }
+  for (unsigned size : vdsp_not) {
+    ASSERT_FALSE(dft_processor_vdsp::is_supported_size(size)) << "size " << size << " is not vDSP-compatible";
+  }
+
+  std::shared_ptr<dft_processor_factory> vdsp_factory = create_dft_processor_factory_vdsp();
+  std::shared_ptr<dft_processor_factory> cpu_factory  = create_dft_processor_factory_generic();
+  ASSERT_NE(vdsp_factory, nullptr);
+  ASSERT_NE(cpu_factory, nullptr);
+
+  std::uniform_real_distribution<float> dist(-M_PI, +M_PI);
+  for (unsigned size : {18432u, 768u}) {
+    for (dft_processor::direction direction : {dft_processor::direction::DIRECT, dft_processor::direction::INVERSE}) {
+      dft_processor::configuration config;
+      config.size = size;
+      config.dir  = direction;
+
+      std::unique_ptr<dft_processor> accelerated = vdsp_factory->create(config);
+      std::unique_ptr<dft_processor> reference   = cpu_factory->create(config);
+      ASSERT_NE(accelerated, nullptr) << "the accelerator factory refused size " << size;
+      ASSERT_NE(reference, nullptr);
+
+      span<cf_t> input = accelerated->get_input();
+      for (cf_t& value : input) {
+        value = std::polar(1.0F, dist(rgen));
+      }
+      std::copy(input.begin(), input.end(), reference->get_input().begin());
+
+      span<const cf_t> accelerated_out = accelerated->run();
+      span<const cf_t> reference_out   = reference->run();
+
+      // Same tolerance as the parameterised case: the accelerator changes the rounding, not the transform.
+      ASSERT_NE(accelerated_out.size(), 0);
+      ASSERT_EQ(accelerated_out.size(), reference_out.size());
+      float max_err = 0.0F;
+      for (unsigned i = 0; i != accelerated_out.size(); ++i) {
+        max_err = std::max(max_err, std::abs(accelerated_out[i] - reference_out[i]));
+      }
+      ASSERT_LT(max_err / std::sqrt(static_cast<float>(size)), ASSERT_MAX_ERROR)
+          << "size " << size << " " << dft_processor::direction_to_string(direction) << ": max error " << max_err;
+    }
+  }
+}
+#endif // OCUDU_VDSP_DFT
 
 TEST_P(DFTprocessorFixture, DFTProcessorUnittest)
 {
@@ -190,6 +260,10 @@ INSTANTIATE_TEST_SUITE_P(DFTProcessorTest,
                                                               ,
                                                               "fftz"
 #endif // HAVE_FFTZ
+#ifdef OCUDU_VDSP_DFT
+                                                              ,
+                                                              "vdsp"
+#endif // OCUDU_VDSP_DFT
                                                               ),
                                             ::testing::ValuesIn(dft_required_sizes),
                                             ::testing::Values(dft_processor::direction::DIRECT,

@@ -339,6 +339,15 @@
 > ② **`p169-n78-stress`**：UL 载荷 **34.34 MB / 103.1 s = 2.67 Mbit/s（基线 2.7×）**、CRC-OK **92.6%**、契约 8 of 9、`stale=0`、`gaps=0`、`cbs/lane=2.00`、V1 中位 1257.8（+12.7）、`AT/BELOW 0=2` + `excluded 9`、`dl_tx_call over 1ms=0`；
 > ③ ★ **两个工具缺陷（同一类：字面量/前提停在交付前）**：审计的 **stress 侧**契约仍要 `MET (9 of 9`；`a12_attribution_gate.sh` 的 **C3 在 plain route=0 时做 0/0** ⇒ 落到"第三条缺陷分支"文案上 ⇒ 两条健康腿被判缺陷。修法：stress 侧接受两种读数；**前提缺失就报缺失**（plain route=0 ⇒ C1–C4 NOT JUDGED），审计接受"无 FAIL + 不可判项由门自己记为 NOT JUDGED"；
 > ④ ⇒ ★ **`offline acceptance: GREEN`（29 PASS / 0 FAIL / 0 RED）**，本工作流第一次；
+> **2026-10-01 ★★ vDSP 的 DFT 后端已实现，macOS 上翻成默认（用户裁定"也应该做，只要没有负收益"；开发文档 §6.231）** ——
+> ① **实现**：新增 `dft_processor_vdsp`（`vDSP_DFT_Interleaved_*`，交织复、**不做去交织**、两方向都不归一化）；CPU 链拆成 `create_dft_processor_factory_cpu()`，
+>    vDSP 是**装饰器**（覆盖不了的长度透明回落，照 Metal 那套）；`create_dft_processor_factory()` = **平台默认**（Apple ⇒ vDSP，其他 ⇒ 原样）；
+>    旋钮 **`OCUDU_DFT_BACKEND=generic|vdsp`** ⇒ ★ A/B 可在**同一二进制**上跑；
+> ② **数值/覆盖**：单测参数表加 `"vdsp"` ⇒ **403/403 PASS**（134 条 vdsp 组合 + 1 条回落专测）；`ctest -L phy` **204/204**；回落专测当场纠掉我一个错的尺寸例子（612 连 generic 都不支持，真例是 **18432 = 9·2^11**）；
+> ③ **性能**（树内真实路径，同一次运行比值）：768 点 **generic 3.42 µs → vDSP 0.92 µs（3.7×）**、inverse 1.75 → 0.42 µs（4.2×）；1536 点上三者相同（瓶颈不在算法）；
+> ④ **预期收益 ~1 µs/跳（V1 的 ~0.1%）** —— 因为符号级下只有**最后一个**符号的变换暴露（§6.229②），判据是"**没有负收益**"而不是"省多少"；
+> ⑤ ⏳ **A/B（同二进制）**：`p170-n78-vdsp`（默认）vs `p171-n78-novdsp`（`OCUDU_DFT_BACKEND=generic`）；判据 **ΔV1 > +5 µs ⇒ 改回 generic**，**≤0 ⇒ 保持默认**；契约不变量两条腿逐字不变（纪律 68）；
+>
 > ⑤ ✅ **结构性发现（用户已裁定）**：交付改的是 **RX 侧** DFT（`effective.dft = cpu` 喂 lower PHY 的 **RX** 工厂）⇒ 交付模式下 Metal DFT 引擎一次都不跑、A1-2 要归因的 plain route（RX 引擎，PRACH 的 IDFT）整条为空 ⇒ 该仪器（与契约的 `dft radio inputs`）在交付模式下**没有总体**；
 >    ⚠ 措辞更正（用户指出、已按码与腿核实）：**DL 的 FFT/IFFT 一直在 CPU** —— 腿自己的启动诊断 `[lower_phy] DFT backend:` 在 `p161`(metal) 是 `rx=metal (GPU) tx=cpu`、在 `p167`(交付) 是 `rx=cpu tx=cpu`，**只差 `rx=`**；代码 `lower_phy_factory.cpp:45-47` 原文 *"The TX (IFFT) side always runs the default CPU implementation in this phase"*）；
 >    ✅ **裁定**：**接受"交付模式下 A1-2 = NOT JUDGED"**，边界写死 —— 只在 `plain route == 0` 时成立、门自己记录原因、有一次 Metal 变换就照旧逐条判（FAIL 仍是 FAIL）、**C5 永远判**；"定期飞历史形态腿"降为**可选**（纪律 64/65）；

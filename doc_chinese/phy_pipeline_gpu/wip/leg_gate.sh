@@ -75,18 +75,36 @@ def f(txt, rx):
 leg_txt, leg_err = read(leg_log)
 base_txt, base_err = read(base_log)
 
+def leg_slots(err):
+    """[ul_rx] blocks as SLOTS - and since the per-symbol receive policy became the default (dev doc 6.215
+    (1)) ONE BLOCK IS ONE OFDM SYMBOL, so blocks/14 is the slot count. Reading blocks as slots inflates the
+    wall clock by 14x and deflates every rate by the same factor: measured on p169-n78-stress this made the
+    stress-validity check read 0.24 Mbit/s against 0.77 (FAIL) for a leg that carried 34.34 MB in 103.1 s
+    (2.67 Mbit/s, 2.7x the baseline). Same two independent facts as wip/ul_load.sh: the [ul_rx_policy] line
+    says it in words, samples/blocks says it numerically on every leg, old or new (822.86 = 11520/14 on a
+    symbol leg, exactly 11520 on a whole-slot one)."""
+    blocks = f(err, r"\[ul_rx\] blocks=(\d+)")
+    if not blocks:
+        return None
+    samps = f(err, r"\[ul_rx\] blocks=\d+ samples=(\d+)")
+    spb   = (float(samps) / int(blocks)) if samps else None
+    nsym  = f(err, r"(\d+) of \d+ slot symbols")
+    nsym  = int(nsym) if nsym else 14
+    sym   = ("blocks of 1 OFDM symbol" in err) or (spb is not None and spb < 2000.0)
+    return (int(blocks) // nsym) if sym else int(blocks)
+
 def ul_mbps(txt, err):
-    slots = f(err, r"\[ul_rx\] blocks=(\d+)")
+    slots = leg_slots(err)
     if not slots:
         return None
-    dur = int(slots) * slot_ms / 1000.0            # slots x slot length
+    dur = slots * slot_ms / 1000.0                 # slots x slot length
     tbs = [int(x) for x in re.findall(r"PUSCH:.*?tbs=(\d+)", txt)]
-    return (sum(tbs) * 8 / dur / 1e6) if dur else None, len(tbs), int(slots)
+    return (sum(tbs) * 8 / dur / 1e6) if dur else None, len(tbs), slots
 
 def ul_duty(txt, err):
-    slots = f(err, r"\[ul_rx\] blocks=(\d+)")
+    slots = leg_slots(err)
     grants = len(re.findall(r"PUSCH:", txt))
-    return (100.0 * grants / int(slots)) if slots else None
+    return (100.0 * grants / slots) if slots else None
 
 b_mbps, b_grants, b_slots = (ul_mbps(base_txt, base_err) or (None, None, None))
 l_mbps, l_grants, l_slots = (ul_mbps(leg_txt, leg_err) or (None, None, None))
@@ -235,6 +253,43 @@ else:
 new_fmt = f(leg_err, r"(dft radio inputs: [^\n]*submit routes[^\n]*)")
 check("dft radio inputs in the NEW format (5.9.99)", new_fmt is not None, (new_fmt or "old format or missing")[:110])
 
+# ---- §6.198④'s DL-timeliness VALIDITY gate, RESTATED (dev doc 6.230; user ruling 2026-10-01) --------
+# OLD TEXT: "dl_tx_slack ... AT/BELOW 0 == 0 ... non-zero => this leg's link conclusions do not count".
+# It was written for the p153 transport incident (16/46/36 there, against 0 on p151/p152) and it was
+# CALIBRATED ON THE BROKEN INSTRUMENT: pairing the block's FIRST sample with the call's return inflated
+# every margin by one block (500us whole-slot, 35.7us symbol), so p151's "+416us" was really about
+# -84us - the healthy calibration legs had late hand-overs too, hidden by the inflation. With the clock
+# map fixed (6.213) AND the teardown window excluded (6.219 (8)) the IN-STREAM reading on six
+# transport-clean legs is 1..6 (p164 2 and 6, p165 2, p167 1, p168 1, p169 2), so the literal 0 is
+# unreachable, and the teardown tail that used
+# to supply most of the count is no longer in the population at all.
+# What replaces it is the CONJUNCTION THAT STILL CATCHES THE INCIDENT, and it keeps the incident's
+# shape: p153 was "late AND a slip/recv storm" (slip 21/9/467, recv 35/12/570), while p164/p165/p166
+# (the phone's data toggle off) were "2 late, NO storm" - this gate says "transport healthy, look
+# elsewhere" for the latter, which is the direction that would have saved two of those three legs.
+# NOTE the placement: this is a JUDGED row, so it must be appended BEFORE the rows are printed below.
+tx_windowed = f(leg_err, r"\[dl_tx_slack\][^\n]*excluded \d+ hand-over")
+tx_pop      = f(leg_err, r"\[dl_tx_slack\][^\n]*; every number above is over the (\d+) hand-over")
+late_in     = f(leg_err, r"\[dl_tx_slack\][^\n]*AT/BELOW 0=(\d+)")
+slips       = f(leg_err, r"\[ul_rx_timing\][^\n]*slip\(max=\d+us over 1ms=(\d+)")
+recvs       = f(leg_err, r"\[ul_rx_timing\][^\n]*recv\(max=\d+us over 1ms=(\d+)")
+gaps_txt    = f(leg_err, r"radio sample continuity: (\d+) gaps")
+tx_name = ("VALIDITY (6.198 (4) restated): AT/BELOW 0 <= 10 inside the stream AND no transport storm "
+           "(slip/recv over 1ms <= 10, gaps = 0)")
+if tx_windowed is None:
+    check_bound(tx_name, None, "", bound_here=False,
+                reason="the window-scoped reading needs the 2026-10-01 instrument ([dl_tx_slack] carrying "
+                       "'excluded N hand-over(s)'); this leg predates it, so its AT/BELOW 0 counts the "
+                       "teardown tail too")
+elif None in (late_in, slips, recvs, gaps_txt):
+    check(tx_name, None, f"cannot read every term: AT/BELOW 0={late_in} slip={slips} recv={recvs} gaps={gaps_txt}")
+else:
+    ok = (int(late_in) <= 10) and (int(slips) <= 10) and (int(recvs) <= 10) and (gaps_txt == "0")
+    check(tx_name, ok,
+          f"in-stream AT/BELOW 0={late_in} (population {tx_pop}), slip={slips}, recv={recvs}, gaps={gaps_txt}"
+          + ("" if ok else "  <- the p153 shape was 'late AND a slip/recv storm'; a small count with a clean "
+                           "transport is NOT a transport fault (6.230)"))
+
 print(f"pass 5 gate: {leg_lab}   (baseline {base_lab}, slot {slot_ms} ms)")
 print(f"  leg log: {os.path.basename(leg_log)}")
 print(f"  leg identity: regime={leg_regime}  config={os.path.basename(leg_cfg)}")
@@ -306,4 +361,5 @@ else:
     print(f"  [INFO           ] transport health (DL side, dev doc 6.157): cannot read "
           f"([dl_tx_slack]/[dl_tx_call]/[ul_rx_timing] missing from this leg's report)")
     print(f"                     'cannot read' is not 'healthy': do not use this leg for a receive-tail claim")
+
 PY

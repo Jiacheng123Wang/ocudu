@@ -71,6 +71,9 @@ int main(int argc, char** argv)
 
   std::shared_ptr<dft_processor_factory> fftz_dft_factory = create_dft_processor_factory_fftz();
 
+  // Apple's vDSP (Accelerate) DFT, the platform default since dev doc 6.231. nullptr everywhere else.
+  std::shared_ptr<dft_processor_factory> vdsp_dft_factory = create_dft_processor_factory_vdsp();
+
   benchmarker perf_meas("DFT", nof_repetitions);
 
   // Test for the most common DFT sizes
@@ -134,6 +137,25 @@ int main(int argc, char** argv)
 
           // Measure performance.
           perf_meas.new_measure(fmt::format("fftz {} {}", size, dft_processor::direction_to_string(direction)),
+                                size,
+                                [&dft]() { dft->run(); });
+        }
+      }
+
+      // Benchmark vDSP DFT if available (Apple only, dev doc 6.231).
+      if (vdsp_dft_factory) {
+        std::unique_ptr<dft_processor> dft = vdsp_dft_factory->create(config);
+        if (dft != nullptr) {
+          // Get DFT input buffer
+          span<cf_t> input = dft->get_input();
+
+          // Generate input random data.
+          for (cf_t& value : input) {
+            value = {dist(rgen), dist(rgen)};
+          }
+
+          // Measure performance.
+          perf_meas.new_measure(fmt::format("vdsp {} {}", size, dft_processor::direction_to_string(direction)),
                                 size,
                                 [&dft]() { dft->run(); });
         }

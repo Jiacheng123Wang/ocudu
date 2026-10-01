@@ -6,6 +6,8 @@
 
 #include "ocudu/phy/generic_functions/dft_processor.h"
 #include "ocudu/phy/generic_functions/dft_processor_ci16.h"
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 
 namespace ocudu {
@@ -79,26 +81,49 @@ create_dft_processor_factory_fftw_fast(bool avoid_wisdom = false, const std::str
 /// \return A valid pointer to a DFT processor factory if FFTW is available. Otherwise, \c nullptr.
 std::shared_ptr<dft_processor_factory> create_dft_processor_factory_fftw();
 
+/// \brief The CPU chain, without any platform-specific accelerator: FFTW, then AOCL-FFTZ, then generic.
+///
+/// This is what every consumer used to get from \ref create_dft_processor_factory. It is kept as its own
+/// entry point because the accelerators are DECORATORS: they wrap this chain and fall back into it per
+/// configuration, so they cannot be part of it (that would recurse).
+std::shared_ptr<dft_processor_factory> create_dft_processor_factory_cpu();
+
+/// \brief Creates a DFT processor factory that prefers Apple's vDSP (Accelerate framework) implementation.
+///
+/// vDSP covers lengths of the form f * 2^n with f in {1, 3, 5, 15}; any other configuration falls back
+/// transparently to \ref create_dft_processor_factory_cpu, so the factory never rejects a valid
+/// configuration because of the accelerator (18432 = 9*2^11, one of the OFDM sizes this tree uses, is one
+/// of those cases).
+/// \return A valid pointer to a DFT processor factory if vDSP is available. Otherwise, \c nullptr.
+std::shared_ptr<dft_processor_factory> create_dft_processor_factory_vdsp();
+
 /// \brief Factory helper that automatically selects the best available DFT processor.
 ///
 /// This function attempts to create a concrete @ref dft_processor_factory implementation according to the following
 /// priority list:
-/// 1. Fastest FFT in the West (FFTW);
-/// 2. AMD Optimized Computing Library FFT for Zen (AOCL-FFTZ); and
-/// 3. Generic DFT which might not support all DFT sizes.
+/// 1. Apple vDSP (Accelerate) - APPLE ONLY, and ON BY DEFAULT there (dev doc 6.231): it is 1.87x faster than
+///    the in-tree generic path for the 768-point transform the RX front end runs (2.88 -> 1.54us), and it is
+///    the only path in this tree that reaches Apple's matrix units;
+/// 2. Fastest FFT in the West (FFTW);
+/// 3. AMD Optimized Computing Library FFT for Zen (AOCL-FFTZ); and
+/// 4. Generic DFT which might not support all DFT sizes.
+///
+/// The accelerator can be turned OFF with \c OCUDU_DFT_BACKEND=generic (or forced with \c =vdsp), which is what
+/// lets an A/B arm run on ONE binary - the same contract the fusion knobs follow. On every platform other than
+/// Apple the behaviour is exactly \ref create_dft_processor_factory_cpu, unchanged.
 inline std::shared_ptr<dft_processor_factory> create_dft_processor_factory()
 {
-  std::shared_ptr<dft_processor_factory> dft_proc_factory;
-
-  if ((dft_proc_factory = create_dft_processor_factory_fftw())) {
-    return dft_proc_factory;
+#if defined(OCUDU_VDSP_DFT)
+  const char* backend  = std::getenv("OCUDU_DFT_BACKEND");
+  const bool  use_vdsp = (backend == nullptr) || (std::strcmp(backend, "vdsp") == 0);
+  if (use_vdsp) {
+    if (std::shared_ptr<dft_processor_factory> dft_proc_factory = create_dft_processor_factory_vdsp()) {
+      return dft_proc_factory;
+    }
   }
+#endif
 
-  if ((dft_proc_factory = create_dft_processor_factory_fftz())) {
-    return dft_proc_factory;
-  }
-
-  return create_dft_processor_factory_generic();
+  return create_dft_processor_factory_cpu();
 }
 
 /// \brief Creates a DFT processor factory that prefers the Metal GPU implementation.
