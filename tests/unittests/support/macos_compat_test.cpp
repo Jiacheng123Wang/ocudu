@@ -291,7 +291,13 @@ TEST(macos_compat_sched_test, time_constraint_env_knob)
   {
     const tc_case_result r = run_case(nullptr, "tc_case_off", true);
     EXPECT_FALSE(r.constrained) << "the knob is unset: no thread may be put under a time constraint";
+#if defined(__APPLE__)
     EXPECT_EQ(r.period_us, 0) << "a successful readback of 'no constraint' must be 0, not -1 (which means n/a)";
+#else
+    EXPECT_EQ(r.period_us, -1)
+        << "Linux has no such notion, so the field must stay at its 'not applicable' value - a 0 here would claim a "
+           "reading this platform never took (the rule the whole struct follows)";
+#endif
   }
 
 #if !defined(__APPLE__)
