@@ -1712,7 +1712,10 @@ public:
   /// \param[in] time_ordered The series' samples IN THE ORDER THEY WERE RECORDED (which is what makes the windows
   ///            mean something); the whole-run reference values are computed from the same vector, so the
   ///            comparison cannot drift from the series it is about.
-  static void print_window_stability(const char* name, const std::vector<double>& time_ordered, unsigned windows)
+  static void print_window_stability(const char*            name,
+                                     const std::vector<double>& time_ordered,
+                                     unsigned               windows,
+                                     double                 tail_floor_us)
   {
     if (time_ordered.size() < static_cast<size_t>(windows) * 8) {
       // Too few samples for the cut to say anything: SAY so rather than print a table of 3-sample windows, whose
@@ -1733,6 +1736,7 @@ public:
     const size_t per_window = time_ordered.size() / windows;
     std::string  medians;
     std::string  p95s;
+    std::string  tails;
     double       worst_dev = 0.0;
     for (unsigned w = 0; w != windows; ++w) {
       const size_t begin = w * per_window;
@@ -1745,17 +1749,27 @@ public:
       medians += buf;
       std::snprintf(buf, sizeof(buf), " %.1f", p95);
       p95s += buf;
+      // ... and HOW MANY of this window's samples crossed the tail floor. This is what makes a WITHIN-LEG A/B
+      // decidable (dev doc 10.23): the tier/priority being tested can be changed half-way through one run, which
+      // controls the environment, and the reading is then a count per window rather than one `max` per leg.
+      const size_t over = static_cast<size_t>(std::count_if(slice.begin(), slice.end(), [tail_floor_us](double v) {
+        return v > tail_floor_us;
+      }));
+      std::snprintf(buf, sizeof(buf), " %zu", over);
+      tails += buf;
       if (ref_median > 0) {
         worst_dev = std::max(worst_dev, std::fabs(med - ref_median) / ref_median * 100.0);
         worst_dev = std::max(worst_dev, std::fabs(p95 - ref_p95) / ref_p95 * 100.0);
       }
     }
     std::fprintf(stderr,
-                 "  %-22s n=%-8zu median[%s ] p95[%s ]   worst window vs whole run: %.1f%%\n",
+                 "  %-22s n=%-8zu median[%s ] p95[%s ] over %lluus[%s ]  worst window vs whole run: %.1f%%\n",
                  name,
                  time_ordered.size(),
                  medians.c_str(),
                  p95s.c_str(),
+                 static_cast<unsigned long long>(tail_floor_us),
+                 tails.c_str(),
                  worst_dev);
   }
 
@@ -1828,13 +1842,16 @@ public:
                    "the receive path, and a phase window can begin inside that cadence)\n",
                    static_cast<unsigned long long>(phase_baseline_misses));
     }
-    if (worst_rx_events.empty()) {
-      std::fprintf(stderr,
-                   "  rx  : none above the %lld us floor in %llu candidate check(s) - the receive path never "
-                   "blocked that long\n",
-                   static_cast<long long>(timing_event_rx_floor_ns / 1000),
-                   static_cast<unsigned long long>(rx_event_candidates));
-    }
+    // THE TAIL AS A RATE, ALWAYS - not only when the list is empty (dev doc 10.23). `max` is one draw from a
+    // heavy tail, so two legs cannot be compared by it: the decidable quantity is HOW OFTEN the floor is crossed
+    // out of how many samples. The numerator was already counted; the denominator is the series' own population,
+    // which is what makes the number a rate (and the two are taken from the same object, so they cannot drift).
+    std::fprintf(stderr,
+                 "  rx  : %llu of %zu receive(s) above the %lld us floor = %s\n",
+                 static_cast<unsigned long long>(rx_event_candidates),
+                 rx_wait_us.size(),
+                 static_cast<long long>(timing_event_rx_floor_ns / 1000),
+                 rate_pct(rx_event_candidates, rx_wait_us.size()).c_str());
     unsigned rank = 0;
     for (const timing_event& ev : worst_rx_events) {
       char wall[32];
@@ -1863,13 +1880,11 @@ public:
                    age_str(ev.win_us).c_str(),
                    age_str(ev.base_age_us).c_str());
     }
-    if (worst_tx_events.empty()) {
-      std::fprintf(stderr,
-                   "  dl  : none below the %lld us margin floor in %llu candidate check(s) - no hand-over was "
-                   "close to its due time\n",
-                   static_cast<long long>(timing_event_tx_floor_us),
-                   static_cast<unsigned long long>(tx_event_candidates));
-    }
+    std::fprintf(stderr,
+                 "  dl  : %llu hand-over(s) below the %lld us margin floor (rate against the leg's own "
+                 "transmission count, printed by [dl_tx_slack] as `transmissions=`)\n",
+                 static_cast<unsigned long long>(tx_event_candidates),
+                 static_cast<long long>(timing_event_tx_floor_us));
     rank = 0;
     for (const timing_event& ev : worst_tx_events) {
       char wall[32];
@@ -1907,12 +1922,17 @@ public:
       const timing_event_kind kind =
           static_cast<timing_event_kind>(static_cast<size_t>(timing_event_kind::phase_t2f) + i);
       const char* name = phase_series_name(kind);
+      // The series' own sample count is the denominator: the same series the aggregate lines print below, so a
+      // reader can divide one by the other and get a rate that means something (`ce` 3 of 38274 = 0.008%).
+      const size_t population = phase_series_population(kind);
+      std::fprintf(stderr,
+                   "  %-4s: %llu of %zu sample(s) above the %lld us floor = %s\n",
+                   name,
+                   static_cast<unsigned long long>(phase_event_candidates[i]),
+                   population,
+                   static_cast<long long>(timing_event_phase_floor_us[i]),
+                   rate_pct(phase_event_candidates[i], population).c_str());
       if (worst_phase_events[i].empty()) {
-        std::fprintf(stderr,
-                     "  %-4s: none above the %lld us floor in %llu candidate check(s)\n",
-                     name,
-                     static_cast<long long>(timing_event_phase_floor_us[i]),
-                     static_cast<unsigned long long>(phase_event_candidates[i]));
         continue;
       }
       rank = 0;
@@ -1958,6 +1978,39 @@ public:
         break;
     }
     return "?";
+  }
+
+  /// \brief A count as a percentage of its population, or `-` when the population is empty.
+  ///
+  /// Printed with four decimals because these tails are TENS of events out of tens of thousands: "0.0%" would
+  /// hide the difference the whole exercise is about (3 of 38274 is 0.0078%, and 30 of 38274 is 0.078% - the same
+  /// "0.0%" to one decimal).
+  static std::string rate_pct(uint64_t count, size_t population)
+  {
+    if (population == 0) {
+      return "-";
+    }
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.4f%%", static_cast<double>(count) * 100.0 / static_cast<double>(population));
+    return buf;
+  }
+
+  /// The number of samples the series behind \p kind recorded (the denominator of its tail rate).
+  size_t phase_series_population(timing_event_kind kind) const
+  {
+    switch (kind) {
+      case timing_event_kind::phase_t2f:
+        return t2f_latencies_us.size();
+      case timing_event_kind::phase_ce:
+        return ce_latencies_us.size();
+      case timing_event_kind::phase_eqdem:
+        return eqdem_latencies_us.size();
+      case timing_event_kind::phase_ldpc:
+        return ldpc_latencies_us.size();
+      default:
+        break;
+    }
+    return 0;
   }
 
   /// The process CPU time consumed over the window, in ms with two decimals, or `-` when there was no baseline.
@@ -2187,13 +2240,13 @@ public:
                    "ORDER; a stable run repeats its own statistics\n",
                    stability_window_count,
                    stability_window_count);
-      print_window_stability("ul_pipeline", sorted_pipeline, stability_window_count);
-      print_window_stability("ul_gpu_pipeline", sorted_gpu_pipeline, stability_window_count);
-      print_window_stability("ul_time_frequency", sorted_t2f, stability_window_count);
-      print_window_stability("ul_channel_estimation", sorted_ce, stability_window_count);
-      print_window_stability("ul_equalization_demod", sorted_eqdem, stability_window_count);
-      print_window_stability("ul_ldpc_decode", sorted_ldpc, stability_window_count);
-      print_window_stability("ul_rx_wait", sorted_rx_wait, stability_window_count);
+      print_window_stability("ul_pipeline", sorted_pipeline, stability_window_count, 2000.0);
+      print_window_stability("ul_gpu_pipeline", sorted_gpu_pipeline, stability_window_count, 2000.0);
+      print_window_stability("ul_time_frequency", sorted_t2f, stability_window_count, 2000.0);
+      print_window_stability("ul_channel_estimation", sorted_ce, stability_window_count, 1000.0);
+      print_window_stability("ul_equalization_demod", sorted_eqdem, stability_window_count, 3000.0);
+      print_window_stability("ul_ldpc_decode", sorted_ldpc, stability_window_count, 500.0);
+      print_window_stability("ul_rx_wait", sorted_rx_wait, stability_window_count, 1000.0);
       std::fprintf(stderr,
                    "  read: each window is a K-th of the run's SAMPLES (time order), median/p95 in us, and the "
                    "last column is the widest deviation of a window from the whole-run value\n");

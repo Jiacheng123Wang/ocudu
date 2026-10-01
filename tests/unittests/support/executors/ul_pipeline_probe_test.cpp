@@ -1217,8 +1217,13 @@ TEST(ul_pipeline_probe_test, worst_timing_events_carry_the_wall_clock_and_stay_b
     }
     EXPECT_NE(events.find("load1=4.68"), std::string::npos) << events;
     EXPECT_NE(events.find("load1=1.20"), std::string::npos) << events;
-    // A candidate count, so "nothing was slow" and "the instrument never ran" cannot look alike.
-    EXPECT_NE(events.find("candidate check(s)"), std::string::npos) << events;
+    // THE TAIL AS A RATE, always printed. Two jobs in one line: "nothing was slow" and "the instrument never
+    // ran" must not look alike, and two legs must be comparable - `max` is one draw from a heavy tail, so the
+    // decidable quantity is how many samples crossed the floor out of how many there were (dev doc 10.23).
+    // The numerator here is the arm's kept events and the denominator the series' population, both printed.
+    EXPECT_NE(events.find("receive(s) above the 1000 us floor = "), std::string::npos) << events;
+    EXPECT_TRUE(std::regex_search(events, std::regex(R"(rx  : \d+ of \d+ receive\(s\) above the 1000 us floor = [0-9.]+%)")))
+        << events;
   }
 
   // ---- the DL side ranks the other way round: the MOST NEGATIVE margin is the worst ---------------------------------
@@ -1471,10 +1476,19 @@ TEST(ul_pipeline_probe_test, phase_segment_tails_are_ranked_and_attributed)
     EXPECT_NE(ce_line.find(" tcpu="), std::string::npos) << ce_line;
     // The other series has its own block, its own floor (500 us for ldpc) and its own name.
     EXPECT_NE(events.find("  ldpc#1 took=961us"), std::string::npos) << events;
-    // A series that saw nothing must SAY so, with its candidate count: "off" and "on and quiet" must not look alike.
-    EXPECT_NE(events.find("  t2f : none above the 2000 us floor"), std::string::npos) << events;
-    EXPECT_EQ(events.find("  ce  : none above"), std::string::npos)
-        << "a series with kept events must not also print the empty-list line: " << events;
+    // A series that kept nothing must STILL print its tail line - "the instrument was on and this series kept
+    // nothing" is a different statement from "the instrument was off". Asserted as a PATTERN and not as literal
+    // zeros: the probe is a singleton and the earlier cases in this binary leave samples behind, so the
+    // denominator depends on the run mode - which must not decide the verdict (the same trap as `ce #1` above).
+    EXPECT_TRUE(std::regex_search(events, std::regex(R"(t2f : \d+ of \d+ sample\(s\) above the 2000 us floor = ([0-9.]+%|-))")))
+        << events;
+    // ... while a series that DID keep events prints its own count and no "none" line. The denominator is 0 here
+    // because this case calls the RECORDER directly and never goes through a CRC-OK completion, which is what
+    // pushes the aggregate series - so the rate prints `-` (no population to divide by) and the line reads
+    // `3 of 0`. That is the honest output for it, and it is also the one shape that tells a reader "these events
+    // did not come from this series' population": in a real leg the two counts are equal by construction.
+    EXPECT_TRUE(std::regex_search(events, std::regex(R"(ce  : \d+ of \d+ sample\(s\) above the 1000 us floor = ([0-9.]+%|-))")))
+        << events;
   }
   ::unsetenv("OCUDU_UL_TIMING_EVENTS");
 }
