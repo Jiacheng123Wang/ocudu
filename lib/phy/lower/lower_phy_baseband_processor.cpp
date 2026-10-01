@@ -167,6 +167,16 @@ void tx_slack_note_transmit(int64_t margin_us, uint64_t due_ts)
   tx_slack_accounting& a = tx_slack_accounts();
   a.transmissions.fetch_add(1, std::memory_order_relaxed);
 #if defined(OCUDU_FLOW_PROBES)
+  // Same baseline for the transmit side (dev doc 6.243), so a late hand-over can be read the same way: the DL
+  // hand-overs come every slot (500 us), so the throttled baseline is at most ~2 slots old.
+  {
+    const int64_t snapshot_now_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (ul_pipeline_probe::get().timing_event_snapshot_wanted(snapshot_now_ns)) {
+      ul_pipeline_probe::get().timing_event_snapshot(snapshot_now_ns);
+    }
+  }
   // The worst-K list beside the receive waits (OCUDU_UL_TIMING_EVENTS, dev doc 6.241): the aggregate below says
   // HOW MANY hand-overs missed their due time, this says WHEN one did - which is what lets a leg line the DL side
   // up against the RX stalls and the `[RF]` lines on one wall-clock axis. Only events below the floor pay for it,
@@ -1472,6 +1482,20 @@ void lower_phy_baseband_processor::ul_process()
   // [dl_tx_call]). Two clock reads and one relaxed-store block per slot, because the question - "is the host
   // late to ASK, or does the transport block INSIDE the call?" - cannot be answered from the timestamps alone,
   // and it is the question that decides whether the remaining millisecond discontinuities are ours to fix.
+#if defined(OCUDU_FLOW_PROBES)
+  // The process-wide baseline for the worst-K event list (dev doc 6.243): taken HERE, immediately before the call
+  // it will be subtracted from, and throttled inside the probe (<=1 per ms) so it costs a few percent of a thread
+  // that is blocked ~96% of the time. It answers what `load1` cannot - "did this process get the CPU while the
+  // samples were late" - because a 60 s load average is blind to a 12 ms stall.
+  {
+    const int64_t snapshot_now_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (ul_pipeline_probe::get().timing_event_snapshot_wanted(snapshot_now_ns)) {
+      ul_pipeline_probe::get().timing_event_snapshot(snapshot_now_ns);
+    }
+  }
+#endif
   const auto rx_call_begin = std::chrono::steady_clock::now();
   baseband_gateway_receiver::metadata rx_metadata = receiver.receive(rx_writer);
   const auto rx_call_end = std::chrono::steady_clock::now();

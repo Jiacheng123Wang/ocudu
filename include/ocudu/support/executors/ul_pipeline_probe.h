@@ -20,6 +20,9 @@
 #include <optional>
 #include <cstring>
 #include <vector>
+#if !defined(_WIN32)
+#include <sys/resource.h> // getrusage: the only reading that says whether THIS PROCESS got the CPU
+#endif
 
 #if defined(OCUDU_FLOW_PROBES)
 #include "ocudu/ocudulog/ocudulog.h"
@@ -563,7 +566,32 @@ public:
     int64_t  air_us     = 0;  ///< the block's air time, receive events only (0 = not reported)
     int64_t  due_ts     = 0;  ///< the radio's due timestamp, hand-over events only
     int64_t  load1_x100 = -1; ///< getloadavg(1) at that instant, x100 (-1 = the caller had none)
+    /// THE PROCESS'S OWN CPU TIME AND INVOLUNTARY SWITCHES over the event's window (dev doc 6.243), measured
+    /// against a baseline the caller takes just before the window (see timing_event_snapshot_wanted). This is what
+    /// separates the two owners a long wait can have, and `load1` CANNOT do it: a 60 s average is blind to a
+    /// 12 ms stall (measured on p178: 3.61 and 4.03 on 14 cores, neither supporting nor refuting contention).
+    ///   * cpu_ns ~= the window  => the process kept its cores; the samples were late on the RADIO/USB side;
+    ///   * cpu_ns ~= 0 (and/or ivcsw > 0) => the process was NOT scheduled; that is host scheduling.
+    int64_t  cpu_ns     = -1; ///< (utime + stime) consumed by the whole process during the window (-1 = no baseline)
+    int64_t  ivcsw      = -1; ///< involuntary context switches of the process during the window (-1 = no baseline)
+    int64_t  nvcsw      = -1; ///< voluntary ones, for the same window (a blocked thread switches voluntarily)
+    int64_t  base_age_us = -1;///< how long BEFORE the window began the baseline was taken (the reading's slack)
   };
+
+  /// The baseline for the deltas above: process-wide CPU time and switch counts, taken by the caller just before
+  /// the measured call, at most once per timing_event_cpu_period_ns() so the instrument stays cheap.
+  struct cpu_snapshot {
+    int64_t ns     = 0;
+    int64_t cpu_ns = 0;
+    int64_t nvcsw  = 0;
+    int64_t ivcsw  = 0;
+    bool    valid  = false;
+  };
+  cpu_snapshot cpu_base{};
+  /// 1 ms: the baseline is then at most 1 ms older than the window it is subtracted from, i.e. <=8% of a 12 ms
+  /// stall, while the cost is bounded at <=1000 getrusage calls/s on the receive thread (it runs at ~28k
+  /// receive calls/s and spends ~96% of that time blocked, so this is a few percent of its own CPU).
+  static constexpr int64_t timing_event_cpu_period_ns = 1000000;
   /// Bounded so a leg's report cannot grow without limit: 64 events is already far more than the ~0-20 a leg has.
   static constexpr unsigned max_timing_events     = 64;
   static constexpr unsigned default_timing_events = 8;
@@ -607,6 +635,7 @@ public:
       ev.end_ns     = end_ns;
       ev.air_us     = air_us;
       ev.load1_x100 = load1_x100;
+      attach_cpu_delta(ev, begin_ns, end_ns);
       take_rx_timing_event(ev);
     }
 
@@ -665,7 +694,35 @@ public:
     ev.end_ns     = end_ns;
     ev.due_ts     = static_cast<int64_t>(due_ts);
     ev.load1_x100 = load1_x100;
+    attach_cpu_delta(ev, /*begin_ns=*/cpu_base.ns, end_ns);
     take_tx_timing_event(ev);
+  }
+
+  /// \brief Fills \p ev's CPU fields from the process-wide baseline. Caller holds the lock.
+  ///
+  /// The window is [\p begin_ns, \p end_ns] and the baseline must PRECEDE it; when it does not (or was never
+  /// taken) the fields stay -1 and the report prints `cpu=-`, because "no reading" must not look like "zero CPU".
+  void attach_cpu_delta(timing_event& ev, int64_t begin_ns, int64_t end_ns)
+  {
+    if (!cpu_base.valid || (cpu_base.ns > begin_ns)) {
+      return;
+    }
+#if !defined(_WIN32)
+    rusage ru{};
+    if (getrusage(RUSAGE_SELF, &ru) != 0) {
+      return;
+    }
+    const int64_t cpu_ns =
+        (static_cast<int64_t>(ru.ru_utime.tv_sec) + static_cast<int64_t>(ru.ru_stime.tv_sec)) * 1000000000LL +
+        (static_cast<int64_t>(ru.ru_utime.tv_usec) + static_cast<int64_t>(ru.ru_stime.tv_usec)) * 1000LL;
+    ev.cpu_ns      = cpu_ns - cpu_base.cpu_ns;
+    ev.ivcsw       = static_cast<int64_t>(ru.ru_nivcsw) - cpu_base.ivcsw;
+    ev.nvcsw       = static_cast<int64_t>(ru.ru_nvcsw) - cpu_base.nvcsw;
+    ev.base_age_us = (begin_ns - cpu_base.ns) / 1000;
+#else
+    (void)begin_ns;
+    (void)end_ns;
+#endif
   }
 
   /// \brief Keeps \p ev if it is among the worst `timing_events_limit()` receive waits. Caller holds the lock.
@@ -888,6 +945,40 @@ public:
   static bool timing_event_wanted_tx(int64_t margin_us)
   {
     return (timing_events_limit() != 0) && (margin_us < timing_event_tx_floor_us);
+  }
+
+  /// Whether the caller should take a fresh process-wide baseline now (throttled, and only with the knob on).
+  bool timing_event_snapshot_wanted(int64_t now_ns) const
+  {
+    if (timing_events_limit() == 0) {
+      return false;
+    }
+    return !cpu_base.valid || ((now_ns - cpu_base.ns) >= timing_event_cpu_period_ns);
+  }
+
+  /// Takes the process-wide baseline. Called from the receive and transmit paths just before the measured call, so
+  /// the snapshot always PRECEDES the window it will be subtracted from (its age is reported as base_age_us).
+  ///
+  /// getrusage(RUSAGE_SELF) is the whole process (every thread), which is the question: "did this process get the
+  /// CPU while the call was outstanding". A thread-scoped reading would not answer it - the blocked thread burns no
+  /// CPU either way - and RUSAGE_THREAD does not exist on macOS in any case (checked on this SDK).
+  void timing_event_snapshot(int64_t now_ns)
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+#if !defined(_WIN32)
+    rusage ru{};
+    if (getrusage(RUSAGE_SELF, &ru) != 0) {
+      return;
+    }
+    cpu_base.ns     = now_ns;
+    cpu_base.cpu_ns = (static_cast<int64_t>(ru.ru_utime.tv_sec) + static_cast<int64_t>(ru.ru_stime.tv_sec)) * 1000000000LL +
+                      (static_cast<int64_t>(ru.ru_utime.tv_usec) + static_cast<int64_t>(ru.ru_stime.tv_usec)) * 1000LL;
+    cpu_base.nvcsw  = static_cast<int64_t>(ru.ru_nvcsw);
+    cpu_base.ivcsw  = static_cast<int64_t>(ru.ru_nivcsw);
+    cpu_base.valid  = true;
+#else
+    (void)now_ns;
+#endif
   }
 
   /// \brief Which row to drop when the timeline is full.
@@ -1279,7 +1370,7 @@ public:
       // `epoch_ms - wait`, computed here rather than stored, so the two cannot drift apart.
       std::fprintf(stderr,
                    "  rx  #%u wait=%lldus air=%lldus wall=%s epoch_ms=%lld began_ms=%lld steady_end_ns=%lld "
-                   "load1=%s\n",
+                   "load1=%s cpu=%s ivcsw=%s nvcsw=%s base_age=%s\n",
                    ++rank,
                    static_cast<long long>(ev.value_us),
                    static_cast<long long>(ev.air_us),
@@ -1287,7 +1378,11 @@ public:
                    static_cast<long long>(ev.wall_ms),
                    static_cast<long long>(ev.wall_ms) - static_cast<long long>(ev.value_us) / 1000,
                    static_cast<long long>(ev.end_ns),
-                   load1_str(ev.load1_x100));
+                   load1_str(ev.load1_x100),
+                   cpu_str(ev.cpu_ns),
+                   delta_str(ev.ivcsw),
+                   delta_str(ev.nvcsw),
+                   age_str(ev.base_age_us));
     }
     if (worst_tx_events.empty()) {
       std::fprintf(stderr,
@@ -1304,7 +1399,7 @@ public:
       // past), i.e. the same two ends for the transmit direction.
       std::fprintf(stderr,
                    "  dl  #%u margin=%lldus due_ts=%lld wall=%s epoch_ms=%lld due_ms=%lld steady_end_ns=%lld "
-                   "load1=%s\n",
+                   "load1=%s cpu=%s ivcsw=%s nvcsw=%s base_age=%s\n",
                    ++rank,
                    static_cast<long long>(ev.value_us),
                    static_cast<long long>(ev.due_ts),
@@ -1312,8 +1407,48 @@ public:
                    static_cast<long long>(ev.wall_ms),
                    static_cast<long long>(ev.wall_ms) + static_cast<long long>(ev.value_us) / 1000,
                    static_cast<long long>(ev.end_ns),
-                   load1_str(ev.load1_x100));
+                   load1_str(ev.load1_x100),
+                   cpu_str(ev.cpu_ns),
+                   delta_str(ev.ivcsw),
+                   delta_str(ev.nvcsw),
+                   age_str(ev.base_age_us));
     }
+  }
+
+  /// The process CPU time consumed over the window, in ms with two decimals, or `-` when there was no baseline.
+  /// Read it AGAINST the window: `cpu` close to `wait` says the process kept its cores (the radio/USB side was
+  /// late), `cpu` near zero says it did not run at all (host scheduling).
+  static const char* cpu_str(int64_t cpu_ns)
+  {
+    static thread_local char buf[24];
+    if (cpu_ns < 0) {
+      return "-";
+    }
+    std::snprintf(buf, sizeof(buf), "%lld.%02lldms", static_cast<long long>(cpu_ns / 1000000),
+                  static_cast<long long>((cpu_ns % 1000000) / 10000));
+    return buf;
+  }
+
+  /// A switch-count delta, or `-` when there was no baseline.
+  static const char* delta_str(int64_t v)
+  {
+    static thread_local char buf[16];
+    if (v < 0) {
+      return "-";
+    }
+    std::snprintf(buf, sizeof(buf), "+%lld", static_cast<long long>(v));
+    return buf;
+  }
+
+  /// How stale the baseline was, in us.
+  static const char* age_str(int64_t us)
+  {
+    static thread_local char buf[16];
+    if (us < 0) {
+      return "-";
+    }
+    std::snprintf(buf, sizeof(buf), "%lldus", static_cast<long long>(us));
+    return buf;
   }
 
   /// The load average as a fixed-point string, or `-` when the caller had no reading (see the platform note in
@@ -1978,6 +2113,8 @@ public:
   static unsigned timing_events_limit() { return 0; }
   static bool     timing_event_wanted_rx(int64_t /*wait_ns*/) { return false; }
   static bool     timing_event_wanted_tx(int64_t /*margin_us*/) { return false; }
+  bool            timing_event_snapshot_wanted(int64_t /*now_ns*/) const { return false; }
+  void            timing_event_snapshot(int64_t /*now_ns*/) {}
   void record_tx_timing_event(int64_t /*margin_us*/, uint64_t /*due_ts*/, int64_t /*end_ns*/ = 0,
                               int64_t /*load1_x100*/ = -1)
   {

@@ -1125,6 +1125,9 @@ TEST(ul_pipeline_probe_test, worst_timing_events_carry_the_wall_clock_and_stay_b
     // The counts are DELTAS, not absolutes: gtest_discover_tests gives this case its own process, but the whole
     // binary can also be run in one, and the earlier cases in this file record waits of their own.
     const int before_off = std::max(0, samples(capture_report(), "ul_rx_wait"));
+    // ... and the SNAPSHOT is off with it: with the knob unset the receive path must not pay a getrusage call per
+    // window, which is what this predicate is (the negative control below breaks exactly this line).
+    EXPECT_FALSE(probe.timing_event_snapshot_wanted(std::chrono::nanoseconds(std::chrono::steady_clock::now().time_since_epoch()).count()));
     probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::milliseconds(12)).count());
     probe.record_tx_timing_event(-900, 1234, 0, 55);
     const std::string report = capture_report();
@@ -1180,6 +1183,10 @@ TEST(ul_pipeline_probe_test, worst_timing_events_carry_the_wall_clock_and_stay_b
     // Both ends of the stall, and the arithmetic between them, so an alignment against the `.log` cannot be off by
     // the stall's own duration: began = end - wait (12 ms here).
     EXPECT_TRUE(std::regex_search(rx_line, std::regex(R"(began_ms=[1-9][0-9]{12,})"))) << rx_line;
+    // THE CPU READING (dev doc 6.243). No baseline has been taken in this case yet, so the line must SAY SO with
+    // "-" rather than print a zero: "the process used no CPU" and "nobody measured" are different statements, and
+    // a zero here would read as the strongest possible evidence of host scheduling.
+    EXPECT_NE(rx_line.find(" cpu=- ivcsw=- nvcsw=- base_age=-"), std::string::npos) << rx_line;
     {
       const std::regex  ends(R"(epoch_ms=([0-9]+) began_ms=([0-9]+))");
       std::smatch       m;
@@ -1210,6 +1217,63 @@ TEST(ul_pipeline_probe_test, worst_timing_events_carry_the_wall_clock_and_stay_b
     EXPECT_LT(first, second) << "a hand-over margin goes wrong downwards, so the worst is the most negative";
     EXPECT_EQ(events.find("margin=-100us"), std::string::npos) << "only two are kept";
     EXPECT_EQ(events.find("margin=700us"), std::string::npos) << "an event above the floor must never enter";
+  }
+
+  // ---- the CPU delta: with a baseline, a kept event carries what the PROCESS did during its window ------------
+  //
+  // This is the reading that separates "the radio/USB delivered late" from "this process did not get the CPU", and
+  // it exists because the first attempt at that question used load1, which a 12 ms stall cannot move (measured on
+  // p178: 3.61 and 4.03 on 14 cores). The arm below therefore pins the WIRING: a baseline taken here, real CPU
+  // burned between it and the event, and a positive delta with a bounded age on the printed line. The negative
+  // control for it is the "-" assertion in the arms above (no baseline => no reading, never a zero).
+  {
+    ::setenv("OCUDU_UL_TIMING_EVENTS", "2", 1);
+    const auto steady_now = []() {
+      return std::chrono::nanoseconds(std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    // The baseline FIRST, then the window it is subtracted from - the same order the receive path uses, and the
+    // order matters: attach_cpu_delta() refuses a baseline that does not precede the window (a delta against a
+    // snapshot taken inside the window would understate the CPU and could be misread as host scheduling).
+    // The THROTTLE, before the baseline is used: the first ask is granted, and the next one inside the period is
+    // not - that is what bounds the instrument at <=1000 getrusage pairs per second on a thread that may be called
+    // 28k times a second.
+    EXPECT_TRUE(probe.timing_event_snapshot_wanted(steady_now()));
+    const int64_t begin_ns = steady_now();
+    probe.timing_event_snapshot(begin_ns);
+    EXPECT_FALSE(probe.timing_event_snapshot_wanted(begin_ns + 1));
+    EXPECT_TRUE(probe.timing_event_snapshot_wanted(begin_ns + ocudu::ul_pipeline_probe::timing_event_cpu_period_ns));
+    volatile double sink = 0.0;
+    for (int i = 0; i != 20000000; ++i) {
+      sink += static_cast<double>(i) * 1e-9;
+    }
+    (void)sink;
+    const int64_t end_ns = steady_now();
+    // A NOMINAL 100 ms wait, so RANKING cannot depend on how fast this machine burns CPU (the first version used the
+    // burn's own duration and failed under ctest when it came out below the 12 ms the arms above had recorded - the
+    // assertion then read the wrong line). The burn above is what the CPU delta measures, and it is really inside
+    // the window [begin_ns, end_ns].
+    probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::milliseconds(100)).count(), false, begin_ns, end_ns,
+                         /*air_us=*/35, /*load1_x100=*/468);
+    const std::string report = capture_report();
+    const size_t      at     = report.find("  rx  #1 wait=100000us");
+    ASSERT_NE(at, std::string::npos) << report;
+    const std::string line = report.substr(at, report.find('\n', at) - at);
+    EXPECT_TRUE(std::regex_search(line, std::regex(R"(cpu=[0-9]+\.[0-9]{2}ms)")))
+        << "a baseline plus real CPU work must produce a delta: " << line;
+    // The delta must also be PLAUSIBLE against its window: a 10-20 ms burn cannot read as 200 ms of CPU.
+    {
+      std::smatch m;
+      const std::regex  parts(R"(wait=([0-9]+)us.*cpu=([0-9]+)\.([0-9]{2})ms)");
+      ASSERT_TRUE(std::regex_search(line, m, parts)) << line;
+      const double wait_ms = std::stod(m[1].str()) / 1000.0;
+      const double cpu_ms  = std::stod(m[2].str() + "." + m[3].str());
+      // A 20M-iteration volatile burn is milliseconds of CPU on any machine this runs on; the upper bound is the
+      // window plus slack, because the delta covers the WHOLE process and other threads may contribute to it.
+      EXPECT_GT(cpu_ms, 0.2) << line;
+      EXPECT_LT(cpu_ms, wait_ms + 5.0) << "the process cannot have used more CPU than the window plus 5 ms: " << line;
+    }
+    EXPECT_TRUE(std::regex_search(line, std::regex(R"(ivcsw=\+[0-9]+ nvcsw=\+[0-9]+ base_age=[0-9]+us)")))
+        << "the switch counts and the baseline's age must be printed, not implied: " << line;
   }
 
   ::unsetenv("OCUDU_UL_TIMING_EVENTS");
