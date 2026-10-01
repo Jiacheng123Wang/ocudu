@@ -1,7 +1,7 @@
 # OCUDU_* 旋钮清单（**生成物** + 人工判读）
 
 > 生成方式：`python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > doc_chinese/phy_latency/knob_inventory.md`
-> 本次生成：commit `d9c96b9f31`。**不要手改正文**——改生成器或改人工判读小节。
+> 本次生成：commit `497f0074cd`。**不要手改正文**——改生成器或改人工判读小节。
 > （生成器把**生成那一刻的 HEAD**写进这一行；要把这一行也追平 HEAD，就重跑生成器再提交一次——那一次是纯文档差异。）
 >
 > **默认值**是**从守卫表达式读出来的**（`ON` = 不设或非 0 都开；`OFF` = 必须显式置 1；`AUTO` = 由别处推导；`= 14` / `= "vdsp"` = 默认是一个**值**而不是开关，腿不设它时用的就是这个值；`?` = 需要读注释）。
@@ -42,8 +42,8 @@
 | `OCUDU_LANE_ABLATE` | OFF | `lib/phy/metal/ocudu_metal_burst.mm:450` | 16 | 消去法总开关：各阶段的绑定换成 `lane_ablate_noop`（只换 kernel，网格/屏障/提交结构不变） |
 | `OCUDU_LANE_ABLATE_EVERY` | ? | `lib/phy/metal/ocudu_metal_burst.mm:455` | 15 | **修饰符**（默认 1 = 每跳都消去；只在 `OCUDU_LANE_ABLATE=1` 时有意义）：`=8` = 每 8 跳消去 1 跳，全消去手机接不进来（p79） |
 | `OCUDU_LANE_ABLATE_STAGE` | OFF | `lib/phy/metal/ocudu_metal_burst.mm:284` | 10 | **修饰符**（只在 `OCUDU_LANE_ABLATE=1` 时有意义）：只消去哪一**阶段族**——`front_end`/`ce`/`eq`/`demap`（`|` 或 `,` 组合），不设 = `all` = 历史行为；拼错的名字按 `all` 处理并打 WARNING。族级账单靠它，覆盖度看报告里的 `Q9-F5 ablation coverage`（开发文档 6.162） |
-| `OCUDU_METAL_GPU_TIME` | OFF | `lib/phy/metal/ocudu_metal_queue.mm:325` | 107 | **探针**：给每条 cb 装 GPU 时间戳（per-label 表的来源；验收腿一直带着它） |
-| `OCUDU_UL_PHASE_SEGMENTS` | OFF | `include/ocudu/support/executors/ul_pipeline_probe.h:1365` | 148 | **探针**：上行相位分段读数（验收腿一直带着它） |
+| `OCUDU_METAL_GPU_TIME` | OFF | `lib/phy/metal/ocudu_metal_queue.mm:325` | 108 | **探针**：给每条 cb 装 GPU 时间戳（per-label 表的来源；验收腿一直带着它） |
+| `OCUDU_UL_PHASE_SEGMENTS` | OFF | `include/ocudu/support/executors/ul_pipeline_probe.h:1365` | 149 | **探针**：上行相位分段读数（验收腿一直带着它） |
 | `OCUDU_UL_SLOT_TRACE` | OFF | `include/ocudu/support/executors/ul_pipeline_probe.h:703` | 11 | **探针**：每**时隙**时间线（`=N` = 最多记 N 个时隙，非数字 = 开且用默认上限）。和上面两个一样被两条闸门当「任意值」接受，但它比相位分段宽得多，**验收腿不需要它**——只在追「某个时隙为什么晚」时开（开发文档 6.145⑹⑴；`=64` 曾打出 512 行，见 `ul_pipeline_probe.h` 的注） |
 | `OCUDU_DFT_BACKEND` | = "vdsp" | `lib/phy/generic_functions/generic_functions_factories.cpp:195` | 2 | 前端变换的**后端选择**：`=vdsp`（Apple 上**不设就是它**，所以白名单接受）｜`=generic`（**A/B 对照臂**，n78 p170/p171、n1 p172/p173 用它跑 generic 那一侧）。非 Apple 平台根本不编进这条分支，所以这一行的「默认」只在 Apple 上有意义 |
 | `OCUDU_DFT_BATCH_SYMBOLS` | AUTO | `lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm:106` | 17 | 前端批量：不设 = `AUTO`（= 一个时隙自己的符号数，n78 上是 **14**）｜`=1` = 每符号对照臂｜`=7`/`=2` 是中间臂。白名单只接受与 AUTO 等价的 `=14` |
@@ -161,7 +161,7 @@
 | `OCUDU_LANE_ABLATE_EVERY` | ? | lib | `lib/phy/metal/ocudu_metal_burst.mm:455` | 3 | `lib/phy/metal/ocudu_metal_burst.mm` | 15 | 12/3 | 8 |
 | `OCUDU_LANE_ABLATE_STAGE` | OFF | lib | `lib/phy/metal/ocudu_metal_burst.mm:284` | 1 | `lib/phy/metal/ocudu_metal_burst.mm` | 10 | 19/5 | all,ce,demap,eq,front_end |
 | `OCUDU_LANE_DIAG_SPLIT` | ? | lib | `lib/phy/metal/ocudu_metal_burst.mm:884` | 1 | `lib/phy/metal/ocudu_metal_burst.mm` | 3 | 29/7 | 1 |
-| `OCUDU_METAL_GPU_TIME` | OFF | lib | `lib/phy/metal/ocudu_metal_queue.mm:325` | 2 | `lib/phy/metal/ocudu_metal_queue.mm` | 107 | 127/23 | 1 |
+| `OCUDU_METAL_GPU_TIME` | OFF | lib | `lib/phy/metal/ocudu_metal_queue.mm:325` | 2 | `lib/phy/metal/ocudu_metal_queue.mm` | 108 | 127/23 | 1 |
 | `OCUDU_MMSE_DEBUG` | ? | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_metal_mmse_engine.mm:412` | 2 | `lib/phy/upper/signal_processors` | 0 | 21/7 | — |
 | `OCUDU_PROBE_GAPPED` | ? | test | `lib/phy/upper/channel_processors/metal/test/metal_chain_probe.cpp:268` | 1 | `lib/phy/upper/channel_processors` | 0 | 8/2 | — |
 | `OCUDU_PROBE_RE` | = 1272 | test | `lib/phy/upper/channel_processors/metal/test/metal_dispatch_probe.cpp:57` | 1 | `lib/phy/upper/channel_processors` | 0 | 0/0 | — |
@@ -174,7 +174,7 @@
 | `OCUDU_UL_DUMP_MAX_RB` | = 0 | lib | `lib/phy/upper/channel_processors/pusch/ul_capture.cpp:52` | 1 | `lib/phy/upper/channel_processors` | 0 | 3/2 | — |
 | `OCUDU_UL_DUMP_TD` | ? | lib | `lib/phy/lower/processors/uplink/puxch/puxch_processor_impl.cpp:35` | 2 | `lib/phy/lower/processors` | 0 | 14/7 | — |
 | `OCUDU_UL_DUMP_TD_SLOTS` | = 4 | lib | `lib/phy/lower/processors/uplink/puxch/puxch_processor_impl.cpp:45` | 1 | `lib/phy/lower/processors` | 0 | 2/2 | — |
-| `OCUDU_UL_PHASE_SEGMENTS` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1365` | 1 | `include/ocudu` | 148 | 124/21 | 1 |
+| `OCUDU_UL_PHASE_SEGMENTS` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1365` | 1 | `include/ocudu` | 149 | 124/21 | 1 |
 | `OCUDU_UL_RX_POOL_DROP` | ? | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:1171` | 1 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 1 | 17/2 | 0 |
 | `OCUDU_UL_RX_POOL_DROP_FORCE` | = 0 | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:1184` | 1 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 1 | 11/3 | 20 |
 | `OCUDU_UL_RX_POOL_SIZE` | ? | lib | `lib/phy/lower/lower_phy_factory.cpp:226` | 1 | `lib/phy/lower/lower_phy_factory.cpp` | 1 | 8/4 | 12 |
