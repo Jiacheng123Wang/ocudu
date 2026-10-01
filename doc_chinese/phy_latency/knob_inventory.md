@@ -1,7 +1,7 @@
 # OCUDU_* 旋钮清单（**生成物** + 人工判读）
 
 > 生成方式：`python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > doc_chinese/phy_latency/knob_inventory.md`
-> 本次生成：commit `8c39d0f918`。**不要手改正文**——改生成器或改人工判读小节。
+> 本次生成：commit `88593e0524`。**不要手改正文**——改生成器或改人工判读小节。
 > （生成器把**生成那一刻的 HEAD**写进这一行；要把这一行也追平 HEAD，就重跑生成器再提交一次——那一次是纯文档差异。）
 >
 > **默认值**是**从守卫表达式读出来的**（`ON` = 不设或非 0 都开；`OFF` = 必须显式置 1；`AUTO` = 由别处推导；`= 14` / `= "vdsp"` = 默认是一个**值**而不是开关，腿不设它时用的就是这个值；`?` = 需要读注释）。
@@ -82,7 +82,7 @@
 | `OCUDU_CE_DEV_TA` | ON | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:805` | 1 | `lib/phy/upper/signal_processors` | 0 | 15/7 | — |
 | `OCUDU_CE_DEV_Y` | ON | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:953` | 1 | `lib/phy/upper/signal_processors` | 0 | 37/11 | — |
 | `OCUDU_CE_DFT_TIME` | OFF | test | `lib/phy/upper/signal_processors/channel_estimator/metal/test/port_channel_estimator_metal_mmse_unit_test.cpp:693` | 1 | `lib/phy/upper/signal_processors` | 0 | 1/1 | — |
-| `OCUDU_CE_EDGE_CHECK` | OFF | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:493` | 1 | `lib/phy/upper/signal_processors` | 0 | 6/5 | — |
+| `OCUDU_CE_EDGE_CHECK` | OFF | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:493` | 1 | `lib/phy/upper/signal_processors` | 0 | 9/7 | — |
 | `OCUDU_CE_EDGE_DIAG` | ? | test | `lib/phy/upper/signal_processors/channel_estimator/metal/test/port_channel_estimator_metal_mmse_unit_test.cpp:2651` | 1 | `lib/phy/upper/signal_processors` | 0 | 2/2 | — |
 | `OCUDU_CE_EDGE_FUSE` | ON | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:595` | 1 | `lib/phy/upper/signal_processors` | 0 | 36/13 | — |
 | `OCUDU_CE_FD_HZ` | = 0.0 | test | `tests/integrationtests/phy/upper/channel_processors/pxsch_bler_test_factories.cpp:260` | 1 | `tests/integrationtests` | 0 | 0/0 | — |
@@ -96,8 +96,8 @@
 | `OCUDU_CE_INVERT_FIRST` | ? | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:3825` | 2 | `lib/phy/upper/signal_processors` | 0 | 17/7 | — |
 | `OCUDU_CE_INV_BARRIERS` | = 0 | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_metal_mmse_engine.mm:695` | 1 | `lib/phy/upper/signal_processors` | 0 | 13/6 | — |
 | `OCUDU_CE_K0A_RATIO_CHECK` | ? | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:2203` | 1 | `lib/phy/upper/signal_processors` | 0 | 7/4 | — |
-| `OCUDU_CE_K0A_RATIO_DEV` | ON | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:501` | 1 | `lib/phy/upper/signal_processors` | 0 | 16/10 | — |
-| `OCUDU_CE_LANE_ORDER` | ? | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:1574` | 1 | `lib/phy/upper/signal_processors` | 1 | 66/21 | event |
+| `OCUDU_CE_K0A_RATIO_DEV` | ON | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:501` | 1 | `lib/phy/upper/signal_processors` | 0 | 17/11 | — |
+| `OCUDU_CE_LANE_ORDER` | ? | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:1574` | 1 | `lib/phy/upper/signal_processors` | 1 | 67/21 | event |
 | `OCUDU_CE_LS_CHECK` | ? | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:674` | 1 | `lib/phy/upper/signal_processors` | 0 | 14/6 | — |
 | `OCUDU_CE_MATRIX_CACHE` | ? | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:91` | 1 | `lib/phy/upper/signal_processors` | 2 | 4/1 | 1 |
 | `OCUDU_CE_NO_K4` | ? | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_metal_mmse_engine.mm:1906` | 1 | `lib/phy/upper/signal_processors` | 0 | 11/7 | — |
@@ -125,22 +125,22 @@
 | `OCUDU_CE_Y_HASH` | ? | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:5182` | 1 | `lib/phy/upper/signal_processors` | 0 | 2/1 | — |
 | `OCUDU_D1_HANDED_BOUND` | OFF | lib | `lib/phy/metal/ocudu_metal_burst.mm:40` | 1 | `lib/phy/metal/ocudu_metal_burst.mm` | 0 | 7/3 | — |
 | `OCUDU_DEMOD_DEFER_ENCODE` | ON | lib | `lib/phy/upper/channel_modulation/metal/demodulation_mapper_metal.cpp:199` | 1 | `lib/phy/upper/channel_modulation` | 0 | 8/2 | — |
-| `OCUDU_DFT_BACKEND` | = "vdsp" | lib | `lib/phy/generic_functions/generic_functions_factories.cpp:195` | 1 | `lib/phy/generic_functions/generic_functions_factories.cpp` | 2 | 19/2 | generic |
+| `OCUDU_DFT_BACKEND` | = "vdsp" | lib | `lib/phy/generic_functions/generic_functions_factories.cpp:195` | 1 | `lib/phy/generic_functions/generic_functions_factories.cpp` | 2 | 25/2 | generic |
 | `OCUDU_DFT_BACKEND_QUEUE` | OFF | lib | `lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm:1766` | 1 | `lib/phy/generic_functions/metal` | 1 | 13/5 | 1 |
-| `OCUDU_DFT_BATCH_SYMBOLS` | AUTO | lib | `lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm:106` | 1 | `lib/phy/generic_functions/metal` | 17 | 34/5 | 1,14,2,7 |
+| `OCUDU_DFT_BATCH_SYMBOLS` | AUTO | lib | `lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm:106` | 1 | `lib/phy/generic_functions/metal` | 17 | 35/5 | 1,14,2,7 |
 | `OCUDU_DFT_GRID_AUDIT` | OFF | lib | `lib/phy/lower/modulation/ofdm_demodulator_impl.cpp:166` | 2 | `lib/phy/lower/modulation` | 2 | 2/2 | 1 |
 | `OCUDU_DFT_OPEN_BLOCK` | ON | lib | `lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm:1174` | 2 | `lib/phy/generic_functions/metal` | 0 | 32/12 | — |
 | `OCUDU_DFT_PIPELINE_DEPTH` | ? | lib | `lib/phy/lower/modulation/ofdm_demodulator_impl.cpp:577` | 1 | `lib/phy/lower/modulation` | 0 | 18/6 | — |
-| `OCUDU_DFT_RELEASE_BLOCK` | ON | include | `include/ocudu/phy/phy_pipeline_grid_ready.h:293` | 1 | `include/ocudu` | 9 | 70/12 | 0,1 |
+| `OCUDU_DFT_RELEASE_BLOCK` | ON | include | `include/ocudu/phy/phy_pipeline_grid_ready.h:293` | 1 | `include/ocudu` | 9 | 73/12 | 0,1 |
 | `OCUDU_DFT_RELEASE_TOKENS_EARLY` | ON | lib | `lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm:1251` | 1 | `lib/phy/generic_functions/metal` | 1 | 18/7 | 1 |
 | `OCUDU_DFT_STAGE_INPUT` | OFF | lib | `lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm:1575` | 2 | `lib/phy/generic_functions/metal` | 3 | 16/4 | 1 |
-| `OCUDU_DFT_WAIT_PER_SLOT` | OFF | lib | `lib/phy/lower/modulation/ofdm_demodulator_impl.cpp:159` | 1 | `lib/phy/lower/modulation` | 3 | 6/2 | 1 |
+| `OCUDU_DFT_WAIT_PER_SLOT` | OFF | lib | `lib/phy/lower/modulation/ofdm_demodulator_impl.cpp:159` | 1 | `lib/phy/lower/modulation` | 3 | 7/2 | 1 |
 | `OCUDU_EQ_DEFER_ENCODE` | ON | lib | `lib/phy/upper/channel_processors/metal/ocudu_equalizer_metal_engine.mm:1861` | 5 | `lib/phy/upper/channel_processors` | 0 | 37/11 | — |
 | `OCUDU_EQ_DEV_TABLES` | ON | lib | `lib/phy/upper/channel_processors/metal/ocudu_equalizer_metal_engine.mm:442` | 1 | `lib/phy/upper/channel_processors` | 0 | 4/3 | — |
 | `OCUDU_EQ_DIRECT_GRID` | ON | lib | `lib/phy/upper/channel_processors/metal/ocudu_equalizer_metal_engine.mm:1296` | 1 | `lib/phy/upper/channel_processors` | 1 | 6/1 | 0 |
 | `OCUDU_EQ_GATHER` | ON | lib | `lib/phy/upper/channel_processors/metal/channel_equalizer_metal_factory.cpp:87` | 1 | `lib/phy/upper/channel_processors` | 0 | 18/2 | — |
 | `OCUDU_EQ_TABLE_CHECK` | ? | lib | `lib/phy/upper/channel_processors/metal/ocudu_equalizer_metal_engine.mm:1112` | 1 | `lib/phy/upper/channel_processors` | 0 | 5/3 | — |
-| `OCUDU_GPU_STRICT` | ? | include | `include/ocudu/phy/phy_pipeline_strict.h:31` | 1 | `include/ocudu` | 0 | 12/7 | — |
+| `OCUDU_GPU_STRICT` | ? | include | `include/ocudu/phy/phy_pipeline_strict.h:31` | 1 | `include/ocudu` | 0 | 18/9 | — |
 | `OCUDU_HANDOFF_ADDR` | ? | test | `lib/phy/upper/channel_processors/metal/test/eq_handoff_probe.cpp:155` | 1 | `lib/phy/upper/channel_processors` | 0 | 0/0 | — |
 | `OCUDU_HANDOFF_DM_DEFER` | ? | test | `lib/phy/upper/channel_processors/metal/test/eq_handoff_probe.cpp:233` | 1 | `lib/phy/upper/channel_processors` | 0 | 0/0 | — |
 | `OCUDU_HANDOFF_EQ_DEFER` | ? | test | `lib/phy/upper/channel_processors/metal/test/eq_handoff_probe.cpp:232` | 1 | `lib/phy/upper/channel_processors` | 0 | 0/0 | — |
@@ -168,8 +168,8 @@
 | `OCUDU_PUSCH_DEFERRED_GROUP` | ? | lib | `lib/phy/upper/channel_processors/pusch/pusch_demodulator_impl.cpp:413` | 2 | `lib/phy/upper/channel_processors` | 0 | 8/4 | — |
 | `OCUDU_PUSCH_FORCE_SERIAL` | OFF | lib | `lib/phy/upper/channel_processors/pusch/pusch_demodulator_impl.cpp:303` | 2 | `lib/phy/upper/channel_processors` | 0 | 6/3 | — |
 | `OCUDU_REPLAY_TRACE` | ? | test | `lib/phy/upper/channel_processors/metal/test/ul_chain_replay.cpp:292` | 3 | `lib/phy/upper/channel_processors` | 0 | 1/1 | — |
-| `OCUDU_UL_DUMP` | ? | lib | `lib/phy/upper/channel_processors/pusch/ul_capture.cpp:31` | 2 | `lib/phy/upper/channel_processors` | 0 | 73/11 | — |
-| `OCUDU_UL_DUMP_COUNT` | = 8 | lib | `lib/phy/upper/channel_processors/pusch/ul_capture.cpp:37` | 1 | `lib/phy/upper/channel_processors` | 0 | 10/5 | — |
+| `OCUDU_UL_DUMP` | ? | lib | `lib/phy/upper/channel_processors/pusch/ul_capture.cpp:31` | 2 | `lib/phy/upper/channel_processors` | 0 | 75/12 | — |
+| `OCUDU_UL_DUMP_COUNT` | = 8 | lib | `lib/phy/upper/channel_processors/pusch/ul_capture.cpp:37` | 1 | `lib/phy/upper/channel_processors` | 0 | 11/6 | — |
 | `OCUDU_UL_DUMP_LLR` | ? | test | `lib/phy/upper/channel_processors/metal/test/ul_chain_replay.cpp:502` | 2 | `lib/phy/upper/channel_processors` | 0 | 7/2 | — |
 | `OCUDU_UL_DUMP_MAX_RB` | = 0 | lib | `lib/phy/upper/channel_processors/pusch/ul_capture.cpp:52` | 1 | `lib/phy/upper/channel_processors` | 0 | 3/2 | — |
 | `OCUDU_UL_DUMP_TD` | ? | lib | `lib/phy/lower/processors/uplink/puxch/puxch_processor_impl.cpp:35` | 2 | `lib/phy/lower/processors` | 0 | 14/7 | — |
@@ -178,8 +178,8 @@
 | `OCUDU_UL_RX_POOL_DROP` | ? | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:1171` | 1 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 1 | 17/2 | 0 |
 | `OCUDU_UL_RX_POOL_DROP_FORCE` | = 0 | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:1184` | 1 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 1 | 11/3 | 20 |
 | `OCUDU_UL_RX_POOL_SIZE` | ? | lib | `lib/phy/lower/lower_phy_factory.cpp:226` | 1 | `lib/phy/lower/lower_phy_factory.cpp` | 1 | 8/4 | 12 |
-| `OCUDU_UL_RX_SYMBOLS` | = 1 | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:924` | 2 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 4 | 79/14 | 1,7 |
-| `OCUDU_UL_SLOT_TRACE` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:703` | 1 | `include/ocudu` | 11 | 40/13 | 512 |
+| `OCUDU_UL_RX_SYMBOLS` | = 1 | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:924` | 2 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 4 | 81/14 | 1,7 |
+| `OCUDU_UL_SLOT_TRACE` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:703` | 1 | `include/ocudu` | 11 | 43/14 | 512 |
 | `OCUDU_UL_STALE_US` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1440` | 1 | `include/ocudu` | 0 | 4/3 | — |
 | `OCUDU_USRSCTP_MODE` | ? | lib | `lib/gateways/sctp_socket_usrsctp.cpp:117` | 1 | `lib/gateways` | 0 | 2/1 | — |
 
