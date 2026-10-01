@@ -14992,6 +14992,29 @@ dl #2 margin=474us … wall=04:59:31.809 … cpu=1.97ms win=… µs
 
 **④ 判据状态**：`leg_gate` **10 of 10** ✅；审计 `--leg=p175-n78-milestone --stress-leg=p180-n78-stress` = **30 PASS / 3 FAIL**，其中 2 条 FAIL 是**审计跑到我编辑中途的红测试**（`ul_pipeline_probe_test` 当时正红；修后 `ctest -L phy -j 1` **205/205**），第 3 条是 **`p175` 因仪器代码变更而过期** ⇒ **只差一条当前 HEAD 的 default 腿** ⇒ 那时审计将带上**一条合法加载、全判据通过**的 stress 腿回到 GREEN（本工作流第一次*有实质证据*的绿）。
 
+### 6.246 ★ `p181-n78-default`（当前 HEAD 的交付腿）：`leg_gate` **10 of 10**；审计 **32 PASS / 1 FAIL / 0 RED** —— 唯一 FAIL 是 `p180` 被**报告层**的格式化器修复判成过期；**只差一条当前 HEAD 的 stress 腿**（2026-10-01）
+
+**① 腿的读数（全判据通过）**：戳 `059c9ff21e` = HEAD；knobs 只有两个常规探针；V1 中位 **1262.1**、契约 **8 of 9**、**0 gaps / 4751336 blocks**、crossings 0.00+0.00、`cbs/lane=2.00 dropped=0`、`stale=0`（default 绑定的判据）、CRC-OK 90.0%；
+**§6.198④ 重述 PASS**：`AT/BELOW 0=4`（限 10）、`slip over 1ms=10`、`recv over 1ms=9`（两项都**顶在 ≤10 的上沿**）、`gaps=0`。`leg_gate` = **10 of 10 judged**。
+
+**② 一个要写下来的意外**：这条腿**标签是 `default`（"不跑负载发生器"），实际上行是满载的** —— `ul_load.sh` 读 **UL 5.11 Mbit/s、占空比 11.7%、TBS 中位 2370 B、≥1000 B 87.6%**，是**本会话最高**的上行吞吐（比 `p180` 的 4.07 还高）。⇒ 两个含义：
+* **对证据是好事**：default 绑定的 `stale=0` 是**在真流量下**成立的（不是"空载所以没 stale"）；
+* ⚠ **regime 标签说的是"操作者有没有开负载器"，不是"链路上有没有流量"** —— 读腿时必须同时看 `ul_load.sh` 的载荷，否则会把"标签 default + 实际满载"误读成"空载腿"（与纪律 73/76 同源）。
+
+**③ 判据状态：只差一条腿**。审计 `--leg=p181-n78-default --stress-leg=p180-n78-stress` = **32 PASS / 1 FAIL / 0 RED**，唯一 FAIL：
+
+```
+stress leg p180-n78-stress: the commit it ran, vs HEAD
+  leg ran 4c74233c23; 4c74233c23..HEAD changes 2 file(s), both under lib/include/tests
+  [include/ocudu/support/executors/ul_pipeline_probe.h ...]  <- this leg is NOT evidence about HEAD
+```
+
+即：`p180` 跑在"格式化器修复"**之前**的那一版。该提交只动**报告打印路径**与单测（`git diff 4c74233c23..HEAD -- lib include apps tests` = 探针头文件 + 单测），**不改任何交付行为** —— 但审计的规则是**机械的**（"差分不许碰代码"），而它必须机械：判"这个改动无害"正是审计不该自己做的事。⇒ **再飞一条当前 HEAD 的 stress 腿**（`p182`）即可收口，而且那一条会带上**修好的** `win=`/`ivcsw=`/`nvcsw=` 三列。
+
+**④ 顺带确认**：这条腿的 `[RF]` 52 条里 **27 条落在 `Stopping...`（05:15:46.834）之后**（收尾，`excluded` 那一路）、16 条在 05:15:20、6 条在 05:15:26（流内），前段只有 3 条散布 ⇒ 又是一条"收尾簇"的实例，与 §6.219⑹ 的记录一致。
+
+## 7. 杠杆与候选改动（技术账）
+
 ## 7. 杠杆与候选改动（技术账）
 
 ## 7. 杠杆与候选改动（技术账）
