@@ -1563,4 +1563,78 @@ TEST(ul_pipeline_probe_test, phase_events_carry_the_baseline_of_their_own_window
   ::unsetenv("OCUDU_UL_PHASE_SEGMENTS");
 }
 
+/// \brief The WITHIN-RUN stability view: does the run repeat its own statistics? (dev doc 10.20)
+///
+/// WHY THIS IS THE LINE'S DEFINITION AND NOT A NICETY. The user's definition of running stability: when the PHY
+/// threads run the same task the time it takes should barely change - and because DIFFERENT RUNS may legitimately
+/// differ (radio environment, traffic type), the measurable quantity is the one INSIDE one run. This case drives
+/// the view and, more importantly, its REVERSE ARM: the windows must be cut in TIME ORDER. A series whose first
+/// half is fast and second half slow is exactly what this view exists to expose, and an implementation that
+/// sorted the samples before slicing would report 0% deviation for it - the arm below would then pass a probe
+/// that had quietly stopped measuring anything.
+TEST(ul_pipeline_probe_test, within_run_stability_cuts_time_ordered_windows)
+{
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+
+  // ---- OFF: no [ul_stability] block at all ---------------------------------------------------------------
+  {
+    ::unsetenv("OCUDU_UL_STABILITY_WINDOWS");
+    const std::string report = capture_report();
+    EXPECT_EQ(report.find("[ul_stability]"), std::string::npos)
+        << "the view is opt-in: with the variable unset the report must not change";
+  }
+
+  // ---- ON, arm 1: an ALTERNATING run is stable, and it is the arm that can fail ---------------------------
+  //
+  // ★ THE INPUT IS CHOSEN SO THAT A SORTED IMPLEMENTATION FAILS IT, which the first version of this case did not
+  // manage. A step (100 us then 200 us) cannot tell the two implementations apart: sorting a two-valued series
+  // groups the fast half first, so the sliced windows show the SAME pattern either way - the arm was written,
+  // executed, and only then found to be incapable of going red. Alternating values are the discriminating case:
+  //   * recording order - every window is half fast and half slow, so every window looks like the run (~0%);
+  //   * sorted order    - the first four windows come out all-fast and the last four all-slow, i.e. the probe
+  //     would report a drift of 100% for a run that has none.
+  ::setenv("OCUDU_UL_STABILITY_WINDOWS", "8", 1);
+  const auto push_alternating = [&probe](int pairs) {
+    probe.reset_samples_for_test(); // the probe is a singleton: each arm starts from an empty instrument
+    for (int i = 0; i != pairs; ++i) {
+      probe.record_rx_wait(100000); // 100 us
+      probe.record_rx_wait(200000); // 200 us
+    }
+  };
+  {
+    push_alternating(1000); // 2000 samples, 250 per window
+    const std::string line = line_with(capture_report(), "n=2000");
+    ASSERT_FALSE(line.empty()) << "the view must cut this series";
+    // Every window carries the same mix, so every window's median is the same as the run's: 0.0% deviation.
+    EXPECT_NE(line.find("worst window vs whole run: 0.0%"), std::string::npos)
+        << "a run that alternates fast and slow uniformly must read as stable; a probe that sorts before "
+           "slicing reports a drift that is not there: "
+        << line;
+  }
+
+  // ---- ON, arm 2: a run that really does drift must be REPORTED as drifting --------------------------------
+  {
+    probe.reset_samples_for_test();
+    for (int i = 0; i != 1000; ++i) {
+      probe.record_rx_wait(100000);
+    }
+    for (int i = 0; i != 1000; ++i) {
+      probe.record_rx_wait(200000);
+    }
+    const std::string line = line_with(capture_report(), "n=2000");
+    ASSERT_FALSE(line.empty());
+    EXPECT_NE(line.find("median[ 100.0 100.0 100.0 100.0 200.0 200.0 200.0 200.0 ]"), std::string::npos)
+        << "a run whose second half is twice as slow as its first must show that in the windows: " << line;
+    // The reference is the RUN'S OWN median, which for a step is the fast half (nearest-rank, no interpolation);
+    // the slow windows are twice it. The first version of this case expected ~33% because it reasoned about the
+    // MEAN of the halves, which is not what the probe reports.
+    EXPECT_TRUE(std::regex_search(line, std::regex(R"(worst window vs whole run: 100\.0%)"))) << line;
+    // A series with too few samples says so instead of printing three-sample windows whose deviations would be
+    // sampling noise dressed as instability.
+    const std::string report = capture_report();
+    EXPECT_NE(report.find("only 0 sample(s): fewer than 64 per window, not cut"), std::string::npos) << report;
+  }
+  ::unsetenv("OCUDU_UL_STABILITY_WINDOWS");
+}
+
 #endif // OCUDU_FLOW_PROBES

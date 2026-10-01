@@ -160,10 +160,13 @@ is_n1_fdd  = ("fdd_n1" in leg_cfg)
 # OCUDU_SCHED_VERBOSE joined 2026-10-01 with doc_chinese/macos_thread_priority/ dev doc 10.5: it reads back each
 # worker thread's granted QoS class / POSIX policy ONCE at thread creation and PRINTS one line; it changes no
 # scheduling parameter, reads no clock, and prints nothing when unset. The two knobs that DO change macOS
-# scheduling (OCUDU_SCHED_SKIP_POSIX_RT, OCUDU_SCHED_ATTR_QOS) are deliberately NOT here: they are arms, and an
+# scheduling (OCUDU_SCHED_POSIX_RT, OCUDU_SCHED_ATTR_QOS) are deliberately NOT here: they are arms, and an
 # arm can satisfy every other criterion in this file.
+# OCUDU_UL_STABILITY_WINDOWS joined 2026-10-01 (macos_thread_priority dev doc 10.20): the within-run stability
+# view. It reads NOTHING new - it re-cuts the sample vectors the probe already keeps, in their recording order,
+# at report time - so on the hot path it costs zero and it changes no delivery decision.
 KNOB_ANY = ("OCUDU_METAL_GPU_TIME", "OCUDU_UL_PHASE_SEGMENTS", "OCUDU_UL_SLOT_TRACE", "OCUDU_UL_TIMING_EVENTS",
-            "OCUDU_SCHED_VERBOSE")
+            "OCUDU_SCHED_VERBOSE", "OCUDU_UL_STABILITY_WINDOWS")
 KNOB_EQ  = ("OCUDU_DFT_BATCH_SYMBOLS=14", "OCUDU_DFT_OPEN_BLOCK=1", "OCUDU_DFT_RELEASE_BLOCK=1",
             "OCUDU_CE_LANE_ORDER=merged",
             # OCUDU_DFT_BACKEND=vdsp joined 2026-10-01: on Apple that IS the value an unset leg resolves to

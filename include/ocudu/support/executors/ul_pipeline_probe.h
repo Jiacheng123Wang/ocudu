@@ -1658,6 +1658,107 @@ public:
     }
   }
 
+  /// \brief Forgets every recorded SAMPLE (the series' distributions), leaving the counters and the ranked event
+  /// lists alone.
+  ///
+  /// WHY IT EXISTS. The within-run stability view is about the ORDER of a series' samples, so a unit case that
+  /// wants to state "this run drifts" and "that run does not" has to say which samples it is talking about - and
+  /// the probe is a process-wide singleton whose vectors are private. Appending two shapes to one stream and
+  /// asserting on the printout would give DIFFERENT lines depending on whether the binary ran the cases in one
+  /// process or one process each (gtest_discover_tests does the latter, a direct run the former), i.e. the run
+  /// mode would decide the verdict - the trap the ranked-list case already hit once. A reset makes the two arms
+  /// independent by construction, in either mode.
+  ///
+  /// \note Test hook, not production API: nothing in the pipeline calls it, and it is named so that a reader
+  ///       cannot mistake it for one.
+  void reset_samples_for_test()
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    latencies_us.clear();
+    stale_pipeline_us.clear();
+    stale_gpu_pipeline_us.clear();
+    t2f_latencies_us.clear();
+    ce_latencies_us.clear();
+    eqdem_latencies_us.clear();
+    gpu_pipeline_latencies_us.clear();
+    ldpc_latencies_us.clear();
+    mac_pdu_sizes_bytes.clear();
+    fapi_mac_latencies_us.clear();
+    rx_wait_us.clear();
+    rx_wait_hop_us.clear();
+    dft_wait_us.clear();
+  }
+
+  /// How many equal-sample windows the within-run stability view cuts each series into (0 = the view is off).
+  ///
+  /// `OCUDU_UL_STABILITY_WINDOWS=K`: K windows of equal SAMPLE count, in time order. 1 is refused (one window is
+  /// the whole run and would report "perfectly stable" for anything); a non-numeric value means the default 8,
+  /// for the reason slot_trace_limit() gives - an operator asking for the view should not have to guess a count.
+  static unsigned stability_windows()
+  {
+    const char* env = std::getenv("OCUDU_UL_STABILITY_WINDOWS");
+    if (env == nullptr) {
+      return 0;
+    }
+    const unsigned v = static_cast<unsigned>(std::strtoul(env, nullptr, 10));
+    if (v <= 1) {
+      return (env[0] >= '0' && env[0] <= '9' && v == 1) ? 0U : 8U;
+    }
+    return (v > 64) ? 64U : v;
+  }
+
+  /// \brief One line per series: what each K-th of the run looked like, and how far the worst one strayed.
+  ///
+  /// \param[in] time_ordered The series' samples IN THE ORDER THEY WERE RECORDED (which is what makes the windows
+  ///            mean something); the whole-run reference values are computed from the same vector, so the
+  ///            comparison cannot drift from the series it is about.
+  static void print_window_stability(const char* name, const std::vector<double>& time_ordered, unsigned windows)
+  {
+    if (time_ordered.size() < static_cast<size_t>(windows) * 8) {
+      // Too few samples for the cut to say anything: SAY so rather than print a table of 3-sample windows, whose
+      // deviations would be sampling noise dressed as instability.
+      std::fprintf(stderr,
+                   "  %-22s only %zu sample(s): fewer than %u per window, not cut\n",
+                   name,
+                   time_ordered.size(),
+                   windows * 8);
+      return;
+    }
+    const auto stat_of = [](std::vector<double> v, double p) {
+      std::sort(v.begin(), v.end());
+      return v[static_cast<size_t>((v.size() - 1) * p)];
+    };
+    const double ref_median = stat_of(time_ordered, 0.5);
+    const double ref_p95    = stat_of(time_ordered, 0.95);
+    const size_t per_window = time_ordered.size() / windows;
+    std::string  medians;
+    std::string  p95s;
+    double       worst_dev = 0.0;
+    for (unsigned w = 0; w != windows; ++w) {
+      const size_t begin = w * per_window;
+      const size_t end   = (w + 1 == windows) ? time_ordered.size() : begin + per_window;
+      const std::vector<double> slice(time_ordered.begin() + begin, time_ordered.begin() + end);
+      const double              med = stat_of(slice, 0.5);
+      const double              p95 = stat_of(slice, 0.95);
+      char                      buf[32];
+      std::snprintf(buf, sizeof(buf), " %.1f", med);
+      medians += buf;
+      std::snprintf(buf, sizeof(buf), " %.1f", p95);
+      p95s += buf;
+      if (ref_median > 0) {
+        worst_dev = std::max(worst_dev, std::fabs(med - ref_median) / ref_median * 100.0);
+        worst_dev = std::max(worst_dev, std::fabs(p95 - ref_p95) / ref_p95 * 100.0);
+      }
+    }
+    std::fprintf(stderr,
+                 "  %-22s n=%-8zu median[%s ] p95[%s ]   worst window vs whole run: %.1f%%\n",
+                 name,
+                 time_ordered.size(),
+                 medians.c_str(),
+                 p95s.c_str(),
+                 worst_dev);
+  }
+
   /// \brief Prints the worst receive waits and hand-over margins WITH their host wall clocks (dev doc 6.240/6.241).
   ///
   /// WHAT IT IS FOR. The three things a leg can see about a stall live in three files and two clocks: the receive
@@ -2065,6 +2166,38 @@ public:
                    stale_sum / static_cast<double>(stale.size()),
                    stale_max);
     };
+
+    // ---- the WITHIN-RUN stability view (dev doc 10.20) --------------------------------------------------------
+    // WHAT THE USER MEANS BY "running stability" (2026-10-01, and it is a definition, not a preference): when the
+    // PHY threads run THE SAME TASK the time it takes should barely change - and because DIFFERENT RUNS may
+    // legitimately differ (the radio environment and the traffic type change between them), the quantity to
+    // measure is the one INSIDE one run: are the run's own statistics the same in its first tenth as in its last?
+    //
+    // It is computed here, at report time, from data this probe ALREADY keeps, and that is why it is free: every
+    // series vector is appended in TIME ORDER, so splitting it into K equal-count windows is a slice of the same
+    // vector - no per-sample timestamp, no histogram, nothing on the hot path. Each window's statistic is then
+    // compared with the whole run's, and the widest deviation is printed per series.
+    //
+    // Gate: OCUDU_UL_STABILITY_WINDOWS=K (0/unset = no output at all, so every existing report is byte-identical;
+    // it is a print-only probe and belongs in the gate's whitelist - it changes no delivery decision).
+    const unsigned stability_window_count = stability_windows();
+    if (stability_window_count > 1) {
+      std::fprintf(stderr,
+                   "[ul_stability] OCUDU_UL_STABILITY_WINDOWS=%u: the run cut into %u equal-sample windows IN TIME "
+                   "ORDER; a stable run repeats its own statistics\n",
+                   stability_window_count,
+                   stability_window_count);
+      print_window_stability("ul_pipeline", sorted_pipeline, stability_window_count);
+      print_window_stability("ul_gpu_pipeline", sorted_gpu_pipeline, stability_window_count);
+      print_window_stability("ul_time_frequency", sorted_t2f, stability_window_count);
+      print_window_stability("ul_channel_estimation", sorted_ce, stability_window_count);
+      print_window_stability("ul_equalization_demod", sorted_eqdem, stability_window_count);
+      print_window_stability("ul_ldpc_decode", sorted_ldpc, stability_window_count);
+      print_window_stability("ul_rx_wait", sorted_rx_wait, stability_window_count);
+      std::fprintf(stderr,
+                   "  read: each window is a K-th of the run's SAMPLES (time order), median/p95 in us, and the "
+                   "last column is the widest deviation of a window from the whole-run value\n");
+    }
 
     double sum = 0;
     // Report to stderr (guaranteed to be visible at the shutdown, unlike the logging backend) and to the logs.
