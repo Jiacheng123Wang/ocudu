@@ -28,6 +28,7 @@
 |---|---|---|
 | `wip/*.sh`、`wip/*.py` | ✅ **跟踪** | 腿配方与旁观脚本（它们产出证据，属于"人读了才懂"的东西）：`observe_threads.sh`（旁观，默认 light）、`taskpolicy_ab.sh`（P2 档位 A/B）、`spike_census.py`（尖峰普查，读 p99）、`threshold_candidates.py`（按**家族**导出 C1/C2 阈值）、`freeze_census.py`（把每条尾部事件与**该腿自己的**切换率基线并列 → 区分「整进程冻结」与「线程没被调度」，并给出可拿去 `log show` 追查的**本地时刻**）|
 | `wip/logs/` | ❌ **忽略**（`doc_chinese/.gitignore` 的 `**/logs/`）| 本线新飞的腿（三件套：`.log` / `.log.stderr` / `.log.stdout`）。★ **飞腿时必须带 `LEG_LOGDIR=doc_chinese/macos_thread_priority/wip/logs`**：`run_leg.sh` 的默认仍指向 `../phy_pipeline_gpu/wip/logs/`（2026-10-01 之前它的 `LOGDIR` 是写死的，所以本目录一直是空的 —— 用户发现，见开发文档 §10.14）；三个门（`leg_gate.sh`/`ul_load.sh`/`milestone_audit.sh`）**两个目录都会找**，所以腿放哪边都能判 |
+| `wip/sched_microbench/` | ✅ **跟踪** | P4 的**微基准依据**（2026-10-01）：9 个独立可编译的探针 + `run_all.sh`（一条命令跑完，约 3 分钟）+ `loopback_arm_sweep.sh`（把**各臂放到 loopback 台上跑基率**：无电台、无 UE、无 sudo，18 秒一轮）。★ 它回答了"时间约束值多少"（2× 超订下唤醒尾延迟 **5358 → 9.9 µs**）、"哪种参数有害"（只有 `constraint<computation`），以及**2026-09-01 回归到底是谁的错**（**范围**，不是参数：全量臂 0/3 干净，池线程/单线程/io 3/3 干净，`lower_phy_*` **0/12**）。读数表在它的 `README.md`，判定在开发文档 §10.29/§10.30 |
 | `work_tmp/` | ❌ **忽略**（`**/work_tmp/`）| `taskinfo`/`powermetrics`/`sample` 的采样文件、dump、scratch |
 
 ## 与本仓其他目录的关系

@@ -2146,7 +2146,10 @@ public:
     if (v < 0) {
       return "-";
     }
-    char buf[16];
+    // 24 bytes, not 16: a long long prints up to 20 characters, and GCC's -Werror=format-truncation refuses the
+    // smaller buffer - which it only ever saw on Linux, where this probe had never been built with
+    // ENABLE_FLOW_PROBES=ON until 2026-10-01 (the bench runs the project default, probes OFF).
+    char buf[24];
     std::snprintf(buf, sizeof(buf), "+%lld", static_cast<long long>(v));
     return buf;
   }
@@ -2174,7 +2177,10 @@ public:
     if (us < 0) {
       return "-";
     }
-    char buf[16];
+    // 24 bytes, not 16: a long long prints up to 20 characters, and GCC's -Werror=format-truncation refuses the
+    // smaller buffer - which it only ever saw on Linux, where this probe had never been built with
+    // ENABLE_FLOW_PROBES=ON until 2026-10-01 (the bench runs the project default, probes OFF).
+    char buf[24];
     std::snprintf(buf, sizeof(buf), "%lldus", static_cast<long long>(us));
     return buf;
   }
@@ -2186,7 +2192,10 @@ public:
     if (load1_x100 < 0) {
       return "-";
     }
-    char buf[16];
+    // 24 bytes, not 16: a long long prints up to 20 characters, and GCC's -Werror=format-truncation refuses the
+    // smaller buffer - which it only ever saw on Linux, where this probe had never been built with
+    // ENABLE_FLOW_PROBES=ON until 2026-10-01 (the bench runs the project default, probes OFF).
+    char buf[24];
     std::snprintf(buf, sizeof(buf), "%lld.%02lld", static_cast<long long>(load1_x100 / 100),
                   static_cast<long long>(load1_x100 % 100));
     return buf;
