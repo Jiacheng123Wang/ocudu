@@ -176,3 +176,8 @@ LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml OCUDU_METAL_GPU_TIME=1 OCUDU_UL
 9. ★ **新**：**"设了"不等于"生效"** —— 任何调度/档位改动都必须在**线程内回读**（本会话的全部价值来自这一条）。
 10. ★ **新（2026-10-01 的教训）**：**腿在跑的时候，本机不许跑构建/测试/loopback/任何 `-j`** —— 动手前先 `pgrep -x gnb`。
     实测代价：`p191` 因我在 22:09:12 跑了 `-j 8` 构建而作废（最后一窗独占 19/23 个接收尾部事件、`load1` 3.8→5.6）。
+11. ★★ **新（2026-10-01，臂 0 的结论）**：**飞腿时机器必须安静** —— 关蓝牙、接力/Continuity、Spotlight 索引，不开其它应用。
+    理由：`max` 就是"该腿最大的一次**系统守护进程造成的整进程停顿**"（Continuity/BLE 发现、`launchd`/`runningboardd`、
+    `deleted`/`biomesyncd`/`mobileassetd` 风暴），**线程优先级修不了它**。两条安静腿把 8–15 ms 那一类全部消除
+    （`rx_wait` max 11.0→2.1–2.4 ms、`eqd` 11.6→2.9–3.3 ms），残余 1.7–2.2 ms 仍来自 `launchd`/`runningboardd`/`mDNSResponder`。
+    诊断工具：`wip/freeze_census.py`（把每条事件与本腿切换率基线并列，给出可去 `log show` 追查的本地时刻）。
