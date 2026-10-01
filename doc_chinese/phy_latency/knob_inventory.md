@@ -1,7 +1,7 @@
 # OCUDU_* 旋钮清单（**生成物** + 人工判读）
 
 > 生成方式：`python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > doc_chinese/phy_latency/knob_inventory.md`
-> 本次生成：commit `a283a2addb`。**不要手改正文**——改生成器或改人工判读小节。
+> 本次生成：commit `5c8e8330ca`。**不要手改正文**——改生成器或改人工判读小节。
 > （生成器把**生成那一刻的 HEAD**写进这一行；要把这一行也追平 HEAD，就重跑生成器再提交一次——那一次是纯文档差异。）
 >
 > **默认值**是**从守卫表达式读出来的**（`ON` = 不设或非 0 都开；`OFF` = 必须显式置 1；`AUTO` = 由别处推导；`= 14` / `= "vdsp"` = 默认是一个**值**而不是开关，腿不设它时用的就是这个值；`?` = 需要读注释）。
