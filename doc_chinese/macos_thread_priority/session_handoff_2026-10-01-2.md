@@ -27,7 +27,21 @@
   `=1` = 恢复历史行为，作为对照臂留在同一二进制上。两条臂都在 loopback 复验（开发文档 §10.16(2)）。
 * **相位基线缺口已修**（§10.16(3)）：`cpu=`/`tcpu=` 不再是 `-`；单测抓到我第二版实现里一个"纳秒级却致命"的缺陷。
 * 回归：`ctest -L phy -j 1` = **208/208**；探针单测整二进制 14/14、ctest 9/9。
-* ⚠ **因此 p185/p186 已过期**（这两项改动都动了 `lib/`/`utils/`）⇒ **需要最后一对腿**，命令见本文件末尾。
+* Ubuntu 台架同一 commit：`BUILD_RC=0`（0 warning）+ `ctest -L phy` **184/184**。
+* ⚠ **因此 p185/p186 已过期**（这两项改动都动了 `lib/`/`utils/`）⇒ **需要最后一对腿**：
+
+```bash
+cd /Users/jiachengwang/dev/ocudu
+# 腿 ①：default（新默认 = QoS 档存活；带读档与事件表）
+LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
+OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_UL_TIMING_EVENTS=16 OCUDU_SCHED_VERBOSE=1 \
+LEG_LOGDIR=doc_chinese/macos_thread_priority/wip/logs \
+  sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p187-n78-default --regime=default
+# 腿 ②：stress（同上 + --regime=stress；先判载荷）
+```
+**这一对腿要看的新东西**：① `[sched]` 里 RT 线程应变成 `eff=USER_INTERACTIVE posix=OTHER/31`（**默认臂**，
+不再是 `UNSPECIFIED`）；② 相位块（`ce`/`eqd`/`ldpc`）的事件行应开始带 **`cpu=<数值>`**（不再是 `-`）；
+③ `leg_gate` 两条都应是 **10/10**。
 
 ## 1. 一句话状态
 

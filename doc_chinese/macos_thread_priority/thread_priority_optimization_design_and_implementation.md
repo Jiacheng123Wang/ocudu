@@ -682,7 +682,9 @@ OCUDU_SCHED_POSIX_RT=1 [sched] thread=main_pool#0 rt_intent=1 req=USER_INTERACTI
 
 #### (4) 回归
 
-`ctest -L phy -j 1` = **208/208**；探针单测两种跑法都过（整二进制 **14/14**、ctest 逐用例 **9/9**）——
+`ctest -L phy -j 1` = **208/208**；**Ubuntu 台架**（同一 commit，`ENABLE_FLOW_PROBES=OFF` 的项目默认配置）：
+`cmake --build build -j 8` = **`BUILD_RC=0`**、`ctest -L phy -j 4` = **184/184 通过 / 0 失败**。
+探针单测两种跑法都过（整二进制 **14/14**、ctest 逐用例 **9/9**）——
 ★ 其中一次失败是**我自己的用例**在整二进制模式下读到了**别的用例**留下的 `ce #1`（探针是进程级单例）；
 用例已改为先清空自己的列表，并在注释里写明两种跑法差异**不得**决定判据。
 
