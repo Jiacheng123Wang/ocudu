@@ -1651,4 +1651,116 @@ TEST(ul_pipeline_probe_test, within_run_stability_cuts_time_ordered_windows)
   ::unsetenv("OCUDU_UL_STABILITY_WINDOWS");
 }
 
+/// \brief Per-thread, per-slot CPU accounting: the figure a Mach time constraint's `computation` is read from.
+///
+/// WHY IT GETS A TEST OF ITS OWN (dev doc 10.30(8)). Every part of it is arithmetic around a clock reading - when
+/// a window opens, when it closes, which bucket it lands in, what the quantile returns - and each part can be
+/// wrong in a way that shows up only as a slightly different number in a report nobody can check by hand. So the
+/// arms below drive it with KNOWN CPU values instead of a clock.
+///
+/// ★ The second arm is chosen to fail an implementation that files a window per CALL rather than per slot CHANGE:
+/// four boundary calls at four slot indices must produce exactly three windows, and a call that repeats a slot
+/// must not open a second one. Both wrong versions are the obvious ones to write, and both would inflate the
+/// count (and shrink the mean) without ever looking broken.
+TEST(ul_pipeline_probe_test, per_thread_cpu_accounting_files_one_window_per_slot_change)
+{
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+
+  const auto capture_accounting = [&probe]() {
+    std::string out;
+    FILE*       capture = std::tmpfile();
+    EXPECT_NE(capture, nullptr);
+    if (capture == nullptr) {
+      return out;
+    }
+    std::fflush(stderr);
+    const int saved = dup(fileno(stderr));
+    dup2(fileno(capture), fileno(stderr));
+    probe.print_thread_cpu_accounting();
+    std::fflush(stderr);
+    dup2(saved, fileno(stderr));
+    close(saved);
+    std::rewind(capture);
+    char   buf[512];
+    size_t nof_read = 0;
+    while ((nof_read = std::fread(buf, 1, sizeof(buf), capture)) > 0) {
+      out.append(buf, nof_read);
+    }
+    std::fclose(capture);
+    return out;
+  };
+
+  // ---- OFF: the knob unset means no line AND no registration, even when a real landmark runs ---------------
+  {
+    ::unsetenv("OCUDU_UL_THREAD_CPU");
+    probe.reset_thread_cpu_accounting_for_test();
+    probe.record_ce_end(1000); // the real landmark: it must not register anything while the knob is off
+    EXPECT_EQ(probe.thread_cpu_accounts_size_for_test(), 1u)
+        << "only the reset's own block may exist: the landmark must not register one";
+    const std::array<int64_t, 4> values = probe.thread_cpu_account_values_for_test(0);
+    EXPECT_EQ(values[0], 0) << "no window may be filed with the knob off";
+    EXPECT_TRUE(capture_accounting().empty()) << "and the report must print nothing at all";
+  }
+
+  // ---- ON: one window per slot change, not per call --------------------------------------------------------
+  {
+    ::setenv("OCUDU_UL_THREAD_CPU", "1", 1);
+    probe.reset_thread_cpu_accounting_for_test();
+    probe.record_thread_cpu_boundary_for_test(10, 1000000); // opens a window at slot 10, thread CPU 1 ms
+    probe.record_thread_cpu_boundary_for_test(11, 1100000); // slot changed: files 100 us
+    probe.record_thread_cpu_boundary_for_test(12, 1300000); // files 200 us
+    probe.record_thread_cpu_boundary_for_test(13, 1600000); // files 300 us
+    std::array<int64_t, 4> values = probe.thread_cpu_account_values_for_test(0);
+    EXPECT_EQ(values[0], 3) << "four boundaries at four slots close three windows";
+    EXPECT_EQ(values[1], 600000) << "sum = 100 + 200 + 300 us";
+    EXPECT_EQ(values[2], 300000) << "max = 300 us";
+
+    // A second call with the SAME slot must not open a second window.
+    probe.record_thread_cpu_boundary_for_test(13, 1700000);
+    values = probe.thread_cpu_account_values_for_test(0);
+    EXPECT_EQ(values[0], 3) << "a repeated slot index must not close (or open) anything";
+
+    // A counter that goes BACKWARDS (another thread's reading, or a reset) must not file a negative window.
+    probe.record_thread_cpu_boundary_for_test(14, 100000);
+    probe.record_thread_cpu_boundary_for_test(15, 100000);
+    values = probe.thread_cpu_account_values_for_test(0);
+    EXPECT_EQ(values[0], 4) << "the backwards reading opens a window; only a valid pair files one";
+    EXPECT_EQ(values[2], 300000) << "and it must not make the max grow";
+  }
+
+  // ---- the report names the thread, the count and the number to declare -----------------------------------
+  {
+    const std::string out = capture_accounting();
+    EXPECT_NE(out.find("[ul_thread_cpu]"), std::string::npos) << out;
+    EXPECT_NE(out.find("thread="), std::string::npos) << out;
+    EXPECT_NE(out.find("slots=4"), std::string::npos) << out;
+    EXPECT_NE(out.find("declare computation >="), std::string::npos) << out;
+  }
+
+  // ---- a LONE TAIL must survive to the declaration: the mean is not the number -----------------------------
+  //
+  // 1000 windows of 100 us and one of 1000 us: the mean is ~101 us, and declaring it would under-declare by 10x
+  // for exactly the slot that needed the budget - the failure mode the whole accounting exists to prevent.
+  {
+    probe.reset_thread_cpu_accounting_for_test();
+    int64_t cpu_ns = 0;
+    for (int i = 0; i != 1002; ++i) {
+      if (i != 0) {
+        cpu_ns += (i == 1001) ? 1000000 : 100000;
+      }
+      probe.record_thread_cpu_boundary_for_test(static_cast<uint64_t>(i), cpu_ns);
+    }
+    const std::array<int64_t, 4> values = probe.thread_cpu_account_values_for_test(0);
+    EXPECT_EQ(values[0], 1001) << "1002 boundaries close 1001 windows";
+    EXPECT_EQ(values[2], 1000000) << "the tail is the max, whatever the mean says";
+    EXPECT_GT(values[3], 100000) << "p99.9 must sit above the 100 us body, not inside it";
+    EXPECT_LE(values[3], 131072) << "and it is the histogram's bucket edge just above 100 us";
+    const std::string out = capture_accounting();
+    EXPECT_NE(out.find("max=1000.0us"), std::string::npos) << out;
+    EXPECT_NE(out.find("declare computation >= 1000.0us"), std::string::npos) << out;
+  }
+
+  ::unsetenv("OCUDU_UL_THREAD_CPU");
+}
+
 #endif // OCUDU_FLOW_PROBES

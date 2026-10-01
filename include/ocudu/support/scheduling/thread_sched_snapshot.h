@@ -94,6 +94,15 @@ struct thread_sched_snapshot {
 /// reading is actually kept - exactly like the process-wide baseline the timing events already use.
 thread_sched_snapshot this_thread_sched_snapshot();
 
+/// \brief Reads ONLY the calling thread's cumulative CPU, in nanoseconds (-1 when the platform refuses).
+///
+/// WHY IT IS SEPARATE: this_thread_sched_snapshot() answers "what is this thread's scheduling state", and it pays
+/// for that answer with five calls (pthread_getschedparam, pthread_threadid_np, pthread_get_qos_class_np,
+/// thread_info, thread_policy_get). A caller that only wants the CPU counter - the per-slot accounting that
+/// calibrates a Mach time constraint's `computation` (dev doc 10.30(8)) - must not pay for the other four on
+/// every pipeline landmark, so this is the same reading with nothing else attached.
+int64_t this_thread_cpu_ns();
+
 /// \brief Returns a printable name for a qos_class value ("USER_INTERACTIVE", "-", ...).
 const char* qos_class_name(int32_t qos);
 

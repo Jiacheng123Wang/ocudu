@@ -4,14 +4,14 @@
 > 2026-10-01 从 `phy_latency/knob_inventory.md` 上移到本目录并改名（旧路径只作历史）。
 
 > 生成方式：`python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > doc_chinese/ocudu_env_knobs_inventory_and_leg_whitelist.md`
-> 本次生成：commit `405e038308`。**不要手改正文**——改生成器或改人工判读小节。
+> 本次生成：commit `a236a81a4b`。**不要手改正文**——改生成器或改人工判读小节。
 > （生成器把**生成那一刻的 HEAD**写进这一行；要把这一行也追平 HEAD，就重跑生成器再提交一次——那一次是纯文档差异。）
 >
 > **默认值**是**从守卫表达式读出来的**（`ON` = 不设或非 0 都开；`OFF` = 必须显式置 1；`AUTO` = 由别处推导；`= 14` / `= "vdsp"` = 默认是一个**值**而不是开关，腿不设它时用的就是这个值；`?` = 需要读注释）。
 > 生成器只认**本旋钮自己那次读取**的守卫（窗口在下一个旋钮的读取处截断），并且只认几种写法：`?` 里绝大多数是「置位即开」的探针/实验选择器（`static const bool x = (std::getenv("X") != nullptr);`），生成器**故意不把它们判成 `ON`** —— §1 是验收腿白名单，**宁可漏，不可错**。
 > **飞过的腿数**来自 `logs/*.log.stderr` 顶部的 `knob : NAME=VALUE` 登记行 —— 这是**唯一能区分「新仪器」与「已退役」的一列**，源码里两者长得一样。
 
-合计 **128** 个旋钮：**20** 个默认 `ON`（`OCUDU_DFT_RELEASE_TOKENS_EARLY` 于 2026-09-28 由 OFF 改为 ON：**理由 = 输入保持**，见开发文档 6.157；6.156 当初写的"吃掉接收尾巴 60-70×"**已被 6.157 撤回**）（= 交付形态的一部分）；**29** 个有腿登记行、**90** 个只在记录里出现过、**9** 个两处都没有；其中 **19** 个的首个读取点在 `test/`（离线臂）。
+合计 **129** 个旋钮：**20** 个默认 `ON`（`OCUDU_DFT_RELEASE_TOKENS_EARLY` 于 2026-09-28 由 OFF 改为 ON：**理由 = 输入保持**，见开发文档 6.157；6.156 当初写的"吃掉接收尾巴 60-70×"**已被 6.157 撤回**）（= 交付形态的一部分）；**29** 个有腿登记行、**92** 个只在记录里出现过、**8** 个两处都没有；其中 **19** 个的首个读取点在 `test/`（离线臂）。
 
 ## 1. 交付形态的一部分（默认 `ON`）——**验收腿上不许出现「改成 OFF」的值**
 
@@ -46,20 +46,21 @@
 | `OCUDU_LANE_ABLATE_EVERY` | ? | `lib/phy/metal/ocudu_metal_burst.mm:455` | 15 | **修饰符**（默认 1 = 每跳都消去；只在 `OCUDU_LANE_ABLATE=1` 时有意义）：`=8` = 每 8 跳消去 1 跳，全消去手机接不进来（p79） |
 | `OCUDU_LANE_ABLATE_STAGE` | OFF | `lib/phy/metal/ocudu_metal_burst.mm:284` | 10 | **修饰符**（只在 `OCUDU_LANE_ABLATE=1` 时有意义）：只消去哪一**阶段族**——`front_end`/`ce`/`eq`/`demap`（`|` 或 `,` 组合），不设 = `all` = 历史行为；拼错的名字按 `all` 处理并打 WARNING。族级账单靠它，覆盖度看报告里的 `Q9-F5 ablation coverage`（开发文档 6.162） |
 | `OCUDU_METAL_GPU_TIME` | OFF | `lib/phy/metal/ocudu_metal_queue.mm:325` | 115 | **探针**：给每条 cb 装 GPU 时间戳（per-label 表的来源；验收腿一直带着它） |
-| `OCUDU_UL_PHASE_SEGMENTS` | OFF | `include/ocudu/support/executors/ul_pipeline_probe.h:2436` | 156 | **探针**：上行相位分段读数（验收腿一直带着它） |
-| `OCUDU_UL_TIMING_EVENTS` | OFF | `include/ocudu/support/executors/ul_pipeline_probe.h:1200` | 5 | **探针（新，开发文档 6.240–6.243）**：打印**最慢的 K 次接收等待**与**最迟的 K 次 DL 交接**，各带**宿主墙钟**（`wall=` UTC + `epoch_ms=` + 窗口两端 `began_ms=`/`due_ms=`）、当时的 `load1`，以及**本进程在那个窗口里的 CPU 时间与自愿/非自愿切换增量**（`cpu=`/`ivcsw=`/`nvcsw=`/`base_age=`）—— 用来把 `[ul_rx_wait]` 的尖峰、DL 的迟到和 `.log` 里 `[RF] Real-time failure in RF` 的行对到**同一条时间轴**上。★ 判读只看 **`cpu=` 对窗口**：`cpu ≈ wait` ⇒ 进程一直有 CPU ⇒ 是**电台/USB 侧**晚；`cpu ≈ 0` 或 `ivcsw>0` ⇒ 进程没被调度 ⇒ **宿主调度**。（`load1` 是 60 s 平均，**看不见 10 ms 级事件**，别用它判 —— 纪律 78） |
-| `OCUDU_UL_SLOT_TRACE` | OFF | `include/ocudu/support/executors/ul_pipeline_probe.h:1166` | 11 | **探针**：每**时隙**时间线（`=N` = 最多记 N 个时隙，非数字 = 开且用默认上限）。和上面两个一样被两条闸门当「任意值」接受，但它比相位分段宽得多，**验收腿不需要它**——只在追「某个时隙为什么晚」时开（开发文档 6.145⑹⑴；`=64` 曾打出 512 行，见 `ul_pipeline_probe.h` 的注） |
+| `OCUDU_UL_PHASE_SEGMENTS` | OFF | `include/ocudu/support/executors/ul_pipeline_probe.h:2548` | 156 | **探针**：上行相位分段读数（验收腿一直带着它） |
+| `OCUDU_UL_TIMING_EVENTS` | OFF | `include/ocudu/support/executors/ul_pipeline_probe.h:1307` | 5 | **探针（新，开发文档 6.240–6.243）**：打印**最慢的 K 次接收等待**与**最迟的 K 次 DL 交接**，各带**宿主墙钟**（`wall=` UTC + `epoch_ms=` + 窗口两端 `began_ms=`/`due_ms=`）、当时的 `load1`，以及**本进程在那个窗口里的 CPU 时间与自愿/非自愿切换增量**（`cpu=`/`ivcsw=`/`nvcsw=`/`base_age=`）—— 用来把 `[ul_rx_wait]` 的尖峰、DL 的迟到和 `.log` 里 `[RF] Real-time failure in RF` 的行对到**同一条时间轴**上。★ 判读只看 **`cpu=` 对窗口**：`cpu ≈ wait` ⇒ 进程一直有 CPU ⇒ 是**电台/USB 侧**晚；`cpu ≈ 0` 或 `ivcsw>0` ⇒ 进程没被调度 ⇒ **宿主调度**。（`load1` 是 60 s 平均，**看不见 10 ms 级事件**，别用它判 —— 纪律 78） |
+| `OCUDU_UL_SLOT_TRACE` | OFF | `include/ocudu/support/executors/ul_pipeline_probe.h:1273` | 11 | **探针**：每**时隙**时间线（`=N` = 最多记 N 个时隙，非数字 = 开且用默认上限）。和上面两个一样被两条闸门当「任意值」接受，但它比相位分段宽得多，**验收腿不需要它**——只在追「某个时隙为什么晚」时开（开发文档 6.145⑹⑴；`=64` 曾打出 512 行，见 `ul_pipeline_probe.h` 的注） |
 | `OCUDU_DFT_BACKEND` | = "vdsp" | `lib/phy/generic_functions/generic_functions_factories.cpp:195` | 2 | 前端变换的**后端选择**：`=vdsp`（Apple 上**不设就是它**，所以白名单接受）｜`=generic`（**A/B 对照臂**，n78 p170/p171、n1 p172/p173 用它跑 generic 那一侧）。非 Apple 平台根本不编进这条分支，所以这一行的「默认」只在 Apple 上有意义 |
 | `OCUDU_DFT_BATCH_SYMBOLS` | AUTO | `lib/phy/generic_functions/metal/ocudu_dft_metal_engine.mm:106` | 17 | 前端批量：不设 = `AUTO`（= 一个时隙自己的符号数，n78 上是 **14**）｜`=1` = 每符号对照臂｜`=7`/`=2` 是中间臂。白名单只接受与 AUTO 等价的 `=14` |
 | `OCUDU_CE_LANE_ORDER` | ? | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:1574` | 1 | 信道估计的四种车道顺序：`merged`（**默认**，估计器的派发搭车道共享 cb）｜`event`｜`wait`/`host_wait`｜`burst`（旧名 `OCUDU_CE_FUSED_BURST`）。拼错的值打 error 并按 `merged` 跑（代码里那条 warning 的原文就写着 "using merged"）。白名单只接受 `=merged` |
-| `OCUDU_UL_STABILITY_WINDOWS` | OFF | `include/ocudu/support/executors/ul_pipeline_probe.h:1699` | 0 | **探针（只打印，白名单可带）**：`=K` 把**本次运行**按时间顺序切成 K 个等样本窗口，逐序列打印每个窗口的 median/p95 与**相对整腿值的最大偏离** —— 这就是本线定义的**运行稳定性**（用户 2026-10-01：稳定性 = *同一次运行内*统计量变化不大；**跨腿**差异是环境造成的，本来就会变）。★ 它**不采新数据**：直接重切探针已经保存的样本向量（本就按时间顺序追加），**报告期零热路径成本**；关着（不设或 `=1`）一个字都不打印。反向臂已实测：把实现改成「先排序再切片」，单测的**交替**输入立刻变红（开发文档 10.20） |
-| `OCUDU_SCHED_VERBOSE` | OFF | `lib/support/scheduling/thread_sched_snapshot.cpp:203` | 1 | **探针（只打印，白名单可带）**：每个 worker 线程创建后**回读**它真正拿到的调度状态，一行 `[sched] thread=… id=… rt_intent=… req=… eff=… run=… posix=…/…`。★ 它回答的是本线开线时的悬案「我们请求的 QoS 到底生效没有」——**第一次跑就给了答案**：请求 `USER_INTERACTIVE` 的线程回读 `eff=UNSPECIFIED`，而**不调用** `pthread_setschedparam` 的非实时线程回读 `eff=USER_INITIATED`（开发文档 10.5）。两把钥匙：`ENABLE_FLOW_PROBES` 编译 + 本变量非 `0`；两者缺一即**一个字都不打印**（默认关） |
+| `OCUDU_UL_STABILITY_WINDOWS` | OFF | `include/ocudu/support/executors/ul_pipeline_probe.h:1806` | 0 | **探针（只打印，白名单可带）**：`=K` 把**本次运行**按时间顺序切成 K 个等样本窗口，逐序列打印每个窗口的 median/p95 与**相对整腿值的最大偏离** —— 这就是本线定义的**运行稳定性**（用户 2026-10-01：稳定性 = *同一次运行内*统计量变化不大；**跨腿**差异是环境造成的，本来就会变）。★ 它**不采新数据**：直接重切探针已经保存的样本向量（本就按时间顺序追加），**报告期零热路径成本**；关着（不设或 `=1`）一个字都不打印。反向臂已实测：把实现改成「先排序再切片」，单测的**交替**输入立刻变红（开发文档 10.20） |
+| `OCUDU_SCHED_VERBOSE` | OFF | `lib/support/scheduling/thread_sched_snapshot.cpp:231` | 1 | **探针（只打印，白名单可带）**：每个 worker 线程创建后**回读**它真正拿到的调度状态，一行 `[sched] thread=… id=… rt_intent=… req=… eff=… run=… posix=…/…`。★ 它回答的是本线开线时的悬案「我们请求的 QoS 到底生效没有」——**第一次跑就给了答案**：请求 `USER_INTERACTIVE` 的线程回读 `eff=UNSPECIFIED`，而**不调用** `pthread_setschedparam` 的非实时线程回读 `eff=USER_INITIATED`（开发文档 10.5）。两把钥匙：`ENABLE_FLOW_PROBES` 编译 + 本变量非 `0`；两者缺一即**一个字都不打印**（默认关） |
 | `OCUDU_SCHED_ATTR_QOS` | OFF | `utils/macos_compat/macos_compat.cpp:449` | 0 | **实验臂（改 macOS 调度，**不在**白名单，fail-closed）**：把 QoS 类**声明在线程属性上**（`pthread_attr_set_qos_class_np`），让关键线程**从第一条指令**就在目标档上。默认关 = 历史行为。★ 注意它与 `OCUDU_SCHED_POSIX_RT=1` **不能同时用**：只要那个 POSIX 调用还在（现在只剩对照臂才调用），attr 上声明的档**同样会被抹掉**（实测，开发文档 10.5）。默认已经跳过那个调用，所以这一臂现在才有意义 —— 它买的是「起跑那一刻就在 P 核」 |
+| `OCUDU_UL_THREAD_CPU` | ? | `include/ocudu/support/executors/ul_pipeline_probe.h:2613` | 0 | **探针（只打印，白名单可带；macos_thread_priority 开发文档 10.31）**：每条线程在自己的 **slot 变化**处读一次**自己的**累计 CPU，把两次之间的差值记进本线程的 count/sum/max + 一个 log2 直方图（40 桶），关停时每线程打一行 `[ul_thread_cpu] thread=… slots=… mean=… p99.9<=… max=… -> declare computation >= …`。★ 它存在的理由：**P4（Mach 时间约束）要申报「每 period 需要多少 CPU」，唯一诚实的来源就是线程自己每 slot 烧掉多少** —— 而相位事件的 `tcpu=` 在池线程上是**结构性**的 `-`（工作窃取 ⇒ 开窗与关窗不是同一条线程，`attach_cpu_delta` 只认同线程基线），进程口径的 `cpu=` 又是全进程（窗口 1.3–1.8 ms 却记到 4.4–6.9 ms）。两把钥匙：`ENABLE_FLOW_PROBES` 编译 + 本变量非 0；关着只读一次环境变量就返回，**不读时钟、不注册、不打印**（交付腿逐字节不变）；开着每次地标一次 Mach 调用（为此加了窄接口 `this_thread_cpu_ns()`）。反向臂已实测：把「按 slot 变化记一笔」改成「每次调用记一笔」，单测 3 条断言变红（开发文档 10.31(1)） |
 | `OCUDU_SCHED_POSIX_RT` | OFF | `utils/macos_compat/macos_compat.cpp:641` | 0 | **对照臂（改 macOS 调度，**不在**白名单，fail-closed）**：`=1` = **恢复历史行为**，即对实时意图线程调用 `pthread_setschedparam(SCHED_FIFO,prio)`。★ **不设它才是新默认**（2026-10-01 用户裁决）：实测 Darwin 上线程**要么**由 QoS 管、**要么**是显式调度，那个 POSIX 调用会把刚设好的 QoS 类**静默抹掉且不可恢复**（再设返回 EPERM）；默认跳过它以后，`[sched]` 回读 `eff=USER_INTERACTIVE`（真腿读数见开发文档 10.15 与本次裁决 10.16）。保留这个臂是为了能**在同一个二进制上**做 A/B 推翻默认，而不是靠重新编译 |
 | `OCUDU_SCHED_TIME_CONSTRAINT` | ? | `utils/macos_compat/macos_compat.cpp:148` | 0 | **实验臂 / P4（改 macOS 调度，**不在**白名单，fail-closed）**：Mach **时间约束**（`THREAD_TIME_CONSTRAINT_POLICY`）—— macOS 上**唯一**能向内核「预留 CPU」的机制。语法：不设/`0` = **关**（默认，逐字节不变）｜`1`/`default` = **把 2026-09-01 那一臂原样复现**（每个实时意图 worker 拿到同一个 `1 ms/1 ms/1 ms`，含其作用域）｜`NAME=P/C/K[;NAME=…]` = **逐线程**微秒值，`NAME=*` 匹配所有 worker（**同名精确匹配优先于 `*`**，与书写顺序无关）。畸形请求**一律拒绝且不施用**：`constraint<computation` 是唯一被实测有害的形状（p50 793 µs / max 7.3 ms），`period<constraint` 自相矛盾。★ **代价是必然的：施加它就等于删掉该线程的 QoS 档**（Darwin 上两者双向互斥且不可逆，实测开发文档 10.29）——换来的是 2× 超订下唤醒尾延迟 **5358 → 9.9 µs**。★ 为什么不许「给所有线程发同一参数」：2026-09-01 回归**唯一**未被微基准否掉的解释，就是统一参数把 FIFO 优先级（44/46/…）编码的线程间次序拍平了（开发文档 §10.29）。施加时每个被选中的线程打一行 `[sched_tc]`，且 `[sched]` 行多一个 `tc=` 字段（`tc=none` / `tc=500/200/400us(duty=40%)`） |
 
 > ⚠ **验收腿的旋钮白名单**（`milestone_audit.sh` 的 `kNOB_ANY`/`kNOB_EQ` 与 `leg_gate.sh` 的 `KNOB_ANY`/`KNOB_EQ` **就是它**，两边逐字一致）。
-> **任意值**（探针）：`OCUDU_METAL_GPU_TIME`、`OCUDU_UL_PHASE_SEGMENTS`、`OCUDU_UL_SLOT_TRACE`、`OCUDU_UL_TIMING_EVENTS`（2026-10-01 加入：只**打印**最慢的接收等待 / 迟到交接及其宿主墙钟与进程 CPU 增量，不改变任何交付决定；关着不读时钟、不打印，开着最多存 64 条事件 —— 见开发文档 6.240/6.241）、`OCUDU_SCHED_VERBOSE`（2026-10-01 加入：每个 worker 线程**回读一次**自己的 QoS/POSIX 档并打一行，只打印、不改调度；默认关时一个字都不打印 —— 见 `doc_chinese/macos_thread_priority/` 开发文档 10.5）。
+> **任意值**（探针）：`OCUDU_METAL_GPU_TIME`、`OCUDU_UL_PHASE_SEGMENTS`、`OCUDU_UL_SLOT_TRACE`、`OCUDU_UL_TIMING_EVENTS`（2026-10-01 加入：只**打印**最慢的接收等待 / 迟到交接及其宿主墙钟与进程 CPU 增量，不改变任何交付决定；关着不读时钟、不打印，开着最多存 64 条事件 —— 见开发文档 6.240/6.241）、`OCUDU_SCHED_VERBOSE`（2026-10-01 加入：每个 worker 线程**回读一次**自己的 QoS/POSIX 档并打一行，只打印、不改调度；默认关时一个字都不打印 —— 见 `doc_chinese/macos_thread_priority/` 开发文档 10.5）、`OCUDU_UL_THREAD_CPU`（2026-10-01 加入：**每线程每 slot CPU 记账**，关停时每线程打一行；P4 的 `computation` 只能从这个读数来，因为相位事件的 `tcpu=` 在池线程上是结构性的 `-`。关着不读时钟、不注册、不打印 —— 见该目录开发文档 10.31）。
 > **视为「等于交付默认」**：`OCUDU_DFT_BATCH_SYMBOLS=14`、`OCUDU_DFT_OPEN_BLOCK=1`、`OCUDU_DFT_RELEASE_BLOCK=1`、`OCUDU_CE_LANE_ORDER=merged`、`OCUDU_DFT_BACKEND=vdsp`（2026-10-01 加入：Apple 上这就是不设它时的值）。其余一律判 FAIL（**fail-closed**）。
 > `OCUDU_SCHED_POSIX_RT`（改 macOS 调度）与 `OCUDU_SCHED_ATTR_QOS` 同样**故意不**在白名单里（臂，fail-closed）；`OCUDU_DFT_BACKEND=generic` **故意不**在白名单里：那是一条 A/B **臂**——臂可以满足其余所有判据（p84 就是这样），闸门拦的就是它。
 > 6.215 起交付车道的网格由 **host** 写，所以 `OCUDU_DFT_BATCH_SYMBOLS`/`OCUDU_DFT_OPEN_BLOCK`/`OCUDU_DFT_RELEASE_BLOCK` 对交付腿是 **MOOT**（那个引擎根本不在路上）；**最有力的交付腿是一个旋钮都不设**，白名单只是给「已经设了」的腿留出等于默认的写法。
@@ -170,7 +171,7 @@
 | `OCUDU_LANE_ABLATE_EVERY` | ? | lib | `lib/phy/metal/ocudu_metal_burst.mm:455` | 3 | `lib/phy/metal/ocudu_metal_burst.mm` | 15 | 12/3 | 8 |
 | `OCUDU_LANE_ABLATE_STAGE` | OFF | lib | `lib/phy/metal/ocudu_metal_burst.mm:284` | 1 | `lib/phy/metal/ocudu_metal_burst.mm` | 10 | 19/5 | all,ce,demap,eq,front_end |
 | `OCUDU_LANE_DIAG_SPLIT` | ? | lib | `lib/phy/metal/ocudu_metal_burst.mm:884` | 1 | `lib/phy/metal/ocudu_metal_burst.mm` | 3 | 29/7 | 1 |
-| `OCUDU_METAL_GPU_TIME` | OFF | lib | `lib/phy/metal/ocudu_metal_queue.mm:325` | 2 | `lib/phy/metal/ocudu_metal_queue.mm` | 115 | 133/26 | 1 |
+| `OCUDU_METAL_GPU_TIME` | OFF | lib | `lib/phy/metal/ocudu_metal_queue.mm:325` | 2 | `lib/phy/metal/ocudu_metal_queue.mm` | 115 | 134/26 | 1 |
 | `OCUDU_MMSE_DEBUG` | ? | lib | `lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_metal_mmse_engine.mm:412` | 2 | `lib/phy/upper/signal_processors` | 0 | 21/7 | — |
 | `OCUDU_PROBE_GAPPED` | ? | test | `lib/phy/upper/channel_processors/metal/test/metal_chain_probe.cpp:268` | 1 | `lib/phy/upper/channel_processors` | 0 | 8/2 | — |
 | `OCUDU_PROBE_RE` | = 1272 | test | `lib/phy/upper/channel_processors/metal/test/metal_dispatch_probe.cpp:57` | 1 | `lib/phy/upper/channel_processors` | 0 | 0/0 | — |
@@ -179,26 +180,27 @@
 | `OCUDU_REPLAY_TRACE` | ? | test | `lib/phy/upper/channel_processors/metal/test/ul_chain_replay.cpp:292` | 3 | `lib/phy/upper/channel_processors` | 0 | 1/1 | — |
 | `OCUDU_SCHED_ATTR_QOS` | OFF | utils | `utils/macos_compat/macos_compat.cpp:449` | 1 | `utils/macos_compat` | 0 | 10/4 | — |
 | `OCUDU_SCHED_POSIX_RT` | OFF | utils | `utils/macos_compat/macos_compat.cpp:641` | 1 | `utils/macos_compat` | 0 | 11/4 | — |
-| `OCUDU_SCHED_TIME_CONSTRAINT` | ? | utils | `utils/macos_compat/macos_compat.cpp:148` | 1 | `utils/macos_compat` | 0 | 0/0 | — |
-| `OCUDU_SCHED_VERBOSE` | OFF | lib | `lib/support/scheduling/thread_sched_snapshot.cpp:203` | 1 | `lib/support` | 1 | 19/4 | 1 |
+| `OCUDU_SCHED_TIME_CONSTRAINT` | ? | utils | `utils/macos_compat/macos_compat.cpp:148` | 1 | `utils/macos_compat` | 0 | 4/2 | — |
+| `OCUDU_SCHED_VERBOSE` | OFF | lib | `lib/support/scheduling/thread_sched_snapshot.cpp:231` | 1 | `lib/support` | 1 | 21/4 | 1 |
 | `OCUDU_UL_DUMP` | ? | lib | `lib/phy/upper/channel_processors/pusch/ul_capture.cpp:31` | 2 | `lib/phy/upper/channel_processors` | 0 | 75/12 | — |
 | `OCUDU_UL_DUMP_COUNT` | = 8 | lib | `lib/phy/upper/channel_processors/pusch/ul_capture.cpp:37` | 1 | `lib/phy/upper/channel_processors` | 0 | 11/6 | — |
 | `OCUDU_UL_DUMP_LLR` | ? | test | `lib/phy/upper/channel_processors/metal/test/ul_chain_replay.cpp:502` | 2 | `lib/phy/upper/channel_processors` | 0 | 7/2 | — |
 | `OCUDU_UL_DUMP_MAX_RB` | = 0 | lib | `lib/phy/upper/channel_processors/pusch/ul_capture.cpp:52` | 1 | `lib/phy/upper/channel_processors` | 0 | 3/2 | — |
 | `OCUDU_UL_DUMP_TD` | ? | lib | `lib/phy/lower/processors/uplink/puxch/puxch_processor_impl.cpp:35` | 2 | `lib/phy/lower/processors` | 0 | 14/7 | — |
 | `OCUDU_UL_DUMP_TD_SLOTS` | = 4 | lib | `lib/phy/lower/processors/uplink/puxch/puxch_processor_impl.cpp:45` | 1 | `lib/phy/lower/processors` | 0 | 2/2 | — |
-| `OCUDU_UL_PHASE_SEGMENTS` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:2436` | 1 | `include/ocudu` | 156 | 130/24 | 1 |
+| `OCUDU_UL_PHASE_SEGMENTS` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:2548` | 1 | `include/ocudu` | 156 | 131/24 | 1 |
 | `OCUDU_UL_RX_POOL_DROP` | ? | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:1190` | 1 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 1 | 17/2 | 0 |
 | `OCUDU_UL_RX_POOL_DROP_FORCE` | = 0 | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:1203` | 1 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 1 | 11/3 | 20 |
 | `OCUDU_UL_RX_POOL_SIZE` | ? | lib | `lib/phy/lower/lower_phy_factory.cpp:226` | 1 | `lib/phy/lower/lower_phy_factory.cpp` | 1 | 8/4 | 12 |
 | `OCUDU_UL_RX_SYMBOLS` | = 1 | lib | `lib/phy/lower/lower_phy_baseband_processor.cpp:943` | 2 | `lib/phy/lower/lower_phy_baseband_processor.cpp` | 4 | 83/14 | 1,7 |
-| `OCUDU_UL_SLOT_TRACE` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1166` | 1 | `include/ocudu` | 11 | 43/14 | 512 |
-| `OCUDU_UL_STABILITY_WINDOWS` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1699` | 1 | `include/ocudu` | 0 | 4/2 | — |
-| `OCUDU_UL_STALE_US` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:2526` | 1 | `include/ocudu` | 0 | 4/3 | — |
-| `OCUDU_UL_TIMING_EVENTS` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1200` | 1 | `include/ocudu` | 5 | 31/7 | 16 |
+| `OCUDU_UL_SLOT_TRACE` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1273` | 1 | `include/ocudu` | 11 | 43/14 | 512 |
+| `OCUDU_UL_STABILITY_WINDOWS` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1806` | 1 | `include/ocudu` | 0 | 5/2 | — |
+| `OCUDU_UL_STALE_US` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:2746` | 1 | `include/ocudu` | 0 | 4/3 | — |
+| `OCUDU_UL_THREAD_CPU` | ? | include | `include/ocudu/support/executors/ul_pipeline_probe.h:2613` | 1 | `include/ocudu` | 0 | 3/1 | — |
+| `OCUDU_UL_TIMING_EVENTS` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1307` | 1 | `include/ocudu` | 5 | 32/7 | 16 |
 | `OCUDU_USRSCTP_MODE` | ? | lib | `lib/gateways/sctp_socket_usrsctp.cpp:117` | 1 | `lib/gateways` | 0 | 2/1 | — |
 
-### 3.1 既没有腿登记行、也从未在记录里出现过：9 个
+### 3.1 既没有腿登记行、也从未在记录里出现过：8 个
 
 * **离线/测试臂 8 个**（首个读取点在 `test/`）——它们本来就不上空口，没有腿、没有记录是**正常**的：
 
@@ -213,8 +215,7 @@ OCUDU_HANDOFF_WIDE
 OCUDU_PROBE_RE
 ```
 
-* ★ **落在交付代码里的 1 个 = 真正的退役候选**（源码里分不出「新仪器」与「已死」，要读注释再决定）：
+* ★ **落在交付代码里的 0 个 = 真正的退役候选**（源码里分不出「新仪器」与「已死」，要读注释再决定）：
 
 ```
-OCUDU_SCHED_TIME_CONSTRAINT
 ```

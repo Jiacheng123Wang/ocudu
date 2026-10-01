@@ -166,7 +166,7 @@ is_n1_fdd  = ("fdd_n1" in leg_cfg)
 # view. It reads NOTHING new - it re-cuts the sample vectors the probe already keeps, in their recording order,
 # at report time - so on the hot path it costs zero and it changes no delivery decision.
 KNOB_ANY = ("OCUDU_METAL_GPU_TIME", "OCUDU_UL_PHASE_SEGMENTS", "OCUDU_UL_SLOT_TRACE", "OCUDU_UL_TIMING_EVENTS",
-            "OCUDU_SCHED_VERBOSE", "OCUDU_UL_STABILITY_WINDOWS")
+            "OCUDU_SCHED_VERBOSE", "OCUDU_UL_STABILITY_WINDOWS", "OCUDU_UL_THREAD_CPU")
 KNOB_EQ  = ("OCUDU_DFT_BATCH_SYMBOLS=14", "OCUDU_DFT_OPEN_BLOCK=1", "OCUDU_DFT_RELEASE_BLOCK=1",
             "OCUDU_CE_LANE_ORDER=merged",
             # OCUDU_DFT_BACKEND=vdsp joined 2026-10-01: on Apple that IS the value an unset leg resolves to
@@ -304,7 +304,8 @@ late_in     = f(leg_err, r"\[dl_tx_slack\][^\n]*AT/BELOW 0=(\d+)")
 slips       = f(leg_err, r"\[ul_rx_timing\][^\n]*slip\(max=\d+us over 1ms=(\d+)")
 recvs       = f(leg_err, r"\[ul_rx_timing\][^\n]*recv\(max=\d+us over 1ms=(\d+)")
 gaps_txt    = f(leg_err, r"radio sample continuity: (\d+) gaps")
-tx_name = ("VALIDITY (6.198 (4) restated): AT/BELOW 0 <= 10 inside the stream AND no transport storm "
+tx_name = ("VALIDITY (6.198 (4) restated; AT/BELOW 0 became a RATE on 2026-10-01 by user ruling): "
+           "AT/BELOW 0 / transmissions <= 0.0025% AND no transport storm "
            "(slip over 1ms <= 22, recv over 1ms <= 19, gaps = 0)")
 # ★ THE STORM BOUNDS WERE RE-REGISTERED PROSPECTIVELY ON 2026-10-01 (user ruling), and this is the derivation
 # so the number is checkable rather than remembered. Population: the 23 legs of the CURRENT family
@@ -325,7 +326,18 @@ tx_name = ("VALIDITY (6.198 (4) restated): AT/BELOW 0 <= 10 inside the stream AN
 # before the fix and p185/p186 read 12 after). The new bound is the worst reading of the newest NINE family
 # legs - 22 (slip) and 19 (recv) - which keeps the criterion's PURPOSE intact: what it was written to catch is
 # the p153 shape (slip 21/9/467, recv 35/12/570 - i.e. recurring hundreds), and 22/19 is still an order of
-# magnitude below that. `AT/BELOW 0 <= 10` is NOT relaxed: its healthy reading is 1..6, so it has real margin.
+# magnitude below that.
+#
+# ★ AT/BELOW 0 BECAME A RATE ON 2026-10-01 (user ruling, dev doc macos_thread_priority 10.26(4)). It was a COUNT
+# (`<= 10`), and a count grows with the leg: over the same family,
+#     p190   3.0 min,  377 989 hand-overs,  4 late -> 0.00106%
+#     p192  18.5 min,  667 000 hand-overs, 15 late -> 0.00225%
+#     p193  12.0 min, 1 402 658 hand-overs, 11 late -> 0.00078%   <- the BEST link so far, and it FAILED
+# The count said "worse than p190" for the quietest leg in the set, because a 12-minute leg simply has more
+# hand-overs to be late on. The rate is what the criterion was always about, and the bound is the worst of those
+# three (p192, 0.00225%) times 1.25, rounded down to 0.0025% - so p192 itself still passes, and the p153 shape it
+# was written to catch (slip 21/9/467, recv 35/12/570, i.e. hundreds of late hand-overs) is three orders of
+# magnitude away. PROSPECTIVE, like the storm bounds above: legs flown before this line keep their old verdict.
 #
 # PROSPECTIVE ONLY: legs flown before this line are not re-judged (dev doc phy_latency 5.2 rule 4), which is
 # why the numbers are written here rather than read from the logs at run time - a gate that re-derives its own
@@ -338,10 +350,18 @@ if tx_windowed is None:
 elif None in (late_in, slips, recvs, gaps_txt):
     check(tx_name, None, f"cannot read every term: AT/BELOW 0={late_in} slip={slips} recv={recvs} gaps={gaps_txt}")
 else:
-    ok = (int(late_in) <= 10) and (int(slips) <= 22) and (int(recvs) <= 19) and (gaps_txt == "0")
+    # The population is the same one every number in that line is over ("every number above is over the N
+    # hand-over"), so the rate is the count divided by it - and when the population cannot be read the row says so
+    # instead of quietly judging the count.
+    pop           = int(tx_pop) if (tx_pop is not None and tx_pop.isdigit() and int(tx_pop) > 0) else None
+    late_rate_pct = (100.0 * int(late_in) / pop) if pop is not None else None
+    ok = ((late_rate_pct is not None) and (late_rate_pct <= 0.0025) and (int(slips) <= 22)
+          and (int(recvs) <= 19) and (gaps_txt == "0"))
+    rate_txt = f"{late_rate_pct:.5f}%" if late_rate_pct is not None else "n/a (population unreadable)"
     check(tx_name, ok,
-          f"in-stream AT/BELOW 0={late_in} (population {tx_pop}), slip={slips}, recv={recvs}, gaps={gaps_txt}"
-          + ("" if ok else "  <- the p153 shape was 'late AND a slip/recv storm'; a small count with a clean "
+          f"in-stream AT/BELOW 0={late_in} of {tx_pop} hand-over(s) = {rate_txt} (bound 0.0025%), "
+          f"slip={slips}, recv={recvs}, gaps={gaps_txt}"
+          + ("" if ok else "  <- the p153 shape was 'late AND a slip/recv storm'; a small RATE with a clean "
                            "transport is NOT a transport fault (6.230)"))
 
 print(f"pass 5 gate: {leg_lab}   (baseline {base_lab}, slot {slot_ms} ms)")

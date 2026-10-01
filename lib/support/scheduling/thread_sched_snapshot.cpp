@@ -148,6 +148,34 @@ thread_sched_snapshot ocudu::this_thread_sched_snapshot()
   return snap;
 }
 
+int64_t ocudu::this_thread_cpu_ns()
+{
+#if defined(__APPLE__)
+  // One Mach call, nothing else: this is the reading a per-landmark accounting can afford (dev doc 10.30(8)).
+  mach_thread_port         port;
+  thread_basic_info_data_t basic{};
+  mach_msg_type_number_t   basic_count = THREAD_BASIC_INFO_COUNT;
+  if (::thread_info(port.port, THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&basic), &basic_count) !=
+      KERN_SUCCESS) {
+    return -1;
+  }
+  return (static_cast<int64_t>(basic.user_time.seconds) + static_cast<int64_t>(basic.system_time.seconds)) *
+             1000000000LL +
+         (static_cast<int64_t>(basic.user_time.microseconds) +
+          static_cast<int64_t>(basic.system_time.microseconds)) *
+             1000LL;
+#elif !defined(_WIN32)
+  rusage ru{};
+  if (::getrusage(RUSAGE_THREAD, &ru) != 0) {
+    return -1;
+  }
+  return (static_cast<int64_t>(ru.ru_utime.tv_sec) + static_cast<int64_t>(ru.ru_stime.tv_sec)) * 1000000000LL +
+         (static_cast<int64_t>(ru.ru_utime.tv_usec) + static_cast<int64_t>(ru.ru_stime.tv_usec)) * 1000LL;
+#else
+  return -1;
+#endif
+}
+
 const char* ocudu::qos_class_name(int32_t qos)
 {
 #if defined(__APPLE__)

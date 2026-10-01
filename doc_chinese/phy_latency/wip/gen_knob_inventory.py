@@ -310,6 +310,7 @@ def main():
         "OCUDU_UL_STABILITY_WINDOWS": "**探针（只打印，白名单可带）**：`=K` 把**本次运行**按时间顺序切成 K 个等样本窗口，逐序列打印每个窗口的 median/p95 与**相对整腿值的最大偏离** —— 这就是本线定义的**运行稳定性**（用户 2026-10-01：稳定性 = *同一次运行内*统计量变化不大；**跨腿**差异是环境造成的，本来就会变）。★ 它**不采新数据**：直接重切探针已经保存的样本向量（本就按时间顺序追加），**报告期零热路径成本**；关着（不设或 `=1`）一个字都不打印。反向臂已实测：把实现改成「先排序再切片」，单测的**交替**输入立刻变红（开发文档 10.20）",
         "OCUDU_SCHED_VERBOSE": "**探针（只打印，白名单可带）**：每个 worker 线程创建后**回读**它真正拿到的调度状态，一行 `[sched] thread=… id=… rt_intent=… req=… eff=… run=… posix=…/…`。★ 它回答的是本线开线时的悬案「我们请求的 QoS 到底生效没有」——**第一次跑就给了答案**：请求 `USER_INTERACTIVE` 的线程回读 `eff=UNSPECIFIED`，而**不调用** `pthread_setschedparam` 的非实时线程回读 `eff=USER_INITIATED`（开发文档 10.5）。两把钥匙：`ENABLE_FLOW_PROBES` 编译 + 本变量非 `0`；两者缺一即**一个字都不打印**（默认关）",
         "OCUDU_SCHED_ATTR_QOS": "**实验臂（改 macOS 调度，**不在**白名单，fail-closed）**：把 QoS 类**声明在线程属性上**（`pthread_attr_set_qos_class_np`），让关键线程**从第一条指令**就在目标档上。默认关 = 历史行为。★ 注意它与 `OCUDU_SCHED_POSIX_RT=1` **不能同时用**：只要那个 POSIX 调用还在（现在只剩对照臂才调用），attr 上声明的档**同样会被抹掉**（实测，开发文档 10.5）。默认已经跳过那个调用，所以这一臂现在才有意义 —— 它买的是「起跑那一刻就在 P 核」",
+        "OCUDU_UL_THREAD_CPU": "**探针（只打印，白名单可带；macos_thread_priority 开发文档 10.31）**：每条线程在自己的 **slot 变化**处读一次**自己的**累计 CPU，把两次之间的差值记进本线程的 count/sum/max + 一个 log2 直方图（40 桶），关停时每线程打一行 `[ul_thread_cpu] thread=… slots=… mean=… p99.9<=… max=… -> declare computation >= …`。★ 它存在的理由：**P4（Mach 时间约束）要申报「每 period 需要多少 CPU」，唯一诚实的来源就是线程自己每 slot 烧掉多少** —— 而相位事件的 `tcpu=` 在池线程上是**结构性**的 `-`（工作窃取 ⇒ 开窗与关窗不是同一条线程，`attach_cpu_delta` 只认同线程基线），进程口径的 `cpu=` 又是全进程（窗口 1.3–1.8 ms 却记到 4.4–6.9 ms）。两把钥匙：`ENABLE_FLOW_PROBES` 编译 + 本变量非 0；关着只读一次环境变量就返回，**不读时钟、不注册、不打印**（交付腿逐字节不变）；开着每次地标一次 Mach 调用（为此加了窄接口 `this_thread_cpu_ns()`）。反向臂已实测：把「按 slot 变化记一笔」改成「每次调用记一笔」，单测 3 条断言变红（开发文档 10.31(1)）",
         "OCUDU_SCHED_POSIX_RT": "**对照臂（改 macOS 调度，**不在**白名单，fail-closed）**：`=1` = **恢复历史行为**，即对实时意图线程调用 `pthread_setschedparam(SCHED_FIFO,prio)`。★ **不设它才是新默认**（2026-10-01 用户裁决）：实测 Darwin 上线程**要么**由 QoS 管、**要么**是显式调度，那个 POSIX 调用会把刚设好的 QoS 类**静默抹掉且不可恢复**（再设返回 EPERM）；默认跳过它以后，`[sched]` 回读 `eff=USER_INTERACTIVE`（真腿读数见开发文档 10.15 与本次裁决 10.16）。保留这个臂是为了能**在同一个二进制上**做 A/B 推翻默认，而不是靠重新编译",
         "OCUDU_SCHED_TIME_CONSTRAINT": "**实验臂 / P4（改 macOS 调度，**不在**白名单，fail-closed）**：Mach **时间约束**（`THREAD_TIME_CONSTRAINT_POLICY`）—— macOS 上**唯一**能向内核「预留 CPU」的机制。语法：不设/`0` = **关**（默认，逐字节不变）｜`1`/`default` = **把 2026-09-01 那一臂原样复现**（每个实时意图 worker 拿到同一个 `1 ms/1 ms/1 ms`，含其作用域）｜`NAME=P/C/K[;NAME=…]` = **逐线程**微秒值，`NAME=*` 匹配所有 worker（**同名精确匹配优先于 `*`**，与书写顺序无关）。畸形请求**一律拒绝且不施用**：`constraint<computation` 是唯一被实测有害的形状（p50 793 µs / max 7.3 ms），`period<constraint` 自相矛盾。★ **代价是必然的：施加它就等于删掉该线程的 QoS 档**（Darwin 上两者双向互斥且不可逆，实测开发文档 10.29）——换来的是 2× 超订下唤醒尾延迟 **5358 → 9.9 µs**。★ 为什么不许「给所有线程发同一参数」：2026-09-01 回归**唯一**未被微基准否掉的解释，就是统一参数把 FIFO 优先级（44/46/…）编码的线程间次序拍平了（开发文档 §10.29）。施加时每个被选中的线程打一行 `[sched_tc]`，且 `[sched]` 行多一个 `tc=` 字段（`tc=none` / `tc=500/200/400us(duty=40%)`）",
     }
@@ -324,7 +325,10 @@ def main():
           "`OCUDU_UL_TIMING_EVENTS`（2026-10-01 加入：只**打印**最慢的接收等待 / 迟到交接及其宿主墙钟与进程 CPU 增量，"
           "不改变任何交付决定；关着不读时钟、不打印，开着最多存 64 条事件 —— 见开发文档 6.240/6.241）、"
           "`OCUDU_SCHED_VERBOSE`（2026-10-01 加入：每个 worker 线程**回读一次**自己的 QoS/POSIX 档并打一行，"
-          "只打印、不改调度；默认关时一个字都不打印 —— 见 `doc_chinese/macos_thread_priority/` 开发文档 10.5）。")
+          "只打印、不改调度；默认关时一个字都不打印 —— 见 `doc_chinese/macos_thread_priority/` 开发文档 10.5）、"
+          "`OCUDU_UL_THREAD_CPU`（2026-10-01 加入：**每线程每 slot CPU 记账**，关停时每线程打一行；"
+          "P4 的 `computation` 只能从这个读数来，因为相位事件的 `tcpu=` 在池线程上是结构性的 `-`。"
+          "关着不读时钟、不注册、不打印 —— 见该目录开发文档 10.31）。")
     print("> **视为「等于交付默认」**：`OCUDU_DFT_BATCH_SYMBOLS=14`、`OCUDU_DFT_OPEN_BLOCK=1`、`OCUDU_DFT_RELEASE_BLOCK=1`、`OCUDU_CE_LANE_ORDER=merged`、"
           "`OCUDU_DFT_BACKEND=vdsp`（2026-10-01 加入：Apple 上这就是不设它时的值）。其余一律判 FAIL（**fail-closed**）。")
     print("> `OCUDU_SCHED_POSIX_RT`（改 macOS 调度）与 `OCUDU_SCHED_ATTR_QOS` 同样**故意不**在白名单里（臂，fail-closed）；"

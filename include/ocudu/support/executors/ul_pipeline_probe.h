@@ -417,11 +417,118 @@ public:
     trace_slot(slot, slot_trace_what::t2f, now);
   }
 
+  /// \brief Files one per-slot CPU window for the CALLING thread (see thread_cpu_accounting).
+  ///
+  /// Call it from a landmark that runs on the pool thread and carries a slot index. Several calls within the same
+  /// slot are harmless: a window is opened once per slot CHANGE, and a later call that sees the same slot leaves
+  /// the open window where it is.
+  void record_thread_cpu_boundary(uint64_t slot)
+  {
+#if defined(OCUDU_FLOW_PROBES)
+    if (!thread_cpu_accounting_enabled()) {
+      return; // one getenv and out: with the knob off there is no clock read and no state, on either platform
+    }
+    thread_cpu_accounting& acc    = this_thread_cpu_accounting();
+    const int64_t          cpu_ns = this_thread_cpu_ns();
+    if (cpu_ns < 0) {
+      return; // the platform refused the reading: it must not be filed as a zero-length window
+    }
+    file_thread_cpu_boundary(acc, slot, cpu_ns);
+#else
+    (void)slot;
+#endif
+  }
+
+  /// Test hook: file a window with a GIVEN CPU value instead of a clock reading. The parts that can be wrong are
+  /// the counting, the buckets and the quantile, and all three are testable without a clock.
+  ///
+  /// \note It goes through the SAME file_thread_cpu_boundary() the production path uses. The first version of this
+  ///       hook duplicated the slot test, and the reverse arm for it ("file on every call instead of on every slot
+  ///       change") did NOT go red - the test was exercising a copy of the logic. One implementation, or the test
+  ///       is decoration.
+  void record_thread_cpu_boundary_for_test(uint64_t slot, int64_t cpu_ns)
+  {
+    file_thread_cpu_boundary(this_thread_cpu_accounting(), slot, cpu_ns);
+  }
+
+  /// Test hook: zero the calling thread's accounting and make it the only registered one, so a case cannot read
+  /// another case's numbers (the probe is a process-wide singleton and the test binary runs many cases in one
+  /// process - the same trap the window-stability test hit on 2026-10-01).
+  void reset_thread_cpu_accounting_for_test()
+  {
+    thread_cpu_accounting& own = this_thread_cpu_accounting();
+    const uint64_t         tid = own.thread_id;
+    char                   nm[sizeof(own.name)] = {};
+    std::snprintf(nm, sizeof(nm), "%s", own.name);
+    own = thread_cpu_accounting{};
+    std::snprintf(own.name, sizeof(own.name), "%s", nm);
+    own.thread_id = tid;
+    std::lock_guard<std::mutex> lock(mutex);
+    thread_cpu_accounts.clear();
+    thread_cpu_accounts.push_back(&own);
+  }
+
+  size_t thread_cpu_accounts_size_for_test()
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    return thread_cpu_accounts.size();
+  }
+
+  /// Test hook: {slots, sum_ns, max_ns, p99.9 from the histogram} of one registered account. It returns VALUES
+  /// rather than the block itself because the block type is private: a test that could name it would also be able
+  /// to depend on its layout, and the arithmetic under test is exactly these four numbers.
+  std::array<int64_t, 4> thread_cpu_account_values_for_test(size_t index)
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    const thread_cpu_accounting& acc = *thread_cpu_accounts.at(index);
+    return {static_cast<int64_t>(acc.slots), acc.sum_ns, acc.max_ns, thread_cpu_quantile_ns(acc, 0.999)};
+  }
+
+  /// \brief Prints one line per thread that filed windows, with the number to declare (see thread_cpu_accounting).
+  ///
+  /// It prints NOTHING when the knob is off, so a delivery leg's report stays byte-identical, and it is called
+  /// from report() next to the series it belongs with.
+  void print_thread_cpu_accounting()
+  {
+    if (!thread_cpu_accounting_enabled()) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    if (thread_cpu_accounts.empty()) {
+      return;
+    }
+    std::fprintf(stderr,
+                 "[ul_thread_cpu] OCUDU_UL_THREAD_CPU=1: CPU each thread burned between two consecutive slot "
+                 "changes IT saw - the figure a Mach time constraint's `computation` has to cover\n");
+    for (const thread_cpu_accounting* acc : thread_cpu_accounts) {
+      if (acc->slots == 0) {
+        std::fprintf(stderr,
+                     "[ul_thread_cpu]   thread=%-16s id=%llu no closed window (fewer than two slot changes seen)\n",
+                     acc->name,
+                     static_cast<unsigned long long>(acc->thread_id));
+        continue;
+      }
+      std::fprintf(stderr,
+                   "[ul_thread_cpu]   thread=%-16s id=%llu slots=%llu mean=%.1fus p99.9<=%.1fus max=%.1fus "
+                   "-> declare computation >= %.1fus\n",
+                   acc->name,
+                   static_cast<unsigned long long>(acc->thread_id),
+                   static_cast<unsigned long long>(acc->slots),
+                   static_cast<double>(acc->sum_ns) / static_cast<double>(acc->slots) / 1000.0,
+                   static_cast<double>(thread_cpu_quantile_ns(*acc, 0.999)) / 1000.0,
+                   static_cast<double>(acc->max_ns) / 1000.0,
+                   static_cast<double>(acc->max_ns) / 1000.0);
+    }
+  }
+
   /// Records the completion of the PUSCH channel estimation: the channel estimates of all the data symbols of
   /// the slot are ready (call from the PUSCH processor at the start of the data processing).
   /// \param[in] slot Slot number of the PUSCH (same reference as record_end_crc_ok).
   void record_ce_end(uint64_t slot)
   {
+    // The per-slot CPU window of THIS thread is closed here, before the phase machinery below can return early:
+    // it is a different question from the phase segments (dev doc 10.30(8)) and must not inherit their gates.
+    record_thread_cpu_boundary(slot);
     if (!records_phase_segments()) {
       return;
     }
@@ -2233,6 +2340,11 @@ public:
     //
     // Gate: OCUDU_UL_STABILITY_WINDOWS=K (0/unset = no output at all, so every existing report is byte-identical;
     // it is a print-only probe and belongs in the gate's whitelist - it changes no delivery decision).
+    // The per-thread per-slot CPU accounting (dev doc 10.30(8)) is printed here, next to the series it belongs
+    // with: it is the report P4's constraint parameters are read from, and it prints nothing when its knob is off
+    // - so every existing leg report stays byte-identical.
+    print_thread_cpu_accounting();
+
     const unsigned stability_window_count = stability_windows();
     if (stability_window_count > 1) {
       std::fprintf(stderr,
@@ -2461,6 +2573,114 @@ private:
     return phase_segments_forced() || (phy_pipeline_mode_registry::get() != phy_pipeline_mode::gpu);
   }
 
+  /// \brief Per-thread, per-slot CPU accounting: the number a Mach time constraint's `computation` has to cover.
+  ///
+  /// WHY IT EXISTS (dev doc 10.30(8)): P4 declares to the kernel "this thread needs `computation` of CPU every
+  /// `period`", and the only honest source for that number is how much CPU the thread actually burns per slot.
+  /// Nothing in this probe could produce it. The timing events' `tcpu=` is filled only when the baseline and the
+  /// event belong to the SAME thread, and the UL pool steals work - a `ce` window is opened by whichever thread
+  /// finished `t2f` and closed by whichever finished `ce` - so on a pool thread that field is structurally `-`
+  /// (measured on leg p194, 2026-10-01). The process-wide `cpu=` is not a substitute: over a 1.3-1.8 ms window it
+  /// reads 4.4-6.9 ms, because it counts every thread in the process.
+  ///
+  /// WHAT IT MEASURES: on each boundary call a thread reads its OWN cumulative CPU and, when the slot index it
+  /// sees changes, files the delta since its own previous boundary. One sample is therefore "CPU this thread
+  /// burned between two consecutive slot changes", and over a leg that is its CPU per slot. It is deliberately
+  /// NOT a claim about one hop: a work-stealing thread's slot boundary is the only period it can be held to.
+  ///
+  /// KEYS: compiled only with OCUDU_FLOW_PROBES, and it takes its reading only when OCUDU_UL_THREAD_CPU is set to
+  /// something other than 0. With either key off it reads one environment variable per boundary and returns
+  /// before any clock, and the report prints nothing - so a delivery leg stays byte-identical.
+  struct thread_cpu_accounting {
+    uint64_t thread_id = 0;
+    char     name[24]  = {};
+    /// Windows closed so far (one per slot change this thread observed).
+    uint64_t slots = 0;
+    int64_t  sum_ns = 0;
+    int64_t  max_ns = 0;
+    /// The slot whose window is open, -1 when none, and this thread's CPU at the moment it was opened.
+    int64_t open_slot   = -1;
+    int64_t open_cpu_ns = -1;
+    /// Log2 histogram of the closed windows, in ns: bucket i counts samples in [2^i, 2^(i+1)). It is what makes a
+    /// TAIL readable out of a bounded amount of state - the declaration wants a p99.9, and keeping every sample of
+    /// every pool thread for a whole leg is not something a hot path may do.
+    uint64_t buckets[40] = {};
+  };
+
+  /// The knob for the accounting above. Read per call rather than cached, so a test can move it.
+  static bool thread_cpu_accounting_enabled()
+  {
+    const char* env = std::getenv("OCUDU_UL_THREAD_CPU");
+    return (env != nullptr) && (env[0] != '\0') && !((env[0] == '0') && (env[1] == '\0'));
+  }
+
+  /// Returns this thread's accounting block, registering it on first use.
+  ///
+  /// The block is allocated and NEVER freed on purpose: it is registered in `thread_cpu_accounts`, which the
+  /// shutdown report walks, while a plain thread_local would be destroyed when its thread exits (a test thread, a
+  /// respawned worker) and leave the registry pointing at freed memory. The leak is one small block per thread
+  /// that ever called this, bounded by the worker count.
+  thread_cpu_accounting& this_thread_cpu_accounting()
+  {
+    static thread_local thread_cpu_accounting* acc = nullptr;
+    if (acc == nullptr) {
+      acc = new thread_cpu_accounting();
+      const thread_sched_snapshot self = this_thread_sched_snapshot();
+      acc->thread_id                   = self.thread_id;
+      std::snprintf(acc->name, sizeof(acc->name), "%s", this_thread_name());
+      std::lock_guard<std::mutex> lock(mutex);
+      thread_cpu_accounts.push_back(acc);
+    }
+    return *acc;
+  }
+
+  /// Files the window that ends when the calling thread observes \p slot, given its own reading \p cpu_ns.
+  ///
+  /// This is the ONE place the windowing rule lives, and both the production boundary and its test hook call it -
+  /// see the note on record_thread_cpu_boundary_for_test() for what happened when it was written twice.
+  static void file_thread_cpu_boundary(thread_cpu_accounting& acc, uint64_t slot, int64_t cpu_ns)
+  {
+    if ((acc.open_slot >= 0) && (static_cast<int64_t>(slot) != acc.open_slot) && (cpu_ns >= acc.open_cpu_ns)) {
+      file_thread_cpu_window(acc, cpu_ns - acc.open_cpu_ns);
+    }
+    acc.open_slot   = static_cast<int64_t>(slot);
+    acc.open_cpu_ns = cpu_ns;
+  }
+
+  /// Files one closed window. Only the OWNING thread ever writes a block, so no lock is needed here; the registry
+  /// itself is what `mutex` protects, and it is touched once per thread (at registration).
+  static void file_thread_cpu_window(thread_cpu_accounting& acc, int64_t cpu_ns)
+  {
+    ++acc.slots;
+    acc.sum_ns += cpu_ns;
+    if (cpu_ns > acc.max_ns) {
+      acc.max_ns = cpu_ns;
+    }
+    unsigned  bucket = 0;
+    for (int64_t v = cpu_ns >> 1; (v != 0) && (bucket + 1 < 40); v >>= 1) {
+      ++bucket;
+    }
+    ++acc.buckets[bucket];
+  }
+
+  /// \brief The smallest value that covers \p quantile of the filed windows, from the histogram (-1 if empty).
+  static int64_t thread_cpu_quantile_ns(const thread_cpu_accounting& acc, double quantile)
+  {
+    if (acc.slots == 0) {
+      return -1;
+    }
+    const uint64_t target = static_cast<uint64_t>(quantile * static_cast<double>(acc.slots) + 0.999999);
+    uint64_t       seen   = 0;
+    for (unsigned i = 0; i != 40; ++i) {
+      seen += acc.buckets[i];
+      if (seen >= target) {
+        // The bucket's upper edge, in ns: bucket i holds [2^i, 2^(i+1)), so the edge is 2^(i+1) - 1.
+        return (i >= 62) ? acc.max_ns : ((static_cast<int64_t>(1) << (i + 1)) - 1);
+      }
+    }
+    return acc.max_ns;
+  }
+
   /// Registry entry: start timestamp plus a monotonic insertion sequence (the slot key wraps every SFN cycle,
   /// so it cannot serve as the age order for the bounded-registry eviction).
   ///
@@ -2617,6 +2837,9 @@ private:
   }
 
   std::mutex       mutex;
+  /// The per-thread CPU accounting blocks (see thread_cpu_accounting). Guarded by `mutex` for the registry
+  /// itself, which is only touched when a thread registers; each block is written by its owning thread alone.
+  std::vector<thread_cpu_accounting*> thread_cpu_accounts;
   start_registry   pending_starts;
   uint64_t         next_start_seq = 0;
   std::vector<double> latencies_us;
