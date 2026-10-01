@@ -28,7 +28,11 @@
 set -u
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
-LOGDIR=$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs
+# TWO DIRECTORIES, newest first across both: the macOS thread-stability line keeps its legs in
+# doc_chinese/macos_thread_priority/wip/logs (run_leg.sh's LEG_LOGDIR) and every leg before 2026-10-01 is in the
+# historical one. The two patterns MUST stay two separate words - see the trap documented in leg_gate.sh.
+OLD_LOGS=$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs
+NEW_LOGS=$ROOT/doc_chinese/macos_thread_priority/wip/logs
 LABEL=${1:-}
 
 classify() { # $1 = .log.stderr path
@@ -67,12 +71,14 @@ PY
 }
 
 if [[ -n $LABEL ]]; then
-  leg=$(ls -1t "$LOGDIR"/gnb_*"$LABEL"*.log.stderr 2>/dev/null | head -1)
-  [[ -n $leg ]] || { echo "no leg matched '$LABEL' in $LOGDIR" >&2; exit 2; }
+  leg=$(ls -1t "$NEW_LOGS"/gnb_*"$LABEL"*.log.stderr "$OLD_LOGS"/gnb_*"$LABEL"*.log.stderr 2>/dev/null |
+        grep -v ':$' | head -1)
+  [[ -n $leg ]] || { echo "no leg matched '$LABEL' in either wip/logs" >&2; exit 2; }
   echo "== $(basename "$leg")"
   classify "$leg"
 else
-  for leg in $(ls -1t "$LOGDIR"/gnb_*.log.stderr 2>/dev/null | head -5); do
+  for leg in $(ls -1t "$NEW_LOGS"/gnb_*.log.stderr "$OLD_LOGS"/gnb_*.log.stderr 2>/dev/null |
+               grep -v ':$' | head -5); do
     echo "== $(basename "$leg")"
     classify "$leg"
   done

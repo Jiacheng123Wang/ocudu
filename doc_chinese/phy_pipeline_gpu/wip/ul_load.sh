@@ -29,9 +29,8 @@ done
 [[ ${#ARGS[@]} -gt 0 ]] || { echo "usage: bash ul_load.sh [--slot-us=N] <log | leg-label> [...]" >&2; exit 2; }
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
-# TWO DIRECTORIES, newest first across both - see leg_gate.sh: the macOS thread-stability line keeps its legs in
-# doc_chinese/macos_thread_priority/wip/logs and everything before 2026-10-01 is here.
-LOGDIRS=("$ROOT/doc_chinese/macos_thread_priority/wip/logs" "$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs")
+# TWO DIRECTORIES, newest first across both - see leg_gate.sh, INCLUDING the trap documented there: the two
+# patterns must stay two words (the "${arr[@]/%//}"gnb_*.log form silently hands ls a directory argument).
 
 RESOLVED=()
 for a in "${ARGS[@]}"; do
@@ -41,8 +40,10 @@ for a in "${ARGS[@]}"; do
   fi
   # a bare label: newest leg whose name carries it. A leg is three files; the .log is the one whose
   # siblings hold the contract and the counters, and the python below finds them by suffix.
-  hit=$(ls -1t "${LOGDIRS[@]/%//}"gnb_*"$a"*.log 2>/dev/null | grep -v '\.stderr$\|\.stdout$' | head -1)
-  [[ -n $hit ]] || { echo "no leg matched '$a' in ${LOGDIRS[*]}" >&2; exit 2; }
+  hit=$(ls -1t "$ROOT/doc_chinese/macos_thread_priority/wip/logs"/gnb_*"$a"*.log \
+                "$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs"/gnb_*"$a"*.log 2>/dev/null \
+        | grep -v '\.stderr$\|\.stdout$\|:$' | head -1)
+  [[ -n $hit ]] || { echo "no leg matched '$a' in either wip/logs (this line's or phy_pipeline_gpu's)" >&2; exit 2; }
   RESOLVED+=("$hit")
 done
 

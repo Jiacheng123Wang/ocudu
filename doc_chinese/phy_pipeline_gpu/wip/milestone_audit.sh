@@ -27,9 +27,10 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 W=$ROOT/doc_chinese/phy_pipeline_gpu/wip
 # TWO DIRECTORIES, newest first across both: the macOS thread-stability line keeps its legs in its own
 # (doc_chinese/macos_thread_priority/wip/logs) and every leg before 2026-10-01 is in this one. Every lookup below
-# goes through $LOGDIRS so a leg is found wherever run_leg.sh put it (LEG_LOGDIR selects that).
-LOGDIRS=("$ROOT/doc_chinese/macos_thread_priority/wip/logs" "$W/logs")
-LOGDIR=${LOGDIRS[1]}   # kept for the messages that name "the" directory; the lookups use $LOGDIRS
+# names BOTH patterns as separate words - see the trap documented in leg_gate.sh (the compact
+# "${arr[@]/%//}"gnb_*.log form hands ls a directory argument and it prints a "<dir>:" header instead).
+LOGDIR=$W/logs                                  # this line's own directory, for the messages that name one
+LOGDIR_NEW=$ROOT/doc_chinese/macos_thread_priority/wip/logs
 LEG=""
 STRESSLEG=""
 QUICK=0
@@ -86,7 +87,8 @@ s80-ulcap40-n78 s81-ulcap40-cpu-n78 s82-phases-heavy-n78
 leg_regime() {
   local label=$1 f line s
   f="$LOGDIR/gnb_gpu_$label.log.stderr"
-  [ -f "$f" ] || f=$(ls -1t "${LOGDIRS[@]/%//}"gnb_*"$label"*.log.stderr 2>/dev/null | head -1)
+  [ -f "$f" ] || f=$(ls -1t "$LOGDIR_NEW"/gnb_*"$label"*.log.stderr "$LOGDIR"/gnb_*"$label"*.log.stderr 2>/dev/null |
+                     grep -v ':$' | head -1)
   if [ -n "${f:-}" ] && [ -f "$f" ]; then
     line=$(grep -aoE '\[leg\] regime=[a-z]+' "$f" | tail -1)
     [ -n "$line" ] && { echo "${line#*=}"; return; }
@@ -95,7 +97,8 @@ leg_regime() {
   echo default
 }
 leg_labels_newest_first() {
-  ls -1t "${LOGDIRS[@]/%//}"gnb_gpu_*.log.stderr 2>/dev/null | xargs -I{} basename {} .log.stderr | sed 's/^gnb_gpu_//'
+  ls -1t "$LOGDIR_NEW"/gnb_gpu_*.log.stderr "$LOGDIR"/gnb_gpu_*.log.stderr 2>/dev/null | grep -v ':$' |
+    xargs -I{} basename {} .log.stderr | sed 's/^gnb_gpu_//'
 }
 # An explicit --leg that names a STRESS leg is redirected, not honoured: honouring it would bind the
 # default-regime criteria to the one regime where they were pre-registered to read the other way.
@@ -528,7 +531,8 @@ IFS='|' read -r -a NAMEARR <<<"$NAMES"
 LEGF=""
 if [ -n "$LEG" ]; then
   LEGF="$LOGDIR/gnb_gpu_${LEG}.log.stderr"
-  [ -f "$LEGF" ] || LEGF=$(ls -1t "${LOGDIRS[@]/%//}"gnb_*"$LEG"*.log.stderr 2>/dev/null | head -1)
+  [ -f "$LEGF" ] || LEGF=$(ls -1t "$LOGDIR_NEW"/gnb_*"$LEG"*.log.stderr "$LOGDIR"/gnb_*"$LEG"*.log.stderr 2>/dev/null |
+                           grep -v ':$' | head -1)
 fi
 if [ -n "${LEGF:-}" ] && [ -f "$LEGF" ]; then
   leg_commit_check "$LEG" "$LEGF" "default"
@@ -595,7 +599,8 @@ fi
 SF=""
 if [ -n "$STRESSLEG" ]; then
   SF="$LOGDIR/gnb_gpu_${STRESSLEG}.log.stderr"
-  [ -f "$SF" ] || SF=$(ls -1t "${LOGDIRS[@]/%//}"gnb_*"$STRESSLEG"*.log.stderr 2>/dev/null | head -1)
+  [ -f "$SF" ] || SF=$(ls -1t "$LOGDIR_NEW"/gnb_*"$STRESSLEG"*.log.stderr "$LOGDIR"/gnb_*"$STRESSLEG"*.log.stderr 2>/dev/null |
+                       grep -v ':$' | head -1)
 fi
 if [ -n "${SF:-}" ] && [ -f "$SF" ]; then
   leg_commit_check "$STRESSLEG" "$SF" "stress"

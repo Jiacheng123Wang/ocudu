@@ -30,7 +30,11 @@
 set -u
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
-LOGDIR=$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs
+# TWO DIRECTORIES, newest first across both: the macOS thread-stability line keeps its legs in
+# doc_chinese/macos_thread_priority/wip/logs (run_leg.sh's LEG_LOGDIR) and every leg before 2026-10-01 is in the
+# historical one. The two patterns MUST stay two separate words - see the trap documented in leg_gate.sh.
+OLD_LOGS=$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs
+NEW_LOGS=$ROOT/doc_chinese/macos_thread_priority/wip/logs
 
 # --- the p86 baseline, read off that leg's own stderr (kept HERE with its source, because a comparison
 #     without the reference values written down is how "unchanged" becomes unfalsifiable) --------------
@@ -51,8 +55,9 @@ V1_CRIT=2150
 RESOLVED=()
 for a in "$@"; do
   if [ -f "$a" ]; then RESOLVED+=("$a"); continue; fi
-  f=$(ls -t "$LOGDIR"/*"$a"*.log.stderr 2>/dev/null | head -1)
-  if [ -z "$f" ]; then echo "no leg matches '$a' under $LOGDIR" >&2; exit 2; fi
+  f=$(ls -t "$NEW_LOGS"/*"$a"*.log.stderr "$OLD_LOGS"/*"$a"*.log.stderr 2>/dev/null |
+      grep -v ':$' | head -1)
+  if [ -z "$f" ]; then echo "no leg matches '$a' in either wip/logs" >&2; exit 2; fi
   RESOLVED+=("$f")
 done
 [ ${#RESOLVED[@]} -gt 0 ] || { echo "usage: bash $0 <leg .stderr | leg label> [...]" >&2; exit 2; }

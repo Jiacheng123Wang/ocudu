@@ -48,19 +48,28 @@ done
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 # TWO DIRECTORIES, newest first across both: the macOS thread-stability line keeps its legs in its own
 # (doc_chinese/macos_thread_priority/wip/logs, per that directory's README) while every leg before 2026-10-01 is
-# in this one. `ls -1t` sorts by mtime over ALL its arguments, so "the newest leg carrying this label" keeps
-# meaning exactly what it meant with one directory - and a label only exists in one of them anyway.
-LOGDIRS=("$ROOT/doc_chinese/macos_thread_priority/wip/logs" "$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs")
-
+# in this one. The two patterns are written out as TWO WORDS on purpose: the compact form
+# "${LOGDIRS[@]/%//}"gnb_*.log does NOT do what it looks like - bash appends the trailing text to the LAST
+# element only, so ls receives the first directory as a DIRECTORY argument and prints a "<dir>:" header, which the
+# `head -1` below then reads back as a path (measured: "FileNotFoundError: .../logs/:"). Same class of trap as
+# the array-substitution one this tree has hit before.
 resolve() { # newest .log whose name carries the label (never the .stderr / .stdout siblings)
   local hit
-  hit=$(ls -1t "${LOGDIRS[@]/%//}"gnb_*"$1"*.log 2>/dev/null | grep -v '\.stderr$\|\.stdout$' | head -1)
-  [[ -n $hit ]] || { echo "no leg matched '$1' in ${LOGDIRS[*]}" >&2; exit 2; }
+  hit=$(ls -1t "$ROOT/doc_chinese/macos_thread_priority/wip/logs"/gnb_*"$1"*.log \
+                "$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs"/gnb_*"$1"*.log 2>/dev/null \
+        | grep -v '\.stderr$\|\.stdout$\|:$' | head -1)
+  [[ -n $hit ]] || { echo "no leg matched '$1' in either wip/logs (this line's or phy_pipeline_gpu's)" >&2; exit 2; }
   printf '%s' "$hit"
 }
 
 LEG_LOG=$(resolve "$LEG")
+# The emptiness is checked HERE, not only inside resolve(): `exit` in a $(...) subshell ends the SUBSHELL, so a
+# label that matches nothing used to fall through into the python below with an empty path and die with a
+# FileNotFoundError traceback instead of the one-line message resolve() prints (measured 2026-10-01 with
+# `--slot-ms=0.5 no-such-leg`).
+[[ -n $LEG_LOG ]] || exit 2
 BASE_LOG=$(resolve "$BASE")
+[[ -n $BASE_LOG ]] || exit 2
 
 python3 - "$LEG_LOG" "$BASE_LOG" "$LEG" "$BASE" "$SLOT_MS" <<'PY'
 import os, re, sys

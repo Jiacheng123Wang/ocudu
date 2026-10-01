@@ -55,7 +55,15 @@ done
 case "$REGIME" in default|stress) ;; *) echo "regime must be default or stress" >&2; exit 2 ;; esac
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
-LOGDIR=$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs
+# TWO DIRECTORIES, newest first across both: the macOS thread-stability line keeps its legs in
+# doc_chinese/macos_thread_priority/wip/logs (run_leg.sh's LEG_LOGDIR) and every leg before 2026-10-01 is here.
+# The two patterns MUST stay two separate words - see the trap documented in leg_gate.sh: the compact
+# "${arr[@]/%//}"gnb_*.log form appends the trailing text to the last element only and hands ls a DIRECTORY,
+# whose "<dir>:" header is then read back as a leg path. (Measured, 2026-10-01: this script was the one file the
+# first dual-directory patch missed, and the milestone audit read the resulting "0 of 4 criteria pass" as a FAIL
+# of the A1-2 gate.)
+OLD_LOGS=$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs
+NEW_LOGS=$ROOT/doc_chinese/macos_thread_priority/wip/logs
 
 if [ "$SELF_TEST" = 1 ]; then
   # Two synthetic legs, evaluated by the SAME code path below: one where the third branch holds and
@@ -96,8 +104,9 @@ fi
 resolve() {
   local hit
   if [ -f "$1" ]; then printf '%s' "$1"; return; fi
-  hit=$(ls -1t "$LOGDIR"/gnb_*"$1"*.log 2>/dev/null | grep -v '\.stderr$\|\.stdout$' | head -1)
-  [[ -n $hit ]] || { echo "no leg matched '$1' in $LOGDIR" >&2; exit 2; }
+  hit=$(ls -1t "$NEW_LOGS"/gnb_*"$1"*.log "$OLD_LOGS"/gnb_*"$1"*.log 2>/dev/null |
+        grep -v '\.stderr$\|\.stdout$\|:$' | head -1)
+  [[ -n $hit ]] || { echo "no leg matched '$1' in either wip/logs" >&2; exit 2; }
   printf '%s' "$hit"
 }
 
