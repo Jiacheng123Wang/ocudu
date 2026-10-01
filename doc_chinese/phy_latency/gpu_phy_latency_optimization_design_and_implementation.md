@@ -14796,6 +14796,63 @@ LEG_CONFIG=... OCUDU_DFT_BACKEND=generic run_leg.sh gpu p171-n78-novdsp --regime
 
 **⑥ 要把它钉到机制，还差一件已登记的东西**：这条序列**只有聚合、没有时间戳**，而 `record_rx_wait()` **已经收到** begin/end 瞬时（用于重叠测试）——只是没打印。按 §6.157 末尾预登记的下一步：加一个 **env 门控（默认关）+ 编译期开关**的"最慢 K 次事件 + 宿主时刻"，就能把 **RX 停顿 / DL 的 RF 失败 / GPU 提交**对到同一条时间轴上（那是唯一能把"相关"变成"机制"的东西）。本节不声称尖峰落在最后两分钟：那是**推论**（该腿另两个症状的分布支持它），不是读数。
 
+### 6.241 ★★ 新增仪器 **`OCUDU_UL_TIMING_EVENTS`**（两把钥匙、默认关）：把 **RX 停顿 / DL 迟到 / `[RF]` 失败**放到**同一条墙钟时间轴**上（用户指示"加上测量把这个原因搞清楚"；2026-10-01）
+
+**① 它补的是哪一块**（§6.240⑥ 的登记项）：三个症状分别在三个文件、两种时钟里 —— RX 尾巴是**聚合**、DL 迟到是**聚合**、电台自己的 `[RF] Real-time failure in RF: underflow|late` 是 `.log` 里的**墙钟时间戳**。缺的从来不是"有多少"，而是"**什么时候**"。
+
+**② 它打印什么**（在最慢的 K 条上各一行，两个方向一起给，便于互相对照）：
+
+```
+[ul_timing_events] limit=16 (OCUDU_UL_TIMING_EVENTS=16): the worst receive waits and hand-over margins, with the host wall clock
+  line them up against the .log's `[RF] Real-time failure in RF: ...` lines; wall= is UTC, epoch_ms= is the same instant as an integer
+  rx  #1 wait=12381us air=36us wall=2026-10-01T03:21:07.123 epoch_ms=… began_ms=… steady_end_ns=… load1=4.68
+  dl  #1 margin=-5195us due_ts=… wall=2026-10-01T03:21:07.123 epoch_ms=… due_ms=… steady_end_ns=… load1=4.68
+```
+
+* **两个方向**：`rx` = 接收调用（与 `[ul_rx_wait]` 同一个数），`dl` = 交接余量（与 `[dl_tx_slack]` 同一个数，负 = 迟到）；
+* **窗口两端**都印：`rx` 的 `wall=` 是等待**结束**的时刻（样点到手），`began_ms = epoch_ms − wait` 是它**开始**的时刻；`dl` 的 `due_ms = epoch_ms + margin` 是它**本该**发生的时刻 —— 少了这一对，对时间轴就会整体偏掉"停顿本身的长度"；
+* **`load1`**：那一刻的 1 分钟负载（x100）。这是最便宜、又最能分开两种原因的判据：**高 = 宿主争用**（线程被抢），**低 = 电台/USB 那一侧停**；
+* 计数行：`none above the floor in N candidate check(s)` —— 让"仪器开着但什么都没发生"与"仪器根本没编进去"**长得不一样**。
+
+**③ 契约（两把钥匙，与 §6.145③ 一致）**：编译期 `OCUDU_FLOW_PROBES` + 环境变量 `OCUDU_UL_TIMING_EVENTS=N`。
+
+* **关着**（变量不设）：`timing_events_limit()==0` ⇒ 不读墙钟、不读 `load1`、不打印，报告与从前**逐字节相同**（除了一次整数比较之外没有别的开销，且调用点整体在编译期门内）；
+* **开着**：只**排名**在地板之上的事件（接收等待 ≥ **1 ms**、交接余量 < **500 µs**），**最多 64 条**（`max_timing_events`），准入判据是"能否打败当前最差那条"⇒ 健康腿上一条都不留、也不读时钟；`=1` 或非数字 = 开且用默认条数（8），`=0` = 明确关。
+
+**④ 离线验证（已做，含四个反向臂）**：`ul_pipeline_probe_test.worst_timing_events_carry_the_wall_clock_and_stay_bounded`
+
+| 反向臂（故意打断仪器）| 结果 |
+|---|---|
+| RX 排序方向反了（留最小的）| **FAILED as required** ✅ |
+| 不盖墙钟（`wall_ms` 留 0）| **FAILED as required** ✅（★ 第一次**没抓住** —— 见下）|
+| 上界失效（不淘汰）| **FAILED as required** ✅ |
+| 打印不看开关（默认也印）| **FAILED as required** ✅ |
+
+★ **反向臂抓到的是测试自己**：第一版只断言 `epoch_ms=` **这个标签存在**，而"没盖墙钟"时它印的是 `epoch_ms=0` —— 于是**测试全绿而仪器是坏的**。改成"对**该行**做正则（`wall=20xx-…` 且 `epoch_ms` 有 13 位以上）+ 两端算术 `epoch_ms − began_ms == wait`"之后才抓住。⇒ 与 §6.147 的"三个反向臂"同一做法：**新仪器的测试必须能被反向臂打红，否则它的绿不算数**。
+`ctest -L phy`：**204/204**（`port_channel_estimator_metal_mmse_unit_test` 是 6.5 登记的偶发 SIGBUS，重跑两次全过）。
+
+**⑤ 白名单**：两条闸门（`leg_gate.sh` 的 `KNOB_ANY`、`milestone_audit.sh` 的 `kNOB_ANY`）按**类别规则**接受它（只打印、不改任何交付决定），并在注释里写明加入日期与理由 —— 所以带它的腿**仍然可以**被当成交付腿判；旋钮清单也随之重新生成（**123** 个旋钮，新行在 §2）。
+
+**⑥ ★ 下一条腿的预登记读法（写在这里，腿还没飞）**：
+
+* **配方**：在既有的两个探针之外加 `OCUDU_UL_TIMING_EVENTS=16`，飞一条**真加载**的 stress 腿（纪律 73：载荷没起来的话先别飞，`ul_load.sh` 的 TBS 分布 60 秒就能看出来）；
+* **先看仪器有没有齿**：一条**安静**腿（或健康段）应读 `rx: none above the 1000 us floor` ⇒ 它不是"见到什么记什么"；
+* **四种结果，四种结论**（预登记，避免事后挑解释）：
+  1. 尖峰与某条 `[RF]` 行**同一秒**、且那一刻 `load1` **低** ⇒ **电台/USB 那一侧**的停顿（与 §6.158 的"症状位置 = 宿主↔电台接口"一致）；
+  2. 尖峰落在 `load1` **高**（近 CPU 数）的窗口 ⇒ **宿主争用/调度**，下一步是 `host_sched_watch.sh` + 优先级/亲和性 A/B；
+  3. `rx` 的 `began_ms…wall=` 与 `dl` 的 `due_ms…wall=` **在毫秒级上交错** ⇒ 两个方向**同一个原因**（§6.157 的双向比 1.3–1.6）；
+  4. **只有一侧有事件**（只有 rx 或只有 dl）⇒ **不是共享原因**，两侧分别归因（并检查另一侧的地板是否选错）。
+* **反面判据同样登记**：若 `[RF]` 行与两侧事件**都不重合**，那么"三症状同源"的假设被否掉，`[RF]` 那一侧要按 UHD/TX 自己的路径单独查（§6.158 的否证清单已排除过一批）。
+* **怎么对**（腿跑完就地读，不需要新工具）：
+  ```bash
+  L=doc_chinese/phy_pipeline_gpu/wip/logs/gnb_gpu_<label>_*.log
+  grep -a -A20 '^\[ul_timing_events\]' ${L%.log}.log.stderr            # 最慢的 K 条 + 两端 + load1
+  grep -a 'Real-time failure in RF' $L | head -40                        # 独立的第三方证人（墙钟）
+  ```
+  把 `rx` 的 `began_ms…epoch_ms`（停顿的区间）、`dl` 的 `due_ms…epoch_ms`（本该 vs 实际）与 `[RF]` 行的时间戳放在一起看：**同一秒 + `load1` 低** ⇒ 电台/USB 侧；**落在 `load1` 高的窗口** ⇒ 宿主争用。
+
+**⑦ 状态**：仪器**已落地、已离线锁定，尚未在空口腿上读过** ⇒ 本节不含任何关于原因的结论（纪律：先飞再判）。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

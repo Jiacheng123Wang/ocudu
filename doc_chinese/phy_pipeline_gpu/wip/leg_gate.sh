@@ -140,7 +140,11 @@ is_n1_fdd  = ("fdd_n1" in leg_cfg)
 # unknown knob is refused rather than assumed harmless, so adding a probe is a deliberate act.
 # Probes: report-only, but they do perturb (see milestone_audit.sh: the category rule and why
 # OCUDU_UL_SLOT_TRACE is one of them).
-KNOB_ANY = ("OCUDU_METAL_GPU_TIME", "OCUDU_UL_PHASE_SEGMENTS", "OCUDU_UL_SLOT_TRACE")
+# Probes: report-only, and they belong here by CATEGORY, not by name (the same rule milestone_audit.sh
+# states). OCUDU_UL_TIMING_EVENTS joined 2026-10-01 with dev doc 6.241: it PRINTS the worst receive waits and
+# hand-over margins with their host wall clocks and changes no delivery decision; when unset it reads no clock
+# and prints nothing, and when set it stores at most 64 events (only above a 1 ms / 500 us floor).
+KNOB_ANY = ("OCUDU_METAL_GPU_TIME", "OCUDU_UL_PHASE_SEGMENTS", "OCUDU_UL_SLOT_TRACE", "OCUDU_UL_TIMING_EVENTS")
 KNOB_EQ  = ("OCUDU_DFT_BATCH_SYMBOLS=14", "OCUDU_DFT_OPEN_BLOCK=1", "OCUDU_DFT_RELEASE_BLOCK=1",
             "OCUDU_CE_LANE_ORDER=merged",
             # OCUDU_DFT_BACKEND=vdsp joined 2026-10-01: on Apple that IS the value an unset leg resolves to

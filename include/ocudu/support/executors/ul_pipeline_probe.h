@@ -13,10 +13,12 @@
 #include <cstdio>
 #include <deque>
 #include <cstdlib>
+#include <ctime>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
+#include <cstring>
 #include <vector>
 
 #if defined(OCUDU_FLOW_PROBES)
@@ -545,7 +547,43 @@ public:
   ///       whole-slot policy this series has one sample per slot and under the symbol-grained one it has one per
   ///       block. Compare its counts against the policy in force, not against [ul_pipeline]'s. For the hop-scoped
   ///       companion see record_slot_rx_wait().
-  void record_rx_wait(int64_t wait_ns, bool spans_stream_start = false, int64_t begin_ns = 0, int64_t end_ns = 0)
+  // ---- the worst timing events, with host instants (OCUDU_UL_TIMING_EVENTS, dev doc 6.240/6.241) ------------
+  /// One kept event: the quantity it is ranked by, its own window on the steady clock, the WALL clock at the
+  /// instant it was kept, the load average then, and (for a receive) the block's air time.
+  ///
+  /// Both clocks are kept on purpose. The steady instants order the events inside this process; the wall clock is
+  /// what lines them up against the `.log`'s `[RF] Real-time failure in RF: ...` lines, which carry only wall
+  /// timestamps and are written by a different thread in a different logger. Printing the epoch milliseconds as
+  /// well as the ISO string means the alignment survives any timezone or format difference between the two files.
+  struct timing_event {
+    int64_t  value_us   = 0;  ///< the ranked quantity: the receive wait, or a hand-over's margin (negative = late)
+    int64_t  begin_ns   = 0;  ///< steady-clock instant the measured window began (0 when the caller had none)
+    int64_t  end_ns     = 0;  ///< ... and ended
+    int64_t  wall_ms    = 0;  ///< system_clock at the moment the event was KEPT (see record_timing_event_rx)
+    int64_t  air_us     = 0;  ///< the block's air time, receive events only (0 = not reported)
+    int64_t  due_ts     = 0;  ///< the radio's due timestamp, hand-over events only
+    int64_t  load1_x100 = -1; ///< getloadavg(1) at that instant, x100 (-1 = the caller had none)
+  };
+  /// Bounded so a leg's report cannot grow without limit: 64 events is already far more than the ~0-20 a leg has.
+  static constexpr unsigned max_timing_events     = 64;
+  static constexpr unsigned default_timing_events = 8;
+  /// The floors that make the instrument free when nothing is wrong: a receive wait below 1 ms and a hand-over
+  /// margin at or above 500 us are not kept at all (the report already counts them in its buckets).
+  static constexpr int64_t timing_event_rx_floor_ns = 1000000;
+  static constexpr int64_t timing_event_tx_floor_us = 500;
+  std::vector<timing_event> worst_rx_events{};
+  std::vector<timing_event> worst_tx_events{};
+  /// Candidates SEEN above the floor, kept or not (the list is bounded, this is not): it is what separates "the
+  /// instrument was on and nothing was slow" from "the instrument was never called", which otherwise look alike.
+  uint64_t rx_event_candidates{0};
+  uint64_t tx_event_candidates{0};
+
+  void record_rx_wait(int64_t wait_ns,
+                      bool    spans_stream_start = false,
+                      int64_t begin_ns           = 0,
+                      int64_t end_ns             = 0,
+                      int64_t air_us             = 0,
+                      int64_t load1_x100         = -1)
   {
     if (wait_ns < 0) {
       return;
@@ -558,6 +596,19 @@ public:
       return;
     }
     rx_wait_us.push_back(static_cast<double>(wait_ns) / 1e3);
+
+    // The worst-K list, on the SAME sample this call just pushed: the ranking never removes anything from the
+    // distribution (the two answer different questions - "what is the tail" and "when did it happen").
+    if (timing_event_wanted_rx(wait_ns)) {
+      ++rx_event_candidates;
+      timing_event ev;
+      ev.value_us   = wait_ns / 1000;
+      ev.begin_ns   = begin_ns;
+      ev.end_ns     = end_ns;
+      ev.air_us     = air_us;
+      ev.load1_x100 = load1_x100;
+      take_rx_timing_event(ev);
+    }
 
     // The SAME-LEG TEST (dev doc 6.150 (6)): does this receive's own window overlap one of the submission's
     // windows, per kind? Three rings of 16 walked in full every receive - 48 compares at ~2 kHz, nothing - and the
@@ -592,8 +643,85 @@ public:
     }
   }
 
-  /// \brief Records the receive wait of the block that COMPLETED \p slot, for the hop-scoped [ul_rx_wait_hop].
+  /// \brief Records a hand-over whose margin is at or below the floor, for the worst-K list beside the receive waits.
   ///
+  /// Called from the DL accounting (tx_slack_note_transmit) for the events the report already counts as late or
+  /// nearly late: this adds only WHEN, not what - the aggregates stay the criterion, and this is the alignment
+  /// key against the receive stalls and the `[RF]` lines (dev doc 6.240/6.241).
+  ///
+  /// \param[in] margin_us  due_ts/rate - host_now, the same quantity [dl_tx_slack] is built from (negative = late).
+  /// \param[in] due_ts     The radio timestamp the hand-over was due on (kept so a leg can be tied to the map).
+  /// \param[in] end_ns     Host steady instant of the hand-over when the caller has it, else 0.
+  /// \param[in] load1_x100 getloadavg(1) x100 at that instant, else -1.
+  void record_tx_timing_event(int64_t margin_us, uint64_t due_ts, int64_t end_ns = 0, int64_t load1_x100 = -1)
+  {
+    if (!timing_event_wanted_tx(margin_us)) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    ++tx_event_candidates;
+    timing_event ev;
+    ev.value_us   = margin_us;
+    ev.end_ns     = end_ns;
+    ev.due_ts     = static_cast<int64_t>(due_ts);
+    ev.load1_x100 = load1_x100;
+    take_tx_timing_event(ev);
+  }
+
+  /// \brief Keeps \p ev if it is among the worst `timing_events_limit()` receive waits. Caller holds the lock.
+  ///
+  /// The list is kept sorted DESCENDING, so `back()` is the current admission bar: an event that cannot beat it
+  /// costs one comparison, and the wall-clock read below therefore happens only for events that are actually kept,
+  /// which is what makes "the instrument is on and nothing is wrong" as cheap as "off".
+  void take_rx_timing_event(timing_event& ev)
+  {
+    const size_t limit = timing_events_limit();
+    if (limit == 0) {
+      return;
+    }
+    if (worst_rx_events.size() >= limit) {
+      if (ev.value_us <= worst_rx_events.back().value_us) {
+        return;
+      }
+      worst_rx_events.pop_back();
+    }
+    stamp_wall_clock(ev);
+    worst_rx_events.push_back(ev);
+    std::sort(worst_rx_events.begin(), worst_rx_events.end(),
+              [](const timing_event& lhs, const timing_event& rhs) { return lhs.value_us > rhs.value_us; });
+  }
+
+  /// \brief The same for hand-over margins, where the quantity goes wrong DOWNWARDS: the worst is the MOST
+  /// NEGATIVE margin, so this list is kept sorted ASCENDING and `back()` is again the admission bar.
+  void take_tx_timing_event(timing_event& ev)
+  {
+    const size_t limit = timing_events_limit();
+    if (limit == 0) {
+      return;
+    }
+    if (worst_tx_events.size() >= limit) {
+      if (ev.value_us >= worst_tx_events.back().value_us) {
+        return;
+      }
+      worst_tx_events.pop_back();
+    }
+    stamp_wall_clock(ev);
+    worst_tx_events.push_back(ev);
+    std::sort(worst_tx_events.begin(), worst_tx_events.end(),
+              [](const timing_event& lhs, const timing_event& rhs) { return lhs.value_us < rhs.value_us; });
+  }
+
+  /// The WALL clock is read HERE, i.e. only for an event that enters a list, and at the instant the event is
+  /// recorded - the same instant a concurrent `[RF]` line in the `.log` would carry. Nothing else reads it, so the
+  /// instrument costs one system_clock call per kept event and zero when the knob is unset.
+  static void stamp_wall_clock(timing_event& ev)
+  {
+    ev.wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::system_clock::now().time_since_epoch())
+                     .count();
+  }
+
+  /// \brief Records the receive wait of the block that COMPLETED \p slot, for the hop-scoped [ul_rx_wait_hop].  ///
   /// \param[in] slot Slot whose samples are now all in (same reference as record_slot_samples_complete).
   /// \param[in] wait_ns How long that block's receive blocked.
   /// \param[in] spans_stream_start True for the start-up call (see record_rx_wait): it belongs to no hop.
@@ -715,6 +843,52 @@ public:
   }
   /// \brief How much of the timeline's budget is reserved for the SLOWEST rows (see trace_eviction_victim()).
   static size_t slot_trace_slow_reserve() { return std::max<size_t>(1, slot_trace_limit() / 4); }
+
+  /// \brief How many of the WORST timing events to print with their host instants (OCUDU_UL_TIMING_EVENTS=N).
+  ///
+  /// THE QUESTION THIS ANSWERS (dev doc 6.240). A leg can read a receive wait of 12 ms against a mean of 34 us, and
+  /// the aggregates cannot say WHEN it happened - so it cannot be lined up against the two independent witnesses a
+  /// leg already has: the `[RF] Real-time failure in RF: underflow|late` lines (which carry wall-clock timestamps)
+  /// and the DL hand-overs that missed their due time. Three series, one time axis, is the only way to tell
+  /// "the radio/USB path stalled" from "the host was descheduled" from "something in this process blocked".
+  ///
+  /// WHY IT NEEDS A KEY OF ITS OWN, AND WHY IT IS CHEAP. It is off by default (0 when unset) and only RANKS events
+  /// above a floor (1 ms for a receive wait, 500 us of margin for a hand-over), so a healthy leg keeps ~0-20 of
+  /// them: the wall-clock read and the load average are taken ONLY for an event that enters the list, and the
+  /// per-call cost when the knob is on is one integer compare. With the knob unset nothing is stored, nothing is
+  /// printed and no clock is read - the "off is byte-identical" half of the probe contract (dev doc 6.145 (3)).
+  ///
+  /// `OCUDU_UL_TIMING_EVENTS=1` (or any non-numeric value) means "on, with the default count", for the reason
+  /// slot_trace_limit() gives: an operator asking for the instrument should not have to guess a good number.
+  static unsigned timing_events_limit()
+  {
+    const char* env = std::getenv("OCUDU_UL_TIMING_EVENTS");
+    if (env == nullptr) {
+      return 0;
+    }
+    if ((env[0] == '\0') || (std::strtoul(env, nullptr, 10) == 0)) {
+      // "0" is the explicit OFF, and a non-numeric value is a request for the default rather than a silent 0.
+      const bool numeric = (env[0] >= '0') && (env[0] <= '9');
+      return numeric ? 0U : default_timing_events;
+    }
+    const unsigned v = static_cast<unsigned>(std::strtoul(env, nullptr, 10));
+    return (v > max_timing_events) ? max_timing_events : v;
+  }
+
+  static bool timing_events_enabled() { return timing_events_limit() != 0; }
+
+  /// Whether a receive wait is worth keeping: the floor is what keeps a healthy leg's list empty and its cost zero.
+  static bool timing_event_wanted_rx(int64_t wait_ns)
+  {
+    return (timing_events_limit() != 0) && (wait_ns >= timing_event_rx_floor_ns);
+  }
+
+  /// The same question for a hand-over: its healthy margin is ~1011 us, so the floor is the "below 500 us" bucket
+  /// the report already counts, and a late hand-over (margin <= 0) is always kept.
+  static bool timing_event_wanted_tx(int64_t margin_us)
+  {
+    return (timing_events_limit() != 0) && (margin_us < timing_event_tx_floor_us);
+  }
 
   /// \brief Which row to drop when the timeline is full.
   ///
@@ -1063,6 +1237,114 @@ public:
     }
   }
 
+  /// \brief Prints the worst receive waits and hand-over margins WITH their host wall clocks (dev doc 6.240/6.241).
+  ///
+  /// WHAT IT IS FOR. The three things a leg can see about a stall live in three files and two clocks: the receive
+  /// tail is an aggregate here, the DL hand-overs that missed their due time are an aggregate here, and the radio's
+  /// own `[RF] Real-time failure in RF: underflow|late` lines are wall-clock timestamps in the `.log`. This block
+  /// is the missing half - WHEN each of the worst events happened - so the three can be put on one axis.
+  ///
+  /// It is a READING, never a criterion (the aggregates and the judged rows stay what they were), and it is
+  /// printed ONLY when `OCUDU_UL_TIMING_EVENTS` asked for it: with the knob unset the report is byte-identical.
+  /// When it IS on and nothing was above the floor, the block still prints - one line saying so, because "the
+  /// instrument was on and saw nothing" and "the instrument was never built in" must not look alike (the same rule
+  /// the slot-trace line follows).
+  void print_timing_events()
+  {
+    const unsigned limit = timing_events_limit();
+    if (limit == 0) {
+      return;
+    }
+    std::fprintf(stderr,
+                 "[ul_timing_events] limit=%u (OCUDU_UL_TIMING_EVENTS=%u): the worst receive waits and hand-over "
+                 "margins, with the host wall clock\n",
+                 limit,
+                 limit);
+    std::fprintf(stderr,
+                 "  line them up against the .log's `[RF] Real-time failure in RF: ...` lines; wall= is UTC, "
+                 "epoch_ms= is the same instant as an integer\n");
+    if (worst_rx_events.empty()) {
+      std::fprintf(stderr,
+                   "  rx  : none above the %lld us floor in %llu candidate check(s) - the receive path never "
+                   "blocked that long\n",
+                   static_cast<long long>(timing_event_rx_floor_ns / 1000),
+                   static_cast<unsigned long long>(rx_event_candidates));
+    }
+    unsigned rank = 0;
+    for (const timing_event& ev : worst_rx_events) {
+      char wall[32];
+      format_wall_utc(ev.wall_ms, wall, sizeof(wall));
+      // BOTH ENDS of the window are printed: `wall=` is the instant the wait ENDED (the samples were in hand),
+      // so a reader aligning this against a `[RF]` line must know where the stall BEGAN - `began_ms=` is
+      // `epoch_ms - wait`, computed here rather than stored, so the two cannot drift apart.
+      std::fprintf(stderr,
+                   "  rx  #%u wait=%lldus air=%lldus wall=%s epoch_ms=%lld began_ms=%lld steady_end_ns=%lld "
+                   "load1=%s\n",
+                   ++rank,
+                   static_cast<long long>(ev.value_us),
+                   static_cast<long long>(ev.air_us),
+                   wall,
+                   static_cast<long long>(ev.wall_ms),
+                   static_cast<long long>(ev.wall_ms) - static_cast<long long>(ev.value_us) / 1000,
+                   static_cast<long long>(ev.end_ns),
+                   load1_str(ev.load1_x100));
+    }
+    if (worst_tx_events.empty()) {
+      std::fprintf(stderr,
+                   "  dl  : none below the %lld us margin floor in %llu candidate check(s) - no hand-over was "
+                   "close to its due time\n",
+                   static_cast<long long>(timing_event_tx_floor_us),
+                   static_cast<unsigned long long>(tx_event_candidates));
+    }
+    rank = 0;
+    for (const timing_event& ev : worst_tx_events) {
+      char wall[32];
+      format_wall_utc(ev.wall_ms, wall, sizeof(wall));
+      // `due_ms=` is when the hand-over SHOULD have happened (`epoch_ms + margin`, negative margin = in the
+      // past), i.e. the same two ends for the transmit direction.
+      std::fprintf(stderr,
+                   "  dl  #%u margin=%lldus due_ts=%lld wall=%s epoch_ms=%lld due_ms=%lld steady_end_ns=%lld "
+                   "load1=%s\n",
+                   ++rank,
+                   static_cast<long long>(ev.value_us),
+                   static_cast<long long>(ev.due_ts),
+                   wall,
+                   static_cast<long long>(ev.wall_ms),
+                   static_cast<long long>(ev.wall_ms) + static_cast<long long>(ev.value_us) / 1000,
+                   static_cast<long long>(ev.end_ns),
+                   load1_str(ev.load1_x100));
+    }
+  }
+
+  /// The load average as a fixed-point string, or `-` when the caller had no reading (see the platform note in
+  /// lower_phy_baseband_processor.cpp: getloadavg is POSIX and the callers gate it themselves).
+  static const char* load1_str(int64_t load1_x100)
+  {
+    static thread_local char buf[16];
+    if (load1_x100 < 0) {
+      return "-";
+    }
+    std::snprintf(buf, sizeof(buf), "%lld.%02lld", static_cast<long long>(load1_x100 / 100),
+                  static_cast<long long>(load1_x100 % 100));
+    return buf;
+  }
+
+  /// UTC so it can be compared with a log line without knowing this process's timezone, and fractional to the
+  /// millisecond because a stall and the `[RF]` line it belongs to are milliseconds apart.
+  static void format_wall_utc(int64_t epoch_ms, char* out, size_t n)
+  {
+    const std::time_t secs = static_cast<std::time_t>(epoch_ms / 1000);
+    std::tm           tm{};
+#if defined(_WIN32)
+    gmtime_s(&tm, &secs);
+#else
+    gmtime_r(&secs, &tm);
+#endif
+    std::strftime(out, n, "%Y-%m-%dT%H:%M:%S", &tm);
+    const size_t len = std::strlen(out);
+    std::snprintf(out + len, (n > len) ? (n - len) : 0, ".%03lld", static_cast<long long>(epoch_ms % 1000));
+  }
+
   /// \brief Observer of every FINALIZED phase sample (P0-5: the pairing key this probe and the lane probe share).
   ///
   /// It is called once per sample that enters [ul_time_frequency] / [ul_channel_estimation] /
@@ -1240,6 +1522,7 @@ public:
     // decomposition "wait for this hop's samples + the span of this hop" adds up inside one population.
     print_series("ul_rx_wait_hop", sorted_rx_wait_hop);
     print_series("ul_dft_wait", sorted_dft_wait);
+    print_timing_events();
     // THE SAME-LEG TEST of the receive tail (dev doc 6.150 (6), the M2 hypothesis). Across arms the stalls appear
     // exactly where the host BLOCKS on a Metal completion (0.000-0.001% where it does not, 0.06-0.11% where it
     // does, at the same traffic and with the same device grid present in both). What a cross-arm correlation
@@ -1617,6 +1900,7 @@ private:
   /// span is driver submission work, and one in neither means the two share an upstream cause instead.
   enum class dft_window_kind : unsigned { wait = 0, commit_to_end = 1, gpu = 2, count = 3 };
   static constexpr size_t max_dft_block_windows = 16;
+
   std::array<std::array<dft_block_window, max_dft_block_windows>, static_cast<size_t>(dft_window_kind::count)>
       dft_block_windows{};
   std::array<size_t, static_cast<size_t>(dft_window_kind::count)>   dft_block_next{};
@@ -1685,7 +1969,17 @@ public:
   void record_end_crc_ok(uint64_t /*slot*/, size_t /*mac_pdu_bytes*/) {}
   void record_fapi_mac_end(uint64_t /*slot*/) {}
   void record_rx_wait(int64_t /*wait_ns*/, bool /*spans_stream_start*/ = false, int64_t /*begin_ns*/ = 0,
-                      int64_t /*end_ns*/ = 0)
+                      int64_t /*end_ns*/ = 0, int64_t /*air_us*/ = 0, int64_t /*load1_x100*/ = -1)
+  {
+  }
+  /// The worst-K timing-event list is part of the probe, so its interface must exist in BOTH arms with the same
+  /// shape: with the probes compiled out the instrument is off (limit 0, nothing wanted), which is also what the
+  /// `#if defined(OCUDU_FLOW_PROBES)` guard at the call sites relies on.
+  static unsigned timing_events_limit() { return 0; }
+  static bool     timing_event_wanted_rx(int64_t /*wait_ns*/) { return false; }
+  static bool     timing_event_wanted_tx(int64_t /*margin_us*/) { return false; }
+  void record_tx_timing_event(int64_t /*margin_us*/, uint64_t /*due_ts*/, int64_t /*end_ns*/ = 0,
+                              int64_t /*load1_x100*/ = -1)
   {
   }
   void record_slot_rx_wait(uint64_t /*slot*/, int64_t /*wait_ns*/, bool /*spans_stream_start*/ = false) {}

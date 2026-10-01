@@ -1097,4 +1097,123 @@ TEST(ul_slot_trace_test, a_new_cycle_rebases_a_slot_instead_of_reusing_last_cycl
   ::unsetenv("OCUDU_UL_PHASE_SEGMENTS");
 }
 
+
+/// The worst receive waits and hand-over margins are printed WITH THEIR HOST WALL CLOCK, bounded, and only when
+/// asked for (dev doc 6.240/6.241).
+///
+/// WHY THIS ARM EXISTS. The instrument's whole value is that its numbers can be lined up against a DIFFERENT file's
+/// timestamps: the `.log`'s `[RF] Real-time failure in RF: underflow|late` lines, and the DL hand-overs that missed
+/// their due time. A leg is the only place those three meet, and a leg costs a phone test - so the properties that
+/// make the alignment possible (a wall clock that is actually printed, a list that is actually bounded, ranking in
+/// the direction each quantity goes wrong) are pinned here instead. The three arms below are therefore:
+///
+///  * OFF by default: the report contains no `[ul_timing_events]` block at all, which is the "the knob is the only
+///    thing that turns it on" half of the probe contract (dev doc 6.145 (3));
+///  * ON: the worst TWO survive out of three candidates, worst first, each with `wall=` and `epoch_ms=`, and the
+///    block reports how many candidates it saw so an empty list cannot be confused with a missing instrument;
+///  * the DISTRIBUTION IS NOT TOUCHED: the ranked list is a second view of the same samples, so `[ul_rx_wait]`
+///    still counts every one of them - a ranking that ate samples would silently change the series it annotates.
+TEST(ul_pipeline_probe_test, worst_timing_events_carry_the_wall_clock_and_stay_bounded)
+{
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+
+  // ---- OFF (the default): the block does not exist, whatever the events look like ---------------------------------
+  {
+    ::unsetenv("OCUDU_UL_TIMING_EVENTS");
+    EXPECT_EQ(capture_report().find("[ul_timing_events]"), std::string::npos)
+        << "the instrument must be silent unless OCUDU_UL_TIMING_EVENTS asks for it";
+    // The counts are DELTAS, not absolutes: gtest_discover_tests gives this case its own process, but the whole
+    // binary can also be run in one, and the earlier cases in this file record waits of their own.
+    const int before_off = std::max(0, samples(capture_report(), "ul_rx_wait"));
+    probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::milliseconds(12)).count());
+    probe.record_tx_timing_event(-900, 1234, 0, 55);
+    const std::string report = capture_report();
+    EXPECT_EQ(report.find("[ul_timing_events]"), std::string::npos)
+        << "a slow event with the knob unset must not print anything either";
+    // The series itself is unconditional (it is the delivery instrument); only the ranked list has a key.
+    EXPECT_EQ(samples(report, "ul_rx_wait"), before_off + 1);
+  }
+
+  // ---- ON with a bound of 2: ranked, worst first, bounded, and the floor respected ---------------------------------
+  {
+    ::setenv("OCUDU_UL_TIMING_EVENTS", "2", 1);
+    const int before = std::max(0, samples(capture_report(), "ul_rx_wait"));
+
+    // Four receive waits above the 1 ms floor, in a deliberately unsorted order, plus one below it.
+    const auto ms = [](int v) { return std::chrono::nanoseconds(std::chrono::milliseconds(v)).count(); };
+    probe.record_rx_wait(ms(3), false, 100, 200, /*air_us=*/35, /*load1_x100=*/468);
+    probe.record_rx_wait(ms(12), false, 300, 400, /*air_us=*/35, /*load1_x100=*/468);
+    probe.record_rx_wait(ms(1) / 10, false, 500, 600);  // BELOW the floor: must not be kept
+    probe.record_rx_wait(ms(5), false, 700, 800, /*air_us=*/36, /*load1_x100=*/120);
+    const std::string report = capture_report();
+
+    // The DISTRIBUTION has all five (four above the floor plus the small one): the list is an annotation.
+    EXPECT_EQ(samples(report, "ul_rx_wait"), before + 4) << report;
+
+    // ... and the LIST has exactly the two worst, worst first, with the air time and the wall clock.
+    const size_t block = report.find("[ul_timing_events] limit=2");
+    ASSERT_NE(block, std::string::npos) << report;
+    const std::string events = report.substr(block);
+    const size_t      first  = events.find("  rx  #1 wait=12000us air=35us wall=");
+    const size_t      second = events.find("  rx  #2 wait=5000us air=36us wall=");
+    EXPECT_NE(first, std::string::npos) << events;
+    EXPECT_NE(second, std::string::npos) << events;
+    EXPECT_LT(first, second) << "the list must be printed worst first";
+    EXPECT_EQ(events.find("wait=3000us"), std::string::npos)
+        << "the third-worst event must be dropped: the list is bounded by the knob";
+    EXPECT_EQ(events.find("wait=100us"), std::string::npos) << "an event below the floor must never enter the list";
+    // The wall clock is the point of the instrument: without BOTH forms the alignment against the .log cannot be
+    // done (the log carries the ISO string, a cross-check wants the integer).
+    EXPECT_NE(events.find("epoch_ms="), std::string::npos) << events;
+    // ... and it must be a REAL reading, not just a printed label: without the stamp the line says
+    // "1970-01-01T00:00:00.000" / "epoch_ms=0", which the label-only check above accepts. The assertion is scoped to
+    // THE LINE IT IS ABOUT: the first version searched the whole block and found the DL line's stamp, so breaking
+    // the receive stamp alone left it green (found by exactly that negative control, 2026-10-01 - the ARM was
+    // patched, the control was not dropped).
+    const auto rx_line = (events.find("  rx  #1 ") == std::string::npos)
+                             ? std::string()
+                             : events.substr(events.find("  rx  #1 "), events.find('\n', events.find("  rx  #1 ")) -
+                                                                          events.find("  rx  #1 "));
+    EXPECT_TRUE(std::regex_search(rx_line, std::regex(R"(wall=20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3})")))
+        << rx_line;
+    EXPECT_TRUE(std::regex_search(rx_line, std::regex(R"(epoch_ms=[1-9][0-9]{12,})"))) << rx_line;
+    // Both ends of the stall, and the arithmetic between them, so an alignment against the `.log` cannot be off by
+    // the stall's own duration: began = end - wait (12 ms here).
+    EXPECT_TRUE(std::regex_search(rx_line, std::regex(R"(began_ms=[1-9][0-9]{12,})"))) << rx_line;
+    {
+      const std::regex  ends(R"(epoch_ms=([0-9]+) began_ms=([0-9]+))");
+      std::smatch       m;
+      ASSERT_TRUE(std::regex_search(rx_line, m, ends)) << rx_line;
+      EXPECT_EQ(std::stoll(m[1].str()) - std::stoll(m[2].str()), 12) << rx_line;
+    }
+    EXPECT_NE(events.find("load1=4.68"), std::string::npos) << events;
+    EXPECT_NE(events.find("load1=1.20"), std::string::npos) << events;
+    // A candidate count, so "nothing was slow" and "the instrument never ran" cannot look alike.
+    EXPECT_NE(events.find("candidate check(s)"), std::string::npos) << events;
+  }
+
+  // ---- the DL side ranks the other way round: the MOST NEGATIVE margin is the worst ---------------------------------
+  {
+    ::setenv("OCUDU_UL_TIMING_EVENTS", "2", 1);
+    probe.record_tx_timing_event(-100, 11, 0, 468);
+    probe.record_tx_timing_event(-5000, 22, 0, 468);
+    probe.record_tx_timing_event(-900, 33, 0, 468);
+    probe.record_tx_timing_event(700, 44, 0, 468);  // above the 500 us floor: not a candidate
+    const std::string report = capture_report();
+    const size_t      block  = report.find("[ul_timing_events] limit=2");
+    ASSERT_NE(block, std::string::npos) << report;
+    const std::string events = report.substr(block);
+    const size_t      first  = events.find("  dl  #1 margin=-5000us");
+    const size_t      second = events.find("  dl  #2 margin=-900us");
+    EXPECT_NE(first, std::string::npos) << events;
+    EXPECT_NE(second, std::string::npos) << events;
+    EXPECT_LT(first, second) << "a hand-over margin goes wrong downwards, so the worst is the most negative";
+    EXPECT_EQ(events.find("margin=-100us"), std::string::npos) << "only two are kept";
+    EXPECT_EQ(events.find("margin=700us"), std::string::npos) << "an event above the floor must never enter";
+  }
+
+  ::unsetenv("OCUDU_UL_TIMING_EVENTS");
+  ::unsetenv("OCUDU_UL_PHASE_SEGMENTS");
+}
+
 #endif // OCUDU_FLOW_PROBES

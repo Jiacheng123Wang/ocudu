@@ -286,6 +286,7 @@ def main():
         "OCUDU_LANE_ABLATE_STAGE": "**修饰符**（只在 `OCUDU_LANE_ABLATE=1` 时有意义）：只消去哪一**阶段族**——`front_end`/`ce`/`eq`/`demap`（`|` 或 `,` 组合），不设 = `all` = 历史行为；拼错的名字按 `all` 处理并打 WARNING。族级账单靠它，覆盖度看报告里的 `Q9-F5 ablation coverage`（开发文档 6.162）",
         "OCUDU_METAL_GPU_TIME": "**探针**：给每条 cb 装 GPU 时间戳（per-label 表的来源；验收腿一直带着它）",
         "OCUDU_UL_PHASE_SEGMENTS": "**探针**：上行相位分段读数（验收腿一直带着它）",
+        "OCUDU_UL_TIMING_EVENTS": "**探针（新，开发文档 6.240/6.241）**：打印**最慢的 K 次接收等待**与**最迟的 K 次 DL 交接**，各带**宿主墙钟**（`wall=` UTC + `epoch_ms=` + 窗口两端 `began_ms=`/`due_ms=`）与当时的 `load1` —— 用来把 `[ul_rx_wait]` 的尖峰、DL 的迟到和 `.log` 里 `[RF] Real-time failure in RF` 的行对到**同一条时间轴**上。判读：加载腿上一次都拿不到 ⇒ 不是宿主/电台的停顿；有事件 ⇒ 看 `load1`（高 = 宿主争用；低 = 电台/USB 侧停）与三者的重合",
         "OCUDU_UL_SLOT_TRACE": "**探针**：每**时隙**时间线（`=N` = 最多记 N 个时隙，非数字 = 开且用默认上限）。和上面两个一样被两条闸门当「任意值」接受，但它比相位分段宽得多，**验收腿不需要它**——只在追「某个时隙为什么晚」时开（开发文档 6.145⑹⑴；`=64` 曾打出 512 行，见 `ul_pipeline_probe.h` 的注）",
         "OCUDU_DFT_BACKEND": "前端变换的**后端选择**：`=vdsp`（Apple 上**不设就是它**，所以白名单接受）｜`=generic`（**A/B 对照臂**，n78 p170/p171、n1 p172/p173 用它跑 generic 那一侧）。非 Apple 平台根本不编进这条分支，所以这一行的「默认」只在 Apple 上有意义",
         "OCUDU_DFT_BATCH_SYMBOLS": "前端批量：不设 = `AUTO`（= 一个时隙自己的符号数，n78 上是 **14**）｜`=1` = 每符号对照臂｜`=7`/`=2` 是中间臂。白名单只接受与 AUTO 等价的 `=14`",
@@ -298,7 +299,9 @@ def main():
         print(f"| `{knob}` | {dflt} | `{site}` | {leg_counts.get(knob, 0)} | {note} |")
     print()
     print("> ⚠ **验收腿的旋钮白名单**（`milestone_audit.sh` 的 `kNOB_ANY`/`kNOB_EQ` 与 `leg_gate.sh` 的 `KNOB_ANY`/`KNOB_EQ` **就是它**，两边逐字一致）。")
-    print("> **任意值**（探针）：`OCUDU_METAL_GPU_TIME`、`OCUDU_UL_PHASE_SEGMENTS`、`OCUDU_UL_SLOT_TRACE`。")
+    print("> **任意值**（探针）：`OCUDU_METAL_GPU_TIME`、`OCUDU_UL_PHASE_SEGMENTS`、`OCUDU_UL_SLOT_TRACE`、"
+          "`OCUDU_UL_TIMING_EVENTS`（2026-10-01 加入：只**打印**最慢的接收等待 / 迟到交接及其宿主墙钟，"
+          "不改变任何交付决定；关着不读时钟、不打印，开着最多存 64 条事件 —— 见开发文档 6.240/6.241）。")
     print("> **视为「等于交付默认」**：`OCUDU_DFT_BATCH_SYMBOLS=14`、`OCUDU_DFT_OPEN_BLOCK=1`、`OCUDU_DFT_RELEASE_BLOCK=1`、`OCUDU_CE_LANE_ORDER=merged`、"
           "`OCUDU_DFT_BACKEND=vdsp`（2026-10-01 加入：Apple 上这就是不设它时的值）。其余一律判 FAIL（**fail-closed**）。")
     print("> `OCUDU_DFT_BACKEND=generic` **故意不**在白名单里：那是一条 A/B **臂**——臂可以满足其余所有判据（p84 就是这样），闸门拦的就是它。")

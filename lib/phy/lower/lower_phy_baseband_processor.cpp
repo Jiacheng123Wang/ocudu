@@ -146,12 +146,40 @@ void tx_slack_note_receive(uint64_t radio_ts, int64_t host_ns)
   a.rx_valid.store(true, std::memory_order_release);
 }
 
+/// The host's 1-minute load average, in hundredths (dev doc 6.54, arm C).
+///
+/// It is read only where an event needs a context (see ul_rx_note_call), and it is the reading that separates
+/// the two owners a millisecond transport call can have: a saturated host starves the threads this code does
+/// not own (UHD's own receive worker, the USB stack), while a device or wire stall happens with the host idle.
+int64_t ul_rx_load1_x100()
+{
+  double loads[1] = {0.0};
+  if (getloadavg(loads, 1) != 1) {
+    return -1;
+  }
+  return static_cast<int64_t>(loads[0] * 100.0);
+}
+
 /// Records one transmit hand-over (dev doc 6.41). Called from dl_process() on the TX executor, and ONLY while
 /// the receive path is still feeding the clock map (see tx_slack_note_excluded()).
 void tx_slack_note_transmit(int64_t margin_us, uint64_t due_ts)
 {
   tx_slack_accounting& a = tx_slack_accounts();
   a.transmissions.fetch_add(1, std::memory_order_relaxed);
+#if defined(OCUDU_FLOW_PROBES)
+  // The worst-K list beside the receive waits (OCUDU_UL_TIMING_EVENTS, dev doc 6.241): the aggregate below says
+  // HOW MANY hand-overs missed their due time, this says WHEN one did - which is what lets a leg line the DL side
+  // up against the RX stalls and the `[RF]` lines on one wall-clock axis. Only events below the floor pay for it,
+  // and the whole block is inside the compile-time key, so a build without the probes is untouched.
+  if (ul_pipeline_probe::timing_event_wanted_tx(margin_us)) {
+    ul_pipeline_probe::get().record_tx_timing_event(margin_us,
+                                                    due_ts,
+                                                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                        std::chrono::steady_clock::now().time_since_epoch())
+                                                        .count(),
+                                                    ul_rx_load1_x100());
+  }
+#endif // OCUDU_FLOW_PROBES
   if (margin_us < 2000) {
     a.below_2ms.fetch_add(1, std::memory_order_relaxed);
   }
@@ -623,20 +651,6 @@ ul_rx_stats& ul_rx_counters()
 {
   static ul_rx_stats s;
   return s;
-}
-
-/// The host's 1-minute load average, in hundredths (dev doc 6.54, arm C).
-///
-/// It is read only where an event needs a context (see ul_rx_note_call), and it is the reading that separates
-/// the two owners a millisecond transport call can have: a saturated host starves the threads this code does
-/// not own (UHD's own receive worker, the USB stack), while a device or wire stall happens with the host idle.
-int64_t ul_rx_load1_x100()
-{
-  double loads[1] = {0.0};
-  if (getloadavg(loads, 1) != 1) {
-    return -1;
-  }
-  return static_cast<int64_t>(loads[0] * 100.0);
 }
 
 /// Records one `receiver.receive()` call (dev doc 6.51): how long the transport call took, how long the receive
@@ -1518,12 +1532,25 @@ void lower_phy_baseband_processor::ul_process()
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t_recv_begin).count();
     // The interval rides along for the same-leg overlap test (dev doc 6.150 (6)): it is the same steady_clock
     // the receive timing series already uses, so no extra clock read is added.
+    //
+    // THE AIR TIME AND THE LOAD AVERAGE ride along too, but ONLY when the event is one the worst-K list would
+    // keep (OCUDU_UL_TIMING_EVENTS, dev doc 6.241): `air_us` is what turns "it waited 12 ms" into "it waited 12 ms
+    // for a block whose air time is 35.7 us", and load1 is the cheapest discriminator between "the host was
+    // descheduled" and "the radio/USB path stalled" that does not need another tool. Both are computed only past
+    // the floor test, so a healthy leg pays one integer compare per receive and reads no clock at all.
+    const int64_t air_us     = (nof_samples != 0)
+                                   ? (static_cast<int64_t>(nof_samples) * 1000 / static_cast<int64_t>(srate.to_kHz()))
+                                   : 0;
+    const bool    wants_ev   = ul_pipeline_probe::timing_event_wanted_rx(recv_us * 1000);
+    const int64_t load1_x100 = wants_ev ? ul_rx_load1_x100() : -1;
     ul_pipeline_probe::get().record_rx_wait(
         recv_us * 1000,
         spans_stream_start,
         std::chrono::duration_cast<std::chrono::nanoseconds>(t_recv_begin.time_since_epoch()).count(),
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
-            .count());
+            .count(),
+        air_us,
+        load1_x100);
     // The per-slot timeline (OCUDU_UL_SLOT_TRACE) needs the ONE instant the other series take for granted: the
     // arrival of the samples that COMPLETE a slot. Everything else in the probe starts at the slot's FIRST
     // sample, which is a different instant whenever the block carrying a slot's tail is not the block that

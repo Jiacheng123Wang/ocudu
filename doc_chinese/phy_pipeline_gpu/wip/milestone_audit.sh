@@ -233,7 +233,9 @@ leg_commit_check() {   # <label> <leg .stderr path> <kind>
 # evidence. A knob belongs here by CATEGORY, not by name: OCUDU_UL_SLOT_TRACE joined when the [ul_slot_trace]
 # instrumentation was read on an acceptance leg (dev doc 6.145 (6) (1)); the behaviour-changing knobs stay
 # refused below.
-kNOB_ANY=" OCUDU_METAL_GPU_TIME OCUDU_UL_PHASE_SEGMENTS OCUDU_UL_SLOT_TRACE "
+# OCUDU_UL_TIMING_EVENTS joined 2026-10-01 (dev doc 6.241): a report-only probe by the same category rule -
+# it prints the worst receive waits / hand-over margins with host wall clocks and decides nothing.
+kNOB_ANY=" OCUDU_METAL_GPU_TIME OCUDU_UL_PHASE_SEGMENTS OCUDU_UL_SLOT_TRACE OCUDU_UL_TIMING_EVENTS "
 # `== the delivery default`. SINCE 2026-09-30 (dev doc 6.215) the delivered lane writes the grid from the HOST,
 # so the three DFT entries are MOOT on a delivery leg (that engine is not on the path at all) while
 # `CE_LANE_ORDER=merged` still is the delivered value. A delivery leg should set NONE of them - that is the
