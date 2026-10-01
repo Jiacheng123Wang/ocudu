@@ -145,21 +145,49 @@ else:
     plain_none, plain_no_slot, plain_block = (int(x) for x in why)
 plain_total = int(plain) if plain else None
 
-check("C1 plain_without_block + plain_with_block == plain route",
-      None if (why is None or plain_total is None) else (plain_none + plain_block == plain_total),
-      "instrument absent (predates 5.9.113)" if why is None else
-      f"{plain_none} + {plain_block} = {plain_none + plain_block} vs plain route {plain_total}")
+# ---- AN EMPTY PLAIN ROUTE IS NOT A DEFECT BRANCH (dev doc 6.227, 2026-10-01) -----------------------
+# Since the host-written grid became the DEFAULT (dev doc 6.215 (1)) the lower-PHY DFT runs on the CPU, so
+# the Metal engine is never used and the plain route reads 0 transform(s): this gate has NO population.
+# It used to say otherwise: C3's ratio `no-slot / no-block` became 0/0 -> None and fell through to the
+# FAIL message of the THIRD defect branch ("a slotted instance did NOT join a block") on a leg where no
+# instance ran at all - measured on p167-n78-baseline and p169-n78-stress, which made the milestone audit
+# read NOT GREEN on two healthy delivery legs. An absent premise is reported as absent, never as a defect.
+empty_plain = (plain_total == 0)
+empty_reason = (f"NOT JUDGED: the plain route carried 0 transform(s) in this leg - the lower-PHY DFT runs "
+                f"on the HOST here (dev doc 6.215 (1)), so the Metal engine never runs and there is no "
+                f"plain-route instance to attribute")
 
-check("C2 plain_without_lane_slot <= plain_without_block",
-      None if why is None else (plain_no_slot <= plain_none),
-      "n/a" if why is None else f"{plain_no_slot} <= {plain_none}")
+empty_plain = (plain_total == 0)
+empty_reason = (f"NOT JUDGED: the plain route carried 0 transform(s) in this leg - the lower-PHY DFT runs "
+                f"on the HOST here (dev doc 6.215 (1)), so the Metal engine never runs and there is no "
+                f"plain-route instance to attribute")
 
+C1_NAME = "C1 plain_without_block + plain_with_block == plain route"
+C2_NAME = "C2 plain_without_lane_slot <= plain_without_block"
+C3_NAME = "C3 plain_with_block == 0 AND (no-slot / no-block) >= 0.999  <- 5.9.118 (3) prediction"
 ratio = None if (why is None or plain_none == 0) else plain_no_slot / plain_none
-check("C3 plain_with_block == 0 AND (no-slot / no-block) >= 0.999  <- 5.9.118 (3) prediction",
-      None if why is None else (plain_block == 0 and ratio is not None and ratio >= 0.999),
-      "n/a" if why is None else
-      f"block={plain_block}, no-slot/no-block={ratio if ratio is None else round(ratio, 4)}"
-      + ("" if (ratio is not None and ratio >= 0.999) else "  <- a slotted instance did NOT join a block: 5.9.111 (3) branch 2"))
+
+if empty_plain and why is not None:
+    # C1 and C2 pass trivially here (0 == 0, 0 <= 0) but they are no more evidence than C3 is, so all
+    # three are marked unjudged together and the gate stops pretending to attribute a population it does
+    # not have. C5 is still judged: it is about the LEG, not about the plain route.
+    for nm in (C1_NAME, C2_NAME, C3_NAME):
+        skip(nm, empty_reason)
+else:
+    check(C1_NAME,
+          None if (why is None or plain_total is None) else (plain_none + plain_block == plain_total),
+          "instrument absent (predates 5.9.113)" if why is None else
+          f"{plain_none} + {plain_block} = {plain_none + plain_block} vs plain route {plain_total}")
+
+    check(C2_NAME,
+          None if why is None else (plain_no_slot <= plain_none),
+          "n/a" if why is None else f"{plain_no_slot} <= {plain_none}")
+
+    check(C3_NAME,
+          None if why is None else (plain_block == 0 and ratio is not None and ratio >= 0.999),
+          "n/a" if why is None else
+          f"block={plain_block}, no-slot/no-block={ratio if ratio is None else round(ratio, 4)}"
+          + ("" if (ratio is not None and ratio >= 0.999) else "  <- a slotted instance did NOT join a block: 5.9.111 (3) branch 2"))
 
 # ---- the geometry premise C4 is a law of ---------------------------------------------------------
 leg_cfg  = f(err_txt, r"cell config\s*:\s*(\S+)")
@@ -167,7 +195,11 @@ commits  = f(err_txt, r"\[metal_stats\] dft commits=(\d+)")
 prach_on_engine = None if commits is None else (int(commits) > 1)
 n78_geom = (leg_cfg is not None) and ("tdd_n78" in leg_cfg)
 premise_reason = None
-if leg_cfg is None or commits is None:
+if empty_plain:
+    # Same premise as C1-C3: with no Metal transform in the leg there is no PRACH rate to check either.
+    premise_reason = ("the plain route carried 0 transform(s): the lower-PHY DFT runs on the HOST here "
+                      "(dev doc 6.215 (1))")
+elif leg_cfg is None or commits is None:
     premise_reason = ("cannot read the premise: " + ("no `cell config` provenance in the leg" if leg_cfg is None else "")
                       + (" and " if leg_cfg is None and commits is None else "")
                       + ("no `[metal_stats] dft commits=` line" if commits is None else ""))

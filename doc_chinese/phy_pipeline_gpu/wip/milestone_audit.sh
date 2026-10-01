@@ -583,9 +583,27 @@ if [ -n "${SF:-}" ] && [ -f "$SF" ]; then
         "$([ "$sgot" = "9" ] && echo PASS || echo FAIL)" "found $sgot of 9 in $(basename "$SF")"
 
   sml=$(grep -aE "contract MET" "$SF" | tail -1)
-  check "stress leg $STRESSLEG: contract MET (9 of 9) and mode=gpu" "MET (9 of 9" \
-        "$(echo "$sml" | grep -q "MET (9 of 9" && grep -q "contract (mode=gpu)" "$SF" && echo PASS || echo "$([ -z "$sml" ] && echo RED || echo FAIL)")" \
-        "${sml:-<unreadable>}"
+  # TWO DELIVERY READINGS, same rule as the default side above and for the same reason (dev doc 6.215):
+  # with the grid written on the HOST the "dft radio inputs" check has no population and the contract
+  # reports "MET (8 of 9)". Measured 2026-10-01 (dev doc 6.227): this check still demanded the literal
+  # "MET (9 of 9" for the stress leg, so the first delivered stress leg (p169-n78-stress) FAILED the
+  # audit on a healthy reading while the default side had accepted the same line for a week.
+  sdftl=$(grep -aF "]   dft radio inputs:" "$SF" | tail -1)
+  if echo "$sml" | grep -q "MET (9 of 9"; then
+    check "stress leg $STRESSLEG: contract MET (9 of 9) and mode=gpu" "MET (9 of 9" \
+          "$(grep -q "contract (mode=gpu)" "$SF" && echo PASS || echo "$([ -z "$sml" ] && echo RED || echo FAIL)")" \
+          "${sml:-<unreadable>}"
+  elif echo "$sml" | grep -q "MET (8 of 9" && echo "$sdftl" | grep -q "0 transform(s)"; then
+    check "stress leg $STRESSLEG: contract MET (8 of 9) - the DFT check lost its population because the HOST writes the grid" \
+          "MET (8 of 9) with dft radio inputs = 0 transform(s)" \
+          "$(grep -q "contract (mode=gpu)" "$SF" && echo PASS || echo "$([ -z "$sml" ] && echo RED || echo FAIL)")" \
+          "${sml:-<unreadable>} | ${sdftl:-<unreadable>}"
+  else
+    check "stress leg $STRESSLEG: contract MET (9 of 9), or 8 of 9 with the DFT check unpopulated, and mode=gpu" \
+          "MET (9 of 9), or MET (8 of 9) with dft radio inputs = 0 transform(s)" \
+          "$([ -z "$sml" ] && echo RED || echo FAIL)" \
+          "${sml:-<unreadable>} | ${sdftl:-<no dft radio inputs line>}"
+  fi
 
   sxl=$(grep -aE "= [0-9.]+ read\(s\)" "$SF" | tail -1)
   check "stress leg $STRESSLEG: crossings 0.00 + 0.00 per hop (load must not add one)" "0.00 + 0.00" \
@@ -622,17 +640,34 @@ a12_run() {   # <leg> <regime> <outfile>  -> echoes the summary line
   bash $W/a12_attribution_gate.sh --regime="$2" "$1" >"$3" 2>&1
   grep -E "criteria pass" "$3" | tail -1
 }
+# ACCEPTED SHAPES (dev doc 6.227, 2026-10-01). "5 of 5" stays the first form. The second is: NO criterion
+# failed, and the ones the gate could not judge are recorded as such BY THE GATE ITSELF. The delivered
+# config produces exactly that, because the lower-PHY DFT runs on the HOST there (dev doc 6.215 (1)): the
+# Metal engine never runs, the plain route reads 0 transform(s), and C1-C4 have no population. Before this
+# form existed the gate's C3 divided 0/0 and reported the THIRD defect branch ("a slotted instance did not
+# join a block") on two healthy delivered legs, so the audit read NOT GREEN. A real FAIL still fails.
+a12_accept() { # <outfile> -> PASS / FAIL
+  grep -q "5 of 5 criteria pass" "$1" && { echo PASS; return; }
+  if ! grep -q "\[FAIL" "$1" && grep -q "n/a (not judged)" "$1" && grep -q "\[PASS" "$1"; then
+    echo PASS
+  else
+    echo FAIL
+  fi
+}
 a12_leg=$LEG
 al=$(a12_run "$LEG" default "$T/a12")
-if ! echo "${al:-}" | grep -q "5 of 5 criteria pass" && grep -q "NOT JUDGED" "$T/a12" 2>/dev/null && [ -n "${STRESSLEG:-}" ]; then
+a12_v=$(a12_accept "$T/a12")
+if [ "$a12_v" != "PASS" ] && [ -n "${STRESSLEG:-}" ]; then
   als=$(a12_run "$STRESSLEG" stress "$T/a12s")
-  if echo "${als:-}" | grep -q "5 of 5 criteria pass"; then
-    al="$als  [judged on the STRESS leg: the default leg cannot judge C4 - its PRACH never reaches the Metal DFT engine, so the plain route carries no signal there]"
+  if [ "$(a12_accept "$T/a12s")" = "PASS" ]; then
+    al="$als  [judged on the STRESS leg: the default leg cannot judge it]"
     a12_leg=$STRESSLEG
+    a12_v=PASS
   fi
 fi
-check "A1-2 attribution gate (5.9.118): 5 of 5 judged" "5 of 5" \
-      "$(echo "${al:-}" | grep -q "5 of 5 criteria pass" && echo PASS || echo "$([ -z "${al:-}" ] && echo RED || echo FAIL)")" \
+check "A1-2 attribution gate (5.9.118): every JUDGED criterion passes (5 of 5, or the rest NOT JUDGED by the gate)" \
+      "5 of 5, or no FAIL with the unjudgeable ones recorded as NOT JUDGED" \
+      "$a12_v" \
       "leg ${a12_leg:-<none>}: ${al:-<unreadable>}"
 
 # ---------------------------------------------------------------- 6. the other toolchain (opt-in, INFO)

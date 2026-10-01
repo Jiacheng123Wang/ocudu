@@ -14140,6 +14140,199 @@ HARQ 丢弃数与 RF 失败数（同族对照）：
 本次把顺序走反了（先怀疑自己的代码），代价是三条手机腿；
 ★ 一个**零成本的前置动作**本该在 `p164` 之后立刻做：**用同一张 SIM 访问一次普通网页/测速**，先回答"手机到底能不能用数据"。
 
+### 6.225 ✅ **结案的两条验证：① 手机上打开数据后**空口复现成功**；② 重新应用后的仪表在离线台架上逐条复验**（2026-10-01）
+
+#### ① 空口侧：`p166-n78-revert_1001_0852`（回退版二进制 + 手机数据已打开 + 内部时钟）—— 根因被复现
+
+| 读数 | 值 | 说明 |
+|---|---|---|
+| `[SDAP] ue=0 psi=1: Mapping QFI=1 DRB1` | **00:57:56**（腿内 **+5 min 17 s**）| ★ 会话建立成功（此前 5 次 `did not request` 都是数据开关还没打开的那几分钟）|
+| 收尾 | `Disconnecting PDU session with psi=1`（01:03:48）| 正常断开 |
+| 业务量 | `[ul_mac_pdu_size] total=**325336.0 B**`、上行跳 **906**（其中 +300 s 一段 266 跳）| ⚠ **业务很轻**（对比 `p163` 的 18.6 MB）⇒ 这条腿**证明根因**，但**不是一条业务腿**（不能用来刷新 baseline）|
+| 启动横幅 | `commit 99311751b4`（= 回退版）| 它跑的是回退版，所以**也不能**作为"重新应用后的仪表"的空口证据 |
+
+⇒ ★ **根因在空口上被复现**：数据开关关上时 5 次接入全部 `did not request`；打开后同一条腿里会话建立、业务起来。
+
+#### ② 离线侧：重新应用后的二进制（`f02d40e791`）在台架 `wip/gnb_loopback_n78.yml` 上复验
+
+```
+--== OCUDU gNB (commit f02d40e791) ==--
+[dl_tx_slack] transmissions=25491 ... min=937us ... AT/BELOW 0=0;
+              excluded 10 hand-over(s) after the RECEIVE path stopped (...);
+              every number above is over the 25491 hand-over(s) inside the stream
+[dl_tx_call]  calls=25491 median=0.0us p95=0.0us p99=1.0us max=16us (at call #17989);
+              over 1ms=0, over 5ms=0; 19 call(s) outside the window ...
+```
+
+⇒ 与 §6.219⑧ 的读数**逐条一致**：`excluded 10`、窗口内 `AT/BELOW 0=0`、**`calls == transmissions == 25491`**、`over 1ms/5ms = 0/0`。
+
+#### ③ 当前状态与下一步
+
+* 代码：`f02d40e791`（= `d97d73e698` 的探针改动重新应用；`git diff d97d73e698 -- <file>` 为空）；
+* 三段戳：`hashes.h = HEAD = f02d40e791`，且戳在二进制里；`ctest -L phy` **203/203**、`lower_phy|dft_processor_metal|du_low` **10/10**；
+* ⚠ **时钟源**：`p163`/`p164`/`p165`/`p166_0846` 都是 `clock_source=gpsdo`，而 `p166_0852` 起改成了**内部时钟**（`configs/gnb_rf_b200_tdd_n78_20mhz.yml` 的一处**未提交**改动；**不属于本工作流**）⇒
+  **下一条交付腿必须先定下时钟源**，否则与基线 `p163` 不同配方；
+* ⏳ **下一步**：用交付配置重飞一条**有业务**的腿（ping + iperf3），刷新 baseline ——
+  `p164` 的 V1 1269.0 µs 是**故障腿**读数，`p166_0852` 只有 325 KB 业务，都不能当基线。
+
+### 6.226 ★★★ **baseline 已刷新（腿 `p167-n78-baseline`，提交 `f02d40e791`）：V1 中位 1245.1 µs 复现 `p163`，且仪表的两条新读数第一次在空口上齐全**（2026-10-01）
+
+#### ① 预登记判据逐条（§6.225③ 那 9 条）
+
+| 判据 | 预登记 | `p167` 实测 | |
+|---|---|---|---|
+| 契约 | 8 of 9 | **MET (8 of 9 checks applicable)**，9 名字全在 | ✅ |
+| `stale` | 0 | **0** | ✅ |
+| `cbs/lane` / `dropped` | 2.00 / 0 | **2.00 / 0** | ✅ |
+| `gaps` | 0 | **0**（`rx_overflows=0`、`rx_lates=0`）| ✅ |
+| `dl_tx_slack` 中位 | ≈1011 | **1012.0** | ✅ |
+| `excluded` 非零 | 是 | ★ **10** | ✅ |
+| `dl_tx_call over 1ms` | 0 | ★ **0**（`over 5ms` 也是 0）| ✅ |
+| V1 中位 | 1246–1310 | ★ **1245.1** | ✅（比窗口低 1 µs，= `p163` 的 1246.4）|
+| CRC-OK | ≥ 60% | **31214 / 31682 = 98.5%** | ✅ |
+
+空口门 **9 of 9 judged pass, 0 to explain**；审计 **28 PASS / 1 FAIL / 0 RED**（唯一 FAIL 仍是旧的 stress 腿 `p124`，与本次无关）。
+
+#### ② 与 `p163` 并排（两条都是交付配置；**时钟源不同**）
+
+| 读数 | `p163`（06:47，**gpsdo**）| **`p167`（09:07，内部时钟）** |
+|---|---|---|
+| 提交 | `42c987f3d9` | **`f02d40e791`**（探针改动重新应用）|
+| `[ul_gpu_pipeline]` 中位 / p95 | 1246.4 / 1449.1 | **1245.1 / 1450.0** |
+| `[ul_pipeline]` 中位 | 1280.0 | 1274.0 |
+| 三段（`t2f` / `ce` / `eq_demap`）中位 | 494.0 / 59.6 / 687.1 | 492.8 / 59.1 / 685.5 |
+| 上行跳 / CRC-OK | 26650 / 98.8% | 31682 / **98.5%** |
+| UL MAC PDU 总量 | 18 626 554 B | 17 707 858 B |
+| `[ul_ldpc_decode]` 中位 | 27.0 | 24.0 |
+| lane residency 中位 / 跳间隔中位 | 478.8 / 412.5 | 478.8 / **413.1**（"0.8 slot"）|
+| ★ `[dl_tx_slack]` | 中位 1012.0；**旧仪表**：`AT/BELOW 0=9`（业务+拆链混在一起）| 中位 1012.0；**窗口内 `AT/BELOW 0=1`（min −92 µs）+ `excluded 10`** |
+| ★ `[dl_tx_call]` | max **84498 µs**、`over 1ms=1` | max **239 µs**、**`over 1ms=0/5ms=0`**、`calls == transmissions == 292779` |
+| RF 失败 | 23（**20 条在拆链**）| 25（**22 条在拆链** + **3 条业务中段 underflow**）|
+
+⇒ **交付配置在 `f02d40e791` 上复现了 `p163`**（V1 −1.3 µs、CRC-OK −0.3 pt、MAC PDU 同量级）；
+⇒ ★ **时钟源（gpsdo → 内部）对时延读数没有可测影响**（两条腿差 1.3 µs）—— 这是本轮顺带拿到的一个正面数据。
+
+#### ③ ★ 这条腿把 §6.219⑥ 的诊断**定量闭环**了
+
+`p163` 那条"`AT/BELOW 0 = 9`"在旧仪表下是**业务期 + 拆链期混在一起**、无法拆分（只能靠 `due_ts` 反推）。
+`p167` 用修好的仪表给出**形状**：**窗口内 1 次**（min −92 µs）+ **窗口外 10 次**（`excluded`）。
+⇒ 与 §6.219⑥ 的判断一致：**那 9 次的绝大部分是拆链尾巴**，业务期真的是个位数。
+
+#### ④ 当前状态与可选项
+
+* 代码/戳：`hashes.h = HEAD = f02d40e791`（戳在二进制里）；`ctest -L phy` 203/203；
+* ⚠ **时钟源**：`p167` 用的是**内部时钟**（配置文件那处**不属于本工作流**的未提交改动仍在），
+  与 `p163` 的 gpsdo 不同；② 已证明两者时延读数一致，所以**基线可用**，但记录里要写明；
+* ⏳ **可选的下一步**（按价值排序）：
+  1. **N=5（`max_pusch_and_srs_concurrency=unlimited`）那条腿** —— §6.218⑨ 更正后的预测是 **+0…−30 µs**，现在有了干净基线正好可以判；
+  2. **stress 腿**（`--regime=stress`）—— 它能让审计的唯一 FAIL（旧 `p124`）消失、offline acceptance 变 GREEN；
+  3. **vDSP 臂**（预期再省 ~18 µs，零契约代价）；
+  4. §6.198④ 的 `AT/BELOW 0 == 0` 门**重述**：现在窗口内读数是 **1**（`p161` 是 3）⇒ 建议改成"窗口内 ≤5 且无运输签名"。
+
+### 6.227 ★★★ **两条腿跑完：N=5 是**空结果**（ΔV1 **+1.6 µs** ⇒ 保持 N=2）；stress 腿落地后**审计第一次 GREEN**（29 PASS / 0 FAIL / 0 RED），代价是又查出并修掉两个"字面量停在交付前"的工具缺陷**（2026-10-01）
+
+#### ① 腿 `p168-n78-conc5`（N=5）：预登记判据 ⇒ **空结果**
+
+**启动自检命中**（与 §6.218① 的预测逐字一致）：
+`PUSCH/SRS concurrency = 0 (configured: no limit; …)` 且 `max_pusch_and_srs_concurrency=0, medium pool max_concurrency=5 -> pusch_executor.max_concurrency=5`。
+
+| 读数（中位）| `p167`（**N=2**）| `p168`（**N=5**）| Δ |
+|---|---|---|---|
+| **V1 `[ul_gpu_pipeline]`** | **1245.1** | **1246.7** | ★ **+1.6 µs** |
+| `[ul_pipeline]` | 1274.0 | 1290.0 | +16.0 |
+| `paired ce`（相位段）| 59.1 | 60.1 | +1.0 |
+| lane residency | 478.8 | 477.1 | −1.7 |
+| lane `gap` | 18.9 | 20.2 | +1.3 |
+| 上行跳 / CRC-OK | 31682 / 98.8% | 25419 / **97.5%** | |
+| UL 载荷 | 17.71 MB / 146.4 s = **0.97 Mbit/s** | 19.74 MB / 111.6 s = **1.42 Mbit/s** | 载荷**可比**（略重）|
+| 契约 / `stale` / `gaps` / `cbs/lane` | 8 of 9 / 0 / 0 / 2.00 | 同 | ✓ |
+
+⇒ 按预登记：**|Δ| < 10 µs ⇒ 空结果 —— 该载荷下 `max_pusch_and_srs_concurrency` 不是约束** ⇒ **保持 N=2**；
+这也与 §6.218⑨ 更正后的预测（"+0…−30 µs，最可能是空结果"）一致，而**不是** §6.218④/⑤ 那个（已被更正的）"上不了 2 跳"的推理。
+
+#### ② 腿 `p169-n78-stress`（stress 制度）：一条**真的**带载腿
+
+| 读数 | 值 |
+|---|---|
+| UL 载荷 | **34.34 MB / 103.1 s = 2.67 Mbit/s**（= 基线的 **2.7×**）|
+| 上行跳 / CRC-OK | 20659 / **19140 = 92.6%** |
+| V1 `[ul_gpu_pipeline]` 中位 | 1257.8（基线 1245.1，**+12.7 µs** —— 有载即略高，正常）|
+| 契约 / `stale` / `gaps` / `cbs/lane` | **8 of 9** / **0** / **0** / 2.00 dropped=0 |
+| `[dl_tx_slack]` | `AT/BELOW 0=2`（min −267 µs）+ **`excluded 9`** |
+| `[dl_tx_call]` | max 239 µs、**`over 1ms=0/5ms=0`**、`calls=206132 ≈ transmissions=206133`（1 次调用跨过停止）|
+
+#### ③ ★★ 顺带查出并修掉的两个工具缺陷（与 §6.219⑤ 同一类：**字面量/前提停在交付前**）
+
+| # | 缺陷 | 后果 | 修法 |
+|---|---|---|---|
+| 1 | `milestone_audit.sh` 的 **stress 侧**契约判据仍要求字面量 `MET (9 of 9` | 第一条交付 stress 腿（`p169`）在**健康读数**上判 FAIL（默认侧早就在接受同一行了）| 照默认侧的规则接受两种读数（`9 of 9`，或 `8 of 9` **且** `dft radio inputs: 0 transform(s)`），其余 fail-closed |
+| 2 | `a12_attribution_gate.sh` 的 **C3 在 plain route 为空时做 0/0** | 它落到"第三条缺陷分支"的 FAIL 文案上（*"a slotted instance did NOT join a block"*），而**这条腿上根本没有 instance 跑过** ⇒ 两条健康交付腿被读成缺陷、审计 NOT GREEN | ★ **前提缺失就报缺失**：plain route = 0 ⇒ **C1–C4 一律 NOT JUDGED**（写明原因：宿主写网格、Metal 引擎不跑）；审计侧改为接受"**没有 FAIL 且不可判的项由门自己记成 NOT JUDGED**"（保留 stress 回退，自检仍能看见两个历史缺陷臂）|
+
+⇒ 修后：`milestone_audit.sh --leg=p167-n78-baseline --stress-leg=p169-n78-stress --quick` = ★ **29 PASS / 0 FAIL / 0 RED ⇒ `offline acceptance: GREEN`**（本工作流第一次）。
+
+#### ④ ★ 一个结构性发现（用户已裁定，见 §6.228）
+
+交付改的是 **RX 侧**的 DFT（`effective.dft = cpu` 喂 lower PHY 的 **RX** DFT 工厂）⇒
+在交付模式下 **Metal DFT 引擎一次都不跑**：`dft radio inputs: 0 transform(s)`、`gpu busy (front_end): commits=0`、
+**A1-2 门要归因的"plain route"整条为空**。⇒ 两条仪器（契约的 `dft radio inputs`、A1-2 归因门）**在交付模式下没有总体**。
+
+⚠ **措辞更正（用户指出，并已按码与腿核实）**：这里**不是**"下行前端"——
+**DL 的 FFT/IFFT 一直在 CPU**。两条独立证据：
+
+| 证据 | `p161`（metal 臂）| `p167`（交付）|
+|---|---|---|
+| 腿自己的启动诊断 `[lower_phy] DFT backend:` | `rx=metal (GPU) **tx=cpu**` | `rx=cpu **tx=cpu**` |
+| 代码 | `lower_phy_factory.cpp:45-47`：注释 *"The TX (IFFT) side **always** runs the default CPU implementation in this phase"*，且 `tx_dft_factory = create_dft_processor_factory();` **无条件** | 同 |
+
+⇒ 变的只有 `rx=`；`tx=cpu` 两条腿逐字相同。
+
+只有把腿飞成历史形态（`--expert_phy.pusch_dft_type metal` **且** `OCUDU_UL_RX_SYMBOLS=0`）才能judge那两条仪器。
+
+**纪律 64**：**每翻转一次默认值，都要把**所有**依赖它的判据（不只是一条）找一遍** ——
+`leg_gate.sh` 的契约字面量、`ul_load.sh` 的"一块=一槽"、审计的 stress 侧契约、A1-2 的 C3 前提，
+四处在同一次交付里全部失效，而它们**分别**在四条不同的腿（`p163`/`p167`/`p169`）上才暴露出来；
+★ 顺序上最省的做法是：翻转默认值的**当天**就把"哪些门/工具引用了这个默认"列成清单，逐条跑一遍。
+
+### 6.228 ✅ **用户裁定：交付模式下 A1-2 归因门 = NOT JUDGED；并更正 §6.227④ 的一处措辞（DL 的 FFT 一直在 CPU）**（2026-10-01）
+
+#### ① 裁定（写死边界，免得日后被当成"软化判据"）
+
+**接受"A1-2 归因门在交付模式下读 NOT JUDGED"**，作为交付形态的一部分。四条边界：
+
+1. **只在 `plain route == 0` 时成立** —— 即这条腿上**一次 Metal DFT 变换都没有**（宿主写网格的必然结果）；
+2. 门必须**自己**把 C1–C4 记成 NOT JUDGED 并写出原因（`a12_attribution_gate.sh` 现在如此），
+   审计只接受"**没有任何 FAIL** 且不可判项已由门自己记录"这一种形态（`a12_accept()`）；
+3. 只要腿上有**一次** Metal 变换（例如飞成历史形态），C1–C5 就**照旧逐条判定**，FAIL 仍然是 FAIL
+   （门自检的两个历史缺陷臂仍然被看见：`defect` 臂 C3 FAIL、`branch3` 臂 2 to explain）；
+4. **C5 永远判**（它判的是腿本身：契约、crossings、gaps、stale）⇒ 这条裁定**不会**让"腿本身不合法"溜过去。
+
+⇒ 据此，§6.227④ 里"定期飞一条历史形态的腿"从**建议**降为**可选**：那台仪器只在需要归因 RX plain route 时才需要。
+
+#### ② 用户更正（已按码 + 按腿核实）：**DL 的 FFT 一直在 CPU**
+
+§6.227④ 原文写的"交付把**下行前端**的 DFT 也搬到了 CPU"**是错的**（用户原话："本来 DL 的 FFT 一直在 CPU 的"）。
+读码：`lib/ru/sdr/lower_phy/lower_phy_factory.cpp`
+
+```cpp
+// line 27-41:  RX 侧：config.dft_processor_type == "metal" 才建 Metal，否则 generic(CPU)
+// line 45-47:  // The TX (IFFT) side always runs the default CPU implementation in this phase.
+std::shared_ptr<dft_processor_factory> tx_dft_factory = create_dft_processor_factory();   // 无条件 CPU
+```
+
+腿自己的启动诊断把这件事写得更直白（**同一行、只差 `rx=`**）：
+
+| 腿 | `[lower_phy] DFT backend:` |
+|---|---|
+| `p161-n78-gpudft-d`（metal 臂）| `rx=metal (GPU) **tx=cpu** (expert_phy --pusch_dft_type metal)` |
+| `p167-n78-baseline`（交付）| `rx=cpu **tx=cpu** (expert_phy --pusch_dft_type cpu)` |
+
+⇒ **变的只有 RX**；A1-2 要归因的 plain route 属于 **RX 引擎**（PRACH 检测的 IDFT）⇒ 交付模式下为空。
+**结论不变，措辞已更正**（§6.227④ 与本节的表都留了证据）。
+
+**纪律 65**：**"某条链的某一段一直在 CPU"这类事实，读一条启动诊断就能证实，不要靠推断** ——
+`[lower_phy] DFT backend: rx=… tx=…` 这行在**每条腿**里都有，把"`rx=` 变了、`tx=` 没变"一眼写完；
+★ 我 ④ 的措辞错误本可以用它避免：起腿时的那行启动横幅就是最省事的反证。
+
 **纪律 56**：**交付翻转默认值之后，第一件要查的不是时延，是"哪些工具的字面量还停在旧默认上"** ——
 本次一条腿查出两处：门禁把合法的 `MET (8 of 9)` 判 FAIL、负载工具把"一块"当"一槽"（14× 量纲错）。
 两者都与被测代码无关，却都能让**健康的交付腿**读成红的或读成"余量 99%"。

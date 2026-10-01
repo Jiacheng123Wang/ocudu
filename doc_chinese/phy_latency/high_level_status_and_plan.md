@@ -318,6 +318,30 @@
 > ③ ★ **登记为可复用判据**：**"注册成功但从不发 PDU Session Establishment Request" ⇒ 先查手机的数据开关/APN**；gNB 侧唯一形态 = `UE did not request a PDU session after 3s` + `rrcRelease` 不被 ACK；它与代码/MCS/运输侧无关，且**跨重启存活**（与 §6.198 的运输侧清单并列）；
 > ④ 成本：为环境问题花了 **3 条空口腿**（p164 业务中段死、p165/p166 完全接不上）；换来"网络侧逐条并排"对照法 + 窗口修复的空口自证（纪律 63：排查顺序 = 手机数据开关 → 核心网订阅 → 运输侧 → 最后才是代码）；
 > ⑤ 处置：代码已恢复到最新（探针改动重新应用）、重编译 + 三段戳 + `ctest -L phy` + 离线台架复验；下一步 = **用交付配置重飞一条腿刷新 baseline**（`p164` 的 V1 1269.0 µs 是故障腿读数）；
+>
+> **2026-10-01 ✅ 结案的两条验证（开发文档 §6.225）** ——
+> ① **空口复现根因**：`p166-n78-revert_1001_0852`（手机数据打开后）—— 会话在腿内 **+5 min 17 s** 建立（`SDAP psi=1`）、收尾正常断开；此前 5 次 `did not request` 都在数据开关还没打开的那几分钟 ⇒ ★ 根因在空口上被复现；
+>    但该腿业务很轻（`ul_mac_pdu_size total=` **325 KB**、906 上行跳）⇒ **不能当基线**，且它跑的是回退版二进制；
+> ② **重新应用后的仪表复验**（`f02d40e791`，离线台架）：`excluded 10`、窗口内 `AT/BELOW 0=0`、**`calls == transmissions == 25491`**、`over 1ms/5ms = 0/0`、max 16 µs ⇒ 与 §6.219⑧ 逐条一致；
+> ③ 当前：`hashes.h = HEAD = f02d40e791`（戳在二进制里）、`ctest -L phy` **203/203**、`lower_phy|dft_processor_metal|du_low` **10/10**；
+> ④ ⚠ **时钟源待定**：`p163`–`p166_0846` 都是 `gpsdo`，`p166_0852` 起改成**内部时钟**（配置文件的一处**不属于本工作流**的未提交改动）⇒ 下一条交付腿必须先定下用哪个，否则与基线 `p163` 不同配方；
+> ⑤ ⏳ **下一步**：交付配置重飞一条**有业务**的腿（ping + iperf3）刷新 baseline；
+>
+> **2026-10-01 ★★★ baseline 已刷新：腿 `p167-n78-baseline`（提交 `f02d40e791`）—— V1 中位 1245.1 µs 复现 `p163`，仪表两条新读数第一次在空口齐全（开发文档 §6.226）** ——
+> ① **预登记 9 条全过**：契约 **8 of 9**、`stale=0`、`cbs/lane=2.00 dropped=0`、`gaps=0`、`dl_tx_slack` 中位 **1012.0**、**`excluded 10`**、**`dl_tx_call over 1ms=0/5ms=0`**、V1 中位 **1245.1**、CRC-OK **98.5%**（31214/31682，UL MAC PDU **17.71 MB**）；空口门 **9 of 9 judged**、审计 **28 PASS / 1 FAIL / 0 RED**（唯一 FAIL 是旧 stress 腿 `p124`）；
+> ② **与 `p163` 并排**：V1 1246.4 → **1245.1**、CRC-OK 98.8% → 98.5%、三段 494.0/59.6/687.1 → 492.8/59.1/685.5、跳间隔中位 412.5 → 413.1 ⇒ 复现；
+> ③ ★ **顺带证明时钟源无影响**：`p163` 是 **gpsdo**、`p167` 是**内部时钟**（配置文件那处非本工作流的改动），两条腿 V1 只差 **1.3 µs**；
+> ④ ★ **§6.219⑥ 的拆链诊断定量闭环**：`p163` 那条"`AT/BELOW 0=9`"（旧仪表无法拆分）= `p167` 的 **窗口内 1 次**（min −92 µs）+ **窗口外 10 次** ⇒ 那 9 次的绝大部分确实是拆链尾巴；
+> ⑤ ⏳ **可选下一步（按价值）**：N=5 并发腿（§6.218⑨ 更正后预测 +0…−30 µs）→ stress 腿（让审计唯一 FAIL 消失、offline acceptance GREEN）→ vDSP 臂（~18 µs）→ §6.198④ 的门重述（窗口内读数现在是 **1**，`p161` 是 3）；
+>
+> **2026-10-01 ★★★ 两条腿跑完：N=5 是**空结果**（ΔV1 +1.6 µs ⇒ 保持 N=2），stress 腿落地后**审计第一次 GREEN**（29 PASS / 0 FAIL / 0 RED）；又修掉两个"停在交付前"的工具缺陷（开发文档 §6.227）** ——
+> ① **`p168-n78-conc5`（N=5）**：启动自检命中（`configured: no limit` → `max_concurrency=5`）；V1 中位 **1245.1 → 1246.7**（**+1.6 µs**）、`paired ce` 59.1 → 60.1、residency 478.8 → 477.1、载荷可比（0.97 → 1.42 Mbit/s）⇒ 按预登记 **|Δ|<10 µs = 空结果：该载荷下 N 不是约束** ⇒ **保持 N=2**（与 §6.218⑨ 的更正后预测一致）；
+> ② **`p169-n78-stress`**：UL 载荷 **34.34 MB / 103.1 s = 2.67 Mbit/s（基线 2.7×）**、CRC-OK **92.6%**、契约 8 of 9、`stale=0`、`gaps=0`、`cbs/lane=2.00`、V1 中位 1257.8（+12.7）、`AT/BELOW 0=2` + `excluded 9`、`dl_tx_call over 1ms=0`；
+> ③ ★ **两个工具缺陷（同一类：字面量/前提停在交付前）**：审计的 **stress 侧**契约仍要 `MET (9 of 9`；`a12_attribution_gate.sh` 的 **C3 在 plain route=0 时做 0/0** ⇒ 落到"第三条缺陷分支"文案上 ⇒ 两条健康腿被判缺陷。修法：stress 侧接受两种读数；**前提缺失就报缺失**（plain route=0 ⇒ C1–C4 NOT JUDGED），审计接受"无 FAIL + 不可判项由门自己记为 NOT JUDGED"；
+> ④ ⇒ ★ **`offline acceptance: GREEN`（29 PASS / 0 FAIL / 0 RED）**，本工作流第一次；
+> ⑤ ✅ **结构性发现（用户已裁定）**：交付改的是 **RX 侧** DFT（`effective.dft = cpu` 喂 lower PHY 的 **RX** 工厂）⇒ 交付模式下 Metal DFT 引擎一次都不跑、A1-2 要归因的 plain route（RX 引擎，PRACH 的 IDFT）整条为空 ⇒ 该仪器（与契约的 `dft radio inputs`）在交付模式下**没有总体**；
+>    ⚠ 措辞更正（用户指出、已按码与腿核实）：**DL 的 FFT/IFFT 一直在 CPU** —— 腿自己的启动诊断 `[lower_phy] DFT backend:` 在 `p161`(metal) 是 `rx=metal (GPU) tx=cpu`、在 `p167`(交付) 是 `rx=cpu tx=cpu`，**只差 `rx=`**；代码 `lower_phy_factory.cpp:45-47` 原文 *"The TX (IFFT) side always runs the default CPU implementation in this phase"*）；
+>    ✅ **裁定**：**接受"交付模式下 A1-2 = NOT JUDGED"**，边界写死 —— 只在 `plain route == 0` 时成立、门自己记录原因、有一次 Metal 变换就照旧逐条判（FAIL 仍是 FAIL）、**C5 永远判**；"定期飞历史形态腿"降为**可选**（纪律 64/65）；
 > ⑦ ✅ **"`dft=metal` 仍读 9 of 9"本来就是现状**（契约在**零 Metal 变换**时返回 not applicable）：metal 腿 `p154/p157/p159/p161` = **9 of 9**、宿主网格腿 `p155/p156/p158/p160/p163` = **8 of 9**，空口门**同时接受**两种；
 >    已加**第三条单测臂**（`dft_processor_metal_unit_test.cpp`：无变换时必须 DECLINE + 契约印 `-> not applicable`）把这两条读数锁住，ctest 1/1；
 > ④ ★ **两个工具缺陷已修**（都与被测代码无关，却都能让健康交付腿读红）：`leg_gate.sh:167` 要求 `MET (9 of 9` ⇒ 改为接受两种交付读数；
