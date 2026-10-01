@@ -487,6 +487,12 @@
 > ④ **五阶段**：**P0** 固化旁观配方 + 扩尖峰清单与阈值候选（**不动代码**）→ **P1** 线程级读数 + `[sched]` 启动自读（动代码，**一次改动合并**）→ **P2** `taskpolicy` 档位零代码 A/B → **P3** 把已存在但未用的 **attr-QoS** 接到线程创建 → **P4** 最硬：**Mach time constraint**（离线标定参数 + 单腿 + 预登记回退条件，背着 2026-09-01 那次 OAI-UE RA 回归的历史）；
 > ⑤ ⚠ **成本**：任何 `lib/` 改动都会让 `p181`/`p182`（当前唯一全量 GREEN 的证据）**过期** ⇒ P1/P3/P4 应合并成一次改动再飞一对腿；P0/P2 可先做；
 > ⑥ 本节**不重开** Q27（仍结案存档），它是"若要重开，从这里开始"的可执行版本。
+>
+> **2026-10-01 ➡ 新工作目录：`doc_chinese/macos_thread_priority/`（用户指示）** —— 本线的"重开第一步"已升格为独立工作流：
+> `thread_running_high_level_status_and_plan.md`（高层）＋ `thread_priority_optimization_design_and_implementation.md`（开发文档）＋ `session_handoff_2026-10-01-1.md`（交接）；
+> 新腿日志与新脚本放该目录的 `wip/logs/`、`wip/`；**Linux 行为不变**的复核用 Ubuntu 台架 `jwang@192.168.0.106:~/work/ocudu`。
+> 本目录的 Q27 仍然**结案存档**，不再在此推进。
+
 > ⑥ **保留仪器**：`OCUDU_UL_TIMING_EVENTS`（两把钥匙、六个反向臂、四列已修）、`[ul_rx_timing]`/`[dl_tx_slack]`（含 `excluded`）、`leg_gate` 的 transport-health INFO、`leg_triage.sh`、`host_sched_watch.sh`、`ul_load.sh`。**引用规则**：结论必须带腿级输运协变量（纪律 20）；`[ul_rx_wait]` 跨 6.215 不可比（纪律 77）；报"停顿"必须同时给 `cpu`/`win`/`ivcsw` 与同秒 `[RF]`。
 
 
