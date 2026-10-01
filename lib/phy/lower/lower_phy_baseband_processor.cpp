@@ -1536,7 +1536,14 @@ void lower_phy_baseband_processor::ul_process()
   // radio's start-up offset (~101 ms on every leg) and NOT a link behaviour. Both receive probes use it - the
   // timing series to leave loop/slip unmeasured, the [ul_rx_wait] series to report it apart instead of letting
   // it become the distribution's `max` (dev doc 6.146/6.147).
-  const bool spans_stream_start =
+  //
+  // \note The flag is `[[maybe_unused]]` because it is consumed ONLY by the flow-probe arm below: `ul_rx_note_call`
+  //       itself is NOT optional (its side effects are the [ul_rx_timing] series, an always-on delivery criterion),
+  //       so the call has to stay and only the returned flag is conditional. Found by the Ubuntu bench on
+  //       2026-10-01: with `ENABLE_FLOW_PROBES=OFF` - the project's DEFAULT, and the one that bench builds - GCC
+  //       rejects this with `-Werror=unused-variable` while clang (this development machine, probes ON) never
+  //       looked. Same class of trap as the OCUDU_METAL_STATS one documented above ul_rx_note_call's definition.
+  [[maybe_unused]] const bool spans_stream_start =
       ul_rx_note_call(std::chrono::duration_cast<std::chrono::nanoseconds>(rx_call_begin.time_since_epoch()).count(),
                       std::chrono::duration_cast<std::chrono::nanoseconds>(rx_call_end.time_since_epoch()).count(),
                       static_cast<int64_t>(nof_samples) * 1000 / static_cast<int64_t>(srate.to_kHz()),
