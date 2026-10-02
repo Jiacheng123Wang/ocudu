@@ -49,7 +49,7 @@ hot=""
 # `utm`/`qemu` are not macOS daemons but a virtual machine's host process - a VM is a large, bursty, IO-generating
 # neighbour that can also claim USB devices, and one was running when this script was first used (it surfaced in the
 # top-CPU line, not in a check).
-for d in mediaanalysisd photoanalysisd mds_stores backupd cloudd bird UTM QEMULauncher qemu-system-aarch64; do
+for d in mediaanalysisd photoanalysisd mds mds_stores mdworker mdworker_shared backupd cloudd bird UTM QEMULauncher qemu-system-aarch64; do
   cpu=$(printf '%s\n' "$busy" | awk -v n="$d" '$1 == n {print $2}' | sort -rn | head -1)
   if [ -n "$cpu" ] && awk -v c="$cpu" 'BEGIN { exit (c + 0 >= 5.0) ? 0 : 1 }'; then
     hot="$hot $d=${cpu}%"
@@ -58,6 +58,48 @@ done
 if [ -n "$hot" ]; then verdict 1 "no heavy background daemon" "busy:$hot"; else verdict 0 "no heavy background daemon" "-"; fi
 top5=$(printf '%s\n' "$busy" | awk 'NF == 2 && $2 + 0 > 0 {printf "%s=%.1f%% ", $1, $2}' | cut -c1-90)
 say "(top CPU now)" "${top5:-none}"
+
+# 3b. "Is it running" and "is it busy NOW" both miss the case that matters: a resident daemon that WAKES UP
+# mid-leg. The RF underflow bursts were ~10 minutes apart, so an idle-at-t0 daemon is exactly what one would see
+# before a bad leg. Cumulative CPU time separates the two: a daemon up for hours that has burned seconds is idle;
+# one that has burned minutes has been working, and will probably work again during the leg.
+#
+# NOTE ON COUNTING THEM (the first version of this advice was wrong and the user caught it):
+#   ps aux | grep -c mediaanalysis   ->  3, ALWAYS: mediaanalysisd, mediaanalysisd-access (an on-demand XPC
+#                                        service) AND THE GREP ITSELF. `grep -c` counts its own process.
+#   pgrep -x mediaanalysisd          ->  the daemon only (1 or 0), which is what a person means.
+recent=""
+for d in mediaanalysisd photoanalysisd mds mds_stores mdworker mdworker_shared backupd cloudd bird; do
+  for pid in $(pgrep -x "$d" 2>/dev/null); do
+    read -r etime cputime <<<"$(ps -o etime=,time= -p "$pid" 2>/dev/null)"
+    [ -z "${cputime:-}" ] && continue
+    # ps gives [[dd-]hh:]mm:ss; convert to seconds.
+    # macOS prints a FRACTIONAL last field (`3:42.43`), so the sum has to be truncated to an integer: an
+    # unrounded float makes `[ "$secs" -ge 60 ]` fail with "integer expected" and the comparison then reports
+    # nothing at all - which is how a daemon with 1489 seconds of accumulated CPU passed this check as idle.
+    secs=$(printf '%s' "$cputime" | awk -F'[-:]' '{ if (NF == 4) v = $1*86400 + $2*3600 + $3*60 + $4;
+                                                   else if (NF == 3) v = $1*3600 + $2*60 + $3;
+                                                   else v = $1*60 + $2;
+                                                   printf "%d", v }')
+    if [ "${secs:-0}" -ge 60 ]; then recent="$recent $d=${cputime}/${etime}"; fi
+  done
+done
+if [ -n "$recent" ]; then
+  verdict 1 "no daemon did minutes of work" "cpu/elapsed:$recent"
+else
+  verdict 0 "no daemon did minutes of work" "resident daemons are idle (that is normal: they never exit)"
+fi
+
+# 3c. SPOTLIGHT, checked by its own switch rather than inferred. On 2026-10-02 the operator believed indexing
+# was off; `mdutil -as` said "Indexing enabled" for / and /System/Volumes/Data, and `mds` had burned 30 minutes of
+# CPU with `mds_stores` another 25 - i.e. a heavy, bursty, IO-generating neighbour running throughout. That is the
+# shape of the ~10-minute underflow bursts. `mdutil -s` needs no root to READ; changing it does.
+idx=$(mdutil -as 2>/dev/null | grep -c 'Indexing enabled')
+if [ "${idx:-0}" -gt 0 ]; then
+  verdict 1 "Spotlight indexing off" "$idx volume(s) still 'Indexing enabled' -> sudo mdutil -a -i off"
+else
+  verdict 0 "Spotlight indexing off" "-"
+fi
 
 # 4. The radio must be enumerable. `system_profiler` is slow, so this is the cheap check.
 if system_profiler SPUSBDataType 2>/dev/null | grep -qi 'ettus\|ni \|b200\|usrp'; then
@@ -71,8 +113,14 @@ if [ "$no_go" -eq 0 ]; then
   echo "GO: nothing above was present on the void legs. Fly, and check gaps=0 + 'contract MET' the moment it ends."
 else
   echo "NO-GO: fix the items marked above first. The void legs all failed at least one of them."
-  echo "  Waiting out mediaanalysisd is usually enough: it finishes on its own; 'ps aux | grep -c mediaanalysis'"
-  echo "  until it drops to zero, then re-run this script. Do NOT spend 30 minutes hoping it clears mid-leg."
+  echo "  For the resident daemons (mediaanalysisd and friends) do NOT wait for them to exit - they are launchd"
+  echo "  services that stay resident and wake on demand, so 'pgrep -x mediaanalysisd' will answer 1 forever."
+  echo "  Either wait for the 'did minutes of work' line to clear (that one is activity), or stop it for the run:"
+  echo "    sudo launchctl list | grep -i mediaanalysis        # find the label"
+  echo "    sudo launchctl bootout system/<label>              # or: sudo pkill -9 mediaanalysisd"
+  echo "  Spotlight is the usual offender and it lies quietly: 'mdutil -as' shows whether it is really off,"
+  echo "  and 'ps -o time= -p \$(pgrep -x mds)' twice a minute apart shows whether it is still working."
+  echo "  Then re-run this script. Do NOT spend 30 minutes hoping it clears mid-leg."
 fi
 [ "$VERBOSE" -eq 1 ] && { echo; echo "--- evidence ---"; uptime; ps aux | grep -E 'mediaanalysis|photoanalysis|cloudd|bird|mds_stores|backupd' | grep -v grep | head; }
 exit "$no_go"
