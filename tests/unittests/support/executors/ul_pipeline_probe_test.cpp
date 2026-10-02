@@ -1898,6 +1898,14 @@ TEST(ul_stall_watchdog_test, sees_a_stall_and_classifies_it)
   EXPECT_NE(report.find("101 tick"), std::string::npos) << report;
 
   // ---- the decision table, including the case no scheduler can fix ------------------------
+  //
+  // PLATFORM GUARD (found by the Ubuntu bench): the classification exists only on Darwin, and on Linux the
+  // whole implementation compiles to no-ops - so asserting verdicts there would fail against a stub that is
+  // SUPPOSED to return nothing. The Linux arm below asserts exactly that instead.
+#if !defined(__APPLE__)
+  EXPECT_STREQ(wd.classify_for_test(true, 10, 3, 0, 0), "")
+      << "off Darwin the classifier is a no-op: it must return nothing rather than a verdict it did not compute";
+#else
   EXPECT_STREQ(wd.classify_for_test(/*watchdog_late=*/true, /*busy=*/10, 3, 0, 0), "SUSPENDED")
       << "we were late and the machine was idle: nobody was running us";
   EXPECT_STREQ(wd.classify_for_test(true, 80, 3, 0, 0), "SATURATED");
@@ -1908,6 +1916,7 @@ TEST(ul_stall_watchdog_test, sees_a_stall_and_classifies_it)
       << "runnable but not running on a busy machine: the ONE class a time constraint can address";
   EXPECT_STREQ(wd.classify_for_test(false, 10, 6, 0, 0), "WORK_SLOW")
       << "the threads were running: the work itself took that long, which no scheduling change fixes";
+#endif
 
   ::unsetenv("OCUDU_UL_WATCHDOG");
 }
