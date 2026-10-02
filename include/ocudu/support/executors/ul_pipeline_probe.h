@@ -1794,6 +1794,23 @@ public:
     rx_wait_us.clear();
     rx_wait_hop_us.clear();
     dft_wait_us.clear();
+    // ★ THE COUNTERS TOO, not only the vectors (2026-10-02). The per-series floor lines are a numerator COUNTER
+    // over a denominator VECTOR, so clearing one and not the other makes the two describe different runs - which
+    // is exactly how the first version of `window_counts_agree_with_the_floor_line` passed when ctest ran it in
+    // its own process and failed when the whole binary ran every case in one: an earlier case's above-floor
+    // samples were still in the numerator. A test hook that leaves the instrument half-cleared is worse than none.
+    rx_event_candidates   = 0;
+    tx_event_candidates   = 0;
+    late_baselines        = 0;
+    phase_baseline_misses = 0;
+    for (auto& count : phase_event_candidates) {
+      count = 0;
+    }
+    for (auto& list : worst_phase_events) {
+      list.clear();
+    }
+    worst_rx_events.clear();
+    worst_tx_events.clear();
   }
 
   /// How many equal-sample windows the within-run stability view cuts each series into (0 = the view is off).
@@ -1859,8 +1876,14 @@ public:
       // ... and HOW MANY of this window's samples crossed the tail floor. This is what makes a WITHIN-LEG A/B
       // decidable (dev doc 10.23): the tier/priority being tested can be changed half-way through one run, which
       // controls the environment, and the reading is then a count per window rather than one `max` per leg.
+      // `>=`, NOT `>`: this count and the per-series floor line ("N of M sample(s) above the F us floor") are two
+      // views of the same quantity, and the phase durations arrive quantized to whole microseconds (they come from
+      // a us-resolution source), so samples sitting EXACTLY on the floor are common - `t2f` 6 vs 2 and `ce` 353 vs
+      // 314 on the 2026-10-02 long legs, purely from that boundary. The floor line is the established reading (the
+      // registered bounds and every derivation quoted it), so the window view is the one that moves. The test
+      // `window_counts_agree_with_the_floor_line` pins the two together.
       const size_t over = static_cast<size_t>(std::count_if(slice.begin(), slice.end(), [tail_floor_us](double v) {
-        return v > tail_floor_us;
+        return v >= tail_floor_us;
       }));
       std::snprintf(buf, sizeof(buf), " %zu", over);
       tails += buf;

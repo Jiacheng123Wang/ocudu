@@ -22,6 +22,7 @@
 #include "ocudu/phy/phy_pipeline_mode.h"
 #include "ocudu/support/executors/ul_pipeline_probe.h"
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -1761,6 +1762,83 @@ TEST(ul_pipeline_probe_test, per_thread_cpu_accounting_files_one_window_per_slot
   }
 
   ::unsetenv("OCUDU_UL_THREAD_CPU");
+}
+
+/// \brief The window view and the per-series floor line must count the SAME samples (2026-10-02).
+///
+/// WHY: both answer "how many samples crossed the tail floor", one per window and one per series, and a reader
+/// compares them. On the long legs of 2026-10-02 they disagreed (`t2f` 6 vs 2, `ce` 353 vs 314) because the window
+/// count used `>` while the floor line uses `>=` - and the phase durations arrive quantized to whole microseconds,
+/// so samples exactly ON the floor are common. The floor line is the established reading, so the windows moved.
+///
+/// The input carries three samples exactly on the floor: an implementation that reverts to `>` reports 0 for them
+/// and this case goes red.
+TEST(ul_pipeline_probe_test, window_counts_agree_with_the_floor_line)
+{
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+  ::setenv("OCUDU_UL_STABILITY_WINDOWS", "4", 1);
+  // The floor line lives in the tail-events block, which needs its own key; without it the report has only one of
+  // the two views this case exists to tie together.
+  ::setenv("OCUDU_UL_TIMING_EVENTS", "16", 1);
+
+  FILE* capture = std::tmpfile();
+  ASSERT_NE(capture, nullptr);
+  std::fflush(stderr);
+  const int saved = dup(fileno(stderr));
+  dup2(fileno(capture), fileno(stderr));
+
+  // 400 samples for the smallest series the view accepts (4 windows x 8): 397 below the 1000 us floor, 3 exactly
+  // ON it. Nothing above it, so the whole reading is the boundary.
+  probe.reset_samples_for_test();
+  for (int i = 0; i != 397; ++i) {
+    probe.record_rx_wait(500000); // 500 us, below the floor
+  }
+  for (int i = 0; i != 3; ++i) {
+    probe.record_rx_wait(1000000); // exactly 1000 us, the floor of the ul_rx_wait windows
+  }
+  probe.report();
+
+  std::fflush(stderr);
+  dup2(saved, fileno(stderr));
+  close(saved);
+  std::rewind(capture);
+  std::string out;
+  char        buf[512];
+  size_t      nof_read = 0;
+  while ((nof_read = std::fread(buf, 1, sizeof(buf), capture)) > 0) {
+    out.append(buf, nof_read);
+  }
+  std::fclose(capture);
+  ::unsetenv("OCUDU_UL_STABILITY_WINDOWS");
+  ::unsetenv("OCUDU_UL_TIMING_EVENTS");
+
+  const std::string floor_row = "rx  : 3 of 400 receive(s) above the 1000 us floor";
+  EXPECT_NE(out.find(floor_row), std::string::npos)
+      << "the floor line counts samples ON the floor (this is the established reading): " << out;
+  EXPECT_NE(out.find("ul_rx_wait             n=400"), std::string::npos) << out;
+  // The windows are cut in time order and the three boundary samples must all be counted, wherever they fall.
+  // The numbers INSIDE the brackets: summing digits from the whole row would add the floor's own "1000" (the
+  // first version of this case did exactly that and could not pass at all - a test that can only fail is as
+  // useless as one that can only pass).
+  const std::size_t open = out.find("over 1000us[");
+  ASSERT_NE(open, std::string::npos) << out;
+  const std::size_t close = out.find(']', open);
+  ASSERT_NE(close, std::string::npos) << out;
+  const std::string body  = out.substr(open + std::string("over 1000us[").size(), close - open);
+  int               total = 0;
+  for (std::size_t i = 0; i < body.size();) {
+    if (std::isdigit(static_cast<unsigned char>(body[i])) != 0) {
+      total += std::atoi(body.c_str() + i);
+      while ((i < body.size()) && (std::isdigit(static_cast<unsigned char>(body[i])) != 0)) {
+        ++i;
+      }
+    }
+    else {
+      ++i;
+    }
+  }
+  EXPECT_EQ(total, 3) << "the window counts must add up to the floor line's 3 (a '>' implementation gives 0): ["
+                      << body << "]";
 }
 
 #endif // OCUDU_FLOW_PROBES
