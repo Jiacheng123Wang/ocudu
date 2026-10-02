@@ -158,7 +158,7 @@ sudo taskinfo $(pgrep -f 'build/apps/gnb/gnb') | grep -E 'qos|latency|thruput'  
 | 反向臂 | 每个新字段 ≥1 条（见 §3.4）；每条都要能**打红**（沿用 `../phy_latency` 的纪律 79）|
 | 逐字节不变 | 开着/关着各跑一次 loopback（6 s），`diff` 报告（除新增行外**零差异**）|
 | 回归 | `ctest -L phy -j 1` 全绿（含 `ul_pipeline_probe_test`）|
-| **Linux 复核** | 同一 commit 在 **`jwang@192.168.0.106:~/work/ocudu`** 上：`cmake --build build --target ul_pipeline_probe_test macos_compat_test`（或等价目标）+ `ctest`；结果记进 §10 的"Linux 复核"小节 |
+| **Linux 复核** | 同一 commit 在 **`jwang@192.168.100.131:~/work/ocudu`**（原 `192.168.0.106`，网络变更见 §10.36）上：`cmake --build build --target ul_pipeline_probe_test macos_compat_test`（或等价目标）+ `ctest`；结果记进 §10 的"Linux 复核"小节 |
 
 ---
 
@@ -392,6 +392,9 @@ setschedparam(SCHED_OTHER, 31) 之后再来一次      -> 1 (EPERM)：**不可�
 ⇒ 建议 P4 **维持"最后选项"并且暂不施用**；真要试，必须**一次只改一个线程**（现在 `bind_thread_to_performance_core()` 没有线程过滤）。
 
 ### 10.10 Linux 复核（Ubuntu 台架 `jwang@192.168.0.106:~/work/ocudu`，2026-10-01）
+
+> ★ 本节及以下各处出现的 `192.168.0.106` 是**当时**的台架地址；**网络于 2026-10-02 变更**：台架现为 **`jwang@192.168.100.131`**、核心网 `192.168.100.153`、
+本机 `192.168.100.125`；本文件里更早段落中的 `192.168.0.106` 是**当时**的地址，属历史记录，不再可达。
 
 **怎么把 commit 送过去**：本机 `git bundle create <file> apple-silicon` → `scp` → 台架 `git fetch <bundle> apple-silicon`
 → `git merge --ff-only FETCH_HEAD`（台架的 `032948b560` 是本 commit 的祖先，所以是快进；**不动共享远端**）。

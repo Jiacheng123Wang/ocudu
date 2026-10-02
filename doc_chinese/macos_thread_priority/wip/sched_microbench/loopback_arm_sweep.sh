@@ -30,7 +30,7 @@ fi
 # so the harm is in the SCOPE, not in the constraint or in its parameter values - which is what
 # 2026-09-01 could never tell apart. The remaining arms bisect WHICH members of the blanket set are the
 # dangerous ones, because the set the pipeline actually needs protected is the five pool threads.
-all_arms=("off" "blanket" "single" "single_b" "pool5" "io2" "lower3" "lower3_min" "lower3_hist" "lower3_loose" "pool5_cal")
+all_arms=("off" "blanket" "single" "single_b" "pool5" "io2" "lower3" "lower3_min" "lower3_hist" "lower3_loose" "pool5_cal" "pool5_cal2")
 all_values=("" "*=500/200/400" "main_pool#0=500/200/400" "main_pool#0=500/200/400;radio=500/100/200" \
             "main_pool#0=500/200/400;main_pool#1=500/200/400;main_pool#2=500/200/400;main_pool#3=500/200/400;main_pool#4=500/200/400" \
             "io_timer_tick=500/200/400;io_broker_epoll=500/200/400" \
@@ -38,7 +38,8 @@ all_values=("" "*=500/200/400" "main_pool#0=500/200/400" "main_pool#0=500/200/40
             "lower_phy_tx#0=1000/100/200;lower_phy_rx#0=1000/100/200;lower_phy_ul#0=1000/100/200" \
             "lower_phy_tx#0=500/500/500;lower_phy_rx#0=500/500/500;lower_phy_ul#0=500/500/500" \
             "lower_phy_tx#0=2000/50/100;lower_phy_rx#0=2000/50/100;lower_phy_ul#0=2000/50/100" \
-            "main_pool#0=5000/1000/2000;main_pool#1=5000/1000/2000;main_pool#2=5000/1000/2000;main_pool#3=5000/1000/2000;main_pool#4=5000/1000/2000")
+            "main_pool#0=5000/1000/2000;main_pool#1=5000/1000/2000;main_pool#2=5000/1000/2000;main_pool#3=5000/1000/2000;main_pool#4=5000/1000/2000" \
+            "main_pool#0=5000/2500/3000;main_pool#1=5000/2500/3000;main_pool#2=5000/2500/3000;main_pool#3=5000/2500/3000;main_pool#4=5000/2500/3000")
 arms=("${all_arms[@]}")
 values=("${all_values[@]}")
 if [ -n "${ARMS:-}" ]; then

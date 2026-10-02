@@ -21,9 +21,15 @@
 
 cu_cp:
   amf:
-    addrs: 192.168.0.106
+    # ADDRESSES ARE NETWORK-SPECIFIC AND WERE STALE ON 2026-10-02: this file used to point at the Ubuntu bench as
+    # the core (192.168.0.106) and bind NG-U to 192.168.0.231, which worked while the Mac was on 192.168.0.x. The
+    # Mac is now on 192.168.100.x, so the bind address no longer existed and the gNB died at startup with
+    # "Unable to allocate the required NG-U network resources" - a failure that looks like a socket bug and is
+    # really a moved network. They now match configs/gnb_rf_b200_tdd_n78_20mhz.yml, i.e. the core the RADIO legs
+    # use; if the loopback ever fails that way again, compare these two lines with that file first.
+    addrs: 192.168.100.153
     port: 38412
-    bind_addrs: 192.168.0.231
+    bind_addrs: 192.168.100.125
     supported_tracking_areas:
       - tac: 7
         plmn_list:
