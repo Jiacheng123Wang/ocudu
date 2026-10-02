@@ -1884,6 +1884,20 @@ TEST(ul_stall_watchdog_test, sees_a_stall_and_classifies_it)
   wd.tick_for_test(20000000); // even a 20 ms tick must not print while the knob is off
   EXPECT_TRUE(capture_report().empty()) << "with the knob off the report must be byte-identical (empty)";
 
+#if !defined(__APPLE__)
+  // ---- OFF DARWIN: the instrument is a no-op BY DESIGN -----------------------------------
+  //
+  // The whole watchdog compiles away outside Darwin (the platform has no Mach thread policies), so with the
+  // knob ON it must still print nothing and classify nothing. Asserting the Darwin verdicts here is what the
+  // bench caught: the stub is SUPPOSED to be inert, and a test that demands a verdict from it is wrong.
+  ::setenv("OCUDU_UL_WATCHDOG", "1", 1);
+  wd.reset_for_test();
+  wd.tick_for_test(20000000);
+  EXPECT_TRUE(capture_report().empty())
+      << "off Darwin the watchdog must stay inert even with the knob on (the two-key contract is a no-op here)";
+  EXPECT_STREQ(wd.classify_for_test(true, 10, 3, 0, 0), "")
+      << "off Darwin the classifier must return nothing rather than a verdict it never computed";
+#else
   // ---- ON: the injected stall must show up ------------------------------------------------
   ::setenv("OCUDU_UL_WATCHDOG", "1", 1);
   wd.reset_for_test();
@@ -1899,13 +1913,6 @@ TEST(ul_stall_watchdog_test, sees_a_stall_and_classifies_it)
 
   // ---- the decision table, including the case no scheduler can fix ------------------------
   //
-  // PLATFORM GUARD (found by the Ubuntu bench): the classification exists only on Darwin, and on Linux the
-  // whole implementation compiles to no-ops - so asserting verdicts there would fail against a stub that is
-  // SUPPOSED to return nothing. The Linux arm below asserts exactly that instead.
-#if !defined(__APPLE__)
-  EXPECT_STREQ(wd.classify_for_test(true, 10, 3, 0, 0), "")
-      << "off Darwin the classifier is a no-op: it must return nothing rather than a verdict it did not compute";
-#else
   EXPECT_STREQ(wd.classify_for_test(/*watchdog_late=*/true, /*busy=*/10, 3, 0, 0), "SUSPENDED")
       << "we were late and the machine was idle: nobody was running us";
   EXPECT_STREQ(wd.classify_for_test(true, 80, 3, 0, 0), "SATURATED");
