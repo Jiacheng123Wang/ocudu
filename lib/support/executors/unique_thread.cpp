@@ -5,6 +5,7 @@
 #include "ocudu/adt/scope_exit.h"
 #include "ocudu/adt/static_vector.h"
 #include "ocudu/support/macos_compat.h"
+#include "ocudu/support/executors/ul_stall_watchdog.h"        // 1 ms stall watchdog (two keys, default off)
 #include "ocudu/support/scheduling/thread_sched_snapshot.h" // log_this_thread_scheduling (OCUDU_SCHED_VERBOSE)
 #include "fmt/std.h"
 #include <cstdio>
@@ -270,6 +271,11 @@ unique_thread::thread_handle_impl unique_thread::make_thread(const std::string& 
     // no-op because the POSIX priority and affinity below are the native
     // mechanisms there.
     compat::apply_worker_thread_scheduling(prio, cpu_mask, name);
+
+    // The 1 ms stall watchdog (plan doc D/D.1) is started here because this is the one place every process
+    // that has workers passes through, and it is NOT a hot path - thread creation happens once per worker.
+    // It is double-keyed (OCUDU_FLOW_PROBES + OCUDU_UL_WATCHDOG) and returns after one getenv when off.
+    ul_stall_watchdog::get().start_if_enabled();
 
     // Set thread OS priority and affinity.
     // Note: TSAN seems to have issues with thread attributes when running as normal user, disable them in that case.

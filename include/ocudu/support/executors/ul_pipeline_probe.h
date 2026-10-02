@@ -4,6 +4,7 @@
 #pragma once
 
 #include "ocudu/phy/phy_pipeline_mode.h"
+#include "ocudu/support/executors/ul_stall_watchdog.h" // 1 ms stall watchdog: classify the stalls (plan D)
 #include "ocudu/support/scheduling/thread_sched_snapshot.h" // this_thread_sched_snapshot (P1: per-thread CPU)
 #include "ocudu/support/executors/unique_thread.h"          // this_thread_name()
 #include <algorithm>
@@ -1124,6 +1125,10 @@ public:
     }
     const size_t idx = phase_index(kind);
     ++phase_event_candidates[idx];
+    // We are past the floor gate, so this fires only for events slow enough to be worth classifying - and the
+    // watchdog rate-limits itself further. Its verdict is the difference between "the thread was runnable and
+    // lost the CPU" (the only kind scheduling can fix) and "it was blocked" (no priority can help it).
+    ul_stall_watchdog::get().notify_series_stall(value_us);
     timing_event ev;
     ev.kind     = kind;
     ev.value_us = value_us;
@@ -2376,6 +2381,10 @@ public:
     // with: it is the report P4's constraint parameters are read from, and it prints nothing when its knob is off
     // - so every existing leg report stays byte-identical.
     print_thread_cpu_accounting();
+
+    // The 1 ms watchdog's classification of the stalls this leg contains (plan doc D/D.1). Prints nothing
+    // when its knob is off.
+    ul_stall_watchdog::get().report();
 
     const unsigned stability_window_count = stability_windows();
     if (stability_window_count > 1) {

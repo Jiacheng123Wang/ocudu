@@ -21,6 +21,7 @@
 
 #include "ocudu/phy/phy_pipeline_mode.h"
 #include "ocudu/support/executors/ul_pipeline_probe.h"
+#include "ocudu/support/executors/ul_stall_watchdog.h"
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -1839,6 +1840,76 @@ TEST(ul_pipeline_probe_test, window_counts_agree_with_the_floor_line)
   }
   EXPECT_EQ(total, 3) << "the window counts must add up to the floor line's 3 (a '>' implementation gives 0): ["
                       << body << "]";
+}
+
+/// \brief The 1 ms stall watchdog: it must SEE a stall, and it must classify one (plan doc D/D.1).
+///
+/// WHY THESE TWO ARMS. The watchdog exists to tell apart three stall kinds that leave one fingerprint, so the
+/// two ways it can be useless are (a) it never notices a stall at all and (b) it notices one and says nothing
+/// that distinguishes it. The first arm injects a 20 ms lateness - the spec's own reverse arm - and requires
+/// the headline number to move to 20 ms; an implementation that dropped the reading would print 0.0us. The
+/// second arm drives the decision table with the four combinations it is supposed to separate, including the
+/// one that matters most: a thread blocked in the kernel is NOT the class a scheduler can help.
+TEST(ul_stall_watchdog_test, sees_a_stall_and_classifies_it)
+{
+  ocudu::ul_stall_watchdog& wd = ocudu::ul_stall_watchdog::get();
+
+  const auto capture_report = [&wd]() {
+    std::string out;
+    FILE*       capture = std::tmpfile();
+    EXPECT_NE(capture, nullptr);
+    if (capture == nullptr) {
+      return out;
+    }
+    std::fflush(stderr);
+    const int saved = dup(fileno(stderr));
+    dup2(fileno(capture), fileno(stderr));
+    wd.report();
+    std::fflush(stderr);
+    dup2(saved, fileno(stderr));
+    close(saved);
+    std::rewind(capture);
+    char   buf[512];
+    size_t nof_read = 0;
+    while ((nof_read = std::fread(buf, 1, sizeof(buf), capture)) > 0) {
+      out.append(buf, nof_read);
+    }
+    std::fclose(capture);
+    return out;
+  };
+
+  // ---- OFF: nothing at all ---------------------------------------------------------------
+  ::unsetenv("OCUDU_UL_WATCHDOG");
+  wd.reset_for_test();
+  wd.tick_for_test(20000000); // even a 20 ms tick must not print while the knob is off
+  EXPECT_TRUE(capture_report().empty()) << "with the knob off the report must be byte-identical (empty)";
+
+  // ---- ON: the injected stall must show up ------------------------------------------------
+  ::setenv("OCUDU_UL_WATCHDOG", "1", 1);
+  wd.reset_for_test();
+  for (int i = 0; i != 100; ++i) {
+    wd.tick_for_test(20000); // 20 us, the healthy case
+  }
+  wd.tick_for_test(20000000); // 20 ms: the reverse arm from the spec (a real 8-14.7 ms stall class)
+  const std::string report = capture_report();
+  EXPECT_NE(report.find("late max=20000.0us"), std::string::npos)
+      << "the watchdog must report the stall it was given (an implementation that dropped ticks prints 0.0us): "
+      << report;
+  EXPECT_NE(report.find("101 tick"), std::string::npos) << report;
+
+  // ---- the decision table, including the case no scheduler can fix ------------------------
+  EXPECT_STREQ(wd.classify_for_test(/*watchdog_late=*/true, /*busy=*/10, 3, 0, 0), "SUSPENDED")
+      << "we were late and the machine was idle: nobody was running us";
+  EXPECT_STREQ(wd.classify_for_test(true, 80, 3, 0, 0), "SATURATED");
+  EXPECT_STREQ(wd.classify_for_test(false, 80, 1, 0, 12), "DRIVER_BLOCK")
+      << "a blocked thread has no runnable object: priority cannot help it, and the line's lever choice "
+         "depends on telling this apart from CPU theft";
+  EXPECT_STREQ(wd.classify_for_test(false, 80, 1, 5, 0), "CPU_STOLEN")
+      << "runnable but not running on a busy machine: the ONE class a time constraint can address";
+  EXPECT_STREQ(wd.classify_for_test(false, 10, 6, 0, 0), "WORK_SLOW")
+      << "the threads were running: the work itself took that long, which no scheduling change fixes";
+
+  ::unsetenv("OCUDU_UL_WATCHDOG");
 }
 
 #endif // OCUDU_FLOW_PROBES

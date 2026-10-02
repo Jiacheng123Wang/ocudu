@@ -166,7 +166,7 @@ is_n1_fdd  = ("fdd_n1" in leg_cfg)
 # view. It reads NOTHING new - it re-cuts the sample vectors the probe already keeps, in their recording order,
 # at report time - so on the hot path it costs zero and it changes no delivery decision.
 KNOB_ANY = ("OCUDU_METAL_GPU_TIME", "OCUDU_UL_PHASE_SEGMENTS", "OCUDU_UL_SLOT_TRACE", "OCUDU_UL_TIMING_EVENTS",
-            "OCUDU_SCHED_VERBOSE", "OCUDU_UL_STABILITY_WINDOWS", "OCUDU_UL_THREAD_CPU")
+            "OCUDU_SCHED_VERBOSE", "OCUDU_UL_STABILITY_WINDOWS", "OCUDU_UL_THREAD_CPU", "OCUDU_UL_WATCHDOG")
 KNOB_EQ  = ("OCUDU_DFT_BATCH_SYMBOLS=14", "OCUDU_DFT_OPEN_BLOCK=1", "OCUDU_DFT_RELEASE_BLOCK=1",
             "OCUDU_CE_LANE_ORDER=merged",
             # OCUDU_DFT_BACKEND=vdsp joined 2026-10-01: on Apple that IS the value an unset leg resolves to
