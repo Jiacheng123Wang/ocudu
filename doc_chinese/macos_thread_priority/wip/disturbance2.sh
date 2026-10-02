@@ -64,21 +64,58 @@ case "$CMD" in
     trap stop_all INT TERM
 
     elapsed=0
+    target=""
+    last_size=0
+    seen=0   # has this target been looked at once already? (see the note below)
     while [ "$elapsed" -lt "$SECS" ]; do
       sleep 5
       elapsed=$((elapsed + 5))
       # `--watch`: RF failures in the last ~1 MB of the leg's log. A handful means the DL path is starting
       # to starve; back off one burner per interval until they stop.
       recent=0
-      if [ -n "$WATCH" ] && [ -f "$WATCH" ]; then
-        recent=$(tail -c 1000000 "$WATCH" 2>/dev/null | grep -ac 'Real-time failure' || true)
+      # `--watch` may name a DIRECTORY, which is the useful form: the disturbance must start BEFORE the leg
+      # (the leg is what needs the competition), and the leg's log file is named after its label and start
+      # time - so at start-up there is nothing to point at. Watching the newest *.log in the directory
+      # resolves that, and re-resolves it every cycle so a restarted leg is picked up too.
+      new_target="$WATCH"
+      if [ -n "$WATCH" ] && [ -d "$WATCH" ]; then
+        new_target=$(ls -t "$WATCH"/*.log 2>/dev/null | head -1)
+      fi
+      # ★ NEW FAILURES ONLY, not the count inside a sliding window. The first version counted "failures in the
+      # last 1 MB", and since the newest log in that directory was the VOID p210 leg - which already contains
+      # 1371 of them - it read a constant 1371 every cycle and backed off to one burner for no reason.
+      # Counting only the bytes appended since the previous check is what "are failures happening NOW" means,
+      # and it is also cheap: the append between two 5 s checks is small.
+      # The FIRST look at a file records its size and counts NOTHING: counting from byte 1 on the first cycle
+      # is what made the second version report 1900 failures and back off - the file it was looking at was the
+      # void p210 leg, whose whole history is failures. Only bytes appended between two checks are "now", and
+      # for a freshly created leg log that is exactly right (it starts empty).
+      if [ -n "${new_target:-}" ] && [ -f "$new_target" ]; then
+        size=$(stat -f %z "$new_target" 2>/dev/null || echo 0)
+        # ★ A SEPARATE FLAG, not `last_size -eq 0`: a leg log starts EMPTY, so its size is 0 on the first
+        # look, and using that as the "first look" test made every cycle a first look - the counter never ran
+        # and the backoff could never fire. The reverse-arm test (append ten failures to a fresh log and see
+        # whether it backs off) is what caught it; without that test the controller would have sat at full
+        # disturbance through a real link failure while reporting nothing.
+        if [ "${new_target}" != "${target:-}" ] || [ "$seen" -eq 0 ]; then
+          target="$new_target"
+          last_size=$size
+          seen=1
+        elif [ "$size" -gt "$last_size" ]; then
+          recent=$(tail -c +$((last_size + 1)) "$new_target" 2>/dev/null | grep -ac 'Real-time failure' || true)
+          target="$new_target"
+          last_size=$size
+        elif [ "$size" -lt "$last_size" ]; then
+          target="$new_target"
+          last_size=$size
+        fi
       fi
       if [ "$recent" -gt 3 ] && [ "$alive" -gt 1 ]; then
         # kill the most recently started burner
         last="${pids[$((alive - 1))]}"
         kill "$last" 2>/dev/null
         alive=$((alive - 1))
-        echo "disturbance2: ${recent} RF failure(s) in the last 1MB -> backed off to ${alive} burner(s) at t=${elapsed}s"
+        echo "disturbance2: ${recent} NEW RF failure(s) since the last check -> backed off to ${alive} burner(s) at t=${elapsed}s"
       elif [ $((elapsed % 30)) -eq 0 ]; then
         idle=$(top -l 1 -n 0 2>/dev/null | awk '/^CPU usage:/{print $7}')
         echo "disturbance2: t=${elapsed}s burners=${alive} cpu_idle=${idle:-?} load1=$(uptime | sed 's/.*load averages*: *//' | awk '{print $1}') rf_recent=${recent}"
