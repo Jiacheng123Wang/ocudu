@@ -440,7 +440,7 @@ void ul_stall_watchdog::notify_series_stall(int64_t) {}
 void ul_stall_watchdog::report() {}
 void ul_stall_watchdog::reset_for_test() {}
 void ul_stall_watchdog::tick_for_test(int64_t) {}
-void ul_stall_watchdog::classify_for_test(bool, int, int, int, int) {}
+const char* ul_stall_watchdog::classify_for_test(bool, int, int, int, int) { return ""; }
 void ul_stall_watchdog::inject_late_for_test(int64_t) {}
 
 #endif
