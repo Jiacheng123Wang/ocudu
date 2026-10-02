@@ -1928,4 +1928,94 @@ TEST(ul_stall_watchdog_test, sees_a_stall_and_classifies_it)
   ::unsetenv("OCUDU_UL_WATCHDOG");
 }
 
+/// \brief P5.0's cadence anchor: it must separate JITTER from DRIFT (plan doc Fbis).
+///
+/// WHY THE THIRD ARM IS THE ONE THAT MATTERS. The obvious way to measure "how late is this thread" is
+/// interval-minus-nominal, and it is wrong in a way that hides exactly the failure that matters: a grid whose
+/// period is slightly off accumulates error, so every interval looks fine while the thread slides further from
+/// the schedule. Fitting time against slot instead puts that error in the SLOPE, where it is visible, and
+/// leaves the residuals small. The third arm is a grid 0.5 us per slot too slow; a naive implementation reports
+/// a large residual for it, and the assertion on the fitted period catches that.
+TEST(ul_pipeline_probe_test, slot_grid_separates_jitter_from_drift)
+{
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+
+  const auto capture = [&probe]() {
+    std::string out;
+    FILE*       f = std::tmpfile();
+    EXPECT_NE(f, nullptr);
+    if (f == nullptr) {
+      return out;
+    }
+    std::fflush(stderr);
+    const int saved = dup(fileno(stderr));
+    dup2(fileno(f), fileno(stderr));
+    probe.print_slot_grid();
+    std::fflush(stderr);
+    dup2(saved, fileno(stderr));
+    close(saved);
+    std::rewind(f);
+    char   buf[512];
+    size_t n = 0;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) {
+      out.append(buf, n);
+    }
+    std::fclose(f);
+    return out;
+  };
+
+  // ---- OFF: nothing at all -----------------------------------------------------------------
+  ::unsetenv("OCUDU_UL_SLOT_GRID");
+  probe.reset_slot_grid_for_test();
+  probe.record_slot_grid_for_test(0, 0);
+  probe.record_slot_grid_for_test(1, 500000);
+  EXPECT_TRUE(capture().empty()) << "with the knob off the anchor must print nothing (byte-identical leg)";
+
+  ::setenv("OCUDU_UL_SLOT_GRID", "1", 1);
+
+  // ---- arm A: a perfect 500 us grid --------------------------------------------------------
+  probe.reset_slot_grid_for_test();
+  for (int i = 0; i != 400; ++i) {
+    probe.record_slot_grid_for_test(i, static_cast<int64_t>(i) * 500000);
+  }
+  {
+    const std::string out = capture();
+    EXPECT_NE(out.find("fitted period=500.0us"), std::string::npos) << out;
+    EXPECT_NE(out.find("residual p50/p95/p99/max = 0.0/0.0/0.0/0.0 us"), std::string::npos)
+        << "a perfect grid must have no residual at all: " << out;
+  }
+
+  // ---- arm B: jitter on individual slots (the thread was late, the grid was right) ----------
+  probe.reset_slot_grid_for_test();
+  for (int i = 0; i != 400; ++i) {
+    const int64_t jitter = ((i % 3) == 0) ? 200000 : 0; // every third slot lands 200 us late
+    probe.record_slot_grid_for_test(i, static_cast<int64_t>(i) * 500000 + jitter);
+  }
+  {
+    const std::string out = capture();
+    EXPECT_NE(out.find("fitted period=500.0us"), std::string::npos)
+        << "scatter must NOT be absorbed into the period: " << out;
+    // 133 us, NOT 200: a least-squares line centres its residuals, so a pattern whose mean is non-zero shows up as
+    // scatter around the fitted line rather than as an offset. The number is asserted exactly because it is what
+    // the arithmetic must produce - and because the same property means a CONSTANT lateness is invisible here,
+    // which is why the header says this measures relative cadence stability and not absolute deadline compliance.
+    EXPECT_NE(out.find("-67.0/133.0/133.0/133.0 us"), std::string::npos) << "the jitter must appear as a residual: " << out;
+  }
+
+  // ---- arm C: DRIFT - the grid is 0.5 us per slot too slow ---------------------------------
+  probe.reset_slot_grid_for_test();
+  for (int i = 0; i != 400; ++i) {
+    probe.record_slot_grid_for_test(i, static_cast<int64_t>(i) * 500500);
+  }
+  {
+    const std::string out = capture();
+    EXPECT_NE(out.find("fitted period=500.5us"), std::string::npos)
+        << "a wrong grid must be reported in the SLOPE; interval-minus-nominal would bury it: " << out;
+    EXPECT_NE(out.find("residual p50/p95/p99/max = 0.0/0.0/0.0/0.0 us"), std::string::npos)
+        << "a consistent drift leaves no residual - that is the whole point of fitting: " << out;
+  }
+
+  ::unsetenv("OCUDU_UL_SLOT_GRID");
+}
+
 #endif // OCUDU_FLOW_PROBES

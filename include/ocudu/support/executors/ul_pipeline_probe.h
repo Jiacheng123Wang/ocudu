@@ -485,6 +485,154 @@ public:
     return {static_cast<int64_t>(acc.slots), acc.sum_ns, acc.max_ns, thread_cpu_quantile_ns(acc, 0.999)};
   }
 
+  /// \brief Slot-grid residuals: when each slot's work actually LANDED, against the grid it was supposed to land on.
+  ///
+  /// WHY (plan doc Fbis / P5.0). P5 changes how a cadence-driven thread WAITS (poll and sleep to a deadline minus a
+  /// lead instead of blocking on work), and a change like that needs a baseline to beat: "how late is this thread's
+  /// per-slot work, measured against the slot grid itself?" The probe already knows every completion's slot index
+  /// and steady instant, so the grid does not have to be supplied by the lower PHY - it can be RECOVERED from the
+  /// data: least-squares fit of completion time against slot index, whose slope is the measured slot period and
+  /// whose residuals are the lateness. That also separates the two things a fixed period can do wrong:
+  ///
+  ///   * JITTER: residuals scattered around the fitted line (the thread was late for individual slots);
+  ///   * DRIFT: a slope that differs from the nominal period (the grid itself was wrong, and the residuals stay
+  ///     small - which is exactly what a naive "lateness = interval - nominal" would hide).
+  ///
+  /// COST: one push per slot-series sample, behind OCUDU_UL_SLOT_GRID, and the fit happens at report time. With the
+  /// knob off nothing is stored and nothing is printed, so a leg is byte-identical (the usual two keys).
+  ///
+  /// \warning WHAT IT CANNOT SEE, and the reason is the fit itself: a least-squares line centres its residuals, so
+  /// a CONSTANT lateness (every slot landing 200 us late) is absorbed into the intercept and reports as a perfect
+  /// grid. This measures RELATIVE cadence stability - the user's definition, "the same task takes the same time"
+  /// within one run - not compliance with the radio's absolute slot boundary, which needs the lower PHY's own
+  /// timing and is deliberately not wired in yet. Absolute compliance can be added later by anchoring the grid
+  /// with one radio timestamp.
+  static constexpr size_t NBUCKETS_SLOT_GRID = 96;
+
+  struct slot_grid_sample {
+    int64_t unwrapped_slot = 0;
+    int64_t ns             = 0;
+  };
+
+  /// Unwraps a slot counter that wraps every SFN cycle. The wrap size is not assumed: it is taken to be the largest
+  /// counter value seen so far plus one, which is exact when the leg spans at least one cycle and harmless when it
+  /// does not (no backward jump, no unwrap).
+  void record_slot_grid(uint64_t slot, int64_t end_ns)
+  {
+#if defined(OCUDU_FLOW_PROBES)
+    const char* env = std::getenv("OCUDU_UL_SLOT_GRID");
+    if ((env == nullptr) || (env[0] == '\0') || ((env[0] == '0') && (env[1] == '\0'))) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    const int64_t raw = static_cast<int64_t>(slot);
+    if (slot_grid_raw_max < raw) {
+      slot_grid_raw_max = raw;
+    }
+    if ((slot_grid_base >= 0) && (raw < slot_grid_last_raw)) {
+      // A backward jump of more than half the observed range is a wrap, not a late sample.
+      slot_grid_base += slot_grid_raw_max + 1;
+      slot_grid_raw_max = raw;
+    }
+    slot_grid_last_raw = raw;
+    slot_grid_samples.push_back(slot_grid_sample{slot_grid_base + raw, end_ns});
+#else
+    (void)slot;
+    (void)end_ns;
+#endif
+  }
+
+  /// Test hook: same path as the real recording, so the arithmetic under test is the arithmetic in use.
+  void record_slot_grid_for_test(int64_t unwrapped_slot, int64_t end_ns)
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    slot_grid_samples.push_back(slot_grid_sample{unwrapped_slot, end_ns});
+  }
+
+  void reset_slot_grid_for_test()
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    slot_grid_samples.clear();
+    slot_grid_base     = 0;
+    slot_grid_last_raw = -1;
+    slot_grid_raw_max  = -1;
+  }
+
+  static bool slot_grid_enabled()
+  {
+    const char* env = std::getenv("OCUDU_UL_SLOT_GRID");
+    return (env != nullptr) && (env[0] != '\0') && !((env[0] == '0') && (env[1] == '\0'));
+  }
+
+  void print_slot_grid()
+  {
+    if (!slot_grid_enabled()) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    if (slot_grid_samples.size() < 16) {
+      return;
+    }
+    // Least squares of time against unwrapped slot: slope = measured slot period, residual = lateness.
+    const double n     = static_cast<double>(slot_grid_samples.size());
+    double       sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (const slot_grid_sample& p : slot_grid_samples) {
+      const double x = static_cast<double>(p.unwrapped_slot - slot_grid_samples.front().unwrapped_slot);
+      const double y = static_cast<double>(p.ns - slot_grid_samples.front().ns);
+      sx += x;
+      sy += y;
+      sxx += x * x;
+      sxy += x * y;
+    }
+    const double denom = n * sxx - sx * sx;
+    if (denom == 0) {
+      return;
+    }
+    const double slope_ns = (n * sxy - sx * sy) / denom;
+    const double inter    = (sy - slope_ns * sx) / n;
+
+    std::vector<double> res;
+    res.reserve(slot_grid_samples.size());
+    for (const slot_grid_sample& p : slot_grid_samples) {
+      const double x = static_cast<double>(p.unwrapped_slot - slot_grid_samples.front().unwrapped_slot);
+      res.push_back(static_cast<double>(p.ns - slot_grid_samples.front().ns) - (inter + slope_ns * x));
+    }
+    std::vector<double> sorted = res;
+    std::sort(sorted.begin(), sorted.end());
+    const auto pct = [&sorted](double q) { return sorted[static_cast<size_t>((sorted.size() - 1) * q)]; };
+
+    // Drift is the residual trend between the two halves: a grid that is slightly wrong shows up as the halves
+    // sitting on opposite sides of the fit, not as scatter.
+    const size_t half = res.size() / 2;
+    double       m1 = 0, m2 = 0;
+    for (size_t i = 0; i != half; ++i) {
+      m1 += res[i];
+    }
+    for (size_t i = half; i != res.size(); ++i) {
+      m2 += res[i];
+    }
+    m1 /= static_cast<double>(half);
+    m2 /= static_cast<double>(res.size() - half);
+
+    char hist[NBUCKETS_SLOT_GRID];
+    std::snprintf(hist,
+                  sizeof(hist),
+                  "%.1f/%.1f/%.1f/%.1f",
+                  pct(0.5) / 1000.0,
+                  pct(0.95) / 1000.0,
+                  pct(0.99) / 1000.0,
+                  sorted.back() / 1000.0);
+    std::fprintf(stderr,
+                 "[ul_slot_grid] OCUDU_UL_SLOT_GRID=1: %zu slot sample(s); fitted period=%.1fus "
+                 "(nominal for this cell: see the config); residual p50/p95/p99/max = %s us; "
+                 "half-means %.1fus vs %.1fus (drift)\n",
+                 slot_grid_samples.size(),
+                 slope_ns / 1000.0,
+                 hist,
+                 m1 / 1000.0,
+                 m2 / 1000.0);
+  }
+
   /// \brief Prints one line per thread that filed windows, with the number to declare (see thread_cpu_accounting).
   ///
   /// It prints NOTHING when the knob is off, so a delivery leg's report stays byte-identical, and it is called
@@ -530,6 +678,9 @@ public:
     // The per-slot CPU window of THIS thread is closed here, before the phase machinery below can return early:
     // it is a different question from the phase segments (dev doc 10.30(8)) and must not inherit their gates.
     record_thread_cpu_boundary(slot);
+    // Slot-grid anchor (P5.0): the instant this slot's segment LANDED, for the fit at report time. No-op when
+    // its knob is off, and it rides a landmark that already exists - no new hot-path work, no lower-PHY wiring.
+    record_slot_grid(slot, to_ns(std::chrono::high_resolution_clock::now()));
     if (!records_phase_segments()) {
       return;
     }
@@ -2386,6 +2537,10 @@ public:
     // when its knob is off.
     ul_stall_watchdog::get().report();
 
+    // The cadence anchor (plan doc Fbis / P5.0): how late this thread's per-slot work lands against the grid the
+    // data itself implies. It is the baseline a waiting-discipline change has to beat.
+    print_slot_grid();
+
     const unsigned stability_window_count = stability_windows();
     if (stability_window_count > 1) {
       std::fprintf(stderr,
@@ -2881,6 +3036,11 @@ private:
   /// The per-thread CPU accounting blocks (see thread_cpu_accounting). Guarded by `mutex` for the registry
   /// itself, which is only touched when a thread registers; each block is written by its owning thread alone.
   std::vector<thread_cpu_accounting*> thread_cpu_accounts;
+  /// Slot-grid anchor (P5.0): (unwrapped slot, landing instant) pairs, and the unwrapping state.
+  std::vector<slot_grid_sample> slot_grid_samples;
+  int64_t                       slot_grid_base     = 0;
+  int64_t                       slot_grid_last_raw = -1;
+  int64_t                       slot_grid_raw_max  = -1;
   start_registry   pending_starts;
   uint64_t         next_start_seq = 0;
   std::vector<double> latencies_us;
