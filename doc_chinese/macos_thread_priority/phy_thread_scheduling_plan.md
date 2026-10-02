@@ -60,7 +60,7 @@
 | 改动 | 状态 | 实测效果 |
 |---|---|---|
 | **跳过 POSIX `pthread_setschedparam`**（让 QoS 档活下来）| ✅ 已是默认 | 10/10 实时线程回读 `eff=USER_INTERACTIVE`（此前**全部无档**）；`ivcsw` **194.65 → 179.12/ms（−8%）**。★ 但微基准显示 **QoS 档对唤醒尾延迟几乎无用**（p50 102.9 → 103.1 µs）⇒ **留着，但别指望它降尾部** |
-| Mach affinity tag | 已接线，默认关 | **Apple Silicon 上无效**（`thread_policy_set` 返回 KERN_NOT_SUPPORTED）⇒ 不是方案 |
+| Mach affinity tag | 已接线，默认关 | **Apple Silicon 上无效** —— 注意**只有 `THREAD_AFFINITY_POLICY` 这一个 flavor** 返回 `KERN_NOT_SUPPORTED`；`THREAD_TIME_CONSTRAINT_POLICY` **受支持**（§10.29 实测生效并能读回，用户提供的 `tx_subframe_uhd` 在本机 1 ms LTE 循环里也在用它，§10.48）⇒ 不是方案，但也**不能**据此说"Mach 调度机制在本机不可用" |
 | `taskpolicy -l/-t` 档位 | 可跑（`wip/taskpolicy_ab.sh`）| ❌ **实测无效**（同腿内前后半段：每窗超阈 **3.5 vs 3.7**）|
 | **Mach 时间约束**（`OCUDU_SCHED_TIME_CONSTRAINT`）| 已实现，**默认关** | 见 0bis.2；作为**仪表**保留（它测出的是"这台机器上时间约束值多少"）|
 
