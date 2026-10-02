@@ -1780,3 +1780,40 @@ OCUDU FATAL ERROR: Attempting to write samples [186382380, 186393900) that would
    启动期本来就有 burst？对照腿第 1 窗 230 也高于其后几窗，说明**两腿启动期都更差**，只是臂更差）；
 3. 交付问题（**需要用户裁决**）：这条臂要把 `OCUDU_SCHED_TIME_CONSTRAINT` 变成默认（即交付形态的一部分），
    代价是该 5 条线程**永久失去 QoS 档**（§10.29 实测互斥）。在此之前 `lower_phy_*` 仍然**不许**进臂（0/12）。
+
+### 10.36 2026-10-02 —— 网络搬家（一次被误读成 socket bug 的故障）+ 大预算臂的 loopback 预验 + Linux 双配置复核
+
+#### (1) ★ 现象与真因：`Unable to allocate the required NG-U network resources` **不是 socket 问题**
+
+loopback 台架突然起不来，报上面那句；同一时间 **Ubuntu 台架也 ping 不通**。两件事同一个原因：
+**Mac 换了网段**（`192.168.0.x` → `192.168.100.x`），而 `gnb_loopback_n78.yml` 里写死了旧地址：
+
+| | 旧（config 里写死的）| 现在 |
+|---|---|---|
+| 核心网 AMF | `192.168.0.106`（当时的台架）| **`192.168.100.153`** |
+| NG-U 绑定 | `192.168.0.231` | **`192.168.100.125`**（本机）|
+| Ubuntu 台架 | `192.168.0.106` | **`192.168.100.131`** |
+
+绑定地址在本机不存在 ⇒ `udp_network_gateway` 建不起来 ⇒ `gw->create()` 返回空 ⇒ 那句 ERROR。
+**腿不受影响**，因为 `configs/gnb_rf_b200_tdd_n78_20mhz.yml` 用的是新网段（`amf.addrs: 192.168.100.153`）。
+⇒ 已把 loopback config 对齐到腿的地址，并在文件里写明"再遇到这个报错，先比对这两行与腿的 config"。
+
+#### (2) 大预算臂的 loopback 预验：**3/3 干净**
+
+`pool5_cal2 = main_pool#0..#4 = 5000/2500/3000`（`computation` 1 ms → 2.5 ms，占空 20% → 50%）
+⇒ **3/3 干净**，同批 `off` 对照也 3/3。**理由是它针对 §10.35(3) 定位的启动瞬态**：
+约束在线程创建时施加，启动期（UE 接入 + 流量爬升）池线程的瞬时需求很可能超过 1 ms/5 ms，
+于是在最需要 CPU 的两分钟里被按预算节流；微基准已证"报大是免费的"。
+
+#### (3) Linux 双配置复核（HEAD `ff080a97ba`，台架 `jwang@192.168.100.131`）
+
+| 配置 | 结果 |
+|---|---|
+| `FLOW_PROBES=OFF`（项目默认）| `BUILD_RC=0`，**23/23 通过** |
+| `FLOW_PROBES=ON` | `BUILD_RC=0`（0 error），**34/34 通过** |
+
+★ 台架上的 `build_fp` 目录**已不存在**（此前建过，后被清掉）⇒ 记录重建配方，免得下次重新发现：
+`cmake -S . -B build_fp -DENABLE_FLOW_PROBES=ON -DCMAKE_BUILD_TYPE=Release`
+然后 `cmake --build build_fp --target ul_pipeline_probe_test macos_compat_test -j8`。
+**这个配置是必须的**：新测试整段在 `#if defined(OCUDU_FLOW_PROBES)` 内，用 OFF 配置编译等于"连语法都没检查"，
+而 §10.31–10.33 的三个缺陷全部只在 ON 配置下才暴露。
