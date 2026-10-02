@@ -4,14 +4,14 @@
 > 2026-10-01 从 `phy_latency/knob_inventory.md` 上移到本目录并改名（旧路径只作历史）。
 
 > 生成方式：`python3 doc_chinese/phy_latency/wip/gen_knob_inventory.py > doc_chinese/ocudu_env_knobs_inventory_and_leg_whitelist.md`
-> 本次生成：commit `70c898fbcd`。**不要手改正文**——改生成器或改人工判读小节。
+> 本次生成：commit `77e2377975`。**不要手改正文**——改生成器或改人工判读小节。
 > （生成器把**生成那一刻的 HEAD**写进这一行；要把这一行也追平 HEAD，就重跑生成器再提交一次——那一次是纯文档差异。）
 >
 > **默认值**是**从守卫表达式读出来的**（`ON` = 不设或非 0 都开；`OFF` = 必须显式置 1；`AUTO` = 由别处推导；`= 14` / `= "vdsp"` = 默认是一个**值**而不是开关，腿不设它时用的就是这个值；`?` = 需要读注释）。
 > 生成器只认**本旋钮自己那次读取**的守卫（窗口在下一个旋钮的读取处截断），并且只认几种写法：`?` 里绝大多数是「置位即开」的探针/实验选择器（`static const bool x = (std::getenv("X") != nullptr);`），生成器**故意不把它们判成 `ON`** —— §1 是验收腿白名单，**宁可漏，不可错**。
 > **飞过的腿数**来自 `logs/*.log.stderr` 顶部的 `knob : NAME=VALUE` 登记行 —— 这是**唯一能区分「新仪器」与「已退役」的一列**，源码里两者长得一样。
 
-合计 **129** 个旋钮：**20** 个默认 `ON`（`OCUDU_DFT_RELEASE_TOKENS_EARLY` 于 2026-09-28 由 OFF 改为 ON：**理由 = 输入保持**，见开发文档 6.157；6.156 当初写的"吃掉接收尾巴 60-70×"**已被 6.157 撤回**）（= 交付形态的一部分）；**29** 个有腿登记行、**92** 个只在记录里出现过、**8** 个两处都没有；其中 **19** 个的首个读取点在 `test/`（离线臂）。
+合计 **130** 个旋钮：**20** 个默认 `ON`（`OCUDU_DFT_RELEASE_TOKENS_EARLY` 于 2026-09-28 由 OFF 改为 ON：**理由 = 输入保持**，见开发文档 6.157；6.156 当初写的"吃掉接收尾巴 60-70×"**已被 6.157 撤回**）（= 交付形态的一部分）；**29** 个有腿登记行、**93** 个只在记录里出现过、**8** 个两处都没有；其中 **19** 个的首个读取点在 `test/`（离线臂）。
 
 ## 1. 交付形态的一部分（默认 `ON`）——**验收腿上不许出现「改成 OFF」的值**
 
@@ -54,7 +54,7 @@
 | `OCUDU_CE_LANE_ORDER` | ? | `lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_impl.cpp:1574` | 1 | 信道估计的四种车道顺序：`merged`（**默认**，估计器的派发搭车道共享 cb）｜`event`｜`wait`/`host_wait`｜`burst`（旧名 `OCUDU_CE_FUSED_BURST`）。拼错的值打 error 并按 `merged` 跑（代码里那条 warning 的原文就写着 "using merged"）。白名单只接受 `=merged` |
 | `OCUDU_UL_STABILITY_WINDOWS` | OFF | `include/ocudu/support/executors/ul_pipeline_probe.h:1828` | 0 | **探针（只打印，白名单可带）**：`=K` 把**本次运行**按时间顺序切成 K 个等样本窗口，逐序列打印每个窗口的 median/p95 与**相对整腿值的最大偏离** —— 这就是本线定义的**运行稳定性**（用户 2026-10-01：稳定性 = *同一次运行内*统计量变化不大；**跨腿**差异是环境造成的，本来就会变）。★ 它**不采新数据**：直接重切探针已经保存的样本向量（本就按时间顺序追加），**报告期零热路径成本**；关着（不设或 `=1`）一个字都不打印。反向臂已实测：把实现改成「先排序再切片」，单测的**交替**输入立刻变红（开发文档 10.20） |
 | `OCUDU_SCHED_VERBOSE` | OFF | `lib/support/scheduling/thread_sched_snapshot.cpp:231` | 1 | **探针（只打印，白名单可带）**：每个 worker 线程创建后**回读**它真正拿到的调度状态，一行 `[sched] thread=… id=… rt_intent=… req=… eff=… run=… posix=…/…`。★ 它回答的是本线开线时的悬案「我们请求的 QoS 到底生效没有」——**第一次跑就给了答案**：请求 `USER_INTERACTIVE` 的线程回读 `eff=UNSPECIFIED`，而**不调用** `pthread_setschedparam` 的非实时线程回读 `eff=USER_INITIATED`（开发文档 10.5）。两把钥匙：`ENABLE_FLOW_PROBES` 编译 + 本变量非 `0`；两者缺一即**一个字都不打印**（默认关） |
-| `OCUDU_UL_WATCHDOG` | ? | `—` | 0 | **探针（只打印，白名单可带；macos_thread_priority 开发文档 10.47 / 规划 D.1）**：一个 **1 ms 唤醒**的看门狗线程，记录**自己的迟到量**（log2 直方图 + max），并在可疑时**采样**：(a) 系统忙闲用 `host_statistics(HOST_CPU_LOAD_INFO)` 的**每毫秒增量**（不是 `load1`——它 60 s 平均、看不见 10 ms 事件）；(b) 本进程每条线程的 `run_state` 与 **CPU 增量**（`thread_extended_info` + `thread_identifier_info`）。★ 它存在的理由：**三种停顿（进程被挂起 / 阻塞在驱动 / CPU 被抢）留下的指纹完全相同**，而**只有第三类**是调度手段能治的；不知道是哪一类，任何杠杆决策都是盲投，P4 的负结果也只能被记录、无法被解释。判读（规划 D.1）：看门狗自己迟到 + 系统空闲 ⇒ **①被挂起**；迟到 + 系统忙 ⇒ **饱和**；准时 + 目标线程 CPU 冻结且 `WAITING/UNINTERRUPTIBLE` ⇒ **②驱动阻塞**；准时 + CPU 冻结且 `RUNNING`（可运行却没被调度）⇒ **③CPU 被抢**；CPU 在涨 ⇒ **活儿本身慢**。两把钥匙：`ENABLE_FLOW_PROBES` 编译 + 本变量非 0；关着只读一次环境变量（不建线程、不读时钟、不打印）。反向臂已实测：注入 20 ms 迟到必须出现在 max 上，丢掉读数会让单测 3 条断言变红（开发文档 10.47） |
+| `OCUDU_UL_WATCHDOG` | ? | `lib/support/executors/ul_stall_watchdog.cpp:327` | 0 | **探针（只打印，白名单可带；macos_thread_priority 开发文档 10.47 / 规划 D.1）**：一个 **1 ms 唤醒**的看门狗线程，记录**自己的迟到量**（log2 直方图 + max），并在可疑时**采样**：(a) 系统忙闲用 `host_statistics(HOST_CPU_LOAD_INFO)` 的**每毫秒增量**（不是 `load1`——它 60 s 平均、看不见 10 ms 事件）；(b) 本进程每条线程的 `run_state` 与 **CPU 增量**（`thread_extended_info` + `thread_identifier_info`）。★ 它存在的理由：**三种停顿（进程被挂起 / 阻塞在驱动 / CPU 被抢）留下的指纹完全相同**，而**只有第三类**是调度手段能治的；不知道是哪一类，任何杠杆决策都是盲投，P4 的负结果也只能被记录、无法被解释。判读（规划 D.1）：看门狗自己迟到 + 系统空闲 ⇒ **①被挂起**；迟到 + 系统忙 ⇒ **饱和**；准时 + 目标线程 CPU 冻结且 `WAITING/UNINTERRUPTIBLE` ⇒ **②驱动阻塞**；准时 + CPU 冻结且 `RUNNING`（可运行却没被调度）⇒ **③CPU 被抢**；CPU 在涨 ⇒ **活儿本身慢**。两把钥匙：`ENABLE_FLOW_PROBES` 编译 + 本变量非 0；关着只读一次环境变量（不建线程、不读时钟、不打印）。反向臂已实测：注入 20 ms 迟到必须出现在 max 上，丢掉读数会让单测 3 条断言变红（开发文档 10.47） |
 | `OCUDU_SCHED_ATTR_QOS` | OFF | `utils/macos_compat/macos_compat.cpp:449` | 0 | **实验臂（改 macOS 调度，**不在**白名单，fail-closed）**：把 QoS 类**声明在线程属性上**（`pthread_attr_set_qos_class_np`），让关键线程**从第一条指令**就在目标档上。默认关 = 历史行为。★ 注意它与 `OCUDU_SCHED_POSIX_RT=1` **不能同时用**：只要那个 POSIX 调用还在（现在只剩对照臂才调用），attr 上声明的档**同样会被抹掉**（实测，开发文档 10.5）。默认已经跳过那个调用，所以这一臂现在才有意义 —— 它买的是「起跑那一刻就在 P 核」 |
 | `OCUDU_UL_THREAD_CPU` | ? | `include/ocudu/support/executors/ul_pipeline_probe.h:2654` | 0 | **探针（只打印，白名单可带；macos_thread_priority 开发文档 10.31）**：每条线程在自己的 **slot 变化**处读一次**自己的**累计 CPU，把两次之间的差值记进本线程的 count/sum/max + 一个 log2 直方图（40 桶），关停时每线程打一行 `[ul_thread_cpu] thread=… slots=… mean=… p99.9<=… max=… -> declare computation >= …`。★ 它存在的理由：**P4（Mach 时间约束）要申报「每 period 需要多少 CPU」，唯一诚实的来源就是线程自己每 slot 烧掉多少** —— 而相位事件的 `tcpu=` 在池线程上是**结构性**的 `-`（工作窃取 ⇒ 开窗与关窗不是同一条线程，`attach_cpu_delta` 只认同线程基线），进程口径的 `cpu=` 又是全进程（窗口 1.3–1.8 ms 却记到 4.4–6.9 ms）。两把钥匙：`ENABLE_FLOW_PROBES` 编译 + 本变量非 0；关着只读一次环境变量就返回，**不读时钟、不注册、不打印**（交付腿逐字节不变）；开着每次地标一次 Mach 调用（为此加了窄接口 `this_thread_cpu_ns()`）。反向臂已实测：把「按 slot 变化记一笔」改成「每次调用记一笔」，单测 3 条断言变红（开发文档 10.31(1)） |
 | `OCUDU_SCHED_POSIX_RT` | OFF | `utils/macos_compat/macos_compat.cpp:641` | 0 | **对照臂（改 macOS 调度，**不在**白名单，fail-closed）**：`=1` = **恢复历史行为**，即对实时意图线程调用 `pthread_setschedparam(SCHED_FIFO,prio)`。★ **不设它才是新默认**（2026-10-01 用户裁决）：实测 Darwin 上线程**要么**由 QoS 管、**要么**是显式调度，那个 POSIX 调用会把刚设好的 QoS 类**静默抹掉且不可恢复**（再设返回 EPERM）；默认跳过它以后，`[sched]` 回读 `eff=USER_INTERACTIVE`（真腿读数见开发文档 10.15 与本次裁决 10.16）。保留这个臂是为了能**在同一个二进制上**做 A/B 推翻默认，而不是靠重新编译 |
@@ -199,6 +199,7 @@
 | `OCUDU_UL_STALE_US` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:2787` | 1 | `include/ocudu` | 0 | 4/3 | — |
 | `OCUDU_UL_THREAD_CPU` | ? | include | `include/ocudu/support/executors/ul_pipeline_probe.h:2654` | 1 | `include/ocudu` | 0 | 7/2 | — |
 | `OCUDU_UL_TIMING_EVENTS` | OFF | include | `include/ocudu/support/executors/ul_pipeline_probe.h:1312` | 1 | `include/ocudu` | 5 | 32/7 | 16 |
+| `OCUDU_UL_WATCHDOG` | ? | lib | `lib/support/executors/ul_stall_watchdog.cpp:327` | 1 | `lib/support` | 0 | 2/1 | — |
 | `OCUDU_USRSCTP_MODE` | ? | lib | `lib/gateways/sctp_socket_usrsctp.cpp:117` | 1 | `lib/gateways` | 0 | 2/1 | — |
 
 ### 3.1 既没有腿登记行、也从未在记录里出现过：8 个
