@@ -980,3 +980,83 @@ wake_at = grid_tick + lead
 | **0.5 ms** | 接近本次 300 µs 的形态（吞吐明显下降、节拍最好）|
 
 每档记 **（跳过率，ping max/mdev，iperf3 吞吐）** 三点，**这条曲线就是交付决策的依据**。
+
+### 11.23 ★★★ p228–p231 扫描：**曲线的膝盖是结构决定的**（band 必须 < period），而扫描里还混着一个混淆项
+
+用户飞完四档 band（500 µs / 1 ms / 2 ms / 4 ms），对照腿是 p226（池，**2 并发**）。gNB 侧读数取自各腿
+`.log.stderr`，应用层读数（ping / iperf3）由用户在同一时段另机测量。
+
+| 腿 | band | 线程 | hop 数（`[ul_pipeline] samples`）| ping max | ping mdev | iperf3 | 红线 |
+|---|---|---|---|---|---|---|---|
+| p226 | —（池，2 并发）| 5（池）| **317 724** | 430.152 ms | 24.011 ms | **6.74 Mbit/s** | 全过 |
+| p227 | 300 µs | 1 | 60 169 | 75.749 ms | 7.444 ms | （未记）| 全过 |
+| p231 | 500 µs | 1 | 103 084 | （未记）| （未记）| 3.04 Mbit/s | 全过 |
+| p228 | 1 ms | 1 | 132 059 | **53.428 ms** | 7.049 ms | 3.28 Mbit/s | 全过 |
+| p229 | 2 ms | 1 | 135 279 | 257.8 ms | 17.3 ms | 2.58 Mbit/s | 全过 |
+| p230 | 4 ms | 1 | **137 241** | 173.7 ms | 11.3 ms | 2.04 Mbit/s | 全过 |
+
+八条腿的 `[phy_pipeline] contract` 全部 MET，`gaps=0`、`rx_overflows=0`、`AT/BELOW 0` 率都在登记线内
+⇒ **这一轮没有任何一条腿是被红线否掉的**，曲线本身就是结论。
+
+#### (1) ★★★ 结构性规则：**band 必须小于 period**，否则 tick 结构根本不存在
+
+loopback 直接量到了（`OCUDU_UL_PACED_WAIT_US=4000`，period=500 µs）：
+
+| | 4 ms band（无夹紧）| 夹紧后 |
+|---|---|---|
+| tick 速率 | **257 次/秒** | 2 线程 83251 ticks / 21 s ⇒ **1982 次/秒/线程** |
+| 应有的速率 | 2000 次/秒 | 2000 次/秒 |
+
+原因是机制的、不是调参的：**一次"等待"只要长过一个 slot，它就跨掉了后面几个 tick**。而且 `band = period`
+就已经退化——等待恰好在下一个 tick 到期，循环 re-sync 到"现在"这个 tick，于是变成"以 period 为步长的无限等待"，
+也就是本设计要摆脱的那种行为。⇒ **band 的合法区间是 `band + drain < period`**，
+30 kHz 下 period=500 µs，而 lane 的 drain 实测约 100 µs。
+
+⇒ 已把这条规则写进代码：`paced_task_executor` 的 band **夹紧到 period/2**（留一半给等待唤醒出来的那批工作），
+**夹紧会在 banner 和报告里说出来**（`band=... (CLAMPED below the period...)`），并且它是一条**跨平台单测**
+（`a_band_longer_than_the_period_is_capped_to_it`，Linux 也跑）。
+
+**⇒ 这条规则同时解释了整条曲线**：500 µs/1 ms 两点还在边界附近，2 ms/4 ms 已经落到退化区——
+它们的"吞吐更差、ping 更差"不是 band 这个参数的性质，而是**节拍结构消失**的后果。
+
+#### (2) ★★ 混淆项：单线程 ≠ 池的 2 并发，所以 p226 的 6.74 Mbit/s 不是可比数
+
+`[ul_lane_exec]` 说得明白：池的 `max_pusch_and_srs_concurrency = 2`，**一次跑 2 个 hop**；而 paced 臂是
+**1 条线程**。hop 的链里大部分是**等 GPU**（wall 时间远超 CPU 时间），所以 1 条线程根本撑不起 2 并发能撑的
+slot 率——**这是线程数的性质，不是节拍的性质**，而扫描把这二者混在了一起。
+
+⇒ 已加两个东西：
+1. `OCUDU_UL_PACED_THREADS=<n>`：N 条线程**共用同一个网格**（各算各的 tick，网格是同一个），
+   单测 `the_threads_run_at_the_same_time_on_one_grid` 用"两个任务必须同时到达 rendezvous 才能完成"把它证明掉；
+2. `OCUDU_UL_LANE_CONCURRENCY=<n>`：**串行对照**——把池也压成 1 并发（`<=1` 即 STRAND），
+   于是两条臂只剩"工作什么时候跑"这一个差别。loopback 已验：派生值 2 被覆盖成 1，banner 打出 STRAND。
+
+**另一条已经能下的结论**：p230 处理的 hop 数最多（137 241）而吞吐最低（2.04 Mbit/s），p231 最少（103 084）
+而吞吐更高（3.04）⇒ **多出来的 hop 不是有用功，是重传**（commit 被推迟一个 slot，吃掉 HARQ 预算）。
+⇒ "跳过 ⇒ 丢 slot ⇒ 吞吐腰斩"这个模型是错的，正确的是"**推迟 ⇒ 丢 HARQ 余量 ⇒ 重传**"。
+
+#### (3) 一条真缺陷（仪器侧）：p0 报告表**满了就静默丢弃**
+
+loopback 里 `[paced_exec]` 的报告行消失，一度被读成"节拍没生效"。真因是 `register_p0_report` 的定长表
+写满后**默默丢掉**后面的注册。现在：溢出会**大声报**（并说明该报告会在每次 dump/退出报告里缺席）、容量留出余量、
+线程上线打一行（"没有线程/没有节拍/退出时对象已不在"这三种失败以前长得一模一样）、`ticks=0` 也打印而不是沉默。
+
+#### (4) 下一步飞行（p232–p235）：在**合法区间内**扫，并把两个原因分开
+
+| 腿 | 环境 | 这一腿回答什么 |
+|---|---|---|
+| p232 | `OCUDU_UL_LANE_CONCURRENCY=1`（池，串行，不节拍）| **串行本身**的代价 |
+| p233 | `OCUDU_UL_PACED_LANE=500 OCUDU_UL_PACED_THREADS=2 OCUDU_UL_PACED_WAIT_US=250` | 同等并发下的**节拍**代价 |
+| p234 | `OCUDU_UL_PACED_LANE=500 OCUDU_UL_PACED_THREADS=1 OCUDU_UL_PACED_WAIT_US=0` | **完全刚性**（不等待）：节拍最纯的一点 |
+| p235 | `OCUDU_UL_PACED_LANE=500 OCUDU_UL_PACED_THREADS=2 OCUDU_UL_PACED_WAIT_US=125` | 带内中间点 |
+
+每腿照旧记 **（跳过率，ping max/min/mdev，iperf3）**，并读新的 `[paced_exec]` 两行（ticks/ran/skipped/late + band/threads）。
+判据仍是应用层：**max 下降、min 不升**；跳过多大由应用层决定，不作为判据本身。
+
+#### (5) 离线复核与提交
+
+| | 结果 |
+|---|---|
+| macOS 单测 | `paced_task_executor_test` 4/4（含两条新臂）；`macos_compat_test` 23/23 |
+| Ubuntu 台架 `385a5aca02` | build **无警告**（`-Werror=shadow` 抓到构造函数参数遮蔽成员，macOS 不报——两平台构建的老价值）；`paced_task_executor_test` **2/2**（结构性规则那条 Linux 也跑）；`macos_compat_test` 23/23 |
+| 提交 | `4fcfd135ae`（band 夹紧 + N 线程 + 登记表溢出报错 + 诊断行）、`385a5aca02`（参数改名）、`40c410f36a`（串行对照开关）|
