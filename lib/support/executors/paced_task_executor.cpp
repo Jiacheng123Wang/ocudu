@@ -5,8 +5,11 @@
 #include "ocudu/support/macos_compat.h"
 #include "ocudu/support/scheduling/thread_sched_snapshot.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 
 using namespace ocudu;
 
@@ -25,15 +28,28 @@ paced_task_executor::paced_task_executor(std::string                      thread
                                          std::chrono::nanoseconds         slot_duration_,
                                          std::chrono::nanoseconds         lead_,
                                          std::chrono::nanoseconds         max_wait_,
+                                         unsigned                         nof_threads,
                                          os_thread_realtime_priority      prio,
                                          const os_sched_affinity_bitmask& mask) :
   name(std::move(thread_name)),
   slot_duration(slot_duration_),
   lead(lead_),
-  max_wait(max_wait_),
-  pending(queue_size, std::chrono::microseconds{50}),
-  thread(name, prio, mask, [this]() { run(); })
+  // THE BAND IS CAPPED BELOW THE PERIOD (see the header): a wait longer than one slot spans several ticks, and
+  // then the thread is not keeping a tick per slot at all. Half the period leaves the rest of the slot for the
+  // drain, which is where a burst of a hop's stages goes.
+  max_wait(std::min(max_wait_, slot_duration_ / 2)),
+  max_wait_requested(max_wait_),
+  nof_threads(std::max(1u, nof_threads)),
+  pending(queue_size, std::chrono::microseconds{50})
 {
+  // `this->` on every use: the constructor's parameter shadows the member in the body, and with nof_threads = 0
+  // the two differ (the member is clamped to 1) - so reading the parameter here would create NO thread at all.
+  threads.reserve(this->nof_threads);
+  for (unsigned i = 0; i != this->nof_threads; ++i) {
+    // One thread per index in the name, so a time constraint can be declared per thread (the name is the key).
+    const std::string tname = (this->nof_threads == 1) ? name : (name + "#" + std::to_string(i));
+    threads.emplace_back(tname, prio, mask, [this]() { run(); });
+  }
 }
 
 paced_task_executor::~paced_task_executor()
@@ -44,8 +60,14 @@ paced_task_executor::~paced_task_executor()
   // bounded by one queue wake-up. (The queued tasks behind it are NOT drained: a leg's stop must not run a
   // backlog it was told to abandon.)
   running.store(false, std::memory_order_relaxed);
-  (void)pending.try_push(unique_task([]() {}));
-  thread.join();
+  // One wake-up per thread: each is either parked on the queue or sleeping between ticks, and the flag alone
+  // interrupts neither (a hung test said so).
+  for (size_t i = 0; i != threads.size(); ++i) {
+    (void)pending.try_push(unique_task([]() {}));
+  }
+  for (unique_thread& t : threads) {
+    t.join();
+  }
 }
 
 bool paced_task_executor::execute(unique_task task)
@@ -73,6 +95,21 @@ void paced_task_executor::run()
   // being a behaviour change anywhere it has not been asked for.
   const bool paced = compat::lane_grid_enabled();
 
+  // ONE LINE SAYS THE THREAD EXISTS AT ALL, and it is not decoration: a loopback meant to verify the paced
+  // lane's report printed the banner and then nothing, and "the report is silent" could equally have meant the
+  // thread never started, the pacing never engaged, or the object was already gone when the exit path ran. A
+  // reading that can be missing for three different reasons is not a reading; this line tells them apart.
+  std::fprintf(stderr,
+               "[paced_exec] %s: thread up (paced=%d, period=%lldus, band=%lldus) - the tuning knobs were: "
+               "OCUDU_UL_PACED_LANE=%s OCUDU_UL_PACED_LEAD_US=%s OCUDU_UL_PACED_WAIT_US=%s\n",
+               name.c_str(),
+               paced ? 1 : 0,
+               static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(slot_duration).count()),
+               static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(max_wait).count()),
+               std::getenv("OCUDU_UL_PACED_LANE") != nullptr ? std::getenv("OCUDU_UL_PACED_LANE") : "(unset)",
+               std::getenv("OCUDU_UL_PACED_LEAD_US") != nullptr ? std::getenv("OCUDU_UL_PACED_LEAD_US") : "(unset)",
+               std::getenv("OCUDU_UL_PACED_WAIT_US") != nullptr ? std::getenv("OCUDU_UL_PACED_WAIT_US") : "(unset)");
+
   int64_t tick_ns      = 0;
   int64_t last_tick_ns = 0;
   while (running.load(std::memory_order_relaxed)) {
@@ -97,6 +134,16 @@ void paced_task_executor::run()
     int64_t next_ns = compat::lane_grid_next_tick_ns(last_tick_ns, period_ns);
     if (next_ns < 0) {
       next_ns = (last_tick_ns == 0) ? (steady_now_ns() + period_ns) : (last_tick_ns + period_ns);
+    }
+    // RE-SYNC WHEN THE PREVIOUS ITERATION OVERRAN, and this is not a detail - the air sweep measured what
+    // happens without it. The next tick is computed from the PREVIOUS TICK, so a loop that spent a whole band
+    // per iteration advanced its tick by one period while taking the band's time; with band > period the tick
+    // fell further behind every round and the grid's phase was lost for the rest of the leg. Asking "the first
+    // tick still ahead of NOW" instead keeps the phase: a tick that is in the past is never one to run.
+    const int64_t now_ns = steady_now_ns();
+    if (next_ns + lead_ns <= now_ns) {
+      const int64_t resynced = compat::lane_grid_next_tick_ns(now_ns, period_ns);
+      next_ns                = (resynced < 0) ? (now_ns + period_ns) : resynced;
     }
     tick_ns      = next_ns + lead_ns;
     last_tick_ns = next_ns;
@@ -126,6 +173,13 @@ void paced_task_executor::run()
         // for the next tick would add a slot of latency to work that is already in hand.
         continue;
       }
+      // THE BAND IS A DEADLINE FOR WAITING, NOT A PERIOD TO FILL. Once the work has run there is nothing left
+      // to wait for, and staying in the band only costs the tick's phase (see the re-sync above). The first
+      // version polled to the end of the band either way, and the sweep's larger bands show what that buys:
+      // more retransmissions for less goodput.
+      if (ran) {
+        break;
+      }
       if (steady_now_ns() >= band_end) {
         break;
       }
@@ -153,8 +207,16 @@ void paced_task_executor::run()
 void paced_task_executor::report() const
 {
   const stats s = get_stats();
+  // A ZERO IS PRINTED, NOT SWALLOWED. This used to return early "rather than print a line of zeroes", and that
+  // silence cost a loopback: the report was missing and there was no way to tell a registry that dropped it,
+  // a thread that never started, and a run that simply had no ticks. A leg is read by a person, and "0 ticks"
+  // is a fact about the leg - the only thing that must never happen is not knowing.
   if (s.ticks == 0) {
-    return; // never paced (the knob was off): print nothing rather than a line of zeroes
+    std::fprintf(stderr,
+                 "[paced_exec] %s: ticks=0 - the loop never paced (knob off, or the thread never ran). This "
+                 "line exists so that a missing READING and a missing NUMBER cannot be confused.\n",
+                 name.c_str());
+    return;
   }
   const double mean_us = (s.ran != 0) ? (static_cast<double>(s.late_sum_us) / static_cast<double>(s.ran)) : 0.0;
   std::fprintf(stderr,
@@ -171,4 +233,20 @@ void paced_task_executor::report() const
                static_cast<unsigned long long>(s.tasks),
                mean_us,
                static_cast<long long>(s.late_max_us));
+  const auto req_us = std::chrono::duration_cast<std::chrono::microseconds>(max_wait_requested).count();
+  const auto eff_us = std::chrono::duration_cast<std::chrono::microseconds>(max_wait).count();
+  const auto per_us = std::chrono::duration_cast<std::chrono::microseconds>(slot_duration).count();
+  const auto lead_us = std::chrono::duration_cast<std::chrono::microseconds>(lead).count();
+  std::fprintf(stderr,
+               "[paced_exec] %s: period=%lldus lead=%lldus band=%lldus%s threads=%u; ticks above are the SUM "
+               "over the threads, so divide by %u for a per-thread rate\n",
+               name.c_str(),
+               static_cast<long long>(per_us),
+               static_cast<long long>(lead_us),
+               static_cast<long long>(eff_us),
+               (eff_us != req_us) ? " (CLAMPED below the period: a longer wait spans several ticks, so the "
+                                    "thread would no longer keep one tick per slot)"
+                                  : "",
+               nof_threads,
+               nof_threads);
 }

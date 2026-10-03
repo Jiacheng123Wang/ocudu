@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace ocudu {
 
@@ -52,21 +53,43 @@ public:
   /// \param slot_duration   The grid's period: one slot (see plan doc §11.4; parameterised by SCS, not fixed).
   /// \param lead            How long after the grid tick the loop starts looking for work.
   /// \param max_wait        How long past `lead` it keeps looking before it skips the tick.
-  /// \param prio, mask      Passed to the thread the same way every other worker gets them.
+  /// \param nof_threads     How many threads share the grid and this queue. ONE thread serialises whatever the
+  ///                        lane used to run concurrently, and the first air sweep measured exactly that: the
+  ///                        paced arm sat at ~3.2 Mbit/s against the pool's 6.74 whatever the band, because a
+  ///                        hop's chain costs more WALL time (GPU waits included) than a slot, so one thread
+  ///                        cannot sustain the slot rate the pool's two concurrent hops could. N threads keep the
+  ///                        grid and restore the concurrency.
+  /// \param prio, mask      Passed to the threads the same way every other worker gets them.
+  ///
+  /// \note THE BAND IS CLAMPED TO LESS THAN THE PERIOD, and the clamp is a structural rule rather than a
+  ///       preference: a wait longer than one slot spans several ticks, so the thread can no longer keep one
+  ///       tick per slot at all - measured on the sweep, a 4 ms band left the loop ticking 257 times a second
+  ///       against the 2000 it is supposed to, and BOTH the goodput and the tail got worse than at 500 us.
+  ///       A caller that asks for more gets the cap, and the report says so.
   paced_task_executor(std::string                      thread_name,
                       unsigned                         queue_size,
                       std::chrono::nanoseconds         slot_duration,
                       std::chrono::nanoseconds         lead,
                       std::chrono::nanoseconds         max_wait,
+                      unsigned                         nof_threads = 1,
                       os_thread_realtime_priority      prio = os_thread_realtime_priority::no_realtime(),
                       const os_sched_affinity_bitmask& mask = {});
 
   ~paced_task_executor() override;
 
+  /// The band the loop actually uses. Exposed because the clamp is a rule a leg must be able to SEE: a caller
+  /// that asked for 4 ms gets 250 us at 30 kHz, and a report that silently used the smaller number would make
+  /// the sweep's own table unreadable.
+  [[nodiscard]] std::chrono::nanoseconds get_max_wait() const { return max_wait; }
+
   [[nodiscard]] bool execute(unique_task task) override;
   [[nodiscard]] bool defer(unique_task task) override;
 
   /// The accounting a leg reads: how many ticks ran work, how many were skipped, and how late the loop was.
+  ///
+  /// \note With N threads the counters are the SUM over them, so `ticks` is N times the number of grid ticks
+  ///       the executor lived through - each thread keeps its own tick and they share the grid. The report
+  ///       prints `threads=`, which is what turns the sum back into a per-thread rate.
   struct stats {
     uint64_t ticks    = 0;
     uint64_t ran      = 0; ///< ticks that ran at least one task
@@ -92,9 +115,11 @@ private:
   std::string       name;
   std::chrono::nanoseconds slot_duration;
   std::chrono::nanoseconds lead;
-  std::chrono::nanoseconds max_wait;
-  queue_t           pending;
-  unique_thread     thread;
+  std::chrono::nanoseconds max_wait;            ///< effective, i.e. after the clamp below the period
+  std::chrono::nanoseconds max_wait_requested;  ///< what the caller asked for, so the report can show the cap
+  unsigned                 nof_threads = 1;
+  queue_t                       pending;
+  std::vector<unique_thread>    threads;
   std::atomic<bool> running{true};
 
   mutable std::mutex stat_mutex;

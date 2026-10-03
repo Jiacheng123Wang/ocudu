@@ -16,7 +16,13 @@ namespace {
 /// The registry. A fixed-size array rather than a vector: registration happens a handful of times, on the
 /// threads that build the PHY, and a dump must never allocate (it runs from a thread that is already in
 /// trouble).
-constexpr size_t          max_reports = 32;
+///
+/// THE CAPACITY IS A REAL LIMIT AND OVERFLOWING IT USED TO BE SILENT. It was: a loopback meant to verify the
+/// paced lane's report simply printed no such line, and the reason was not the pacing but that the registry had
+/// filled up and `register_p0_report` dropped the last registrations on the floor without a word. An instrument
+/// that disappears quietly is worse than one that was never built, because the reading is then taken from a
+/// number that is not there. The capacity is now checked out loud.
+constexpr size_t          max_reports = 64;
 void (*                   reports[max_reports])() = {};
 std::atomic<size_t>       nof_registered{0};
 std::mutex                dump_mutex;
@@ -39,6 +45,17 @@ void ocudu::register_p0_report(void (*fn)())
   const size_t slot = nof_registered.fetch_add(1, std::memory_order_acq_rel);
   if (slot < max_reports) {
     reports[slot] = fn;
+    return;
+  }
+  static std::atomic<bool> warned{false};
+  if (!warned.exchange(true, std::memory_order_relaxed)) {
+    std::fprintf(stderr,
+                 "[phy_pipeline] WARNING: the p0 report registry is FULL (%zu entries): the report registered "
+                 "as #%zu has been DROPPED, so it will be missing from every p0 dump and every exit report. "
+                 "Raise max_reports in phy_pipeline_report.cpp - an instrument that vanishes silently makes the "
+                 "reading be taken from a number that is not there\n",
+                 max_reports,
+                 slot + 1);
   }
 }
 

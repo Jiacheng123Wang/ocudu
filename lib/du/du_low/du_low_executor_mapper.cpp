@@ -13,7 +13,9 @@
 #include "ocudu/support/executors/strand_executor.h"
 #include "ocudu/support/executors/task_fork_limiter.h"
 #include "ocudu/support/ocudu_assert.h"
+#include <algorithm> // std::max (the paced thread count)
 #include <cstdio>
+#include <cstdlib> // std::getenv / std::strtol (the pacing knobs)
 
 using namespace ocudu;
 using namespace odu;
@@ -156,6 +158,11 @@ public:
         };
         const int64_t lead_us = env_us("OCUDU_UL_PACED_LEAD_US", 0);
         const int64_t wait_us = env_us("OCUDU_UL_PACED_WAIT_US", 300);
+        // HOW MANY THREADS SHARE THE GRID. One thread serialises what the pool ran concurrently, and the first
+        // air sweep against a 2-concurrent pool showed the difference being read as the price of pacing - a
+        // hop's chain costs more wall time (GPU waits included) than a slot, so one thread cannot sustain the
+        // slot rate two can. The default is 1 (the arm that was flown); 2 is the like-for-like comparison.
+        const int64_t threads = std::max(int64_t{1}, env_us("OCUDU_UL_PACED_THREADS", 1));
         ocudu::compat::lane_grid_set_slot_duration_ns(period_us * 1000);
         // The thread is created with the same realtime INTENT the pool workers carry, so that a leg with the
         // pacing on and the constraint off compares like for like: with `no_realtime()` this thread would sit a
@@ -167,6 +174,7 @@ public:
                                                            std::chrono::microseconds{period_us},
                                                            std::chrono::microseconds{lead_us},
                                                            std::chrono::microseconds{wait_us},
+                                                           static_cast<unsigned>(threads),
                                                            os_thread_realtime_priority::max() - 2);
         paced_lane = paced.get();
         phy_config.pusch_executor = {paced.get(), 1};
@@ -174,10 +182,12 @@ public:
         // thread must outlive the PHY that calls into it.
         executors.push_back(std::move(paced));
         std::fprintf(stderr,
-                     "[paced_exec] OCUDU_UL_PACED_LANE=%lldus: the PUSCH lane runs on its own thread "
-                     "\"pusch_lane\" (lead=%lldus, band=%lldus); declare its reservation with "
+                     "[paced_exec] OCUDU_UL_PACED_LANE=%lldus: the PUSCH lane runs on %lld grid-paced "
+                     "thread(s) \"pusch_lane\" (lead=%lldus, band=%lldus - and the band is CLAMPED below the "
+                     "period, because a longer wait spans several ticks); declare their reservation with "
                      "OCUDU_SCHED_TIME_CONSTRAINT=pusch_lane=<period>/<computation>/<constraint>\n",
                      static_cast<long long>(period_us),
+                     static_cast<long long>(threads),
                      static_cast<long long>(lead_us),
                      static_cast<long long>(wait_us));
         // BOTH exit paths, and that is the rule this file learned the hard way from the other direction: the

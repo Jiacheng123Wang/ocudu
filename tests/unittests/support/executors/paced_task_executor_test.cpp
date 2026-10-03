@@ -47,6 +47,19 @@ TEST(paced_task_executor_test, without_the_grid_it_runs_tasks_and_counts_no_tick
       << "with the knob off there is no grid, so a tick counter would be a number about nothing";
 }
 
+/// \brief A band longer than the period is CLAMPED, because it would stop the thread keeping one tick per slot.
+///
+/// This is the sweep's own finding turned into a rule. The air legs asked for 500us, 1ms, 2ms and 4ms bands; the
+/// 2ms and 4ms ones were worse on BOTH axes - and a loopback with a 4ms band showed why: the loop ticked 257
+/// times a second against the 2000 it was built for, since one "wait" spanned eight slots and the tick
+/// structure was simply gone. A wait is only meaningful while it fits inside the period it belongs to.
+TEST(paced_task_executor_test, a_band_longer_than_the_period_is_capped_to_it)
+{
+  paced_task_executor exec("paced_test_cap", 64, 500us, 0us, 4ms);
+  EXPECT_EQ(std::chrono::duration_cast<std::chrono::microseconds>(exec.get_max_wait()).count(), 250)
+      << "half the period: the wait must end with room left for the drain that follows it";
+}
+
 #if defined(__APPLE__)
 /// \brief THE property of the elastic band: a tick that no task arrives for is SKIPPED and COUNTED.
 ///
@@ -82,5 +95,39 @@ TEST(paced_task_executor_test, a_tick_with_no_work_is_skipped_not_waited_for)
 
   ::unsetenv("OCUDU_UL_LANE_GRID");
   ::unsetenv("OCUDU_UL_LANE_GRID_LEAD_US");
+}
+#endif
+
+/// \brief N threads share the grid and run AT THE SAME TIME, which is what the pool's concurrency was.
+///
+/// The first air sweep compared a paced arm that was one thread against a pool that ran two hops concurrently,
+/// and read the throughput difference as the price of pacing. It was not: a hop's chain costs more wall time
+/// (GPU waits included) than a slot, so one thread cannot sustain the slot rate two could. That is a property
+/// of the thread count, not of the pacing - and it is testable without a radio: two tasks that can only finish
+/// if they run together.
+#if defined(__APPLE__)
+TEST(paced_task_executor_test, the_threads_run_at_the_same_time_on_one_grid)
+{
+  ::setenv("OCUDU_UL_LANE_GRID", "1", 1);
+  paced_task_executor exec("paced_test_n", 64, 20ms, 0us, 2ms, 2);
+
+  std::atomic<int> arrived{0};
+  std::atomic<int> finished{0};
+  auto             rendezvous = [&arrived, &finished]() {
+    ++arrived;
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (arrived.load() < 2 && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(1ms);
+    }
+    ++finished;
+  };
+  ASSERT_TRUE(exec.execute(rendezvous));
+  ASSERT_TRUE(exec.execute(rendezvous));
+  EXPECT_TRUE(wait_for([&finished]() { return finished.load() == 2; }, 1000ms))
+      << "with ONE thread the two tasks would run back to back and the first would sit alone in the "
+         "rendezvous until its 2s deadline: arrived="
+      << arrived.load() << " finished=" << finished.load();
+
+  ::unsetenv("OCUDU_UL_LANE_GRID");
 }
 #endif
