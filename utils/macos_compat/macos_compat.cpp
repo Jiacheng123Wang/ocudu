@@ -4,6 +4,7 @@
 // (Linux affinity branches relocated verbatim from upstream unique_thread.cpp.)
 
 #include "ocudu/support/macos_compat.h"
+#include "ocudu/phy/phy_pipeline_report.h" // register_p0_report
 #include "ocudu/ocudulog/ocudulog.h" // fetch_basic_logger (log_effective_decoder_backend)
 
 #if defined(__APPLE__)
@@ -946,6 +947,11 @@ void lane_grid_report_impl()
 
 const bool lane_grid_report_registered = []() {
   std::atexit(lane_grid_report_impl);
+  // AND the on-demand registry, for the reason the receive pool's report spells out: the gNB's cleanup path
+  // dumps the P0 readings and then raises SIGKILL, so an atexit-ONLY report is lost whenever the stop takes the
+  // forced-exit branch. Found the hard way: the loopback runs printed every other report and no [lane_grid] at
+  // all, while the air legs (whose stop completes gracefully) printed it.
+  register_p0_report(lane_grid_report_impl);
   return true;
 }();
 
@@ -1050,22 +1056,31 @@ lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
   return out;
 }
 
-void lane_grid_note_hop(uint64_t slot)
+void lane_grid_note_slot(uint64_t slot, int64_t host_ns)
 {
 #if defined(__APPLE__)
   if (!lane_grid_enabled()) {
     return;
   }
-  lane_grid_state& st       = lane_grid();
-  const int64_t    anchor   = st.anchor_slot.load(std::memory_order_relaxed);
-  const int64_t    anchor_h = st.anchor_host_ns.load(std::memory_order_relaxed);
-  const lane_grid_update up = lane_grid_update_ns(anchor_h,
-                                                  anchor,
-                                                  slot,
-                                                  steady_now_ns(),
-                                                  st.slot_duration_ns.load(std::memory_order_relaxed),
-                                                  st_gain_shift(),
-                                                  kSlotsPerHyperframe);
+  lane_grid_state& st = lane_grid();
+  // One observation per SLOT, even though the receive policy hands us a block per symbol: the filter's gain is
+  // per observation, and fourteen of them per slot would make it fourteen times faster than documented.
+  static std::atomic<int64_t> last_slot{-1};
+  int64_t                     prev = last_slot.load(std::memory_order_relaxed);
+  if (static_cast<int64_t>(slot) == prev) {
+    return;
+  }
+  last_slot.store(static_cast<int64_t>(slot), std::memory_order_relaxed);
+
+  const int64_t          anchor   = st.anchor_slot.load(std::memory_order_relaxed);
+  const int64_t          anchor_h = st.anchor_host_ns.load(std::memory_order_relaxed);
+  const lane_grid_update up       = lane_grid_update_ns(anchor_h,
+                                                        anchor,
+                                                        slot,
+                                                        host_ns,
+                                                        st.slot_duration_ns.load(std::memory_order_relaxed),
+                                                        st_gain_shift(),
+                                                        kSlotsPerHyperframe);
   if ((up.anchor_host_ns != anchor_h) || (up.anchor_slot != anchor)) {
     st.anchor_host_ns.store(up.anchor_host_ns, std::memory_order_relaxed);
     st.anchor_slot.store(up.anchor_slot, std::memory_order_relaxed);
@@ -1076,6 +1091,7 @@ void lane_grid_note_hop(uint64_t slot)
   st.noted.fetch_add(1, std::memory_order_relaxed);
 #else
   (void)slot;
+  (void)host_ns;
 #endif
 }
 

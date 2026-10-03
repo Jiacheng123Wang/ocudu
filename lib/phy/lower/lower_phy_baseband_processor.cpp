@@ -1625,10 +1625,29 @@ void lower_phy_baseband_processor::ul_process()
   //
   // `+ nof_samples` names the instant just after the last sample, which is when the call can return; the
   // residual offset is the delivery latency and no longer depends on the block size.
-  tx_slack_note_receive(static_cast<uint64_t>(rx_metadata.ts) + nof_samples,
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            rx_call_end.time_since_epoch())
-                            .count());
+  const int64_t rx_call_end_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(rx_call_end.time_since_epoch()).count();
+  tx_slack_note_receive(static_cast<uint64_t>(rx_metadata.ts) + nof_samples, rx_call_end_ns);
+  // ---- P6.1: the lane grid's anchor, taken from the RADIO's own frontier (plan doc §11.18) --------------
+  //
+  // WHY IT IS TAKEN HERE AND NOT AT THE LANE. The lane's arrival instant is the radio's frontier PLUS the
+  // whole upstream pipeline's delay, and that delay WANDERS BY MILLISECONDS - it is data-driven, it bursts
+  // (TDD: three UL slots per 5 ms) and it queues on a shared pool. A grid anchored THERE faithfully tracks
+  // the wander the grid exists to remove: p224/p225 read residuals of 4-19 ms with a clamp that was precise
+  // to 3 us, i.e. the grid was following the pipeline, not the air. The frontier's own wander is the
+  // transport's - a slow, ppm-scale drift - which is the thing a grid may legitimately track.
+  //
+  // THE CALL IS UNGUARDED ON PURPOSE (a behaviour knob must not depend on OCUDU_FLOW_PROBES - the same rule
+  // the receive poll follows), and it costs one integer division per block when the knob is off, because
+  // lane_grid_enabled() is read once. The slot index is published ONCE PER SLOT: the receive policy is
+  // symbol-grained, so fourteen blocks carry the same slot and fourteen observations per slot would make the
+  // filter fourteen times faster than its gain says.
+  if (compat::lane_grid_enabled()) {
+    const uint64_t slots_per_sfn_cycle = (nof_samples_in_all_hyper_frames / NOF_HYPER_SFNS) / nof_samples_per_slot;
+    const uint64_t frontier  = apply_timestamp_sfn0_ref(static_cast<uint64_t>(rx_metadata.ts) + nof_samples);
+    const uint64_t slot_now  = (frontier / nof_samples_per_slot) % slots_per_sfn_cycle;
+    compat::lane_grid_note_slot(slot_now, rx_call_end_ns);
+  }
   // The air time of the block the call asked for: the reference the receive timing is read against (see
   // ul_rx_note_call). `srate` is in kHz, so samples * 1000 / kHz is microseconds.
   //
