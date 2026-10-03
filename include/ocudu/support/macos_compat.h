@@ -348,7 +348,8 @@ void sprint_wait();
 /// KEYS AND SCOPE: MACOS ONLY, gated by OCUDU_UL_LANE_GRID on top of OCUDU_FLOW_PROBES. Off - the default,
 /// and the only behaviour Linux can reach - both call sites are no-ops, so a leg is byte-identical.
 /// `OCUDU_UL_LANE_GRID_LEAD_US` (default 200) is how long after the grid instant the commit is due, and
-/// `OCUDU_UL_LANE_GRID_DEADBAND_US` (default 50) is the pull-back dead band.
+/// `OCUDU_UL_LANE_GRID_GAIN_SHIFT` (default 10, i.e. 1/1024 per hop) is how fast the grid walks to the bulk of
+/// the arrivals - see lane_grid_update_ns() for the rigidity/tracking trade it encodes.
 bool lane_grid_enabled();
 
 /// \brief Publishes one hop's ARRIVAL at the lane and the host instant of it - BEFORE the clamp below.
@@ -399,7 +400,7 @@ lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
                                      uint64_t slot,
                                      int64_t host_ns,
                                      int64_t slot_duration_ns,
-                                     int64_t deadband_ns,
+                                     int64_t gain_shift,
                                      uint64_t slots_per_hyperframe);
 
 /// \brief Host <-> little-endian byte-order conversions used by the MAC PDU decoders.

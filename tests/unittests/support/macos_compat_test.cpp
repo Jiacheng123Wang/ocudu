@@ -663,7 +663,7 @@ TEST(macos_compat_sched_test, lane_grid_filters_arrivals_instead_of_following_th
   EXPECT_EQ(compat::lane_grid_target_ns(0, -1, 7, SLOT_NS, 0, WRAP), -1) << "an unarmed grid has no target";
 
   // ---- the first observation ARMS ------------------------------------------------------------------------
-  const compat::lane_grid_update armed = compat::lane_grid_update_ns(0, -1, 7, 5000000, SLOT_NS, 50000, WRAP);
+  const compat::lane_grid_update armed = compat::lane_grid_update_ns(0, -1, 7, 5000000, SLOT_NS, 10, WRAP);
   EXPECT_EQ(armed.anchor_slot, 7);
   EXPECT_EQ(armed.anchor_host_ns, 5000000);
   EXPECT_FALSE(armed.rearmed);
@@ -676,20 +676,20 @@ TEST(macos_compat_sched_test, lane_grid_filters_arrivals_instead_of_following_th
   // properties that make that true: it MOVES TOWARD a late arrival (so it can reach the bulk at all) and it
   // moves by a FRACTION (so a 20 ms outlier is not the grid).
   const compat::lane_grid_update late_obs =
-      compat::lane_grid_update_ns(5000000, 7, 8, 6200000, SLOT_NS, 50000, WRAP);
+      compat::lane_grid_update_ns(5000000, 7, 8, 6200000, SLOT_NS, 10, WRAP);
   EXPECT_GT(late_obs.anchor_host_ns, 5000000)
       << "a late arrival must PULL THE GRID TOWARD IT - a pull-back-only rule pinned the grid at the earliest "
          "arrival and made the clamp inert (p223: 92.5% late)";
   // predicted(slot 8) = anchor(5.0 ms, slot 7) + one slot = 5.5 ms, so the residual is 700 us.
-  EXPECT_EQ(late_obs.anchor_host_ns, 5000000 + (6200000 - 5500000) / 64)
+  EXPECT_EQ(late_obs.anchor_host_ns, 5000000 + ((6200000 - 5500000) >> 10))
       << "and by a fraction of the distance, not all of it";
   EXPECT_LT(late_obs.anchor_host_ns, 5050000) << "one outlier is not the grid";
   EXPECT_FALSE(late_obs.rearmed);
 
   // An EARLY arrival moves it the other way, by the same fraction: the fixed point is the BULK.
   const compat::lane_grid_update early_obs =
-      compat::lane_grid_update_ns(5500000, 7, 8, 4800000, SLOT_NS, 50000, WRAP);
-  EXPECT_EQ(early_obs.anchor_host_ns, 5500000 + (4800000 - 6000000) / 64)
+      compat::lane_grid_update_ns(5500000, 7, 8, 4800000, SLOT_NS, 10, WRAP);
+  EXPECT_EQ(early_obs.anchor_host_ns, 5500000 + ((4800000 - 6000000) >> 10))
       << "an early arrival moves the grid the other way: " << early_obs.anchor_host_ns;
   EXPECT_LT(early_obs.anchor_host_ns, 5500000);
 
@@ -699,9 +699,9 @@ TEST(macos_compat_sched_test, lane_grid_filters_arrivals_instead_of_following_th
   // ON the scatter, not on its minimum and not on its maximum.
   {
     int64_t anchor = 5500000;
-    for (int i = 0; i != 900; ++i) {
+    for (int i = 0; i != 12000; ++i) {
       const int64_t arrival = 5600000 + ((i % 7) - 3) * 100000; // +-300 us around 5.6 ms
-      anchor = compat::lane_grid_update_ns(anchor, 7, 8, arrival, SLOT_NS, 0, WRAP).anchor_host_ns;
+      anchor = compat::lane_grid_update_ns(anchor, 7, 8, arrival, SLOT_NS, 10, WRAP).anchor_host_ns;
     }
     // The fixed point is residual == 0, i.e. anchor(7) = the arrival mean(8) - one slot = 5.6 ms - 0.5 ms.
     EXPECT_NEAR(static_cast<double>(anchor), 5100000.0, 60000.0)
@@ -709,9 +709,13 @@ TEST(macos_compat_sched_test, lane_grid_filters_arrivals_instead_of_following_th
   }
 
   // ---- a disruption RE-ARMS instead of walking ----------------------------------------------------------
+  // Slot 30 is due at 5.0 ms + 23 slots = 16.5 ms and the hop turns up at 22.5 ms: 12 slots of residual, i.e.
+  // 6 ms on a 500 us cell. The band is +-8 slots (4 ms), so this is what it is for - and the FIRST version of
+  // this arm used "11 slots of silence" without checking the residual it implies (23 slots of slot distance
+  // minus 16 slots of elapsed time = 7 slots), which the wider band correctly filters instead of re-arming.
   const compat::lane_grid_update disruption =
-      compat::lane_grid_update_ns(5000000, 7, 30, 20000000, SLOT_NS, 50000, WRAP);
-  EXPECT_TRUE(disruption.rearmed) << "11 slots of silence cannot be filtered, it has to re-arm";
-  EXPECT_EQ(disruption.anchor_host_ns, 20000000);
+      compat::lane_grid_update_ns(5000000, 7, 30, 22500000, SLOT_NS, 10, WRAP);
+  EXPECT_TRUE(disruption.rearmed) << "12 slots of residual cannot be filtered, it has to re-arm";
+  EXPECT_EQ(disruption.anchor_host_ns, 22500000);
   EXPECT_EQ(disruption.anchor_slot, 30);
 }

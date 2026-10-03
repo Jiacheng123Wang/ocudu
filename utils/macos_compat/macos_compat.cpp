@@ -856,7 +856,6 @@ struct lane_grid_state {
   std::atomic<int64_t>  anchor_slot{-1};
   std::atomic<int64_t>  slot_duration_ns{500000};
   std::atomic<int64_t>  lead_ns{200000};
-  std::atomic<int64_t>  deadband_ns{50000};
   std::atomic<uint64_t> noted{0};
   std::atomic<uint64_t> clamped{0};
   std::atomic<uint64_t> late{0};
@@ -866,6 +865,23 @@ struct lane_grid_state {
   std::atomic<int64_t>  wait_max_us{0};
   std::atomic<bool>     params_read{false};
 };
+
+/// The filter's gain as a right shift (see the caller): read once from the environment, default 1/1024.
+int64_t st_gain_shift()
+{
+  static const int64_t shift = []() {
+    const char* env = std::getenv("OCUDU_UL_LANE_GRID_GAIN_SHIFT");
+    if ((env == nullptr) || (env[0] == '\0')) {
+      return static_cast<int64_t>(10);
+    }
+    const long v = std::strtol(env, nullptr, 10);
+    // 6 = 1/64 (the first default) is the fastest sensible; 16 keeps the arithmetic in range and is slower than
+    // any drift needs. Refuse anything else rather than accept a gain that makes the filter a follower or a
+    // constant.
+    return (v < 6 || v > 16) ? static_cast<int64_t>(10) : static_cast<int64_t>(v);
+  }();
+  return shift;
+}
 
 lane_grid_state& lane_grid()
 {
@@ -935,7 +951,6 @@ bool lane_grid_enabled()
   lane_grid_state& st = lane_grid();
   if (!st.params_read.exchange(true, std::memory_order_relaxed)) {
     st.lead_ns.store(env_us("OCUDU_UL_LANE_GRID_LEAD_US", 200), std::memory_order_relaxed);
-    st.deadband_ns.store(env_us("OCUDU_UL_LANE_GRID_DEADBAND_US", 50), std::memory_order_relaxed);
   }
   return true;
 #else
@@ -962,7 +977,7 @@ lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
                                      uint64_t slot,
                                      int64_t host_ns,
                                      int64_t slot_duration_ns,
-                                     int64_t deadband_ns,
+                                     int64_t gain_shift,
                                      uint64_t slots_per_hyperframe)
 {
   lane_grid_update out;
@@ -982,9 +997,15 @@ lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
     return out;
   }
   const int64_t residual = host_ns - predicted;
-  if ((residual > 2 * slot_duration_ns) || (residual < -4 * slot_duration_ns)) {
-    // The filter cannot follow this (startup, a stream restart, a multi-slot disruption): re-arm rather than
-    // spend hundreds of hops walking there.
+  // ---- THE RE-ARM BAND MUST BE WIDER THAN THE ARRIVAL SPREAD -------------------------------------------
+  //
+  // p224's leg measured why: with the band at +2/-4 slots and an arrival spread of about 2 ms (four slots), it
+  // fired on 177374 of 356011 hops - HALF of them - so the grid was re-armed to whatever had just arrived and
+  // became a FOLLOWER of the jitter instead of a clock over it. The band exists to catch what the filter
+  // cannot follow (startup, a stream restart, a multi-slot disruption), and those are seconds, not slots: at
+  // +-8 slots (4 ms on a 500 us cell) a normal spread never reaches it and a real disruption always does.
+  const int64_t rearm_band = 8 * slot_duration_ns;
+  if ((residual > rearm_band) || (residual < -rearm_band)) {
     out.anchor_host_ns = host_ns;
     out.anchor_slot    = static_cast<int64_t>(slot);
     out.rearmed        = true;
@@ -1000,14 +1021,19 @@ lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
   // was inert. An inert seam is not a null result about the MECHANISM, it is a null result about the ANCHOR.
   //
   // The bulk of the arrivals is what the grid has to sit on, and its MEDIAN is as stable as its floor while
-  // being reachable. Symmetric and slow: 1/64 of the residual per hop, so the grid walks to the median arrival
-  // in ~0.1 s and one 20 ms outlier moves it by 300 us.
+  // being reachable. Symmetric and SLOW, and the gain is the whole trade:
   //
-  // NO SEPARATE RATE LIMIT, and that is deliberate rather than omitted: the re-arm band above already bounds
-  // |residual| to two slots, so this step is at most a thirty-second of a slot and a clamp at, say, an eighth
-  // of a slot could never bind. The first draft had one - dead code, caught by writing the test that was
-  // supposed to exercise it.
-  out.anchor_host_ns = anchor_host_ns + residual / 64;
+  //   * tracking: a first-order filter with gain g converges in ~1/g hops, and the drift it has to follow is
+  //     the radio-vs-host clock difference - ppm, i.e. milliseconds over a ten-minute leg;
+  //   * rigidity: the filter also transmits the arrival noise, and its steady-state spread is
+  //     sigma_grid ~ sigma_arrival * sqrt(g/2). At g = 1/64 and the measured sigma_arrival ~ 2 ms that is
+  //     ~180 us of grid wander - the same order as the jitter the grid exists to remove. At g = 1/1024 it is
+  //     ~45 us, and tracking a 6 ms drift still takes only ~8 s per time constant.
+  //
+  // So the default is 1/1024, tunable as a SHIFT (OCUDU_UL_LANE_GRID_GAIN_SHIFT, default 10) because that is
+  // the form the arithmetic takes. NO SEPARATE RATE LIMIT: the re-arm band bounds the step anyway, and the
+  // first draft's clamp could never bind - dead code, caught by the test that was meant to exercise it.
+  out.anchor_host_ns = anchor_host_ns + (residual >> gain_shift);
   return out;
 }
 
@@ -1025,7 +1051,7 @@ void lane_grid_note_hop(uint64_t slot)
                                                   slot,
                                                   steady_now_ns(),
                                                   st.slot_duration_ns.load(std::memory_order_relaxed),
-                                                  st.deadband_ns.load(std::memory_order_relaxed),
+                                                  st_gain_shift(),
                                                   kSlotsPerHyperframe);
   if ((up.anchor_host_ns != anchor_h) || (up.anchor_slot != anchor)) {
     st.anchor_host_ns.store(up.anchor_host_ns, std::memory_order_relaxed);
