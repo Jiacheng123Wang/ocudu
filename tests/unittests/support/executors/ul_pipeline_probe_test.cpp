@@ -1730,13 +1730,57 @@ TEST(ul_pipeline_probe_test, per_thread_cpu_accounting_files_one_window_per_slot
     EXPECT_EQ(values[2], 300000) << "and it must not make the max grow";
   }
 
-  // ---- the report names the thread, the count and the number to declare -----------------------------------
+  // ---- the report names the thread, the count and the WINDOW the CPU belongs to ---------------------------
+  //
+  // The instruction that used to be printed here ("-> declare computation >= <max>") was WRONG and it was the
+  // instrument's own words: the window closes on a slot change THIS thread saw, so it aggregates every activation
+  // in between (measured on an air leg: one window per ~5 lanes, ~9 ms wide) and its max is a backlog reading.
+  // A reader who declared that number would declare 8.4 ms for a window whose activations need ~0.2 ms.
   {
     const std::string out = capture_accounting();
     EXPECT_NE(out.find("[ul_thread_cpu]"), std::string::npos) << out;
     EXPECT_NE(out.find("thread="), std::string::npos) << out;
     EXPECT_NE(out.find("slots=4"), std::string::npos) << out;
-    EXPECT_NE(out.find("declare computation >="), std::string::npos) << out;
+    EXPECT_EQ(out.find("declare computation >="), std::string::npos)
+        << "the instrument must not tell the reader to declare the aggregate as a budget: " << out;
+    EXPECT_NE(out.find("BACKLOG"), std::string::npos) << "and it must say what the aggregate is: " << out;
+    EXPECT_NE(out.find("duty="), std::string::npos) << out;
+  }
+
+  // ---- the WALL side and the duty it implies ---------------------------------------------------------------
+  //
+  // 4 windows of 200 us of CPU in 2 ms of wall: duty 10%. The reverse arm is the same CPU in the same wall - if
+  // the duty were computed from the CPU series alone (or from a hard-coded 100%) it could not tell the two apart.
+  {
+    probe.reset_thread_cpu_accounting_for_test();
+    for (int i = 0; i != 5; ++i) {
+      probe.record_thread_cpu_boundary_for_test(static_cast<uint64_t>(i),
+                                                static_cast<int64_t>(i) * 200000,
+                                                static_cast<int64_t>(i) * 2000000);
+    }
+    const std::array<int64_t, 4> cpu  = probe.thread_cpu_account_values_for_test(0);
+    const std::array<int64_t, 3> wall = probe.thread_cpu_account_wall_values_for_test(0);
+    EXPECT_EQ(cpu[0], 4) << "5 boundaries close 4 windows";
+    EXPECT_EQ(cpu[1], 800000) << "800 us of CPU in total";
+    EXPECT_EQ(wall[0], 8000000) << "8 ms of wall in total";
+    EXPECT_EQ(wall[1], 2000000) << "the widest window is 2 ms";
+    const std::string out = capture_accounting();
+    EXPECT_NE(out.find("duty=10.0%"), std::string::npos)
+        << "800 us of work in 8 ms of wall is a 10% duty, and the report has to say so: " << out;
+    EXPECT_NE(out.find("window mean=2.00ms"), std::string::npos) << out;
+  }
+
+  // ---- the same CPU in the same wall, but the thread was ON-CPU the whole time ------------------------------
+  {
+    probe.reset_thread_cpu_accounting_for_test();
+    for (int i = 0; i != 5; ++i) {
+      probe.record_thread_cpu_boundary_for_test(static_cast<uint64_t>(i),
+                                                static_cast<int64_t>(i) * 200000,
+                                                static_cast<int64_t>(i) * 200000);
+    }
+    const std::string out = capture_accounting();
+    EXPECT_NE(out.find("duty=100.0%"), std::string::npos)
+        << "cpu == wall means the window was all work, and that is the OTHER end of the same ratio: " << out;
   }
 
   // ---- a LONE TAIL must survive to the declaration: the mean is not the number -----------------------------
@@ -1759,7 +1803,10 @@ TEST(ul_pipeline_probe_test, per_thread_cpu_accounting_files_one_window_per_slot
     EXPECT_LE(values[3], 131072) << "and it is the histogram's bucket edge just above 100 us";
     const std::string out = capture_accounting();
     EXPECT_NE(out.find("max=1000.0us"), std::string::npos) << out;
-    EXPECT_NE(out.find("declare computation >= 1000.0us"), std::string::npos) << out;
+    EXPECT_EQ(out.find("declare computation >="), std::string::npos)
+        << "the tail is reported, but the report no longer turns it into a declaration: the window it belongs to "
+           "aggregates several activations, so the declaration has to come from a per-activation series: "
+        << out;
   }
 
   ::unsetenv("OCUDU_UL_THREAD_CPU");

@@ -434,7 +434,10 @@ public:
     if (cpu_ns < 0) {
       return; // the platform refused the reading: it must not be filed as a zero-length window
     }
-    file_thread_cpu_boundary(acc, slot, cpu_ns);
+    const int64_t wall_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    file_thread_cpu_boundary(acc, slot, cpu_ns, wall_ns);
 #else
     (void)slot;
 #endif
@@ -449,7 +452,14 @@ public:
   ///       is decoration.
   void record_thread_cpu_boundary_for_test(uint64_t slot, int64_t cpu_ns)
   {
-    file_thread_cpu_boundary(this_thread_cpu_accounting(), slot, cpu_ns);
+    // A test that passes only the CPU is declaring "this window was all work": wall = cpu, duty 100%.
+    file_thread_cpu_boundary(this_thread_cpu_accounting(), slot, cpu_ns, cpu_ns);
+  }
+
+  /// Test hook with an explicit WALL span, so the duty a window implies is testable without a clock.
+  void record_thread_cpu_boundary_for_test(uint64_t slot, int64_t cpu_ns, int64_t wall_ns)
+  {
+    file_thread_cpu_boundary(this_thread_cpu_accounting(), slot, cpu_ns, wall_ns);
   }
 
   /// Test hook: zero the calling thread's accounting and make it the only registered one, so a case cannot read
@@ -483,6 +493,18 @@ public:
     std::lock_guard<std::mutex> lock(mutex);
     const thread_cpu_accounting& acc = *thread_cpu_accounts.at(index);
     return {static_cast<int64_t>(acc.slots), acc.sum_ns, acc.max_ns, thread_cpu_quantile_ns(acc, 0.999)};
+  }
+
+  /// Test hook: {sum_wall_ns, max_wall_ns, median_wall_ns} of one registered account, i.e. the WALL side of the
+  /// same windows whose CPU side the call above returns. The duty a leg reports is a ratio of the two, so a test
+  /// that could only see one of them could not test the ratio.
+  std::array<int64_t, 3> thread_cpu_account_wall_values_for_test(size_t index)
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    const thread_cpu_accounting& acc = *thread_cpu_accounts.at(index);
+    return {acc.sum_wall_ns,
+            acc.max_wall_ns,
+            thread_cpu_quantile_ns(acc.wall_buckets, acc.max_wall_ns, acc.slots, 0.5)};
   }
 
   /// \brief Slot-grid residuals: when each slot's work actually LANDED, against the grid it was supposed to land on.
@@ -669,7 +691,12 @@ public:
     }
     std::fprintf(stderr,
                  "[ul_thread_cpu] OCUDU_UL_THREAD_CPU=1: CPU each thread burned between two consecutive slot "
-                 "changes IT saw - the figure a Mach time constraint's `computation` has to cover\n");
+                 "changes IT saw, over the WALL span of that same window\n");
+    std::fprintf(stderr,
+                 "[ul_thread_cpu]   READ THE WINDOW, NOT JUST THE CPU: the window AGGREGATES every activation in "
+                 "between (measured on an air leg: one window per ~5 lanes, ~9 ms wide), so `max` is a BACKLOG "
+                 "reading and NOT the CPU one activation needs. `duty` is how much of the window the thread was "
+                 "on-CPU, i.e. the share a reservation would have to cover.\n");
     for (const thread_cpu_accounting* acc : thread_cpu_accounts) {
       if (acc->slots == 0) {
         std::fprintf(stderr,
@@ -678,16 +705,24 @@ public:
                      static_cast<unsigned long long>(acc->thread_id));
         continue;
       }
+      const double slots = static_cast<double>(acc->slots);
+      const double duty  = (acc->sum_wall_ns > 0) ? (100.0 * static_cast<double>(acc->sum_ns) /
+                                                     static_cast<double>(acc->sum_wall_ns))
+                                                  : 0.0;
       std::fprintf(stderr,
-                   "[ul_thread_cpu]   thread=%-16s id=%llu slots=%llu mean=%.1fus p99.9<=%.1fus max=%.1fus "
-                   "-> declare computation >= %.1fus\n",
+                   "[ul_thread_cpu]   thread=%-16s id=%llu slots=%llu cpu mean=%.1fus p99.9<=%.1fus max=%.1fus | "
+                   "window mean=%.2fms median=%.2fms max=%.1fms | duty=%.1f%%\n",
                    acc->name,
                    static_cast<unsigned long long>(acc->thread_id),
                    static_cast<unsigned long long>(acc->slots),
-                   static_cast<double>(acc->sum_ns) / static_cast<double>(acc->slots) / 1000.0,
+                   static_cast<double>(acc->sum_ns) / slots / 1000.0,
                    static_cast<double>(thread_cpu_quantile_ns(*acc, 0.999)) / 1000.0,
                    static_cast<double>(acc->max_ns) / 1000.0,
-                   static_cast<double>(acc->max_ns) / 1000.0);
+                   static_cast<double>(acc->sum_wall_ns) / slots / 1e6,
+                   static_cast<double>(thread_cpu_quantile_ns(acc->wall_buckets, acc->max_wall_ns, acc->slots, 0.5)) /
+                       1e6,
+                   static_cast<double>(acc->max_wall_ns) / 1e6,
+                   duty);
     }
   }
 
@@ -2815,13 +2850,20 @@ private:
     uint64_t slots = 0;
     int64_t  sum_ns = 0;
     int64_t  max_ns = 0;
-    /// The slot whose window is open, -1 when none, and this thread's CPU at the moment it was opened.
-    int64_t open_slot   = -1;
-    int64_t open_cpu_ns = -1;
+    /// The WALL span of the same windows, so the report can say how much of each window was work and how much was
+    /// being off-CPU. See file_thread_cpu_window() for why the two must travel together.
+    int64_t  sum_wall_ns = 0;
+    int64_t  max_wall_ns = 0;
+    /// The slot whose window is open, -1 when none, and this thread's CPU/wall at the moment it was opened.
+    int64_t open_slot    = -1;
+    int64_t open_cpu_ns  = -1;
+    int64_t open_wall_ns = -1;
     /// Log2 histogram of the closed windows, in ns: bucket i counts samples in [2^i, 2^(i+1)). It is what makes a
     /// TAIL readable out of a bounded amount of state - the declaration wants a p99.9, and keeping every sample of
     /// every pool thread for a whole leg is not something a hot path may do.
     uint64_t buckets[40] = {};
+    /// The same histogram for the wall span (see file_thread_cpu_window).
+    uint64_t wall_buckets[40] = {};
   };
 
   /// The knob for the accounting above. Read per call rather than cached, so a test can move it.
@@ -2855,18 +2897,27 @@ private:
   ///
   /// This is the ONE place the windowing rule lives, and both the production boundary and its test hook call it -
   /// see the note on record_thread_cpu_boundary_for_test() for what happened when it was written twice.
-  static void file_thread_cpu_boundary(thread_cpu_accounting& acc, uint64_t slot, int64_t cpu_ns)
+  static void file_thread_cpu_boundary(thread_cpu_accounting& acc, uint64_t slot, int64_t cpu_ns, int64_t wall_ns)
   {
-    if ((acc.open_slot >= 0) && (static_cast<int64_t>(slot) != acc.open_slot) && (cpu_ns >= acc.open_cpu_ns)) {
-      file_thread_cpu_window(acc, cpu_ns - acc.open_cpu_ns);
+    if ((acc.open_slot >= 0) && (static_cast<int64_t>(slot) != acc.open_slot) && (cpu_ns >= acc.open_cpu_ns) &&
+        (wall_ns >= acc.open_wall_ns)) {
+      file_thread_cpu_window(acc, cpu_ns - acc.open_cpu_ns, wall_ns - acc.open_wall_ns);
     }
-    acc.open_slot   = static_cast<int64_t>(slot);
-    acc.open_cpu_ns = cpu_ns;
+    acc.open_slot    = static_cast<int64_t>(slot);
+    acc.open_cpu_ns  = cpu_ns;
+    acc.open_wall_ns = wall_ns;
   }
 
   /// Files one closed window. Only the OWNING thread ever writes a block, so no lock is needed here; the registry
   /// itself is what `mutex` protects, and it is touched once per thread (at registration).
-  static void file_thread_cpu_window(thread_cpu_accounting& acc, int64_t cpu_ns)
+  ///
+  /// WALL IS FILED WITH THE CPU, and that is not book-keeping: `cpu_ns` is the WORK (what a reservation would have
+  /// to cover) while `wall_ns - cpu_ns` is the PREEMPTION inside the same window (what a reservation could remove).
+  /// Without the pair the two are indistinguishable in the report, and a reader who takes `max` of the CPU series
+  /// as "the budget one activation needs" is wrong twice over - the window aggregates several activations (measured:
+  /// one window per ~5 lanes on an air leg) and its max is a backlog reading, not a compute reading. See the
+  /// warning on file_thread_cpu_boundary().
+  static void file_thread_cpu_window(thread_cpu_accounting& acc, int64_t cpu_ns, int64_t wall_ns)
   {
     ++acc.slots;
     acc.sum_ns += cpu_ns;
@@ -2878,24 +2929,41 @@ private:
       ++bucket;
     }
     ++acc.buckets[bucket];
+
+    acc.sum_wall_ns += wall_ns;
+    if (wall_ns > acc.max_wall_ns) {
+      acc.max_wall_ns = wall_ns;
+    }
+    unsigned wall_bucket = 0;
+    for (int64_t v = wall_ns >> 1; (v != 0) && (wall_bucket + 1 < 40); v >>= 1) {
+      ++wall_bucket;
+    }
+    ++acc.wall_buckets[wall_bucket];
   }
 
   /// \brief The smallest value that covers \p quantile of the filed windows, from the histogram (-1 if empty).
   static int64_t thread_cpu_quantile_ns(const thread_cpu_accounting& acc, double quantile)
   {
-    if (acc.slots == 0) {
+    return thread_cpu_quantile_ns(acc.buckets, acc.max_ns, acc.slots, quantile);
+  }
+
+  /// The same arithmetic over either histogram (CPU or wall - see file_thread_cpu_window). Kept as ONE
+  /// implementation so the two series cannot drift apart in how their quantiles are computed.
+  static int64_t thread_cpu_quantile_ns(const uint64_t (&buckets)[40], int64_t max_ns, uint64_t count, double quantile)
+  {
+    if (count == 0) {
       return -1;
     }
-    const uint64_t target = static_cast<uint64_t>(quantile * static_cast<double>(acc.slots) + 0.999999);
+    const uint64_t target = static_cast<uint64_t>(quantile * static_cast<double>(count) + 0.999999);
     uint64_t       seen   = 0;
     for (unsigned i = 0; i != 40; ++i) {
-      seen += acc.buckets[i];
+      seen += buckets[i];
       if (seen >= target) {
         // The bucket's upper edge, in ns: bucket i holds [2^i, 2^(i+1)), so the edge is 2^(i+1) - 1.
-        return (i >= 62) ? acc.max_ns : ((static_cast<int64_t>(1) << (i + 1)) - 1);
+        return (i >= 62) ? max_ns : ((static_cast<int64_t>(1) << (i + 1)) - 1);
       }
     }
-    return acc.max_ns;
+    return max_ns;
   }
 
   /// Registry entry: start timestamp plus a monotonic insertion sequence (the slot key wraps every SFN cycle,

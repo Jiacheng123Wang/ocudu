@@ -124,6 +124,15 @@ struct lane_stats_t {
   /// follows it: the five phase segments are dark by construction there. This is the total span, entry to
   /// hand-over, and (entry_to_lane_commit - handover) is the tail the CPU spends after the extraction.
   std::vector<double> entry_to_lane_commit_us;
+  /// \brief The SAME span in THREAD CPU, published next to its wall twin on purpose.
+  ///
+  /// The user's accounting (2026-10-03): the CPU's job in a hop is a bounded slice - "申请一个 CPU 时间片段，
+  /// 完成 commit" - and the GPU kernel's execution is NOT part of it. `entry_to_lane_commit_us` cannot say how
+  /// much of the span the CPU was actually running, and that difference is what a Mach time constraint could
+  /// recover: it is preemption inside the activation, at a scale the 1 ms watchdog is blind to (it calls a
+  /// thread frozen only if it gained <100 us of CPU in a whole millisecond). Read the two as a pair: the CPU
+  /// series is the work, `wall - cpu` is the preemption.
+  std::vector<double> entry_to_lane_commit_cpu_us;
   /// Lanes whose total span read SHORTER than its own head (see the collection in close_lane): impossible
   /// by construction, so a non-zero count is an instrument defect, not a pipeline one. Reported by the
   /// contract check below instead of hiding in a series nobody differences by hand.
@@ -915,6 +924,10 @@ void gpu_lane_probe::close_lane()
       ++s.tail_shorter_than_head;
     }
   }
+  // The CPU side of the same span (see entry_to_lane_commit_cpu_us): the work, against the wall above.
+  if (metal::lane_clock.entry_to_lane_commit_cpu_us >= 0.0) {
+    s.entry_to_lane_commit_cpu_us.push_back(metal::lane_clock.entry_to_lane_commit_cpu_us);
+  }
   // ---- When the DEVICE got to each of the lane's command buffers (the queue's share) -------------
   //
   // This is the quantity the 'gap: commit -> first command buffer starts (queue)' series always
@@ -1345,6 +1358,10 @@ void gpu_lane_probe::report()
   // lane's OWN command buffer, i.e. up to the moment the CPU stands aside. The distance between the two
   // series is the work the host still does AFTER the extraction on the route where the lane is one buffer.
   print_series("host: stage entry -> lane commit", s.entry_to_lane_commit_us);
+  // The CPU of the SAME window, so "the host took 114 us" can be read as "of which it was running N us". The
+  // distance to the line above is preemption inside the activation - the quantity a Mach time constraint can
+  // recover, and the one the 1 ms watchdog cannot see (see the series' comment).
+  print_series("host cpu: stage entry -> lane commit", s.entry_to_lane_commit_cpu_us);
   print_series("gap: commit -> first command buffer starts (queue)", s.start_delay_us);
   // The same distance for the other two command buffers of the lane. The three together say whether
   // the gap is the device being busy when a buffer arrives (all three large) or one buffer being

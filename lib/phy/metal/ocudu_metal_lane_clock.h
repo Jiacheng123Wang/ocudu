@@ -27,6 +27,8 @@
 
 #pragma once
 
+#include "ocudu/support/scheduling/thread_sched_snapshot.h"
+
 #include <chrono>
 #include <cstdint>
 
@@ -74,6 +76,23 @@ struct lane_host_clock {
   /// high-level doc's second goal: one-shot host participation) is about.
   double entry_to_lane_commit_us = -1.0;
 
+  /// \brief The SAME span in THREAD CPU, and why the PAIR is the point (2026-10-03, user).
+  ///
+  /// `entry_to_lane_commit_us` is WALL, so it answers "how long did the host take" but not "how much of that was
+  /// the host RUNNING". Those are different quantities with different fixes, and until now this probe could not
+  /// tell them apart:
+  ///
+  ///   * the CPU side is the WORK - the bounded slice the user's framework calls "申请一个 CPU 时间片段，完成
+  ///     commit", and the only thing a Mach time constraint's `computation` can legitimately cover. GPU kernel
+  ///     time is NOT charged to it: the CPU stands aside at the commit and the device runs on its own;
+  ///   * `wall - cpu` is the thread being OFF-CPU inside its own activation - preemption at the ~100 us scale,
+  ///     which the 1 ms watchdog CANNOT see (it samples once per millisecond and calls a thread frozen only if it
+  ///     gained <100 us of CPU in between, so a 200 us preemption inside a 1 ms window reads as "advanced").
+  ///
+  /// Removing that blindness is the whole reason this field exists: `cpu_stolen = 0` over eight legs is a
+  /// statement about stalls of ~1 ms and above, NOT about the scale these activations live at.
+  double entry_to_lane_commit_cpu_us = -1.0;
+
   /// \brief Receiving slot of the lane being assembled on this thread, and whether it was ever told (P0-5).
   ///
   /// This is the KEY the lane probe pairs on. Its residency/busy are per LANE (one thread's chained command
@@ -92,14 +111,16 @@ struct lane_host_clock {
   void mark_stage_entry(uint64_t slot)
   {
     stage_entry       = clock::now();
+    stage_entry_cpu_ns = this_thread_cpu_ns();
     extraction_commit = {};
     handover_us       = -1.0;
     // The tail belongs to ONE lane: a thread that starts a new lane must not inherit the previous one's
     // commit (a route whose lane is committed elsewhere would otherwise report a stale span as this lane's).
-    lane_commit             = {};
-    entry_to_lane_commit_us = -1.0;
-    lane_slot               = slot;
-    has_lane_slot           = true;
+    lane_commit                 = {};
+    entry_to_lane_commit_us     = -1.0;
+    entry_to_lane_commit_cpu_us = -1.0;
+    lane_slot                   = slot;
+    has_lane_slot               = true;
   }
 
   void mark_extraction_commit()
@@ -113,14 +134,30 @@ struct lane_host_clock {
   /// that never did leaves it at -1 (not measured) rather than reporting a partial span.
   void mark_lane_commit()
   {
-    lane_commit             = clock::now();
-    entry_to_lane_commit_us = delta_us(stage_entry, lane_commit);
+    lane_commit                 = clock::now();
+    entry_to_lane_commit_us     = delta_us(stage_entry, lane_commit);
+    entry_to_lane_commit_cpu_us = delta_cpu_us(stage_entry_cpu_ns, this_thread_cpu_ns());
   }
 
   /// Microseconds between the stage entry and the extraction's commit, or -1 when either is unset.
   double entry_to_commit_us() const { return delta_us(stage_entry, extraction_commit); }
 
+  /// The CPU the CPU-vs-wall pair needs at the entry landmark (see entry_to_lane_commit_cpu_us). -1 on a platform
+  /// that refuses the reading, which the callers treat as "not measured" rather than as zero.
+  int64_t stage_entry_cpu_ns = -1;
+
 private:
+  /// Microseconds of THREAD CPU between two readings, -1 when either is missing. Its own helper because the two
+  /// sides are read from different clocks (a time_point and a CPU nanosecond counter) and a negative reading is
+  /// "unmeasured", never "zero work".
+  static double delta_cpu_us(int64_t from_ns, int64_t to_ns)
+  {
+    if ((from_ns < 0) || (to_ns < 0) || (to_ns < from_ns)) {
+      return -1.0;
+    }
+    return static_cast<double>(to_ns - from_ns) / 1e3;
+  }
+
   static double delta_us(clock::time_point from, clock::time_point to)
   {
     if ((from == clock::time_point{}) || (to == clock::time_point{})) {
