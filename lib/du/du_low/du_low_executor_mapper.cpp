@@ -109,7 +109,29 @@ public:
       static constexpr std::array<unsigned, 3> pusch_srs_queue_sizes{
           default_queue_size, default_queue_size, default_queue_size};
 
-      const auto& flexible = std::get<du_low_executor_mapper_flexible_exec_config>(config.executors);
+      // A COPY, so the lane's concurrency can be overridden below without touching the caller's config.
+      auto flexible = std::get<du_low_executor_mapper_flexible_exec_config>(config.executors);
+
+      // ---- the STRAND CONTROL: `OCUDU_UL_LANE_CONCURRENCY=1` serialises the lane exactly the way a single
+      // paced thread does, and it is the arm the first band sweep was missing. That sweep compared a paced
+      // thread against a pool running TWO hops at once and read the whole throughput difference as the price
+      // of pacing; but a hop's chain costs more WALL time (GPU waits included) than a slot, so one worker
+      // cannot sustain what two could - and the two effects are confounded until this knob separates them.
+      // With the pool serialised too, the only difference left between the arms is WHEN the work runs.
+      if (const char* lane_conc = std::getenv("OCUDU_UL_LANE_CONCURRENCY");
+          (lane_conc != nullptr) && (lane_conc[0] != '\0')) {
+        const long over = std::strtol(lane_conc, nullptr, 10);
+        if (over > 0) {
+          const unsigned derived                 = flexible.max_pusch_and_srs_concurrency;
+          flexible.max_pusch_and_srs_concurrency = static_cast<unsigned>(over);
+          std::fprintf(stderr,
+                       "[ul_lane_exec] OCUDU_UL_LANE_CONCURRENCY=%ld OVERRIDES the derived lane concurrency "
+                       "(%u): this is the control arm that separates \"one worker\" from \"work run on a "
+                       "grid\"\n",
+                       over,
+                       derived);
+        }
+      }
 
       report_error_if_not(
           flexible.max_pusch_and_srs_concurrency <= flexible.non_rt_medium_prio_exec.max_concurrency,
