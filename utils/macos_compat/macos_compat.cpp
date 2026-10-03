@@ -823,6 +823,36 @@ void wait_for_tx_timestamp()
 #endif
 }
 
+bool poll_rx_wait_enabled()
+{
+#if defined(__APPLE__)
+  // Two keys, like every instrument here: the compile switch is the caller's guard, this is the run-time one.
+  const char* env = std::getenv("OCUDU_UL_RX_POLL_WAIT");
+  return (env != nullptr) && (env[0] != '\0') && !((env[0] == '0') && (env[1] == '\0'));
+#else
+  // Linux never reaches the call site (it is inside a platform guard), and saying "false" here keeps that
+  // guarantee checkable rather than assumed.
+  return false;
+#endif
+}
+
+void sprint_wait()
+{
+#if defined(__APPLE__)
+  // 50 us: short enough that a buffer which arrives during the quantum is picked up within it, long enough that
+  // an idle receive thread does not burn a core. The framework's idle lane uses the same idea.
+  static const double ticks_per_us = [] {
+    mach_timebase_info_data_t tb{};
+    mach_timebase_info(&tb);
+    return (tb.numer != 0) ? (static_cast<double>(tb.denom) / static_cast<double>(tb.numer)) : 24.0;
+  }();
+  const uint64_t now = mach_absolute_time();
+  mach_wait_until(now + static_cast<uint64_t>(50.0 * ticks_per_us));
+#else
+  ::usleep(50);
+#endif
+}
+
 uint16_t le16_to_host(uint16_t x)
 {
 #if defined(__APPLE__)

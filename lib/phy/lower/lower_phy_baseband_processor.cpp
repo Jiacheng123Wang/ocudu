@@ -1271,8 +1271,37 @@ std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> lower_phy_baseband_proc
     const bool simulated_timeout = force_timeout;
     force_timeout                = false;
     if (!simulated_timeout) {
+      // ★ P5.1 (plan doc Fbis): on macOS, optionally DO NOT BLOCK. The receive thread retries a non-blocking pop
+      // with a bounded sprint quantum instead of parking for the whole slice, so a buffer that arrives during the
+      // quantum is picked up without the kernel having to wake this thread - which is the one property the user's
+      // working LTE framework has and this pipeline does not (its threads poll; ours block), and the property the
+      // watchdog's zero CPU_STOLEN count points at.
+      //
+      // SCOPE: the branch is inside a platform guard, so LINUX CANNOT REACH IT and keeps the blocking wait exactly
+      // as shipped; with the switch off macOS keeps it too. Both are byte-identical to before.
+      const auto pop_rx_buffer = [&]() {
+#if defined(__APPLE__)
+        if (compat::poll_rx_wait_enabled()) {
+          const auto deadline = std::chrono::steady_clock::now() + wait_slice;
+          for (;;) {
+            if (rx_pool->buffers.try_pop(buffer)) {
+              return blocking_queue<std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>>::result::success;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+              // Same outcome as the blocking wait's timeout, and the wait is bounded by the same slice. NOTE:
+              // try_pop() also answers false for an INACTIVE queue, so a stop is noticed at this deadline rather
+              // than immediately - a difference that is bounded by wait_slice, i.e. by what the blocking wait
+              // would have spent anyway, and it is recorded in the record rather than left to be discovered.
+              return blocking_queue<std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>>::result::timeout;
+            }
+            compat::sprint_wait();
+          }
+        }
+#endif
+        return rx_pool->buffers.pop_wait_for(buffer, wait_slice);
+      };
       const blocking_queue<std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>>::result ret =
-          rx_pool->buffers.pop_wait_for(buffer, wait_slice);
+          pop_rx_buffer();
       if (ret == decltype(ret)::success) {
         return buffer;
       }

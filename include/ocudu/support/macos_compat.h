@@ -299,6 +299,33 @@ bool drain_executor_on_stop(task_executor& executor);
 /// coalesced by the Darwin scheduler and overshoot the 2 ms wall-clock deadline.
 void wait_for_tx_timestamp();
 
+/// \brief True when the MACOS build should poll for received baseband instead of BLOCKING on the pool.
+///
+/// WHY (plan doc Fbis / P5.1). The user's LTE framework runs two threads on this machine with under 100 us of
+/// jitter over a million frames, and the property that separates it from this project's pipeline is that its
+/// threads NEVER BLOCK: they poll for work, sleep to an absolute instant minus a lead, and hold a
+/// non-preemptible budget. The watchdog says the same thing from the other side - across 1.5M ticks in two
+/// regimes the stalls were blocked threads and unscheduled runs, and CPU theft was ZERO, so no priority
+/// scheme has an object to act on.
+///
+/// This seam is where our receive thread blocks: `rx_pool->buffers.pop_wait_for(buffer, wait_slice)` parks for
+/// up to a whole slice, and when data arrives it needs the kernel to wake it. With the switch on, the thread
+/// instead re-tries a non-blocking pop with a bounded sprint quantum, so the buffer is picked up without a
+/// wakeup.
+///
+/// KEYS AND SCOPE: MACOS ONLY, and gated by OCUDU_UL_RX_POLL_WAIT on top of OCUDU_FLOW_PROBES. Off - which is
+/// the default and the only behaviour Linux can reach, since the call site is inside a platform guard - the
+/// blocking wait is used exactly as before, so a leg is byte-identical.
+bool poll_rx_wait_enabled();
+
+/// \brief The bounded quantum the polling receive path sleeps between non-blocking retries (macOS).
+///
+/// It is a SHORT sleep rather than a spin on purpose: the framework's own design calls this the sprint window,
+/// and its idle lane does the same thing. Only the last `lead` before a known deadline is worth spinning, and
+/// this path has no known deadline - it is waiting for data.
+void sprint_wait();
+
+
 /// \brief Host <-> little-endian byte-order conversions used by the MAC PDU decoders.
 ///
 /// Linux: endian.h. macOS: libkern/OSByteOrder (OSSwap*).

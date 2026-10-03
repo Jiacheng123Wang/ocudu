@@ -2640,3 +2640,50 @@ P5（`Fbis`）的目标**不需要改**：③ 既然在两种制度下都是 0�
 ★ **过程中又踩一次老坑**：第一次的破坏版本**没编译过**（`sxy` 变成 set-but-unused，`-Werror`），
 而我把构建输出丢进了 `/dev/null` ⇒ 跑的是**旧二进制**，测试"通过"。**教训与纪律 79 同源：
 构建输出不许丢**；反向臂必须**确认二进制真的换了**。
+
+### 10.53 2026-10-03 —— P5.1 落地：**接收路径"不阻塞"**（`OCUDU_UL_RX_POLL_WAIT`，**macOS 独占 + 默认关**）
+
+#### (1) 接缝在哪，以及为什么是它
+
+读代码后发现：本项目的 lower-PHY **两条线程都是"数据驱动"的**，**没有"已知时刻"可以自旋等待**：
+* **TX** 等的是"RX 时间戳追上"（`compat::wait_for_tx_timestamp()`）——而 macOS 侧**本来就已经是 `yield` 自旋**；
+* **RX** 等的是池里有 buffer：`rx_pool->buffers.pop_wait_for(buffer, wait_slice)` —— **阻塞，最长一整个 slice（10 ms）**，
+  数据到了还需要**内核把它唤醒**。
+
+⇒ 用户框架里"睡到 `deadline−lead` 再自旋"对应的是**它那条定时驱动的 TX**；而**"不阻塞"这条**对应的是**我们的 RX**。
+**这正是看门狗指出的那条**（154 万 tick 里 `cpu_stolen = 0`，停顿是"阻塞"与"未被调度"）。
+
+#### (2) 改了什么（**Linux 与默认路径一字不变**）
+
+```cpp
+#if defined(__APPLE__)                    // ← Linux 无法到达这一分支
+  if (compat::poll_rx_wait_enabled()) {   // ← OCUDU_UL_RX_POLL_WAIT（默认关）
+      // 非阻塞 try_pop + 有界 sprint 量子（50 µs），deadline = 原来的 wait_slice
+  }
+#endif
+  return rx_pool->buffers.pop_wait_for(buffer, wait_slice);   // 原路径
+```
+
+* 新接缝两个：`compat::poll_rx_wait_enabled()`（两把钥匙）与 `compat::sprint_wait()`（50 µs 有界量子，
+  不是无脑自旋——用户框架的 idle lane 也这么做）；
+* **代价/差异**（写进代码注释与本节）：`try_pop()` 对"**队列已停止**"也返回 false，
+  所以**关停**会在 deadline 才被察觉（**上界 = wait_slice**，即原本阻塞等待本来就会花掉的时间）。
+
+#### (3) 怎么飞（下一次一起）
+
+在现有配方上加 **一个** 变量即可（与 P5.0 的锚点、看门狗同时带）：
+
+```
+OCUDU_UL_RX_POLL_WAIT=1     # P5.1：接收路径不阻塞
+OCUDU_UL_SLOT_GRID=1        # P5.0：节拍锚点（要打败的基线）
+OCUDU_UL_WATCHDOG=1         # ①/②/③ 的占比
+```
+
+**判据**：四条尾部率不变差、`min` 不升（§10.33）+ **`[ul_slot_grid]` 的残差分布左移** +
+看门狗里 **② driver_block 的占比下降**（若"不阻塞"真的有用，这正是它该动的地方）+ 报告里**自旋/轮询占用的核数**。
+
+#### (4) 本步的验证状态
+
+本机：`gnb` 与探针单测目标**构建通过**；整二进制 **19/19**、`-L phy` **212/212**。
+**Linux 不变性**：分支在平台守卫内 ⇒ Linux 侧**不可达**；Ubuntu 两配置编译 + `ctest` 与
+**"Linux 上开/关旋钮跑 loopback 做 `diff`"**（Fbis.6 检查 #2）见下一次提交的记录。
