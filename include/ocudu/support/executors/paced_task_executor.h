@@ -53,7 +53,7 @@ public:
   /// \param slot_duration   The grid's period: one slot (see plan doc §11.4; parameterised by SCS, not fixed).
   /// \param lead            How long after the grid tick the loop starts looking for work.
   /// \param max_wait        How long past `lead` it keeps looking before it skips the tick.
-  /// \param nof_threads     How many threads share the grid and this queue. ONE thread serialises whatever the
+  /// \param nof_threads_    How many threads share the grid and this queue. ONE thread serialises whatever the
   ///                        lane used to run concurrently, and the first air sweep measured exactly that: the
   ///                        paced arm sat at ~3.2 Mbit/s against the pool's 6.74 whatever the band, because a
   ///                        hop's chain costs more WALL time (GPU waits included) than a slot, so one thread
@@ -71,7 +71,7 @@ public:
                       std::chrono::nanoseconds         slot_duration,
                       std::chrono::nanoseconds         lead,
                       std::chrono::nanoseconds         max_wait,
-                      unsigned                         nof_threads = 1,
+                      unsigned                         nof_threads_ = 1,
                       os_thread_realtime_priority      prio = os_thread_realtime_priority::no_realtime(),
                       const os_sched_affinity_bitmask& mask = {});
 

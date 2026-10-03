@@ -28,7 +28,7 @@ paced_task_executor::paced_task_executor(std::string                      thread
                                          std::chrono::nanoseconds         slot_duration_,
                                          std::chrono::nanoseconds         lead_,
                                          std::chrono::nanoseconds         max_wait_,
-                                         unsigned                         nof_threads,
+                                         unsigned                         nof_threads_,
                                          os_thread_realtime_priority      prio,
                                          const os_sched_affinity_bitmask& mask) :
   name(std::move(thread_name)),
@@ -39,15 +39,16 @@ paced_task_executor::paced_task_executor(std::string                      thread
   // drain, which is where a burst of a hop's stages goes.
   max_wait(std::min(max_wait_, slot_duration_ / 2)),
   max_wait_requested(max_wait_),
-  nof_threads(std::max(1u, nof_threads)),
+  nof_threads(std::max(1u, nof_threads_)),
   pending(queue_size, std::chrono::microseconds{50})
 {
-  // `this->` on every use: the constructor's parameter shadows the member in the body, and with nof_threads = 0
-  // the two differ (the member is clamped to 1) - so reading the parameter here would create NO thread at all.
-  threads.reserve(this->nof_threads);
-  for (unsigned i = 0; i != this->nof_threads; ++i) {
+  // The parameter is spelled `nof_threads_` because the member is `nof_threads`: the first version reused the
+  // name and Linux's -Werror=shadow refused it - the same class of defect the two-platform build exists to
+  // catch, since macOS built it happily.
+  threads.reserve(nof_threads);
+  for (unsigned i = 0; i != nof_threads; ++i) {
     // One thread per index in the name, so a time constraint can be declared per thread (the name is the key).
-    const std::string tname = (this->nof_threads == 1) ? name : (name + "#" + std::to_string(i));
+    const std::string tname = (nof_threads == 1) ? name : (name + "#" + std::to_string(i));
     threads.emplace_back(tname, prio, mask, [this]() { run(); });
   }
 }
