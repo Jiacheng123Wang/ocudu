@@ -352,18 +352,14 @@ void sprint_wait();
 /// the arrivals - see lane_grid_update_ns() for the rigidity/tracking trade it encodes.
 bool lane_grid_enabled();
 
-/// \brief Publishes one hop's ARRIVAL at the lane and the host instant of it - BEFORE the clamp below.
+/// \brief Publishes the RADIO's frontier: slot \p slot 's samples are readable as of \p host_ns.
 ///
-/// WHERE THE OBSERVATION COMES FROM, and why it is not the receive path. It is the lane's own entry instant,
-/// taken just before lane_grid_wait(): the receive path's slot-completion reading would be better in principle
-/// (it is the transport's own timing) but it lives inside the probe's compile guard, and a BEHAVIOUR knob must
-/// not depend on OCUDU_FLOW_PROBES. The lane's arrival is the next best thing and it is enough: what the grid
-/// needs is a STABLE FLOOR, and the fastest hop start is exactly that.
-///
-/// The grid is armed on the first observation, then tracks that floor with a SLOW pull-back (never a
-/// push-forward, and never on a single sample - see the dead band and the filter in the .cpp). A re-arm band
-/// catches the cases the filter cannot follow (startup, a disruption), and it is counted.
-void lane_grid_note_hop(uint64_t slot);
+/// Called from the receive path (lower_phy_baseband_processor, next to the clock map it already maintains), once
+/// per slot. THIS, not the lane's arrival, is what the grid may track: the frontier's wander is the transport's
+/// (slow, ppm-scale), while the lane's arrival carries the whole upstream pipeline's millisecond wander - see
+/// the call site for what anchoring on the wrong one measured (p224/p225: 4-19 ms of residual against a clamp
+/// that was precise to 3 us).
+void lane_grid_note_slot(uint64_t slot, int64_t host_ns);
 
 void lane_grid_wait(uint64_t slot);
 
@@ -390,7 +386,7 @@ struct lane_grid_update {
   bool rearmed = false;
 };
 
-/// \brief Applies one hop observation to the grid (see lane_grid_note_hop): arm, re-arm, or pull back SLOWLY.
+/// \brief Applies one frontier observation to the grid (see lane_grid_note_slot): arm, re-arm, or walk slowly.
 ///
 /// THE RULE THE TEST PINS DOWN: a LATE observation must NOT move the grid. That is what separates a filter
 /// from a follower - a grid that moved on late arrivals would inherit the very jitter it exists to remove -
