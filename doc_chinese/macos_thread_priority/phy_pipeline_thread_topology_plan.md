@@ -552,3 +552,51 @@ T_llr（后续）         在 GPU 完成后接管 LLR → LDPC → TB → FAPI/M
 | **P6.3** | 只为 UL 数据面退役工作窃取池 | 全套 + 长腿 |
 
 **回退**：任一步触红线或价值主张被否证 ⇒ **保持默认关、撤回代码路径**（本线一贯纪律）。
+
+## 11.11 接线设计：**不需要重构 pipeline**，只需要"换一条线程 + 加一个节拍门"
+
+今天 PUSCH lane 的任务跑在 **medium pool**（`main_pool#0..#4`，5 条线程）上：
+
+```cpp
+// du_low_executor_mapper.cpp:121-125
+auto pusch_srs_execs = create_task_fork_limiter(flexible.non_rt_medium_prio_exec,
+                                                flexible.max_pusch_and_srs_concurrency, ...);
+phy_config.pusch_executor = pusch_srs_execs[1];
+```
+
+而 `max_concurrency <= 1` 会返回一个 **STRAND**（同一时刻只有一个 PUSCH hop）——这一点代码注释里已经写明。
+⇒ 本方案的接线只有两件事：
+
+1. **一条独占线程**：给 PUSCH lane 一个**专用 executor**（自己的线程名，如 `pusch_lane`），不再与 medium pool 共享。
+   今天 `[sched]` 已经逐线程打印档位，新的线程会自然出现在那一行里，便于回读；
+2. **周期化 + 申报**：
+   * **节拍门**：在该线程每次处理一个 PUSCH hop 之前，
+     `睡到 (slot_boundary − wake_lead)` → **有界等待**该 slot 数据就绪 → 提交 或 跳过并计数（§11.3）；
+   * **申报**：用**现成的** `OCUDU_SCHED_TIME_CONSTRAINT`（它今天就支持**按线程名**逐线程选择，
+     见 `macos_compat` 的解析器与 §10.45 的七对腿），申报值取 §11.4 的参数表。
+
+**数据流、GPU 派发顺序、FAPI/MAC 交付内容都不动**（§7 第 4 条）。
+`OCUDU_UL_RX_POLL_WAIT` 保持关（P5.1 已证在这套配置下是 no-op，§10.54）。
+
+**前置检查（落地前必须过）**：新线程创建后，`[sched]` 必须能回读到它是**独占**的（不在 `main_pool` 里），
+且申报值与回读值一致——否则这条腿是"没接上"，不是"没效果"（P5.1 的教训：先证明变量到达了线程）。
+
+## 11.12 P6.0-SLOT 的状态（2026-10-03 晚）
+
+| # | 项 | 状态 |
+|---|---|---|
+| 1 | 每 slot 的 **wait / host cpu / device** 三段 | host cpu ✅（`host cpu: stage entry → lane commit`，本次提交）；device ✅（既有 `[metal_stats]`）；**wait 要等线程存在才能量** |
+| 2 | **投递延迟分布**（定 lead）| ❌ **以现有仪器不可测**——见下，改为**运行中判定** |
+| 3 | **commit 地标的节拍锚点** | ✅ 本次提交（CE / COMMIT **两条独立曲线**并存 + 独立性反向臂）|
+| 4 | 跳过计数 + 原因 | 待线程存在（P6.1）|
+| 5 | GPU lane 时间分布 | ✅ 既有（`merged_hop exec`）；"完成 → 后端醒来"的间隔待后端线程 |
+| 6 | Metal commit 稳定性微基准 | ✅ §10.60（并已回答用户关于 `max 862.9 µs` 的问题）|
+
+### 为什么 #2 不可测（诚实结论，而不是糊过去）
+
+**电台时间戳只是样本计数器，不是绝对时间。** 宿主侧唯一的时间信息是"最新一对 `(radio_ts, host_ns)`"，
+所以"这个样本是多久以前在空中"**无法从现有读数算出**——那需要电台的绝对时钟（GPSDO 给得出，但接进来是另一条线）。
+宿主能测的只有"相对最新配对"的量，而那正是 `[ul_rx_wait]` 已经给的"这次 `receive()` 等了多久"。
+
+⇒ **lead 不靠测，靠运行中判定**：先定 **1 个 slot**；若锚点出现斜偏/漂移，或**跳过率 > 0.1%**，就把 lead 加到 2 个 slot。
+这是一个**运营参数**，不是一个需要新仪器的未知量。
