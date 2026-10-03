@@ -542,6 +542,11 @@ public:
   /// One anchor's state: the samples plus the unwrapping bookkeeping. TWO instances exist (CE and commit) and
   /// they must not share the unwrapping state, because each tracks "the previous raw counter value" and two
   /// landmarks filing interleaved slots into one account would read each other's slots as backward steps.
+  /// How far a landmark's slot may step BACKWARD and still count as an observation (see file_slot_grid_sample).
+  /// The pipeline keeps about three slots in flight, so a genuine inversion is one or two; eight leaves room and
+  /// still refuses the thousands-of-slots step that is a stale filing rather than a cadence reading.
+  static constexpr int64_t NBACKWARD_KEPT_SLOTS = 8;
+
   struct slot_grid_account {
     std::vector<slot_grid_sample> samples;
     int64_t                       base         = 0;
@@ -549,6 +554,8 @@ public:
     int64_t                       raw_max      = -1;
     int64_t                       backward     = 0;
     int64_t                       backward_max = 0;
+    /// Landmarks dropped from the fit because their slot stepped back further than NBACKWARD_KEPT_SLOTS.
+    int64_t excluded = 0;
   };
 
   /// Whether the anchor's knob is on (the usual two keys: compile switch + env, off by default).
@@ -578,12 +585,23 @@ public:
         acc.raw_max  = raw;
       }
       else {
-        // KEPT in the fit, not dropped: an out-of-order completion is a real observation and must show up as the
-        // one slot of residual it is. It is COUNTED so the reader can tell a 500 us residual caused by it apart
-        // from one caused by the run.
+        // A SMALL inversion is a real observation and is KEPT: two hops overlap by design, so adjacent slots
+        // finish in either order and the sample is worth the one slot of residual it carries.
+        //
+        // A LARGE one is NOT a cadence observation at all - it is a landmark filed for a slot the pipeline
+        // finished long ago (a duplicate, a late re-run, a stale PDU) - and keeping it in a LEAST-SQUARES fit
+        // moves the whole line. Measured, and the correlation is what named it: the anchor's residual grew with
+        // the largest inversion and with nothing else - p223 9 slots -> p95 190us, p224 11 -> 2270us, p225
+        // 7880 -> 18852us. So it is EXCLUDED from the fit and COUNTED, which is the rule the wrap threshold
+        // already follows (an out-of-order sample must never be read as a clock).
         ++acc.backward;
         if ((acc.last_raw - raw) > acc.backward_max) {
           acc.backward_max = acc.last_raw - raw;
+        }
+        if ((acc.last_raw - raw) > NBACKWARD_KEPT_SLOTS) {
+          ++acc.excluded;
+          acc.last_raw = raw;
+          return;
         }
       }
     }
@@ -717,7 +735,8 @@ public:
     std::fprintf(stderr,
                  "[ul_slot_grid] OCUDU_UL_SLOT_GRID=1: %s landmark: %zu slot sample(s); fitted period=%.1fus "
                  "(nominal for this cell: see the config); residual p50/p95/p99/max = %s us; "
-                 "half-means %.1fus vs %.1fus (drift); backward=%lld (largest %lld slot(s))\n",
+                 "half-means %.1fus vs %.1fus (drift); backward=%lld (largest %lld slot(s), %lld excluded from "
+                 "the fit)\n",
                  which,
                  samples.size(),
                  slope_ns / 1000.0,
@@ -725,7 +744,8 @@ public:
                  m1 / 1000.0,
                  m2 / 1000.0,
                  static_cast<long long>(acc.backward),
-                 static_cast<long long>(acc.backward_max));
+                 static_cast<long long>(acc.backward_max),
+                 static_cast<long long>(acc.excluded));
   }
 
   /// \brief Prints one line per thread that filed windows, with the number to declare (see thread_cpu_accounting).

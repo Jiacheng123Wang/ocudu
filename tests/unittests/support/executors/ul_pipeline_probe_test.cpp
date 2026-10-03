@@ -2118,11 +2118,37 @@ TEST(ul_pipeline_probe_test, slot_grid_counts_a_late_completion_instead_of_inven
         << "one late completion must NOT be read as a counter wrap: it adds a whole hyperframe to every later "
            "sample and tilts the fit (this is the arithmetic p219's 491.8us came from): "
         << out;
-    EXPECT_NE(out.find("backward=1 (largest 1 slot(s))"), std::string::npos)
+    EXPECT_NE(out.find("backward=1 (largest 1 slot(s), 0 excluded from the fit)"), std::string::npos)
         << "the sample is KEPT in the fit (it is a real observation, not noise), so the report has to say so: " << out;
     // The kept sample lands one slot late against the grid, so it is the run's residual maximum and nothing else is.
     EXPECT_NE(out.find("residual p50/p95/p99/max = 0.0/0.0/0.0/500.0 us"), std::string::npos)
         << "the out-of-order completion is worth exactly one slot of residual: " << out;
+  }
+
+  // ---- arm C: a STALE landmark must not move the fit, and must be reported as excluded -------------------
+  //
+  // p225 measured why this arm exists: its anchor carried `backward=42 (largest 7880 slot(s))` and residuals of
+  // 4-19 ms, against a leg whose clamp was precise to 3 us. The residual grew with the largest inversion and
+  // with nothing else (p223 9 slots -> 190us, p224 11 -> 2270us, p225 7880 -> 18852us), i.e. the fit was
+  // reporting a handful of stale filings rather than the run. A small inversion stays - it is a real
+  // observation - and a large one is dropped and counted.
+  fill(/*one_completion_out_of_order=*/false);
+  {
+    // The clean arm above is the reference: 500.0 us and no residual. Now file ONE landmark for a slot 200
+    // back - which is what a stale filing looks like: the counter is hyperframe-relative, so it is 20279 while
+    // the leg is at 20479, and the instant is now. (The first version of this arm passed 2*HYPERFRAME-200, a
+    // value the production counter can never take: it read as a huge FORWARD jump and tilted the fit instead of
+    // being excluded - a test that fails while proving the opposite of what it claims.)
+    probe.record_slot_grid(static_cast<uint64_t>(HYPERFRAME - 1 - 200),
+                           static_cast<int64_t>(2 * HYPERFRAME) * 500000);
+    const std::string out = capture_report();
+    EXPECT_NE(out.find("fitted period=500.0us"), std::string::npos)
+        << "one stale filing must not tilt the line: " << out;
+    EXPECT_NE(out.find("excluded from the fit)"), std::string::npos) << out;
+    EXPECT_NE(out.find("backward=1 (largest 200 slot(s), 1 excluded from the fit)"), std::string::npos)
+        << "and it has to be COUNTED, so the exclusion is visible rather than silent: " << out;
+    EXPECT_NE(out.find("residual p50/p95/p99/max = 0.0/0.0/0.0/0.0 us"), std::string::npos)
+        << "with the stale sample out, the rest is still the perfect grid it was: " << out;
   }
 
   ::unsetenv("OCUDU_UL_SLOT_GRID");
