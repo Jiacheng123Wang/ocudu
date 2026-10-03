@@ -4,7 +4,6 @@
 // (Linux affinity branches relocated verbatim from upstream unique_thread.cpp.)
 
 #include "ocudu/support/macos_compat.h"
-#include "ocudu/phy/phy_pipeline_report.h" // register_p0_report
 #include "ocudu/ocudulog/ocudulog.h" // fetch_basic_logger (log_effective_decoder_backend)
 
 #if defined(__APPLE__)
@@ -894,6 +893,15 @@ struct lane_grid_state {
   /// Whether a radio ABSOLUTE time has ever been seen (see metadata::absolute_ns), and the pair it anchored.
   std::atomic<bool>     absolute_seen{false};
   std::atomic<int64_t>  absolute_anchor_ns{-1};
+  /// The first and latest (radio absolute, host) pairs, for the host-vs-radio RATE - the drift check the
+  /// absolute time base exists for. Both clocks are crystals, so the interesting number is ppm, and it is only
+  /// visible over a baseline: 100 us of lag jitter over 100 s of baseline is 1 ppm.
+  std::atomic<int64_t>  abs_first_ns{0};
+  std::atomic<int64_t>  abs_last_ns{0};
+  std::atomic<int64_t>  host_first_ns{0};
+  std::atomic<int64_t>  host_last_ns{0};
+  /// The rate correction the extrapolation applies, in ppb (see lane_grid_rate_ppb).
+  std::atomic<int64_t>  rate_ppb{0};
   std::atomic<bool>     params_read{false};
 };
 
@@ -903,13 +911,19 @@ int64_t st_gain_shift()
   static const int64_t shift = []() {
     const char* env = std::getenv("OCUDU_UL_LANE_GRID_GAIN_SHIFT");
     if ((env == nullptr) || (env[0] == '\0')) {
-      return static_cast<int64_t>(10);
+      // 1/65536, and the default is the DESIGN, not a tune: the grid must be a CLOCK over the arrivals, not a
+      // tracker of them. `late` is only a verdict, and the lag below is only a measurement, if the grid refuses
+      // to absorb what it is measuring - at 1/64 a 100 us lag excursion moved the grid 1.5 us and at 1/1024 it
+      // moved 0.1 us, which is enough to hide a lead that has stopped being sufficient. At 1/65536 the same
+      // excursion moves it 1.5 ns, while a 10 ppm host-vs-radio drift is still tracked in ~30 s (65536
+      // observations at the measured ~2000 slot-frontiers per second).
+      return static_cast<int64_t>(16);
     }
     const long v = std::strtol(env, nullptr, 10);
     // 6 = 1/64 (the first default) is the fastest sensible; 16 keeps the arithmetic in range and is slower than
     // any drift needs. Refuse anything else rather than accept a gain that makes the filter a follower or a
     // constant.
-    return (v < 6 || v > 16) ? static_cast<int64_t>(10) : static_cast<int64_t>(v);
+    return (v < 6 || v > 20) ? static_cast<int64_t>(16) : static_cast<int64_t>(v);
   }();
   return shift;
 }
@@ -920,6 +934,15 @@ lane_grid_state& lane_grid()
   static lane_grid_state* st = new lane_grid_state();
   return *st;
 }
+
+/// The host-vs-radio rate correction in parts per billion (0 = identical rates). It is the ONLY quantity that
+/// moves the grid's extrapolation once the offset is anchored - see lane_grid_update_ns() for why the offset
+/// must not move, and lane_grid_note_slot() for how this is estimated.
+int64_t lane_grid_rate_ppb()
+{
+  return lane_grid().rate_ppb.load(std::memory_order_relaxed);
+}
+
 
 int64_t env_us(const char* name, int64_t fallback)
 {
@@ -989,18 +1012,30 @@ void lane_grid_report_impl()
                  static_cast<long long>(pct(0.99)),
                  static_cast<long long>(st.lag_max_us.load(std::memory_order_relaxed)),
                  static_cast<long long>(st.lag_min_us.load(std::memory_order_relaxed)),
-                 st.absolute_seen.load(std::memory_order_relaxed) ? "REPORTED (epoch anchor available)"
-                                                                  : "not reported (-1): lag is relative");
+                 st.absolute_seen.load(std::memory_order_relaxed) ? "REPORTED" : "not reported (-1): lag is relative");
+    // The host-vs-radio RATE, when both ends of a baseline exist: the drift check, and the only thing the
+    // absolute epoch is needed for once the grid is anchored (see the gain's note).
+    const int64_t abs_span  = st.abs_last_ns.load(std::memory_order_relaxed) - st.abs_first_ns.load(std::memory_order_relaxed);
+    const int64_t host_span = st.host_last_ns.load(std::memory_order_relaxed) - st.host_first_ns.load(std::memory_order_relaxed);
+    if ((abs_span > 1000000000LL) && (host_span > 0)) {
+      const double rate_ppm = (static_cast<double>(host_span) / static_cast<double>(abs_span) - 1.0) * 1e6;
+      std::fprintf(stderr,
+                   "[lane_grid]   host-vs-radio rate over %.1fs of baseline: %.3f ppm, applied to the "
+                   "extrapolation (the offset is NOT walked: see the grid's header)\n",
+                   static_cast<double>(abs_span) / 1e9,
+                   rate_ppm);
+    }
   }
 }
 
 const bool lane_grid_report_registered = []() {
   std::atexit(lane_grid_report_impl);
-  // AND the on-demand registry, for the reason the receive pool's report spells out: the gNB's cleanup path
-  // dumps the P0 readings and then raises SIGKILL, so an atexit-ONLY report is lost whenever the stop takes the
-  // forced-exit branch. Found the hard way: the loopback runs printed every other report and no [lane_grid] at
-  // all, while the air legs (whose stop completes gracefully) printed it.
-  register_p0_report(lane_grid_report_impl);
+  // NOTE: the on-demand (P0) registry is NOT wired here on purpose. It lives in the PHY layer, and this file is
+  // a util that must not depend on it - found when the compat unit test failed to LINK on
+  // ocudu::register_p0_report. The layer that USES the grid registers lane_grid_report() next to its own
+  // reports instead (lower_phy_baseband_processor.cpp, beside rx_pool_report), which is also where the reason
+  // belongs: the gNB's cleanup path dumps the P0 readings and then raises SIGKILL, so an atexit-only report is
+  // lost whenever the stop takes the forced-exit branch.
   return true;
 }();
 
@@ -1037,7 +1072,14 @@ int64_t lane_grid_target_ns(int64_t anchor_host_ns,
     return -1;
   }
   const uint64_t distance = (slot + slots_per_hyperframe - static_cast<uint64_t>(anchor_slot)) % slots_per_hyperframe;
-  return anchor_host_ns + static_cast<int64_t>(distance) * slot_duration_ns + lead_ns;
+  const int64_t  radio_span_ns = static_cast<int64_t>(distance) * slot_duration_ns;
+  // `rate_ppb` is the host-vs-radio rate correction (see lane_grid_note_slot): the ONLY thing allowed to move
+  // the extrapolation, because it is the only thing that is a property of the two CLOCKS rather than of the
+  // transport. 0 means "same rate", which is what a software loopback radio really is.
+  return anchor_host_ns + radio_span_ns + static_cast<int64_t>((static_cast<double>(radio_span_ns) *
+                                                               static_cast<double>(lane_grid_rate_ppb())) /
+                                                              1e9) +
+         lead_ns;
 }
 
 lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
@@ -1049,10 +1091,10 @@ lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
                                      uint64_t slots_per_hyperframe)
 {
   lane_grid_update out;
+  (void)gain_shift; // kept in the signature for the report's parameter list; the rule no longer walks (see below)
   if (anchor_slot < 0) {
-    // ARM on the first observation: the grid is the host instant of the fastest hop seen, advanced by whole
-    // slot durations from there. A grid re-derived from every arrival would inherit the jitter it exists to
-    // remove, so this happens once.
+    // ARM once, on the first frontier: the grid is then the radio's cadence as the HOST saw it at that instant,
+    // and it is extrapolated from there. Nothing about later arrivals moves its phase.
     out.anchor_host_ns = host_ns;
     out.anchor_slot    = static_cast<int64_t>(slot);
     return out;
@@ -1064,44 +1106,25 @@ lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
   if (predicted < 0) {
     return out;
   }
-  const int64_t residual = host_ns - predicted;
-  // ---- THE RE-ARM BAND MUST BE WIDER THAN THE ARRIVAL SPREAD -------------------------------------------
+  // ---- THE OFFSET IS NOT WALKED, AND THAT IS THE DESIGN (2026-10-03, plan doc §11.20) -------------------
   //
-  // p224's leg measured why: with the band at +2/-4 slots and an arrival spread of about 2 ms (four slots), it
-  // fired on 177374 of 356011 hops - HALF of them - so the grid was re-armed to whatever had just arrived and
-  // became a FOLLOWER of the jitter instead of a clock over it. The band exists to catch what the filter
-  // cannot follow (startup, a stream restart, a multi-slot disruption), and those are seconds, not slots: at
-  // +-8 slots (4 ms on a 500 us cell) a normal spread never reaches it and a real disruption always does.
-  const int64_t rearm_band = 8 * slot_duration_ns;
-  if ((residual > rearm_band) || (residual < -rearm_band)) {
+  // The previous two versions walked the anchor toward the arrivals (gain 1/64, then 1/1024). Both were wrong
+  // for the same reason in different sizes: walking the offset toward the arrivals ABSORBS THE DELIVERY LAG,
+  // and the delivery lag is exactly what (a) the report exists to measure and (b) the thread's `lead` has to
+  // cover. A grid that has absorbed it says "the lead is fine" by construction, which is how p224/p225 read
+  // 0.65% late on a leg whose commits were 2 ms behind. The offset is now FIXED at the anchor and only the
+  // RATE is corrected (from the radio's absolute time, in lane_grid_note_slot) - offset and rate are different
+  // physical quantities from different sources, and only the second one belongs to the grid.
+  //
+  // The band below is therefore not a lag band: it catches only a DISPLACEMENT of the time base (a stream
+  // restart, an epoch change). It has to be far wider than any lag excursion or it would swallow one - the
+  // 8-slot band of the previous version would have re-armed on a 4 ms lag, i.e. exactly the bug above.
+  const int64_t rearm_band = 1000000000LL; // 1 s
+  if ((host_ns - predicted > rearm_band) || (predicted - host_ns > rearm_band)) {
     out.anchor_host_ns = host_ns;
     out.anchor_slot    = static_cast<int64_t>(slot);
     out.rearmed        = true;
-    return out;
   }
-  // ---- TRACK THE BULK OF THE ARRIVALS, NOT THE FLOOR -------------------------------------------------
-  //
-  // THE FIRST VERSION OF THIS RULE WAS WRONG, AND p223's LEG SAID SO IN ONE NUMBER. It pulled the grid back
-  // only (never forward), on the reasoning that the transport's floor is stable and its tail is not. The
-  // consequence is that the grid ends up pinned at the single EARLIEST arrival of the leg, so with an arrival
-  // spread of about a hop interval - measured: 2 ms - nearly every hop is already past its grid instant when
-  // it begins: p223 read `late = 331237 of 358057 = 92.5%`, i.e. the clamp bound on 7.5% of hops and the seam
-  // was inert. An inert seam is not a null result about the MECHANISM, it is a null result about the ANCHOR.
-  //
-  // The bulk of the arrivals is what the grid has to sit on, and its MEDIAN is as stable as its floor while
-  // being reachable. Symmetric and SLOW, and the gain is the whole trade:
-  //
-  //   * tracking: a first-order filter with gain g converges in ~1/g hops, and the drift it has to follow is
-  //     the radio-vs-host clock difference - ppm, i.e. milliseconds over a ten-minute leg;
-  //   * rigidity: the filter also transmits the arrival noise, and its steady-state spread is
-  //     sigma_grid ~ sigma_arrival * sqrt(g/2). At g = 1/64 and the measured sigma_arrival ~ 2 ms that is
-  //     ~180 us of grid wander - the same order as the jitter the grid exists to remove. At g = 1/1024 it is
-  //     ~45 us, and tracking a 6 ms drift still takes only ~8 s per time constant.
-  //
-  // So the default is 1/1024, tunable as a SHIFT (OCUDU_UL_LANE_GRID_GAIN_SHIFT, default 10) because that is
-  // the form the arithmetic takes. NO SEPARATE RATE LIMIT: the re-arm band bounds the step anyway, and the
-  // first draft's clamp could never bind - dead code, caught by the test that was meant to exercise it.
-  out.anchor_host_ns = anchor_host_ns + (residual >> gain_shift);
   return out;
 }
 
@@ -1122,7 +1145,25 @@ void lane_grid_note_slot(uint64_t slot, int64_t host_ns, int64_t radio_abs_ns)
   last_slot.store(static_cast<int64_t>(slot), std::memory_order_relaxed);
 
   if (radio_abs_ns >= 0) {
-    st.absolute_seen.store(true, std::memory_order_relaxed);
+    if (!st.absolute_seen.exchange(true, std::memory_order_relaxed)) {
+      st.abs_first_ns.store(radio_abs_ns, std::memory_order_relaxed);
+      st.host_first_ns.store(host_ns, std::memory_order_relaxed);
+    }
+    st.abs_last_ns.store(radio_abs_ns, std::memory_order_relaxed);
+    st.host_last_ns.store(host_ns, std::memory_order_relaxed);
+    // The RATE estimate, and the guards are the interesting part. It needs a LONG baseline because each end
+    // carries the transport lag of its own instant: 100 us of lag difference over 60 s of baseline is 1.7 ppm,
+    // so anything shorter would fit the transport, not the clocks. It is clamped to +-200 ppm because a value
+    // outside that is not a crystal pair, it is a broken time base - and applying it would walk the grid away
+    // from the radio for the rest of the leg.
+    const int64_t abs_span  = st.abs_last_ns.load(std::memory_order_relaxed) - st.abs_first_ns.load(std::memory_order_relaxed);
+    const int64_t host_span = st.host_last_ns.load(std::memory_order_relaxed) - st.host_first_ns.load(std::memory_order_relaxed);
+    if ((abs_span > 60000000000LL) && (host_span > 0)) {
+      const double ppb = (static_cast<double>(host_span) / static_cast<double>(abs_span) - 1.0) * 1e9;
+      if ((ppb > -200000.0) && (ppb < 200000.0)) {
+        st.rate_ppb.store(static_cast<int64_t>(ppb), std::memory_order_relaxed);
+      }
+    }
   }
   const int64_t          anchor   = st.anchor_slot.load(std::memory_order_relaxed);
   const int64_t          anchor_h = st.anchor_host_ns.load(std::memory_order_relaxed);
@@ -1174,6 +1215,11 @@ void lane_grid_note_slot(uint64_t slot, int64_t host_ns, int64_t radio_abs_ns)
   (void)slot;
   (void)host_ns;
 #endif
+}
+
+void lane_grid_set_rate_ppb_for_test(int64_t ppb)
+{
+  lane_grid().rate_ppb.store(ppb, std::memory_order_relaxed);
 }
 
 void lane_grid_wait(uint64_t slot)

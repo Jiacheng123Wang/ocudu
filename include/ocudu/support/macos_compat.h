@@ -367,6 +367,12 @@ bool lane_grid_enabled();
 /// is reported as the delivery lag, which is the quantity a periodic commit thread's `lead` has to cover.
 void lane_grid_note_slot(uint64_t slot, int64_t host_ns, int64_t radio_abs_ns = -1);
 
+/// \brief Test hook: sets the extrapolation's rate correction (see lane_grid_rate_ppb), in parts per billion.
+///
+/// It exists because the correction is otherwise estimated from a >= 60 s baseline of the radio's absolute time,
+/// and an instrument whose arithmetic cannot be exercised in a test is an instrument nobody has checked.
+void lane_grid_set_rate_ppb_for_test(int64_t ppb);
+
 void lane_grid_wait(uint64_t slot);
 
 /// \brief Prints the grid's accounting once, at exit, next to the pool's own report.

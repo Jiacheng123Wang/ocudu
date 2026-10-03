@@ -668,44 +668,36 @@ TEST(macos_compat_sched_test, lane_grid_filters_arrivals_instead_of_following_th
   EXPECT_EQ(armed.anchor_host_ns, 5000000);
   EXPECT_FALSE(armed.rearmed);
 
-  // ---- the grid TRACKS THE BULK of the arrivals, and one outlier cannot drag it -------------------------
+  // ---- THE REVERSE ARM, INVERTED (2026-10-03, and the inversion IS the finding) ------------------------
   //
-  // THE FIRST RULE WAS WRONG AND THE p223 LEG SAID SO: it pulled the grid back only, so the grid ended up
-  // pinned at the single earliest arrival and 92.5% of hops were already past their instant when they began
-  // (the clamp bound on 7.5% of hops). The grid has to sit on the bulk, and the arm below states the two
-  // properties that make that true: it MOVES TOWARD a late arrival (so it can reach the bulk at all) and it
-  // moves by a FRACTION (so a 20 ms outlier is not the grid).
+  // This arm used to assert the opposite - "a late arrival must PULL THE GRID TOWARD IT" - because the grid
+  // walked its offset toward the arrivals, first at 1/64 and then at 1/1024. p224/p225's legs showed what that
+  // buys: walking the offset ABSORBS THE DELIVERY LAG, and the delivery lag is exactly what the report measures
+  // and what the thread's `lead` has to cover. A grid that has absorbed it reports "the lead is fine" by
+  // construction, which is how a leg read 0.65% late while its commits were 2 ms behind.
+  //
+  // Now the offset is FIXED at the anchor: neither a late nor an early arrival may move it. Only the RATE is
+  // corrected, from the radio's own absolute time.
   const compat::lane_grid_update late_obs =
-      compat::lane_grid_update_ns(5000000, 7, 8, 6200000, SLOT_NS, 10, WRAP);
-  EXPECT_GT(late_obs.anchor_host_ns, 5000000)
-      << "a late arrival must PULL THE GRID TOWARD IT - a pull-back-only rule pinned the grid at the earliest "
-         "arrival and made the clamp inert (p223: 92.5% late)";
-  // predicted(slot 8) = anchor(5.0 ms, slot 7) + one slot = 5.5 ms, so the residual is 700 us.
-  EXPECT_EQ(late_obs.anchor_host_ns, 5000000 + ((6200000 - 5500000) >> 10))
-      << "and by a fraction of the distance, not all of it";
-  EXPECT_LT(late_obs.anchor_host_ns, 5050000) << "one outlier is not the grid";
+      compat::lane_grid_update_ns(5000000, 7, 8, 6200000, SLOT_NS, 16, WRAP);
+  EXPECT_EQ(late_obs.anchor_host_ns, 5000000)
+      << "a LATE arrival must NOT move the grid: moving it absorbs the very lag the grid exists to measure";
+  EXPECT_EQ(late_obs.anchor_slot, 7);
   EXPECT_FALSE(late_obs.rearmed);
 
-  // An EARLY arrival moves it the other way, by the same fraction: the fixed point is the BULK.
   const compat::lane_grid_update early_obs =
-      compat::lane_grid_update_ns(5500000, 7, 8, 4800000, SLOT_NS, 10, WRAP);
-  EXPECT_EQ(early_obs.anchor_host_ns, 5500000 + ((4800000 - 6000000) >> 10))
-      << "an early arrival moves the grid the other way: " << early_obs.anchor_host_ns;
-  EXPECT_LT(early_obs.anchor_host_ns, 5500000);
+      compat::lane_grid_update_ns(5500000, 7, 8, 4800000, SLOT_NS, 16, WRAP);
+  EXPECT_EQ(early_obs.anchor_host_ns, 5500000) << "and neither may an EARLY one: the offset is the anchor's";
+  EXPECT_EQ(early_obs.anchor_slot, 7);
 
-  // ---- the correction CONVERGES to the bulk of the arrivals ---------------------------------------------
-  //
-  // A stream whose arrivals scatter around 5.6 ms (the grid starts 400 us away from that): the grid must land
-  // ON the scatter, not on its minimum and not on its maximum.
+  // A run of arrivals that are all late by the same amount still leaves it alone - the case that used to be
+  // absorbed over ~0.1 s and that this arm exists to keep visible.
   {
-    int64_t anchor = 5500000;
-    for (int i = 0; i != 12000; ++i) {
-      const int64_t arrival = 5600000 + ((i % 7) - 3) * 100000; // +-300 us around 5.6 ms
-      anchor = compat::lane_grid_update_ns(anchor, 7, 8, arrival, SLOT_NS, 10, WRAP).anchor_host_ns;
+    int64_t anchor = 5000000;
+    for (int i = 0; i != 2000; ++i) {
+      anchor = compat::lane_grid_update_ns(anchor, 7, 8, 6200000, SLOT_NS, 16, WRAP).anchor_host_ns;
     }
-    // The fixed point is residual == 0, i.e. anchor(7) = the arrival mean(8) - one slot = 5.6 ms - 0.5 ms.
-    EXPECT_NEAR(static_cast<double>(anchor), 5100000.0, 60000.0)
-        << "the grid must converge to the middle of the arrival scatter, not to its minimum: " << anchor;
+    EXPECT_EQ(anchor, 5000000) << "2000 late arrivals must not walk the grid either: " << anchor;
   }
 
   // ---- a disruption RE-ARMS instead of walking ----------------------------------------------------------
@@ -713,9 +705,22 @@ TEST(macos_compat_sched_test, lane_grid_filters_arrivals_instead_of_following_th
   // 6 ms on a 500 us cell. The band is +-8 slots (4 ms), so this is what it is for - and the FIRST version of
   // this arm used "11 slots of silence" without checking the residual it implies (23 slots of slot distance
   // minus 16 slots of elapsed time = 7 slots), which the wider band correctly filters instead of re-arming.
+  // Slot 30 is due at 5.0 ms + 23 slots = 16.5 ms and the hop turns up at 18.0 ms: 1.5 s of displacement,
+  // which is a moved TIME BASE (a restart), not a lag - the band is 1 s and a lag excursion is milliseconds.
   const compat::lane_grid_update disruption =
-      compat::lane_grid_update_ns(5000000, 7, 30, 22500000, SLOT_NS, 10, WRAP);
-  EXPECT_TRUE(disruption.rearmed) << "12 slots of residual cannot be filtered, it has to re-arm";
-  EXPECT_EQ(disruption.anchor_host_ns, 22500000);
+      compat::lane_grid_update_ns(5000000, 7, 30, 1800000000LL, SLOT_NS, 16, WRAP);
+  EXPECT_TRUE(disruption.rearmed) << "a 1.5 s displacement is a moved time base, it has to re-arm";
+  EXPECT_EQ(disruption.anchor_host_ns, 1800000000LL);
   EXPECT_EQ(disruption.anchor_slot, 30);
+
+  // ---- the RATE correction is the only thing that moves the extrapolation ------------------------------
+  {
+    compat::lane_grid_set_rate_ppb_for_test(0);
+    const int64_t base = compat::lane_grid_target_ns(0, 0, 200, SLOT_NS, 0, WRAP);
+    EXPECT_EQ(base, 200 * SLOT_NS);
+    compat::lane_grid_set_rate_ppb_for_test(10000); // +10 ppm
+    const int64_t corrected = compat::lane_grid_target_ns(0, 0, 200, SLOT_NS, 0, WRAP);
+    EXPECT_EQ(corrected - base, (200 * SLOT_NS) / 100000) << "10 ppm over 100 ms is 1 us: " << corrected - base;
+    compat::lane_grid_set_rate_ppb_for_test(0);
+  }
 }

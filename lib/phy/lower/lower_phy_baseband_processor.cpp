@@ -509,6 +509,11 @@ void rx_pool_report()
 const bool rx_pool_report_registered = []() {
   std::atexit(rx_pool_report);
   register_p0_report(rx_pool_report); // dev doc 6.24: joins the on-demand stall dump
+  // P6.1's lane grid reports from the same seam it is fed from, and joins the same dump for the same reason:
+  // the gNB's cleanup path prints the P0 readings and then SIGKILLs, so an atexit-only report never runs on a
+  // forced exit. Registering it HERE (not in the util) also keeps the dependency direction right - the util
+  // must not know about the PHY's report registry.
+  register_p0_report(ocudu::compat::lane_grid_report);
   return true;
 }();
 
