@@ -63,6 +63,7 @@
 | Mach affinity tag | 已接线，默认关 | **Apple Silicon 上无效** —— 注意**只有 `THREAD_AFFINITY_POLICY` 这一个 flavor** 返回 `KERN_NOT_SUPPORTED`；`THREAD_TIME_CONSTRAINT_POLICY` **受支持**（§10.29 实测生效并能读回，用户提供的 `tx_subframe_uhd` 在本机 1 ms LTE 循环里也在用它，§10.48）⇒ 不是方案，但也**不能**据此说"Mach 调度机制在本机不可用" |
 | `taskpolicy -l/-t` 档位 | 可跑（`wip/taskpolicy_ab.sh`）| ❌ **实测无效**（同腿内前后半段：每窗超阈 **3.5 vs 3.7**）|
 | **Mach 时间约束**（`OCUDU_SCHED_TIME_CONSTRAINT`）| 已实现，**默认关** | 见 0bis.2；作为**仪表**保留（它测出的是"这台机器上时间约束值多少"）|
+| **`SCHED_FIFO`**（`OCUDU_SCHED_POSIX_RT`）| 已实现，**默认关**（= 保持跳过 POSIX）| ❌ **腿级判负（2026-10-03，p220/p221，§10.57）**：体内 p95/p99 持平到略差（微基准预测的 6× 没有转移）、`AT/BELOW 0` 越界 **18 倍**、`gaps=3`（丢 7.02M 样本）、电台 overflow 3 次、上行吞吐 **−25%**；看门狗唤醒线程被饿到 **100 ms**（对照 0.93 ms），`runnable>0` 只在臂腿出现 ⇒ **FIFO 不让路，先饿死同进程的非 RT 线程（USB 传输 / 停机路径）** |
 
 ### 0bis.4 顺带产出（不是降尾部的手段，但改变了**能不能做决定**）
 
