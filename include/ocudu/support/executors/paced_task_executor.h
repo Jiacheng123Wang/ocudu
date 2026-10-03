@@ -102,10 +102,29 @@ public:
   };
   stats get_stats() const;
 
-  /// Prints one line per paced executor, next to the other reports. Registered by the caller, not by atexit,
-  /// for the reason the receive pool's report spells out: the gNB's stop path dumps the P0 readings and then
-  /// raises SIGKILL.
+  /// Prints this executor's accounting, as it stands. Called by the destructor (below) and by a leg that wants
+  /// the reading while the run is still going.
   void report() const;
+
+  /// \brief Prints EVERY LIVE paced executor, and this - not a pointer to one - is what an exit path registers.
+  ///
+  /// WHY, and it is the p233/p234/p235 abort: the exit paths used to call a `static paced_task_executor*` the
+  /// mapper held, and on an air leg that object is a local of `main` - it is DESTROYED before the atexit
+  /// handlers run. The handler then locked a mutex inside freed memory, `pthread_mutex_lock` said EINVAL, the
+  /// std::system_error escaped and the process died with `Abort trap: 6` **partway through the exit report**,
+  /// taking the very readings the report existed for with it (the three legs have no [ul_pipeline] contract
+  /// lines and no [paced_exec] account at all). The loopback had "verified" this path and could not: freed
+  /// memory that has not been reused still holds a working mutex, so the false pass was reading freed bytes.
+  ///
+  /// The registry is the fix rather than a flag: an executor adds itself in its constructor and REMOVES itself
+  /// in its destructor, so a report can only ever see objects that are alive - and when they are all gone it
+  /// prints nothing at all, which is the honest answer.
+  static void report_all_live();
+
+  /// How many executors are in that registry right now. Exposed because the registry's whole job is to be asked
+  /// this: a leg (and this file's own test) must be able to tell "nothing to report" from "reported the wrong
+  /// object", and the abort this replaced was exactly the difference between the two.
+  static size_t nof_live();
 
 private:
   void run();

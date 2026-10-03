@@ -5,8 +5,11 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <thread>
+#include <unistd.h>
 
 using namespace ocudu;
 using namespace std::chrono_literals;
@@ -47,6 +50,25 @@ TEST(paced_task_executor_test, without_the_grid_it_runs_tasks_and_counts_no_tick
       << "with the knob off there is no grid, so a tick counter would be a number about nothing";
 }
 
+/// \brief THE abort this file caused on an air leg (p233/p234/p235, `Abort trap: 6`): the object dies before
+/// the exit report runs, and a report that still pointed at it locked a mutex inside freed memory.
+///
+/// The registry is what makes the exit report safe: an executor is IN it while it is alive and OUT of it once
+/// it is gone, and `report_all_live()` - the function both exit paths register - can then only ever reach a
+/// live object. It is asserted from both sides, because "it did not crash" is exactly the kind of evidence that
+/// let the first version through.
+TEST(paced_task_executor_test, a_destroyed_executor_is_out_of_the_exit_report_registry)
+{
+  const size_t before = paced_task_executor::nof_live();
+  {
+    paced_task_executor exec("paced_test_registry", 64, 20ms, 0us, 2ms);
+    EXPECT_EQ(paced_task_executor::nof_live(), before + 1) << "a live executor must be reportable";
+  }
+  EXPECT_EQ(paced_task_executor::nof_live(), before)
+      << "a destroyed executor must be gone from the registry, or the exit report reads freed memory";
+  paced_task_executor::report_all_live(); // must be a no-op, not a lock on a dead mutex
+}
+
 /// \brief A band longer than the period is CLAMPED, because it would stop the thread keeping one tick per slot.
 ///
 /// This is the sweep's own finding turned into a rule. The air legs asked for 500us, 1ms, 2ms and 4ms bands; the
@@ -61,6 +83,49 @@ TEST(paced_task_executor_test, a_band_longer_than_the_period_is_capped_to_it)
 }
 
 #if defined(__APPLE__)
+/// \brief The reading is still TAKEN when the executor dies on a graceful exit - the destructor prints it,
+/// because by the time the atexit handlers run the object is already gone (see the registry test above).
+///
+/// stderr is captured for real here: "the exit path yields a reading" is the entire reason this code exists,
+/// and a test that merely did not crash would pass on a version that printed nothing at all.
+TEST(paced_task_executor_test, the_destructor_prints_the_reading_a_graceful_exit_would_have_lost)
+{
+  ::setenv("OCUDU_UL_LANE_GRID", "1", 1);
+
+  std::FILE* tmp = std::tmpfile();
+  ASSERT_NE(tmp, nullptr);
+  std::fflush(stderr);
+  const int saved = ::dup(fileno(stderr));
+  ASSERT_GE(saved, 0);
+  ASSERT_NE(::dup2(fileno(tmp), fileno(stderr)), -1);
+
+  {
+    paced_task_executor exec("paced_test_dtor", 64, 20ms, 0us, 2ms);
+    std::atomic<int>   ran{0};
+    ASSERT_TRUE(exec.execute([&ran]() { ++ran; }));
+    EXPECT_TRUE(wait_for([&ran]() { return ran.load() == 1; }, 500ms));
+  } // <- the object dies here, exactly as main's locals do before the atexit handlers run
+
+  std::fflush(stderr);
+  ASSERT_NE(::dup2(saved, fileno(stderr)), -1);
+  ::close(saved);
+
+  std::rewind(tmp);
+  std::string captured;
+  char        buf[512];
+  size_t      n = 0;
+  while ((n = std::fread(buf, 1, sizeof(buf), tmp)) != 0) {
+    captured.append(buf, n);
+  }
+  std::fclose(tmp);
+
+  EXPECT_NE(captured.find("[paced_exec] paced_test_dtor"), std::string::npos)
+      << "the destructor must print the account, or a graceful air leg has no [paced_exec] line at all";
+  EXPECT_NE(captured.find("ticks="), std::string::npos) << "and it must carry the numbers, not just a name";
+
+  ::unsetenv("OCUDU_UL_LANE_GRID");
+}
+
 /// \brief THE property of the elastic band: a tick that no task arrives for is SKIPPED and COUNTED.
 ///
 /// It is the difference between this executor and every "delay until the grid instant" variant this line has

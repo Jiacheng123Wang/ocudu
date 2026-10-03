@@ -22,15 +22,12 @@ using namespace odu;
 
 namespace {
 
-/// The paced lane executor, if one was created, and the thunk that lets the P0 registry print it (the registry
-/// takes a plain function pointer, and there is at most one such executor per process).
-static ocudu::paced_task_executor* paced_lane = nullptr;
-static void                        paced_lane_report()
-{
-  if (paced_lane != nullptr) {
-    paced_lane->report();
-  }
-}
+/// The paced lane's exit report is `paced_task_executor::report_all_live()`, and it is NOT a pointer to the
+/// executor this file creates. It used to be - and that pointer dangles on every air leg, because the executor
+/// is owned by this mapper, i.e. by a local of `main`, so it is destroyed BEFORE the atexit handlers run. The
+/// handler then locked a mutex inside freed memory and p233/p234/p235 died of it (`Abort trap: 6`,
+/// `mutex lock failed: Invalid argument`) halfway through the exit report. The executor keeps a registry of
+/// live instances precisely so a report can never reach a dead one; see the header.
 
 /// Helper class to decorate executors with extra functionalities.
 struct executor_decorator {
@@ -198,7 +195,6 @@ public:
                                                            std::chrono::microseconds{wait_us},
                                                            static_cast<unsigned>(threads),
                                                            os_thread_realtime_priority::max() - 2);
-        paced_lane = paced.get();
         phy_config.pusch_executor = {paced.get(), 1};
         // The mapper owns it: `executors` is where this class keeps the executor instances it creates, and the
         // thread must outlive the PHY that calls into it.
@@ -217,8 +213,8 @@ public:
         // registered with the P0 registry only and was lost on a GRACEFUL exit - an air leg's stop prints the
         // atexit reports, and no P0 dump runs. A reading that is only on one path is a reading that goes
         // missing exactly when someone needs it.
-        std::atexit(paced_lane_report);
-        register_p0_report(paced_lane_report);
+        std::atexit(paced_task_executor::report_all_live);
+        register_p0_report(paced_task_executor::report_all_live);
       }
       // ---- P0-6: the SHAPE that value produced, next to the value itself ---------------------------
       // All three views come from one create_task_fork_limiter(), so they share max_concurrency. A value

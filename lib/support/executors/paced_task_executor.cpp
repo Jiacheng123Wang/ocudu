@@ -15,6 +15,21 @@ using namespace ocudu;
 
 namespace {
 
+/// The live-instance registry behind `report_all_live()`: heap objects that are NEVER destroyed, because the
+/// exit paths that read it run at a point in shutdown where function-local and namespace-scope statics are
+/// already being torn down - and a registry that dies before its readers is the same bug one level up.
+std::mutex& live_mutex()
+{
+  static std::mutex* m = new std::mutex();
+  return *m;
+}
+
+std::vector<const paced_task_executor*>& live_executors()
+{
+  static std::vector<const paced_task_executor*>* v = new std::vector<const paced_task_executor*>();
+  return *v;
+}
+
 int64_t steady_now_ns()
 {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
@@ -45,6 +60,10 @@ paced_task_executor::paced_task_executor(std::string                      thread
   // The parameter is spelled `nof_threads_` because the member is `nof_threads`: the first version reused the
   // name and Linux's -Werror=shadow refused it - the same class of defect the two-platform build exists to
   // catch, since macOS built it happily.
+  {
+    std::lock_guard<std::mutex> lock(live_mutex());
+    live_executors().push_back(this);
+  }
   threads.reserve(nof_threads);
   for (unsigned i = 0; i != nof_threads; ++i) {
     // One thread per index in the name, so a time constraint can be declared per thread (the name is the key).
@@ -68,6 +87,43 @@ paced_task_executor::~paced_task_executor()
   }
   for (unique_thread& t : threads) {
     t.join();
+  }
+
+  // THE READING IS TAKEN HERE, on the last instant at which this object is certainly alive - and it is taken
+  // for exactly the reason the destructor of the mapper's executor list is where an air leg reaches it: after
+  // this the object is gone, and an atexit handler that still pointed at it would be reading freed memory
+  // (which is what aborted p233/p234/p235).
+  if (get_stats().ticks != 0) {
+    report();
+  }
+
+  // Unregister AFTER the report and after the join: a leg that reports from the exit path must not be able to
+  // find an object that is on its way out.
+  {
+    std::lock_guard<std::mutex> lock(live_mutex());
+    auto&                         v = live_executors();
+    for (auto it = v.begin(); it != v.end(); ++it) {
+      if (*it == this) {
+        v.erase(it);
+        break;
+      }
+    }
+  }
+}
+
+size_t paced_task_executor::nof_live()
+{
+  std::lock_guard<std::mutex> lock(live_mutex());
+  return live_executors().size();
+}
+
+void paced_task_executor::report_all_live()
+{
+  std::lock_guard<std::mutex> lock(live_mutex());
+  for (const paced_task_executor* exec : live_executors()) {
+    if (exec != nullptr) {
+      exec->report();
+    }
   }
 }
 
