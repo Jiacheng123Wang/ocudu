@@ -364,14 +364,6 @@ bool lane_grid_enabled();
 /// catches the cases the filter cannot follow (startup, a disruption), and it is counted.
 void lane_grid_note_hop(uint64_t slot);
 
-/// \brief The host instant the grid's observations are taken on (steady clock, nanoseconds).
-///
-/// Exposed so the ONE call site reads both calls on the same clock as the grid does - a caller passing its own
-/// `now` from another clock would silently poison the anchor, which is the kind of unit error this file has
-/// already paid for once (dev doc 10.31).
-int64_t lane_grid_now_ns();
-
-/// \brief Returns only once \p slot 's grid instant has passed (the lane's stage entry). No-op when unarmed.
 void lane_grid_wait(uint64_t slot);
 
 /// \brief Prints the grid's accounting once, at exit, next to the pool's own report.

@@ -957,11 +957,6 @@ int64_t lane_grid_target_ns(int64_t anchor_host_ns,
   return anchor_host_ns + static_cast<int64_t>(distance) * slot_duration_ns + lead_ns;
 }
 
-int64_t lane_grid_now_ns()
-{
-  return steady_now_ns();
-}
-
 lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
                                      int64_t anchor_slot,
                                      uint64_t slot,
@@ -981,8 +976,8 @@ lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
   }
   out.anchor_host_ns = anchor_host_ns;
   out.anchor_slot    = anchor_slot;
-  const int64_t predicted = lane_grid_target_ns(anchor_host_ns, anchor_slot, slot, slot_duration_ns, 0,
-                                                slots_per_hyperframe);
+  const int64_t predicted =
+      lane_grid_target_ns(anchor_host_ns, anchor_slot, slot, slot_duration_ns, 0, slots_per_hyperframe);
   if (predicted < 0) {
     return out;
   }
