@@ -1225,6 +1225,7 @@ void lane_grid_note_slot(uint64_t slot, int64_t host_ns, int64_t radio_abs_ns)
 
 int64_t lane_grid_next_tick_ns(int64_t prev_ns, int64_t slot_duration_ns)
 {
+#if defined(__APPLE__)
   if (slot_duration_ns <= 0) {
     return -1;
   }
@@ -1241,6 +1242,14 @@ int64_t lane_grid_next_tick_ns(int64_t prev_ns, int64_t slot_duration_ns)
          static_cast<int64_t>((static_cast<double>(steps * slot_duration_ns) *
                                static_cast<double>(lane_grid_rate_ppb())) /
                               1e9);
+#else
+  // No grid on this platform, and nothing to ask: the paced executor's pacing switch is off there, so this is
+  // unreachable - and returning -1 makes "unarmed" and "not applicable" the same answer, which is what the
+  // caller's fallback already handles.
+  (void)prev_ns;
+  (void)slot_duration_ns;
+  return -1;
+#endif
 }
 
 void lane_grid_set_slot_duration_ns(int64_t ns)
