@@ -928,6 +928,24 @@ void gpu_lane_probe::close_lane()
   if (metal::lane_clock.entry_to_lane_commit_cpu_us >= 0.0) {
     s.entry_to_lane_commit_cpu_us.push_back(metal::lane_clock.entry_to_lane_commit_cpu_us);
   }
+  // ---- The COMMIT landmark for the cadence anchor (P6.1-SLOT, 2026-10-03) -------------------------
+  //
+  // The anchor (OCUDU_UL_SLOT_GRID) fits "when did this slot's work LAND" against the slot index, and it has
+  // been fed from the PUSCH processor's CE landmark - a landmark whose WALL includes waiting for samples
+  // (measured: t2f median 493us against a 500us slot, max >10ms), which is exactly what the P6.1-SLOT plan
+  // exists to remove. The commit is the other end of the same question and the one the plan is judged on:
+  // "does the CPU hand the slot over on the slot grid, regardless of when the data arrived?"
+  //
+  // TWO INDEPENDENT ANCHORS, not one shared one: the unwrapping rule tracks the previous raw counter value, so
+  // two landmarks filing interleaved samples into one account would read each other's slots as backward steps.
+  // ONE leg therefore reports both fits, and their difference is the reading the plan asks for.
+  if ((metal::lane_clock.entry_to_lane_commit_us >= 0.0) && metal::lane_clock.has_lane_slot &&
+      (metal::lane_clock.lane_commit != ocudu::metal::lane_host_clock::clock::time_point{})) {
+    ul_pipeline_probe::get().record_commit_grid(
+        metal::lane_clock.lane_slot,
+        std::chrono::duration_cast<std::chrono::nanoseconds>(metal::lane_clock.lane_commit.time_since_epoch())
+            .count());
+  }
   // ---- When the DEVICE got to each of the lane's command buffers (the queue's share) -------------
   //
   // This is the quantity the 'gap: commit -> first command buffer starts (queue)' series always

@@ -539,19 +539,33 @@ public:
   /// Unwraps a slot counter that wraps every SFN cycle. The wrap size is not assumed: it is taken to be the largest
   /// counter value seen so far plus one, which is exact when the leg spans at least one cycle and harmless when it
   /// does not (no backward jump, no unwrap).
-  void record_slot_grid(uint64_t slot, int64_t end_ns)
+  /// One anchor's state: the samples plus the unwrapping bookkeeping. TWO instances exist (CE and commit) and
+  /// they must not share the unwrapping state, because each tracks "the previous raw counter value" and two
+  /// landmarks filing interleaved slots into one account would read each other's slots as backward steps.
+  struct slot_grid_account {
+    std::vector<slot_grid_sample> samples;
+    int64_t                       base         = 0;
+    int64_t                       last_raw     = -1;
+    int64_t                       raw_max      = -1;
+    int64_t                       backward     = 0;
+    int64_t                       backward_max = 0;
+  };
+
+  /// Whether the anchor's knob is on (the usual two keys: compile switch + env, off by default).
+  static bool slot_grid_enabled()
   {
-#if defined(OCUDU_FLOW_PROBES)
     const char* env = std::getenv("OCUDU_UL_SLOT_GRID");
-    if ((env == nullptr) || (env[0] == '\0') || ((env[0] == '0') && (env[1] == '\0'))) {
-      return;
-    }
-    std::lock_guard<std::mutex> lock(mutex);
+    return (env != nullptr) && (env[0] != '\0') && !((env[0] == '0') && (env[1] == '\0'));
+  }
+
+  /// The ONE place the unwrapping and the wrap threshold live, shared by both landmarks.
+  static void file_slot_grid_sample(slot_grid_account& acc, uint64_t slot, int64_t end_ns)
+  {
     const int64_t raw = static_cast<int64_t>(slot);
-    if (slot_grid_raw_max < raw) {
-      slot_grid_raw_max = raw;
+    if (acc.raw_max < raw) {
+      acc.raw_max = raw;
     }
-    if ((slot_grid_base >= 0) && (raw < slot_grid_last_raw)) {
+    if ((acc.base >= 0) && (raw < acc.last_raw)) {
       // A backward jump of more than half the observed range is a wrap, not a late sample. The threshold is the
       // whole point: two PUSCH hops overlap by design (pusch_executor.max_concurrency=2), so two adjacent slots can
       // finish in either order, and a ONE-slot backward step must not be read as a wrap - that adds a whole counter
@@ -559,22 +573,51 @@ public:
       // (residuals 238ms p50 / 2.68s max, against -6.8us in its control), and the doc comment below always said
       // "more than half the observed range" while the code accepted any backward step at all. Test:
       // slot_grid_counts_a_late_completion_instead_of_inventing_a_wrap.
-      if ((slot_grid_last_raw - raw) > ((slot_grid_raw_max + 1) / 2)) {
-        slot_grid_base += slot_grid_raw_max + 1;
-        slot_grid_raw_max = raw;
+      if ((acc.last_raw - raw) > ((acc.raw_max + 1) / 2)) {
+        acc.base    += acc.raw_max + 1;
+        acc.raw_max  = raw;
       }
       else {
         // KEPT in the fit, not dropped: an out-of-order completion is a real observation and must show up as the
         // one slot of residual it is. It is COUNTED so the reader can tell a 500 us residual caused by it apart
         // from one caused by the run.
-        ++slot_grid_backward;
-        if ((slot_grid_last_raw - raw) > slot_grid_backward_max) {
-          slot_grid_backward_max = slot_grid_last_raw - raw;
+        ++acc.backward;
+        if ((acc.last_raw - raw) > acc.backward_max) {
+          acc.backward_max = acc.last_raw - raw;
         }
       }
     }
-    slot_grid_last_raw = raw;
-    slot_grid_samples.push_back(slot_grid_sample{slot_grid_base + raw, end_ns});
+    acc.last_raw = raw;
+    acc.samples.push_back(slot_grid_sample{acc.base + raw, end_ns});
+  }
+
+  /// The CE landmark (see record_ce_end): "when this slot's channel estimates LANDED". Its wall includes waiting
+  /// for the slot's samples, which is why it is ~one slot wide on air.
+  void record_slot_grid(uint64_t slot, int64_t end_ns)
+  {
+#if defined(OCUDU_FLOW_PROBES)
+    if (!slot_grid_enabled()) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    file_slot_grid_sample(slot_grid_ce, slot, end_ns);
+#else
+    (void)slot;
+    (void)end_ns;
+#endif
+  }
+
+  /// The COMMIT landmark (P6.1-SLOT): "when the CPU handed this slot's fused command buffer over". This is the
+  /// landmark the periodic-commit plan is judged on - a hand-over that should sit on the slot grid regardless of
+  /// when the data arrived - and it is filed from the lane probe, not from the PUSCH processor.
+  void record_commit_grid(uint64_t slot, int64_t end_ns)
+  {
+#if defined(OCUDU_FLOW_PROBES)
+    if (!slot_grid_enabled()) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    file_slot_grid_sample(slot_grid_commit, slot, end_ns);
 #else
     (void)slot;
     (void)end_ns;
@@ -585,24 +628,23 @@ public:
   void record_slot_grid_for_test(int64_t unwrapped_slot, int64_t end_ns)
   {
     std::lock_guard<std::mutex> lock(mutex);
-    slot_grid_samples.push_back(slot_grid_sample{unwrapped_slot, end_ns});
+    slot_grid_ce.samples.push_back(slot_grid_sample{unwrapped_slot, end_ns});
+  }
+
+  /// Test hook for the COMMIT landmark. It exists so a case can feed the two landmarks DIFFERENT series and pin
+  /// down that they fit independently: with one shared account the commit fit would inherit the CE scatter, and
+  /// that is the comparison the whole P6.1-SLOT judgement rests on.
+  void record_commit_grid_for_test(int64_t unwrapped_slot, int64_t end_ns)
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    slot_grid_commit.samples.push_back(slot_grid_sample{unwrapped_slot, end_ns});
   }
 
   void reset_slot_grid_for_test()
   {
     std::lock_guard<std::mutex> lock(mutex);
-    slot_grid_samples.clear();
-    slot_grid_base          = 0;
-    slot_grid_last_raw      = -1;
-    slot_grid_raw_max       = -1;
-    slot_grid_backward      = 0;
-    slot_grid_backward_max  = 0;
-  }
-
-  static bool slot_grid_enabled()
-  {
-    const char* env = std::getenv("OCUDU_UL_SLOT_GRID");
-    return (env != nullptr) && (env[0] != '\0') && !((env[0] == '0') && (env[1] == '\0'));
+    slot_grid_ce     = slot_grid_account{};
+    slot_grid_commit = slot_grid_account{};
   }
 
   void print_slot_grid()
@@ -611,15 +653,24 @@ public:
       return;
     }
     std::lock_guard<std::mutex> lock(mutex);
-    if (slot_grid_samples.size() < 16) {
+    // Both landmarks, same arithmetic, ONE implementation: the plan compares them (P6.1-SLOT), so a second copy
+    // of the fit would let the two drift apart in exactly the comparison that decides it.
+    print_slot_grid_account("CE     ", slot_grid_ce);
+    print_slot_grid_account("COMMIT ", slot_grid_commit);
+  }
+
+  static void print_slot_grid_account(const char* which, const slot_grid_account& acc)
+  {
+    if (acc.samples.size() < 16) {
       return;
     }
+    const std::vector<slot_grid_sample>& samples = acc.samples;
     // Least squares of time against unwrapped slot: slope = measured slot period, residual = lateness.
-    const double n     = static_cast<double>(slot_grid_samples.size());
+    const double n = static_cast<double>(samples.size());
     double       sx = 0, sy = 0, sxx = 0, sxy = 0;
-    for (const slot_grid_sample& p : slot_grid_samples) {
-      const double x = static_cast<double>(p.unwrapped_slot - slot_grid_samples.front().unwrapped_slot);
-      const double y = static_cast<double>(p.ns - slot_grid_samples.front().ns);
+    for (const slot_grid_sample& p : samples) {
+      const double x = static_cast<double>(p.unwrapped_slot - samples.front().unwrapped_slot);
+      const double y = static_cast<double>(p.ns - samples.front().ns);
       sx += x;
       sy += y;
       sxx += x * x;
@@ -633,10 +684,10 @@ public:
     const double inter    = (sy - slope_ns * sx) / n;
 
     std::vector<double> res;
-    res.reserve(slot_grid_samples.size());
-    for (const slot_grid_sample& p : slot_grid_samples) {
-      const double x = static_cast<double>(p.unwrapped_slot - slot_grid_samples.front().unwrapped_slot);
-      res.push_back(static_cast<double>(p.ns - slot_grid_samples.front().ns) - (inter + slope_ns * x));
+    res.reserve(samples.size());
+    for (const slot_grid_sample& p : samples) {
+      const double x = static_cast<double>(p.unwrapped_slot - samples.front().unwrapped_slot);
+      res.push_back(static_cast<double>(p.ns - samples.front().ns) - (inter + slope_ns * x));
     }
     std::vector<double> sorted = res;
     std::sort(sorted.begin(), sorted.end());
@@ -664,16 +715,17 @@ public:
                   pct(0.99) / 1000.0,
                   sorted.back() / 1000.0);
     std::fprintf(stderr,
-                 "[ul_slot_grid] OCUDU_UL_SLOT_GRID=1: %zu slot sample(s); fitted period=%.1fus "
+                 "[ul_slot_grid] OCUDU_UL_SLOT_GRID=1: %s landmark: %zu slot sample(s); fitted period=%.1fus "
                  "(nominal for this cell: see the config); residual p50/p95/p99/max = %s us; "
                  "half-means %.1fus vs %.1fus (drift); backward=%lld (largest %lld slot(s))\n",
-                 slot_grid_samples.size(),
+                 which,
+                 samples.size(),
                  slope_ns / 1000.0,
                  hist,
                  m1 / 1000.0,
                  m2 / 1000.0,
-                 static_cast<long long>(slot_grid_backward),
-                 static_cast<long long>(slot_grid_backward_max));
+                 static_cast<long long>(acc.backward),
+                 static_cast<long long>(acc.backward_max));
   }
 
   /// \brief Prints one line per thread that filed windows, with the number to declare (see thread_cpu_accounting).
@@ -3125,14 +3177,9 @@ private:
   /// The per-thread CPU accounting blocks (see thread_cpu_accounting). Guarded by `mutex` for the registry
   /// itself, which is only touched when a thread registers; each block is written by its owning thread alone.
   std::vector<thread_cpu_accounting*> thread_cpu_accounts;
-  /// Slot-grid anchor (P5.0): (unwrapped slot, landing instant) pairs, and the unwrapping state.
-  std::vector<slot_grid_sample> slot_grid_samples;
-  int64_t                       slot_grid_base     = 0;
-  int64_t                       slot_grid_last_raw = -1;
-  int64_t                       slot_grid_raw_max  = -1;
-  /// Completions that landed out of order (see record_slot_grid): counted and kept, never mistaken for a wrap.
-  int64_t slot_grid_backward     = 0;
-  int64_t slot_grid_backward_max = 0;
+  /// Slot-grid anchor (P5.0): one account per LANDMARK (CE and commit), each with its own unwrapping state.
+  slot_grid_account slot_grid_ce;
+  slot_grid_account slot_grid_commit;
   start_registry   pending_starts;
   uint64_t         next_start_seq = 0;
   std::vector<double> latencies_us;

@@ -2128,4 +2128,50 @@ TEST(ul_pipeline_probe_test, slot_grid_counts_a_late_completion_instead_of_inven
   ::unsetenv("OCUDU_UL_SLOT_GRID");
 }
 
+/// \brief The two landmarks must fit INDEPENDENTLY (P6.1-SLOT's judgement rests on it).
+///
+/// WHY. The plan's decisive reading is a comparison: the CE landmark's wall includes waiting for the slot's
+/// samples (493us median against a 500us slot, max >10ms), while the COMMIT landmark is the hand-over the
+/// periodic-commit thread is supposed to put on the grid. Comparing them only means something if the two are
+/// separate accounts - and the unwrapping rule tracks "the previous raw counter value", so ONE shared account
+/// would have the two landmarks reading each other's slots as backward steps.
+///
+/// The arm is a jittery CE series against a perfect commit series: the CE line must show the jitter and the
+/// COMMIT line must stay at zero. A single shared account cannot produce both.
+TEST(ul_pipeline_probe_test, the_ce_and_commit_landmarks_fit_independently)
+{
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+  ::setenv("OCUDU_UL_SLOT_GRID", "1", 1);
+
+  const auto line_with = [](const std::string& text, const std::string& marker) {
+    std::string::size_type pos = text.find(marker);
+    if (pos == std::string::npos) {
+      return std::string{};
+    }
+    const std::string::size_type end = text.find('\n', pos);
+    return text.substr(pos, (end == std::string::npos) ? std::string::npos : end - pos);
+  };
+
+  probe.reset_slot_grid_for_test();
+  for (int i = 0; i != 400; ++i) {
+    // CE: every third slot lands 200 us late (the scatter arm of slot_grid_separates_jitter_from_drift).
+    probe.record_slot_grid_for_test(i, static_cast<int64_t>(i) * 500000 + (((i % 3) == 0) ? 200000 : 0));
+    // COMMIT: a perfect grid, which is what the plan is trying to achieve and what the CE series cannot show.
+    probe.record_commit_grid_for_test(i, static_cast<int64_t>(i) * 500000);
+  }
+
+  const std::string out = capture_report();
+  const std::string ce  = line_with(out, "CE      landmark");
+  const std::string cm  = line_with(out, "COMMIT  landmark");
+  EXPECT_FALSE(ce.empty()) << "the CE landmark must still be reported: " << out;
+  EXPECT_FALSE(cm.empty()) << "and the COMMIT landmark must be reported next to it: " << out;
+  EXPECT_NE(ce.find("residual p50/p95/p99/max = -67.0/133.0/133.0/133.0 us"), std::string::npos)
+      << "the CE series carries the jitter it was given: " << ce;
+  EXPECT_NE(cm.find("residual p50/p95/p99/max = 0.0/0.0/0.0/0.0 us"), std::string::npos)
+      << "and the COMMIT series must NOT inherit it - one shared account would: " << cm;
+  EXPECT_NE(cm.find("fitted period=500.0us"), std::string::npos) << cm;
+
+  ::unsetenv("OCUDU_UL_SLOT_GRID");
+}
+
 #endif // OCUDU_FLOW_PROBES
