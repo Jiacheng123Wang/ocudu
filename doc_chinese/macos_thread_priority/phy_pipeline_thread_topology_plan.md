@@ -600,3 +600,53 @@ phy_config.pusch_executor = pusch_srs_execs[1];
 
 ⇒ **lead 不靠测，靠运行中判定**：先定 **1 个 slot**；若锚点出现斜偏/漂移，或**跳过率 > 0.1%**，就把 lead 加到 2 个 slot。
 这是一个**运营参数**，不是一个需要新仪器的未知量。
+
+## 11.13 P6.1-SLOT 第一半已落地（2026-10-03 晚）：**lane 网格**（`OCUDU_UL_LANE_GRID`，macOS 独占 + 默认关）
+
+### (1) 它是什么：一条**宿主时基的固定网格**，不是一段延迟
+
+计划的核心机制，也是"为什么是时钟而不是延迟"：**延迟消不掉抖动，时钟才能**。
+今天一个 hop 的提交时刻是"数据什么时候到"的函数，所以传输抖动与调度停顿都会移动它；
+网格给提交一个**自己的时基**：
+
+| 规则 | 内容 | 为什么 |
+|---|---|---|
+| **锚定一次** | 以**第一个 hop 的到达时刻**为锚，之后**按整 slot 时长推进** | 单个晚到的 hop 不能移动它 |
+| **只往回拉，且很慢** | 观测**早于**网格超过 `deadband`（默认 50 µs）时，按残差的 **1/64** 回拉；**晚到绝不移动它** | 跟随传输的**下界**（稳定），而不是它的尾巴（不稳）|
+| **越界重锚** | 残差超出 `[−4 slot, +2 slot]` 时重锚并**计数** | 启动、流重启、多 slot 级中断——滤波跟不上的情形 |
+| **闸门** | 在 lane 的 stage entry：不到该 slot 的网格时刻就等；**>100 µs 睡、最后 100 µs 用 `yield` 自旋** | Darwin 会合并短睡眠，纯睡会留下几十 µs 的抖动——正是这里要消掉的东西 |
+
+**观测点在闸门之前**（hop 自己的到达时刻）——网格跟的是"最快到达"这个稳定下界；
+若观测点在闸门之后，钳位后的时刻永远是网格本身，滤波就再也看不到漂移（这一点在实现时被专门避开）。
+
+### (2) 它报什么，以及**先看哪个数**
+
+```
+[lane_grid] OCUDU_UL_LANE_GRID=1: grid armed from N hop(s), re-armed M time(s);
+            clamped=C (mean wait X us, max Y us); late=L; unarmed=U
+```
+
+★ **`late` 是 lead 的判决**：它数的是"闸门跑起来时该 slot 的网格时刻**已经过去**"的 hop。
+`late` 占比高 ⇒ lead 不够（把 `OCUDU_UL_LANE_GRID_LEAD_US` 调大）；
+`clamped` 的等待就是**被刻意加进去的相位对齐延迟**（上界 = lead）。
+`unarmed` 非零 ⇒ 网格还没锚上（没有 hop 或旋钮没生效）。
+
+### (3) 已经验证到的程度（**以及没验证到的**）
+
+| 检查 | 结果 |
+|---|---|
+| 旋钮**关**时 | **一行都不打印**（金属估计器单测里 `grep -c lane_grid` = 0），腿逐字节不变 |
+| 旋钮**开**时 | `grid armed from 3278 hop(s) … clamped=1120 … late=2158` ⇒ **变量确实到达了线程**（P5.1 的教训：先证这个）|
+| **等待记账**（不靠推理）| `OCUDU_UL_LANE_GRID_LEAD_US=5000` ⇒ `clamped=3278`、**mean 4999.2 µs**、**max 5000 µs**、`late=0` ⇒ 记账正确 |
+| 单测（纯算术 + 反向臂）| `lane_grid_filters_arrivals_instead_of_following_them`：**晚到不得移动锚**（反向臂）、早到按 1/64 回拉、多次早到收敛到"下界 + deadband"、越界重锚、wrap 处理 |
+| 本机整二进制 | `macos_compat_test` **23/23**、`ul_pipeline_probe_test` **21/21**、Metal 单测 **10/10** |
+| Ubuntu 台架 | `FLOW_PROBES=OFF` gnb **RC=0**、compat/probe 两个单测 **RC=0**、compat **23/23**（Linux 上跑同一份纯算术）|
+| ★ **Linux 构建抓到两个真缺陷** | ① `-Werror=unused-function`：网格的 state 与 `env_us`/`steady_now_ns` 只在 macOS 分支里被用到 ⇒ 加平台守卫；② 删掉一个**死掉的 API**（`lane_grid_now_ns`：调用点最终自己取时刻，头文件里却还留着它，且它在 Linux 上引用了被守卫掉的 helper）⇒ 直接删除而不是留着。**这正是"两平台都编译"这条纪律的产出**：两个问题都是本机（macOS）永远看不到的 |
+| ❌ **没验证** | **真腿上的效果**：loopback 没有 UE 流量（`[ul_gpu_lane] no lanes recorded`、`lanes=0`），所以闸门没有被真实 hop 触发过。判据是 **COMMIT 地标锚点**（§11.12 #3），要上真腿才读得到 |
+
+### (4) 下一次飞腿要读的三行
+
+1. `[lane_grid]`：`late` 占比（lead 够不够）、`clamped` 的等待分布、`re-armed`（是否只在启动时发生）；
+2. `[ul_slot_grid] … COMMIT landmark`：残差 p50/p95/p99/max —— **判决性读数**（是否收敛到 µs 级）；
+   与同一腿的 `CE landmark` 对照（后者的 wall 含等样本）；
+3. 红线：`gaps`、`rx_overflows`、`dl AT/BELOW 0`、四条载体与三条登记率。
