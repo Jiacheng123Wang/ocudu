@@ -396,11 +396,21 @@ void lane_grid_report();
 ///
 /// \return the host instant \p slot is due at, or -1 when the grid is unarmed.
 int64_t lane_grid_target_ns(int64_t anchor_host_ns,
-                            int64_t anchor_slot,
-                            uint64_t slot,
+                            int64_t distance_slots,
                             int64_t slot_duration_ns,
-                            int64_t lead_ns,
-                            uint64_t slots_per_hyperframe);
+                            int64_t lead_ns);
+
+/// \brief Pure: the UNWRAPPED distance from the previous observation to \p slot, in slots.
+///
+/// THE SLOT COUNTER WRAPS EVERY HYPERFRAME (20480 slots = 10.24 s at 30 kHz), and treating that as "the
+/// distance, modulo the hyperframe" is what the first version did - so after 10.24 s of leg the extrapolation
+/// was a whole hyperframe out. On air that read as `late = 323176 of 323176 hops` (control) and
+/// `234285 of 234285` (arm), i.e. the clamp was inert for the entire useful part of BOTH legs, and the delivery
+/// lag's `max` was 10240070 us - one hyperframe exactly. The distance has to be accumulated, not recomputed.
+int64_t lane_grid_unwrap_distance(uint64_t prev_slot,
+                                  int64_t  prev_distance,
+                                  uint64_t slot,
+                                  uint64_t slots_per_hyperframe);
 
 /// \brief The grid's state after ONE observation - pure, so the filter rule itself is testable.
 struct lane_grid_update {
@@ -412,14 +422,16 @@ struct lane_grid_update {
   bool rearmed = false;
 };
 
-/// \brief Applies one frontier observation to the grid (see lane_grid_note_slot): arm, re-arm, or walk slowly.
+/// \brief Applies one frontier observation to the grid (see lane_grid_note_slot): arm, or re-arm on a moved
+/// time base. \p distance_slots is the UNWRAPPED distance (see lane_grid_unwrap_distance): the offset itself is
+/// never walked, and that is the point - walking it would absorb the delivery lag the grid exists to measure.
 ///
 /// THE RULE THE TEST PINS DOWN: a LATE observation must NOT move the grid. That is what separates a filter
 /// from a follower - a grid that moved on late arrivals would inherit the very jitter it exists to remove -
 /// and it is the reverse arm of the unit test.
 lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
                                      int64_t anchor_slot,
-                                     uint64_t slot,
+                                     int64_t distance_slots,
                                      int64_t host_ns,
                                      int64_t slot_duration_ns,
                                      int64_t gain_shift,

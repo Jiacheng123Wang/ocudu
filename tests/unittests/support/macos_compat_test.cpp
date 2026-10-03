@@ -654,13 +654,39 @@ TEST(macos_compat_sched_test, lane_grid_filters_arrivals_instead_of_following_th
   constexpr uint64_t WRAP    = 1024 * 20; // slots per hyperframe
 
   // ---- the target mapping, including the wrap ------------------------------------------------------------
-  EXPECT_EQ(compat::lane_grid_target_ns(1000000, 100, 100, SLOT_NS, 200000, WRAP), 1200000)
-      << "the anchor's own slot is due at anchor + lead";
-  EXPECT_EQ(compat::lane_grid_target_ns(1000000, 100, 101, SLOT_NS, 200000, WRAP), 1700000)
+  EXPECT_EQ(compat::lane_grid_target_ns(1000000, 0, SLOT_NS, 200000), 1200000)
+      << "the anchor's own instant is due at anchor + lead";
+  EXPECT_EQ(compat::lane_grid_target_ns(1000000, 1, SLOT_NS, 200000), 1700000)
       << "and one slot later is due exactly one slot later";
-  EXPECT_EQ(compat::lane_grid_target_ns(1000000, WRAP - 1, 0, SLOT_NS, 0, WRAP), 1500000)
-      << "a slot AFTER the wrap is one step ahead, not 20479 steps behind";
-  EXPECT_EQ(compat::lane_grid_target_ns(0, -1, 7, SLOT_NS, 0, WRAP), -1) << "an unarmed grid has no target";
+  EXPECT_EQ(compat::lane_grid_target_ns(1000000, -1, SLOT_NS, 0), -1)
+      << "a negative distance is not a target: the caller has no such slot";
+
+  // ---- THE WRAP, and it is why the distance is ACCUMULATED rather than taken modulo the hyperframe ---------
+  //
+  // On air, treating the distance as `(slot - anchor) % 20480` put the extrapolation a whole hyperframe out
+  // once a leg ran longer than 10.24 s: both p226 and p227 read `late` on 100% of their hops (323176/323176 and
+  // 234285/234285), their clamps never bound, and the delivery lag's max was 10240070 us - one hyperframe
+  // exactly. These arms pin the accumulation down.
+  EXPECT_EQ(compat::lane_grid_unwrap_distance(20479, 0, 0, WRAP), 1)
+      << "the step across the wrap is ONE slot, not 20479";
+  EXPECT_EQ(compat::lane_grid_unwrap_distance(0, 0, 20479, WRAP), WRAP - 1)
+      << "and the other way it is the long way round, which is what the shorter-way rule is for";
+  {
+    // A leg longer than one hyperframe: 20480 + 3 slots in, the distance must be 20483 and the target must be
+    // 20483 slots after the anchor - not 3.
+    int64_t distance = 0;
+    uint64_t prev    = 0;
+    for (uint64_t k = 1; k <= WRAP + 3; ++k) {
+      const uint64_t slot = k % WRAP;
+      distance = compat::lane_grid_unwrap_distance(prev, distance, slot, WRAP);
+      prev     = slot;
+    }
+    EXPECT_EQ(distance, static_cast<int64_t>(WRAP + 3))
+        << "the distance must keep growing past the counter's wrap, or every reading after 10.24 s is a "
+           "hyperframe wrong: "
+        << distance;
+    EXPECT_EQ(compat::lane_grid_target_ns(0, distance, SLOT_NS, 0), static_cast<int64_t>(WRAP + 3) * SLOT_NS);
+  }
 
   // ---- the first observation ARMS ------------------------------------------------------------------------
   const compat::lane_grid_update armed = compat::lane_grid_update_ns(0, -1, 7, 5000000, SLOT_NS, 10, WRAP);
@@ -716,10 +742,10 @@ TEST(macos_compat_sched_test, lane_grid_filters_arrivals_instead_of_following_th
   // ---- the RATE correction is the only thing that moves the extrapolation ------------------------------
   {
     compat::lane_grid_set_rate_ppb_for_test(0);
-    const int64_t base = compat::lane_grid_target_ns(0, 0, 200, SLOT_NS, 0, WRAP);
+    const int64_t base = compat::lane_grid_target_ns(0, 200, SLOT_NS, 0);
     EXPECT_EQ(base, 200 * SLOT_NS);
     compat::lane_grid_set_rate_ppb_for_test(10000); // +10 ppm
-    const int64_t corrected = compat::lane_grid_target_ns(0, 0, 200, SLOT_NS, 0, WRAP);
+    const int64_t corrected = compat::lane_grid_target_ns(0, 200, SLOT_NS, 0);
     EXPECT_EQ(corrected - base, (200 * SLOT_NS) / 100000) << "10 ppm over 100 ms is 1 us: " << corrected - base;
     compat::lane_grid_set_rate_ppb_for_test(0);
   }

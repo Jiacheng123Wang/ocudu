@@ -865,6 +865,12 @@ struct lane_grid_state {
   std::atomic<int64_t>  slot_duration_ns{500000};
   std::atomic<int64_t>  lead_ns{200000};
   std::atomic<uint64_t> noted{0};
+  /// The last slot index seen and its UNWRAPPED distance from the anchor - the pair the distance accumulation
+  /// needs (see lane_grid_unwrap_distance). Guarded by `distance_mutex`, which is uncontended: two callers, one
+  /// per slot at most.
+  std::mutex            distance_mutex;
+  uint64_t              last_slot     = 0;
+  int64_t               last_distance = 0;
   std::atomic<uint64_t> clamped{0};
   std::atomic<uint64_t> late{0};
   std::atomic<uint64_t> unarmed{0};
@@ -1067,48 +1073,80 @@ int64_t lane_grid_rate_ppb()
   return g_lane_grid_rate_ppb.load(std::memory_order_relaxed);
 }
 
-int64_t lane_grid_target_ns(int64_t anchor_host_ns,
-                            int64_t anchor_slot,
-                            uint64_t slot,
-                            int64_t slot_duration_ns,
-                            int64_t lead_ns,
-                            uint64_t slots_per_hyperframe)
+int64_t lane_grid_target_ns(int64_t anchor_host_ns, int64_t distance_slots, int64_t slot_duration_ns, int64_t lead_ns)
 {
-  if ((anchor_slot < 0) || (slots_per_hyperframe == 0)) {
+  if ((distance_slots < 0) || (slot_duration_ns <= 0)) {
     return -1;
   }
-  const uint64_t distance = (slot + slots_per_hyperframe - static_cast<uint64_t>(anchor_slot)) % slots_per_hyperframe;
-  const int64_t  radio_span_ns = static_cast<int64_t>(distance) * slot_duration_ns;
-  // `rate_ppb` is the host-vs-radio rate correction (see lane_grid_note_slot): the ONLY thing allowed to move
+  const int64_t radio_span_ns = distance_slots * slot_duration_ns;
+  // `rate_ppb` is the host-vs-radio rate correction (see lane_grid_rate_ppb): the ONLY thing allowed to move
   // the extrapolation, because it is the only thing that is a property of the two CLOCKS rather than of the
   // transport. 0 means "same rate", which is what a software loopback radio really is.
-  return anchor_host_ns + radio_span_ns + static_cast<int64_t>((static_cast<double>(radio_span_ns) *
-                                                               static_cast<double>(lane_grid_rate_ppb())) /
-                                                              1e9) +
+  return anchor_host_ns + radio_span_ns +
+         static_cast<int64_t>((static_cast<double>(radio_span_ns) * static_cast<double>(lane_grid_rate_ppb())) / 1e9) +
          lead_ns;
+}
+
+int64_t lane_grid_unwrap_distance(uint64_t prev_slot,
+                                  int64_t  prev_distance,
+                                  uint64_t slot,
+                                  uint64_t slots_per_hyperframe)
+{
+  if (slots_per_hyperframe == 0) {
+    return -1;
+  }
+  const uint64_t step = (slot + slots_per_hyperframe - (prev_slot % slots_per_hyperframe)) % slots_per_hyperframe;
+  return prev_distance + static_cast<int64_t>(step);
+}
+
+/// The distance to \p slot, taken as the SHORTER of the two ways round the ring and added to the accumulator
+/// when \p advance.
+///
+/// The shorter-way rule matters because two callers ask: the receive path, which walks forward one slot at a
+/// time and is the one that ADVANCES the accumulator, and the lane, which may ask about a slot the receive path
+/// has already passed (a hop that arrives late). Taking "forward" unconditionally would read a slot behind the
+/// accumulator as almost a whole hyperframe AHEAD - a target 10.24 s in the future, which the clamp would wait
+/// for. The lane therefore reads without advancing, so its question cannot move the stream's bookkeeping.
+int64_t lane_grid_distance_of(uint64_t slot, bool advance)
+{
+  lane_grid_state&            st = lane_grid();
+  std::lock_guard<std::mutex> lock(st.distance_mutex);
+  const uint64_t forward  = (slot + kSlotsPerHyperframe - (st.last_slot % kSlotsPerHyperframe)) % kSlotsPerHyperframe;
+  const uint64_t backward = (st.last_slot + kSlotsPerHyperframe - (slot % kSlotsPerHyperframe)) % kSlotsPerHyperframe;
+  const int64_t  step     = (forward <= backward) ? static_cast<int64_t>(forward)
+                                                  : -static_cast<int64_t>(backward);
+  if (advance) {
+    st.last_distance += step;
+    st.last_slot      = slot;
+    return st.last_distance;
+  }
+  return st.last_distance + step;
 }
 
 lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
                                      int64_t anchor_slot,
-                                     uint64_t slot,
+                                     int64_t distance_slots,
                                      int64_t host_ns,
                                      int64_t slot_duration_ns,
                                      int64_t gain_shift,
                                      uint64_t slots_per_hyperframe)
 {
   lane_grid_update out;
-  (void)gain_shift; // kept in the signature for the report's parameter list; the rule no longer walks (see below)
+  (void)gain_shift;         // kept in the signature for the report's parameter list; the rule no longer walks
+  (void)slots_per_hyperframe; // the distance arrives UNWRAPPED (see lane_grid_unwrap_distance)
   if (anchor_slot < 0) {
     // ARM once, on the first frontier: the grid is then the radio's cadence as the HOST saw it at that instant,
     // and it is extrapolated from there. Nothing about later arrivals moves its phase.
     out.anchor_host_ns = host_ns;
-    out.anchor_slot    = static_cast<int64_t>(slot);
+    out.anchor_slot    = static_cast<int64_t>(distance_slots);
     return out;
   }
   out.anchor_host_ns = anchor_host_ns;
   out.anchor_slot    = anchor_slot;
-  const int64_t predicted =
-      lane_grid_target_ns(anchor_host_ns, anchor_slot, slot, slot_duration_ns, 0, slots_per_hyperframe);
+  const int64_t predicted = lane_grid_target_ns(anchor_host_ns, distance_slots - anchor_slot, slot_duration_ns, 0);
+  if (predicted < 0) {
+    return out; // an observation older than the anchor: nothing to correct and nothing to re-arm
+  }
   if (predicted < 0) {
     return out;
   }
@@ -1128,7 +1166,7 @@ lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
   const int64_t rearm_band = 1000000000LL; // 1 s
   if ((host_ns - predicted > rearm_band) || (predicted - host_ns > rearm_band)) {
     out.anchor_host_ns = host_ns;
-    out.anchor_slot    = static_cast<int64_t>(slot);
+    out.anchor_slot    = distance_slots; // the anchor moves to THIS observation, so its distance is the new zero
     out.rearmed        = true;
   }
   return out;
@@ -1175,13 +1213,12 @@ void lane_grid_note_slot(uint64_t slot, int64_t host_ns, int64_t radio_abs_ns)
   const int64_t          anchor_h = st.anchor_host_ns.load(std::memory_order_relaxed);
   // THE LAG, before the filter moves the anchor: the residual against the grid the anchor already defines IS
   // the delivery lag (the grid instant is the radio's own cadence; the observation is when the host got it).
+  const int64_t distance = lane_grid_distance_of(slot, /*advance=*/true);
   if (anchor >= 0) {
     const int64_t predicted = lane_grid_target_ns(anchor_h,
-                                                  anchor,
-                                                  slot,
+                                                  distance - anchor,
                                                   st.slot_duration_ns.load(std::memory_order_relaxed),
-                                                  0,
-                                                  kSlotsPerHyperframe);
+                                                  0);
     if (predicted >= 0) {
       const int64_t lag_us = (host_ns - predicted) / 1000;
       ++st.lag_n;
@@ -1204,7 +1241,7 @@ void lane_grid_note_slot(uint64_t slot, int64_t host_ns, int64_t radio_abs_ns)
   }
   const lane_grid_update up       = lane_grid_update_ns(anchor_h,
                                                         anchor,
-                                                        slot,
+                                                        distance,
                                                         host_ns,
                                                         st.slot_duration_ns.load(std::memory_order_relaxed),
                                                         st_gain_shift(),
@@ -1278,11 +1315,9 @@ void lane_grid_wait(uint64_t slot)
   const int64_t    anchor   = st.anchor_slot.load(std::memory_order_relaxed);
   const int64_t    anchor_h = st.anchor_host_ns.load(std::memory_order_relaxed);
   const int64_t    target   = lane_grid_target_ns(anchor_h,
-                                                  anchor,
-                                                  slot,
+                                                  lane_grid_distance_of(slot, /*advance=*/false) - anchor,
                                                   st.slot_duration_ns.load(std::memory_order_relaxed),
-                                                  st.lead_ns.load(std::memory_order_relaxed),
-                                                  kSlotsPerHyperframe);
+                                                  st.lead_ns.load(std::memory_order_relaxed));
   if (target < 0) {
     st.unarmed.fetch_add(1, std::memory_order_relaxed);
     return;

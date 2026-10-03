@@ -180,6 +180,12 @@ public:
                      static_cast<long long>(period_us),
                      static_cast<long long>(lead_us),
                      static_cast<long long>(wait_us));
+        // BOTH exit paths, and that is the rule this file learned the hard way from the other direction: the
+        // lane grid was registered with atexit only and was lost on a forced exit, while this one was
+        // registered with the P0 registry only and was lost on a GRACEFUL exit - an air leg's stop prints the
+        // atexit reports, and no P0 dump runs. A reading that is only on one path is a reading that goes
+        // missing exactly when someone needs it.
+        std::atexit(paced_lane_report);
         register_p0_report(paced_lane_report);
       }
       // ---- P0-6: the SHAPE that value produced, next to the value itself ---------------------------
