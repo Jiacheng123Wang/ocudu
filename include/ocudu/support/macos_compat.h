@@ -359,7 +359,13 @@ bool lane_grid_enabled();
 /// (slow, ppm-scale), while the lane's arrival carries the whole upstream pipeline's millisecond wander - see
 /// the call site for what anchoring on the wrong one measured (p224/p225: 4-19 ms of residual against a clamp
 /// that was precise to 3 us).
-void lane_grid_note_slot(uint64_t slot, int64_t host_ns);
+///
+/// \p radio_abs_ns is the radio's ABSOLUTE time of that same frontier sample when the radio reports one (see
+/// baseband_gateway_receiver::metadata::absolute_ns), -1 otherwise. It buys two things the counter cannot:
+/// the anchor becomes a RADIO-referenced instant rather than a host one (so "residual" acquires an absolute
+/// meaning - it IS the delivery lag), and the rate can be checked instead of assumed. The residual distribution
+/// is reported as the delivery lag, which is the quantity a periodic commit thread's `lead` has to cover.
+void lane_grid_note_slot(uint64_t slot, int64_t host_ns, int64_t radio_abs_ns = -1);
 
 void lane_grid_wait(uint64_t slot);
 

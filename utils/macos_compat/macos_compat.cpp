@@ -852,6 +852,14 @@ constexpr uint64_t kSlotsPerHyperframe = 1024 * 20; // 30 kHz SCS; the caller pa
 // compile to no-ops, which is exactly the kind of "the Linux build is a different build" this port must not have.
 // The PURE functions (target mapping, grid update) stay outside the guard because they are the tested arithmetic
 // and the unit test runs on both platforms.
+/// The delivery-lag histogram's shape: a SIGNED fixed-resolution range, because a lag can be NEGATIVE (the
+/// frontier can arrive before the grid instant) and a log2 bucket built with a shift keeps the sign bit set for
+/// every negative value - so all of them would land in the top bucket and every percentile would read as that
+/// bucket's edge. Measured: the first version printed p50 = 16777215 us against a min/max of -44/+11.
+constexpr int64_t  LAG_LO_US     = -32768;
+constexpr int64_t  LAG_RES_US    = 64;
+constexpr unsigned LAG_BUCKETS   = 1024; // 64 ms of range at 64 us resolution
+
 struct lane_grid_state {
   std::atomic<int64_t>  anchor_host_ns{0};
   std::atomic<int64_t>  anchor_slot{-1};
@@ -872,6 +880,20 @@ struct lane_grid_state {
   /// at THIS scale - the 1 ms watchdog cannot see it (see the lane grid's header note).
   std::atomic<int64_t>  overshoot_sum_us{0};
   std::atomic<int64_t>  overshoot_max_us{0};
+  /// \name The FRONTIER's delivery lag: host instant the samples were readable MINUS the grid instant they
+  /// were due at, i.e. how long the radio-to-host path took. This is the distribution `lead` has to cover, and
+  /// it is the reading the absolute time base exists for.
+  ///@{
+  std::atomic<uint64_t> lag_n{0};
+  std::atomic<int64_t>  lag_min_us{0};
+  std::atomic<int64_t>  lag_max_us{0};
+  /// Signed fixed-resolution histogram (see LAG_* above), so the report prints percentiles from bounded state.
+  std::mutex            lag_mutex;
+  uint64_t              lag_buckets[LAG_BUCKETS] = {};
+  ///@}
+  /// Whether a radio ABSOLUTE time has ever been seen (see metadata::absolute_ns), and the pair it anchored.
+  std::atomic<bool>     absolute_seen{false};
+  std::atomic<int64_t>  absolute_anchor_ns{-1};
   std::atomic<bool>     params_read{false};
 };
 
@@ -943,6 +965,33 @@ void lane_grid_report_impl()
                static_cast<long long>(st.overshoot_max_us.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(st.late.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(st.unarmed.load(std::memory_order_relaxed)));
+  if (st.lag_n.load(std::memory_order_relaxed) != 0) {
+    std::lock_guard<std::mutex> lock(st.lag_mutex);
+    // The bucket's CENTRE, so a percentile never claims more resolution than the histogram has.
+    const auto pct = [&st](double q) {
+      const uint64_t target = static_cast<uint64_t>(q * static_cast<double>(st.lag_n.load()) + 0.999999);
+      uint64_t       seen   = 0;
+      for (unsigned i = 0; i != LAG_BUCKETS; ++i) {
+        seen += st.lag_buckets[i];
+        if (seen >= target) {
+          return LAG_LO_US + static_cast<int64_t>(i) * LAG_RES_US + LAG_RES_US / 2;
+        }
+      }
+      return st.lag_max_us.load();
+    };
+    std::fprintf(stderr,
+                 "[lane_grid]   FRONTIER delivery lag (radio -> host readable, us): n=%llu p50=%lld p95=%lld "
+                 "p99=%lld max=%lld min=%lld; radio absolute time %s. This is the distribution a periodic "
+                 "commit thread's `lead` has to cover\n",
+                 static_cast<unsigned long long>(st.lag_n.load(std::memory_order_relaxed)),
+                 static_cast<long long>(pct(0.50)),
+                 static_cast<long long>(pct(0.95)),
+                 static_cast<long long>(pct(0.99)),
+                 static_cast<long long>(st.lag_max_us.load(std::memory_order_relaxed)),
+                 static_cast<long long>(st.lag_min_us.load(std::memory_order_relaxed)),
+                 st.absolute_seen.load(std::memory_order_relaxed) ? "REPORTED (epoch anchor available)"
+                                                                  : "not reported (-1): lag is relative");
+  }
 }
 
 const bool lane_grid_report_registered = []() {
@@ -1056,7 +1105,7 @@ lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
   return out;
 }
 
-void lane_grid_note_slot(uint64_t slot, int64_t host_ns)
+void lane_grid_note_slot(uint64_t slot, int64_t host_ns, int64_t radio_abs_ns)
 {
 #if defined(__APPLE__)
   if (!lane_grid_enabled()) {
@@ -1072,8 +1121,40 @@ void lane_grid_note_slot(uint64_t slot, int64_t host_ns)
   }
   last_slot.store(static_cast<int64_t>(slot), std::memory_order_relaxed);
 
+  if (radio_abs_ns >= 0) {
+    st.absolute_seen.store(true, std::memory_order_relaxed);
+  }
   const int64_t          anchor   = st.anchor_slot.load(std::memory_order_relaxed);
   const int64_t          anchor_h = st.anchor_host_ns.load(std::memory_order_relaxed);
+  // THE LAG, before the filter moves the anchor: the residual against the grid the anchor already defines IS
+  // the delivery lag (the grid instant is the radio's own cadence; the observation is when the host got it).
+  if (anchor >= 0) {
+    const int64_t predicted = lane_grid_target_ns(anchor_h,
+                                                  anchor,
+                                                  slot,
+                                                  st.slot_duration_ns.load(std::memory_order_relaxed),
+                                                  0,
+                                                  kSlotsPerHyperframe);
+    if (predicted >= 0) {
+      const int64_t lag_us = (host_ns - predicted) / 1000;
+      ++st.lag_n;
+      if (st.lag_n == 1 || lag_us < st.lag_min_us.load(std::memory_order_relaxed)) {
+        st.lag_min_us.store(lag_us, std::memory_order_relaxed);
+      }
+      if (lag_us > st.lag_max_us.load(std::memory_order_relaxed)) {
+        st.lag_max_us.store(lag_us, std::memory_order_relaxed);
+      }
+      int64_t bucket = (lag_us - LAG_LO_US) / LAG_RES_US;
+      if (bucket < 0) {
+        bucket = 0;
+      }
+      else if (bucket >= static_cast<int64_t>(LAG_BUCKETS)) {
+        bucket = LAG_BUCKETS - 1;
+      }
+      std::lock_guard<std::mutex> lock(st.lag_mutex);
+      ++st.lag_buckets[bucket];
+    }
+  }
   const lane_grid_update up       = lane_grid_update_ns(anchor_h,
                                                         anchor,
                                                         slot,

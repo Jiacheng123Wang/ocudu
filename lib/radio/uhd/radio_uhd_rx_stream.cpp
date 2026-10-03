@@ -121,6 +121,14 @@ baseband_gateway_receiver::metadata radio_uhd_rx_stream::receive(baseband_gatewa
     // Save timespec for first block only if the last timestamp is unknown.
     if (rxd_samples_total == 0) {
       ret.ts = md.time_spec.to_ticks(srate_Hz);
+      // ... and the ABSOLUTE time of that same sample when the radio reports one (see metadata::absolute_ns).
+      // `get_frac_secs()` is a double in [0, 1), so converting the two parts separately keeps the pair's
+      // resolution at well under a microsecond; a single `get_real_secs() * 1e9` would leave ~100 ns of
+      // rounding at GPSDO-sized epochs because the double has to carry ~19 significant digits.
+      if (md.time_spec.get_real_secs() != 0.0) {
+        ret.absolute_ns = static_cast<int64_t>(md.time_spec.get_full_secs()) * 1000000000LL +
+                          static_cast<int64_t>(md.time_spec.get_frac_secs() * 1e9);
+      }
     }
 
     // Increase the total amount of received samples.

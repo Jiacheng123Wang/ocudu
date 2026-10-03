@@ -1646,7 +1646,15 @@ void lower_phy_baseband_processor::ul_process()
     const uint64_t slots_per_sfn_cycle = (nof_samples_in_all_hyper_frames / NOF_HYPER_SFNS) / nof_samples_per_slot;
     const uint64_t frontier  = apply_timestamp_sfn0_ref(static_cast<uint64_t>(rx_metadata.ts) + nof_samples);
     const uint64_t slot_now  = (frontier / nof_samples_per_slot) % slots_per_sfn_cycle;
-    compat::lane_grid_note_slot(slot_now, rx_call_end_ns);
+    // The radio's ABSOLUTE time of the SAME sample the frontier names: the radio reports it for the block's
+    // FIRST sample, so the frontier's own instant is that plus the block's air time. -1 when the radio
+    // reported none, and the grid then falls back to a purely relative lag (see metadata::absolute_ns).
+    int64_t frontier_abs_ns = -1;
+    if (rx_metadata.absolute_ns >= 0) {
+      frontier_abs_ns = rx_metadata.absolute_ns +
+                        static_cast<int64_t>(nof_samples) * 1000 / static_cast<int64_t>(srate.to_kHz());
+    }
+    compat::lane_grid_note_slot(slot_now, rx_call_end_ns, frontier_abs_ns);
   }
   // The air time of the block the call asked for: the reference the receive timing is read against (see
   // ul_rx_note_call). `srate` is in kHz, so samples * 1000 / kHz is microseconds.

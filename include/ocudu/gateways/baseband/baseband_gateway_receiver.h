@@ -40,6 +40,21 @@ public:
   struct metadata {
     /// Timestamp of the received baseband signal.
     baseband_gateway_timestamp ts;
+    /// \brief The radio's ABSOLUTE time of the same first sample, in nanoseconds since its own epoch, or -1
+    ///        when the radio did not report one.
+    ///
+    /// WHY IT EXISTS (plan doc §11.18), and it is the one thing a sample counter cannot give. The counter is an
+    /// affine image of the radio's time - `time_spec.to_ticks(rate)` - so the RATE is exact and a grid can be
+    /// extrapolated from it. What the counter cannot say is WHEN, in absolute terms, a sample was on the air,
+    /// and therefore HOW LONG the radio-to-host path took to deliver it. That quantity is the `lead` a periodic
+    /// commit thread has to work with, and without this field it could only be inferred from differences - i.e.
+    /// never in absolute terms at all. With GPSDO/PPS discipline (this project's configuration) the epoch is
+    /// UTC, so the pair (absolute_ns, ts) plus the host pair the receive path already keeps turns "why was this
+    /// slot late" into arithmetic.
+    ///
+    /// A radio that reports no absolute time leaves it at -1 and NOTHING changes for it: the field is additive
+    /// and no existing consumer reads it.
+    int64_t absolute_ns = -1;
     /// What the radio reported about this block (see rx_error).
     rx_error error = rx_error::none;
   };
