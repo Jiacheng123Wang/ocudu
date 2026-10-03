@@ -1254,9 +1254,13 @@ int64_t lane_grid_next_tick_ns(int64_t prev_ns, int64_t slot_duration_ns)
 
 void lane_grid_set_slot_duration_ns(int64_t ns)
 {
+#if defined(__APPLE__)
   if (ns > 0) {
     lane_grid().slot_duration_ns.store(ns, std::memory_order_relaxed);
   }
+#else
+  (void)ns; // no grid on this platform (see lane_grid_enabled): nothing to tell
+#endif
 }
 
 void lane_grid_set_rate_ppb_for_test(int64_t ppb)
