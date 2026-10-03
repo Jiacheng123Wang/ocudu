@@ -845,6 +845,12 @@ namespace {
 /// has to be taken modulo the hyperframe. It is a parameter because the caller knows the numerology.
 constexpr uint64_t kSlotsPerHyperframe = 1024 * 20; // 30 kHz SCS; the caller passes its own through the API
 
+#if defined(__APPLE__)
+// The STATE and the helpers below are macOS-only, and the guard is here rather than around the whole block for a
+// reason Linux found immediately: `-Werror=unused-function` fires on env_us/steady_now_ns when the call sites
+// compile to no-ops, which is exactly the kind of "the Linux build is a different build" this port must not have.
+// The PURE functions (target mapping, grid update) stay outside the guard because they are the tested arithmetic
+// and the unit test runs on both platforms.
 struct lane_grid_state {
   std::atomic<int64_t>  anchor_host_ns{0};
   std::atomic<int64_t>  anchor_slot{-1};
@@ -913,6 +919,8 @@ const bool lane_grid_report_registered = []() {
   std::atexit(lane_grid_report_impl);
   return true;
 }();
+
+#endif // __APPLE__
 
 } // namespace
 
@@ -1083,7 +1091,9 @@ void lane_grid_wait(uint64_t slot)
 
 void lane_grid_report()
 {
+#if defined(__APPLE__)
   lane_grid_report_impl();
+#endif
 }
 
 void sprint_wait()
