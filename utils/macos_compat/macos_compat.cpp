@@ -1109,6 +1109,7 @@ int64_t lane_grid_unwrap_distance(uint64_t prev_slot,
 /// for. The lane therefore reads without advancing, so its question cannot move the stream's bookkeeping.
 int64_t lane_grid_distance_of(uint64_t slot, bool advance)
 {
+#if defined(__APPLE__)
   lane_grid_state&            st = lane_grid();
   std::lock_guard<std::mutex> lock(st.distance_mutex);
   const uint64_t forward  = (slot + kSlotsPerHyperframe - (st.last_slot % kSlotsPerHyperframe)) % kSlotsPerHyperframe;
@@ -1121,6 +1122,14 @@ int64_t lane_grid_distance_of(uint64_t slot, bool advance)
     return st.last_distance;
   }
   return st.last_distance + step;
+#else
+  // No grid on this platform (see lane_grid_enabled): the only callers are inside the platform-guarded receive
+  // path and lane gate, so this is unreachable - and -1 is the answer "no such slot", which the callers already
+  // handle for an unarmed grid.
+  (void)slot;
+  (void)advance;
+  return -1;
+#endif
 }
 
 lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
