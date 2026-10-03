@@ -903,3 +903,36 @@ wake_at = grid(slot) + lead                 ← 最早可以动
 **至此第 1 步（电台绝对时间 + 时钟化网格 + 投递延迟可读）完成。**
 下一步是第 2 步：**弹性线程**（`lead` 与 `max_wait` 之间的带、提交或跳过、独占 `pusch_lane` 线程 + TC 申报），
 其中 `lead` 现在有实测来源（`[lane_grid] FRONTIER delivery lag` 的 p99/max），不再是拍的。
+
+### 11.21 第 2 步已落地（2026-10-04 凌晨）：**弹性线程**（`paced_task_executor` + 独占 `pusch_lane`）
+
+按用户的弹性带设计实现，**数据流一字未动**（GPU 派发顺序、FAPI 交付、谁调用谁都照旧），
+变的只是**这条线程什么时候跑它**：
+
+```
+wake_at = grid_tick + lead
+   在 [wake_at, wake_at + max_wait] 里轮询任务
+      有（或期间到达）→ 立刻跑；提交就落在这条带里的某处
+   带走完仍没有 → **跳过这个 tick 并计数**
+```
+
+★ **与 p224/p225 的区别就是"跳过"这两个字**：那一版**无限等**，于是继承了到达的时刻、节拍跟着数据走
+（精度 3 µs 却仍落后 2 ms）。这一版**丢掉这个 tick、保住节拍**——所以**跳过率是 `max_wait` 的产物**，
+而决定 `max_wait` 的是应用层，不是任何 PHY 阈值。
+
+| 组成 | 内容 |
+|---|---|
+| `paced_task_executor` | 自己的线程 + 自己的队列；循环向**同一个网格**要下一个 tick（`lane_grid_next_tick_ns`，与 lane 钳位共用锚点与速率修正 ⇒ 一条腿的两个读数描述同一个时钟）|
+| 参数 | **period / lead / band 全是构造参数**，不 hardcode |
+| 接线 | `du_low_executor_mapper` 里当 `OCUDU_UL_PACED_LANE=<period µs>` 时把它设为 `phy_config.pusch_executor`；lead/band 取 `OCUDU_UL_PACED_LEAD_US` / `_WAIT_US`；mapper 持有线程，并把**同一个 period**交给网格（两者不可能描述不同时钟）|
+| **申报** | **零新接线**：现成的按线程名机制直接生效，离线端到端回读——`[sched_tc] thread=pusch_lane applied period=500us computation=300us constraint=400us duty=60%`、`[sched] … tc=500/300/400us(duty=60%)` |
+| 线程档位意图 | 与池 worker 相同的 realtime intent，这样"开 pacing/关约束"的对照腿才可比（否则会同时量到档位差异）|
+
+**离线端到端读数**：loopback 13 秒 **26281 ticks = 2021/s**，即**每个 500 µs slot 恰好一个 tick** ✓；
+**skipped = 100%**——没有 UE 流量、永远没有 PUSCH 任务到达。这既是机制照设计工作，也是"空 tick 的代价"的第一个读数。
+
+**测试抓到的两个真缺陷**：
+1. **停机协议是坏的**：关 pacing 时循环停在 `pop_blocking` 里，`running=false` **中断不了它** ⇒ 析构的 join 永远等不到
+   （测试挂了十分钟、且因为被 kill 连 gtest 横幅都丢了）。现在置标志后再推一个空任务去唤醒它；
+   **后面的队列任务故意不排空**——一条腿的停止不该去跑它被要求放弃的积压。
+2. `tasks` 计数声明了却从未自增 ⇒ 一个永远读 0 的计数器就是陷阱；补上，并把断言从 0 改成 1。
