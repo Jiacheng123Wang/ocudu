@@ -900,8 +900,6 @@ struct lane_grid_state {
   std::atomic<int64_t>  abs_last_ns{0};
   std::atomic<int64_t>  host_first_ns{0};
   std::atomic<int64_t>  host_last_ns{0};
-  /// The rate correction the extrapolation applies, in ppb (see lane_grid_rate_ppb).
-  std::atomic<int64_t>  rate_ppb{0};
   std::atomic<bool>     params_read{false};
 };
 
@@ -935,13 +933,6 @@ lane_grid_state& lane_grid()
   return *st;
 }
 
-/// The host-vs-radio rate correction in parts per billion (0 = identical rates). It is the ONLY quantity that
-/// moves the grid's extrapolation once the offset is anchored - see lane_grid_update_ns() for why the offset
-/// must not move, and lane_grid_note_slot() for how this is estimated.
-int64_t lane_grid_rate_ppb()
-{
-  return lane_grid().rate_ppb.load(std::memory_order_relaxed);
-}
 
 
 int64_t env_us(const char* name, int64_t fallback)
@@ -1061,6 +1052,21 @@ bool lane_grid_enabled()
 #endif
 }
 
+/// \brief The extrapolation's host-vs-radio rate correction, in parts per billion (0 = identical rates).
+///
+/// It is the ONLY quantity that moves the grid once the offset is anchored - see lane_grid_update_ns() for why
+/// the offset must not move, and lane_grid_note_slot() for how this is estimated.
+///
+/// IT LIVES OUTSIDE THE PLATFORM GUARD ON PURPOSE, and the Linux build is what said so: the target mapping and
+/// its test hook are compiled on BOTH platforms (the arithmetic is platform-neutral and the unit test runs on
+/// Linux too), so the value they read has to exist on both. The ESTIMATOR of it is macOS-only, with the grid.
+std::atomic<int64_t> g_lane_grid_rate_ppb{0};
+
+int64_t lane_grid_rate_ppb()
+{
+  return g_lane_grid_rate_ppb.load(std::memory_order_relaxed);
+}
+
 int64_t lane_grid_target_ns(int64_t anchor_host_ns,
                             int64_t anchor_slot,
                             uint64_t slot,
@@ -1161,7 +1167,7 @@ void lane_grid_note_slot(uint64_t slot, int64_t host_ns, int64_t radio_abs_ns)
     if ((abs_span > 60000000000LL) && (host_span > 0)) {
       const double ppb = (static_cast<double>(host_span) / static_cast<double>(abs_span) - 1.0) * 1e9;
       if ((ppb > -200000.0) && (ppb < 200000.0)) {
-        st.rate_ppb.store(static_cast<int64_t>(ppb), std::memory_order_relaxed);
+        g_lane_grid_rate_ppb.store(static_cast<int64_t>(ppb), std::memory_order_relaxed);
       }
     }
   }
@@ -1219,7 +1225,7 @@ void lane_grid_note_slot(uint64_t slot, int64_t host_ns, int64_t radio_abs_ns)
 
 void lane_grid_set_rate_ppb_for_test(int64_t ppb)
 {
-  lane_grid().rate_ppb.store(ppb, std::memory_order_relaxed);
+  g_lane_grid_rate_ppb.store(ppb, std::memory_order_relaxed);
 }
 
 void lane_grid_wait(uint64_t slot)
