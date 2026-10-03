@@ -332,6 +332,16 @@ private:
   static void rx_pool_note_wait(int64_t wait_us);
   static void rx_pool_note_return();
 
+  /// \brief P5.1: what a NON-BLOCKING take cost, so the arm is judged on both sides (plan doc Fbis.5).
+  ///
+  /// WHY IT EXISTS. The arm's whole point is that the receive thread stops parking, and the price of that is CPU: a
+  /// polling thread is AWAKE for the whole wait where a parked one is not. Without this the report can show the gain
+  /// (a shorter tail) and say nothing about what bought it, which is exactly the trade a delivery decision needs.
+  /// `try_fail` is the failed `try_pop()` count of one take, `spin_us` the wall time that take spent in the loop
+  /// (bounded by the wait slice), and `deadline_hit` marks the takes that polled the WHOLE slice and found nothing -
+  /// the case a blocking wait handles strictly better. Called once per take, only from the macOS poll branch.
+  static void rx_pool_note_poll(uint64_t try_fail, int64_t spin_us, bool deadline_hit);
+
   /// The receive buffers of this sector (see rx_buffer_pool), sized by the configuration.
   std::shared_ptr<rx_buffer_pool> rx_pool;
 

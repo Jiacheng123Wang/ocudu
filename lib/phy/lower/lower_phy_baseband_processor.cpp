@@ -393,6 +393,20 @@ struct rx_pool_accounting {
   std::atomic<uint64_t> waits_over_10ms{0};
   std::atomic<uint64_t> waits_over_100ms{0};
   std::atomic<uint64_t> waits_over_1s{0};
+
+  /// \brief P5.1: the poll arm's COST (see rx_pool_note_poll). Printed only when a take actually polled, so the
+  /// control leg and every Linux leg keep their report byte for byte.
+  ///
+  /// `spin_us` over the span from the first to the last polling take is the answer to "how much of a core did this
+  /// buy the shorter tail with": a polling thread is awake for that whole time, a parked one is not. `deadline`
+  /// counts the takes that spun the entire slice and came away empty - measured on p219, so that number is not
+  /// assumed to be small.
+  std::atomic<uint64_t> poll_takes{0};
+  std::atomic<uint64_t> poll_try_fail{0};
+  std::atomic<uint64_t> poll_deadline{0};
+  std::atomic<uint64_t> poll_spin_us{0};
+  std::atomic<int64_t>  poll_first_ns{0};
+  std::atomic<int64_t>  poll_last_ns{0};
 };
 
 rx_pool_accounting& rx_pool_accounts()
@@ -467,6 +481,29 @@ void rx_pool_report()
                    static_cast<unsigned long long>(a.waits_over_1s.load(std::memory_order_relaxed)));
     }
   }
+
+  // P5.1: what the non-blocking take cost, printed ONLY when a take actually polled - the control leg and every
+  // Linux leg have no polling take and keep their report byte for byte. `spin` against the window the polling
+  // covered is the fraction of ONE core the arm burned to buy the shorter tail; `deadline` is the takes that spun
+  // the whole slice for nothing, which a blocking wait would have spent parked.
+  if (a.poll_takes.load(std::memory_order_relaxed) != 0) {
+    const uint64_t poll_takes  = a.poll_takes.load(std::memory_order_relaxed);
+    const uint64_t spin_us     = a.poll_spin_us.load(std::memory_order_relaxed);
+    const int64_t  first_ns    = a.poll_first_ns.load(std::memory_order_relaxed);
+    const int64_t  last_ns     = a.poll_last_ns.load(std::memory_order_relaxed);
+    const double   window_s    = static_cast<double>(last_ns - first_ns) / 1e9;
+    const double   share_pct   = (window_s > 0.0) ? (100.0 * static_cast<double>(spin_us) / 1e6 / window_s) : 0.0;
+    std::fprintf(stderr,
+                 "[ul_rx_pool] poll wait (P5.1): takes=%llu try_fail=%llu deadline=%llu spin=%.3fs over %.1fs of "
+                 "polling = %.1f%% of one core (awake instead of parked; compare `over` with the leg length in "
+                 "[ul_timing_events])\n",
+                 static_cast<unsigned long long>(poll_takes),
+                 static_cast<unsigned long long>(a.poll_try_fail.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(a.poll_deadline.load(std::memory_order_relaxed)),
+                 static_cast<double>(spin_us) / 1e6,
+                 window_s,
+                 share_pct);
+  }
 }
 
 const bool rx_pool_report_registered = []() {
@@ -509,6 +546,27 @@ void lower_phy_baseband_processor::rx_pool_note_dropped(uint64_t park_us)
   uint64_t prev = a.drop_park_max_us.load(std::memory_order_relaxed);
   while ((park_us > prev) && !a.drop_park_max_us.compare_exchange_weak(prev, park_us, std::memory_order_relaxed)) {
   }
+}
+
+/// P5.1's cost side (see the header): one call per take that polled instead of parking.
+void lower_phy_baseband_processor::rx_pool_note_poll(uint64_t try_fail, int64_t spin_us, bool deadline_hit)
+{
+  rx_pool_accounting& a = rx_pool_accounts();
+  a.poll_takes.fetch_add(1, std::memory_order_relaxed);
+  a.poll_try_fail.fetch_add(try_fail, std::memory_order_relaxed);
+  a.poll_spin_us.fetch_add(static_cast<uint64_t>(spin_us < 0 ? 0 : spin_us), std::memory_order_relaxed);
+  if (deadline_hit) {
+    a.poll_deadline.fetch_add(1, std::memory_order_relaxed);
+  }
+  // The span, not a rate: the first and last polling takes bound the window the spin total belongs to, and the
+  // report divides by exactly that so the share cannot be inflated by a leg whose polling started late.
+  const int64_t now_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  if (a.poll_first_ns.load(std::memory_order_relaxed) == 0) {
+    a.poll_first_ns.store(now_ns, std::memory_order_relaxed);
+  }
+  a.poll_last_ns.store(now_ns, std::memory_order_relaxed);
 }
 
 void lower_phy_baseband_processor::rx_pool_note_taken(size_t free_buffers, size_t pool_size)
@@ -1282,16 +1340,29 @@ std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> lower_phy_baseband_proc
       const auto pop_rx_buffer = [&]() {
 #if defined(__APPLE__)
         if (compat::poll_rx_wait_enabled()) {
-          const auto deadline = std::chrono::steady_clock::now() + wait_slice;
+          const auto poll_begin = std::chrono::steady_clock::now();
+          const auto deadline   = poll_begin + wait_slice;
+          uint64_t   try_fail   = 0;
           for (;;) {
             if (rx_pool->buffers.try_pop(buffer)) {
+              rx_pool_note_poll(try_fail,
+                                std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() - poll_begin)
+                                    .count(),
+                                /*deadline_hit=*/false);
               return blocking_queue<std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>>::result::success;
             }
+            ++try_fail;
             if (std::chrono::steady_clock::now() >= deadline) {
               // Same outcome as the blocking wait's timeout, and the wait is bounded by the same slice. NOTE:
               // try_pop() also answers false for an INACTIVE queue, so a stop is noticed at this deadline rather
               // than immediately - a difference that is bounded by wait_slice, i.e. by what the blocking wait
               // would have spent anyway, and it is recorded in the record rather than left to be discovered.
+              rx_pool_note_poll(try_fail,
+                                std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() - poll_begin)
+                                    .count(),
+                                /*deadline_hit=*/true);
               return blocking_queue<std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>>::result::timeout;
             }
             compat::sprint_wait();
