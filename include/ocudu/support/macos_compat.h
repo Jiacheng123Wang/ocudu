@@ -375,6 +375,20 @@ void lane_grid_set_rate_ppb_for_test(int64_t ppb);
 
 void lane_grid_wait(uint64_t slot);
 
+/// \brief The next grid instant strictly after \p prev_ns, or -1 when the grid is unarmed.
+///
+/// The periodic-thread half of the same clock (plan doc §11.17/§11.20): a thread that owns its own loop needs
+/// "when is my next tick", not "wait for this slot". It is derived from the SAME anchor and the SAME rate
+/// correction the lane's clamp uses, so a leg's two readings describe one clock.
+int64_t lane_grid_next_tick_ns(int64_t prev_ns, int64_t slot_duration_ns);
+
+/// \brief Tells the grid which slot duration to extrapolate with, in nanoseconds.
+///
+/// One source of truth: the periodic thread's period and the grid's extrapolation MUST be the same number, or
+/// the two readings of one leg describe two clocks. The caller that creates the thread sets both from the same
+/// parameter (SCS-derived: 500 us at 30 kHz, 1000 us at 15 kHz).
+void lane_grid_set_slot_duration_ns(int64_t ns);
+
 /// \brief Prints the grid's accounting once, at exit, next to the pool's own report.
 void lane_grid_report();
 

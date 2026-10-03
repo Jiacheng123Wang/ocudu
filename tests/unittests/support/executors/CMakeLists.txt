@@ -31,3 +31,10 @@ target_link_libraries(ul_pipeline_probe_test ocudulog ocudu_support GTest::gtest
 # an unescaped "support;phy" arrives as "LABELS support" PLUS a stray property named "phy" with an empty value -
 # which ctest reports as `LABELS=['support']` and `phy=''` (measured 2026-09-28, `ctest --show-only=json-v1`).
 gtest_discover_tests(ul_pipeline_probe_test PROPERTIES LABELS "support\;phy")
+
+# P6.1's paced executor: the elastic band (plan doc §11.17). Its own binary because its cases are about TIME -
+# a tick that no work arrives for must be skipped rather than waited for - and that is a behaviour no other
+# executor in this directory has.
+add_executable(paced_task_executor_test paced_task_executor_test.cpp)
+target_link_libraries(paced_task_executor_test ocudulog ocudu_support GTest::gtest ocudu_gtest_main)
+gtest_discover_tests(paced_task_executor_test PROPERTIES LABELS "support\;phy")

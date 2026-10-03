@@ -1,0 +1,86 @@
+// SPDX-FileCopyrightText: Copyright (C) 2026 Jiacheng Wang
+// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+
+#include "ocudu/support/executors/paced_task_executor.h"
+#include <gtest/gtest.h>
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <thread>
+
+using namespace ocudu;
+using namespace std::chrono_literals;
+
+namespace {
+
+/// Waits until \p pred holds or the budget runs out, so a case asserts on a state rather than on a sleep.
+template <typename Pred>
+bool wait_for(Pred pred, std::chrono::milliseconds budget)
+{
+  const auto deadline = std::chrono::steady_clock::now() + budget;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (pred()) {
+      return true;
+    }
+    std::this_thread::sleep_for(2ms);
+  }
+  return pred();
+}
+
+} // namespace
+
+/// \brief With the pacing off - the default, and the only behaviour Linux can reach - tasks run and NO tick is
+/// counted.
+///
+/// This is the arm that keeps the executor from changing a leg it was not asked to change: no grid, no pacing,
+/// no counters, and the thread behaves like any other single-thread executor.
+TEST(paced_task_executor_test, without_the_grid_it_runs_tasks_and_counts_no_ticks)
+{
+  ::unsetenv("OCUDU_UL_LANE_GRID");
+  paced_task_executor exec("paced_test_off", 64, 20ms, 0us, 5ms);
+
+  std::atomic<int> ran{0};
+  ASSERT_TRUE(exec.execute([&ran]() { ++ran; }));
+  EXPECT_TRUE(wait_for([&ran]() { return ran.load() == 1; }, 500ms)) << "the task must run";
+  EXPECT_EQ(exec.get_stats().tasks, 1u);
+  EXPECT_EQ(exec.get_stats().ticks, 0u)
+      << "with the knob off there is no grid, so a tick counter would be a number about nothing";
+}
+
+#if defined(__APPLE__)
+/// \brief THE property of the elastic band: a tick that no task arrives for is SKIPPED and COUNTED.
+///
+/// It is the difference between this executor and every "delay until the grid instant" variant this line has
+/// tried. Those waited indefinitely, so a late arrival was inherited and the cadence followed the data
+/// (p224/p225: precise to 3 us, and still 2 ms behind). Here the thread gives up on a tick instead - the slot
+/// is lost, the cadence is not - and the count is what a leg reads to see the price.
+TEST(paced_task_executor_test, a_tick_with_no_work_is_skipped_not_waited_for)
+{
+  ::setenv("OCUDU_UL_LANE_GRID", "1", 1);
+  ::setenv("OCUDU_UL_LANE_GRID_LEAD_US", "0", 1);
+
+  paced_task_executor exec("paced_test_on", 64, 20ms, 0us, 2ms);
+
+  // One task, then silence. The tick that carries it counts as `ran`; the ticks after it, with nothing to do,
+  // must be counted as skipped rather than blocking the loop.
+  std::atomic<int> ran{0};
+  const auto       pushed_at = std::chrono::steady_clock::now();
+  ASSERT_TRUE(exec.execute([&ran]() { ++ran; }));
+  EXPECT_TRUE(wait_for([&ran]() { return ran.load() == 1; }, 500ms));
+  EXPECT_TRUE(wait_for([&exec]() { return exec.get_stats().skipped >= 3; }, 1000ms))
+      << "ticks with nothing to run must be SKIPPED and counted, not waited for: ticks="
+      << exec.get_stats().ticks << " skipped=" << exec.get_stats().skipped;
+
+  const auto s = exec.get_stats();
+  EXPECT_GE(s.ran, 1u);
+  EXPECT_EQ(s.tasks, 1u) << "exactly the one task was run";
+  // The bound the band promises: the task ran within one period plus the band plus a generous slack, and
+  // certainly not on a wait that follows the data.
+  const auto latency = std::chrono::steady_clock::now() - pushed_at;
+  EXPECT_LT(latency, 500ms) << "the delay is BOUNDED by the band, which is the whole design";
+  EXPECT_GE(s.late_max_us, 0);
+
+  ::unsetenv("OCUDU_UL_LANE_GRID");
+  ::unsetenv("OCUDU_UL_LANE_GRID_LEAD_US");
+}
+#endif

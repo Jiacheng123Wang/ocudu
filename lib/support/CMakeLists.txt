@@ -18,6 +18,8 @@ set(SOURCES
         executors/task_worker_pool.cpp
         executors/unique_thread.cpp
         executors/ul_stall_watchdog.cpp
+
+        executors/paced_task_executor.cpp
         executors/execution_context_description.cpp
         scheduling/darwin_thread_scheduling.cpp
         scheduling/thread_sched_snapshot.cpp

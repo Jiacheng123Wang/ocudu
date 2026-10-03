@@ -6,7 +6,10 @@
 #include "ocudu/adt/mpmc_queue.h"
 #include "ocudu/phy/upper/upper_phy_execution_configuration.h"
 #include "ocudu/support/executors/executor_decoration_factory.h"
+#include "ocudu/phy/phy_pipeline_report.h" // register_p0_report
+#include "ocudu/support/macos_compat.h"    // lane_grid_set_slot_duration_ns
 #include "ocudu/support/executors/inline_task_executor.h"
+#include "ocudu/support/executors/paced_task_executor.h"
 #include "ocudu/support/executors/strand_executor.h"
 #include "ocudu/support/executors/task_fork_limiter.h"
 #include "ocudu/support/ocudu_assert.h"
@@ -16,6 +19,16 @@ using namespace ocudu;
 using namespace odu;
 
 namespace {
+
+/// The paced lane executor, if one was created, and the thunk that lets the P0 registry print it (the registry
+/// takes a plain function pointer, and there is at most one such executor per process).
+static ocudu::paced_task_executor* paced_lane = nullptr;
+static void                        paced_lane_report()
+{
+  if (paced_lane != nullptr) {
+    paced_lane->report();
+  }
+}
 
 /// Helper class to decorate executors with extra functionalities.
 struct executor_decorator {
@@ -123,6 +136,52 @@ public:
                                                       max_pusch_batch_size);
       phy_config.pusch_ch_estimator_executor = pusch_srs_execs[0];
       phy_config.pusch_executor              = pusch_srs_execs[1];
+      // ---- P6.1: the UL lane can run on its OWN, GRID-PACED thread (plan doc §11.17) ------------------
+      //
+      // The lane's work is enqueued exactly as before; what changes is WHEN the thread runs it: it wakes on the
+      // radio-derived grid, waits a BOUNDED time for work, runs what arrived, and counts a skip when nothing
+      // did. That is the elastic band, and it is the one shape that can make the commit cadence independent of
+      // the arrival jitter - a delay on the existing dispatch path cannot (p224/p225).
+      //
+      // The period is a PARAMETER, not a constant: `OCUDU_UL_PACED_LANE` carries it in microseconds (500 at
+      // 30 kHz, 1000 at 15 kHz), and the same number is handed to the grid so the thread's ticks and the lane's
+      // clamp describe one clock. Lead and band come from OCUDU_UL_PACED_LEAD_US / _WAIT_US; all three are
+      // printed by the leg's own header, so a leg records what it ran with.
+      if (const char* paced_us = std::getenv("OCUDU_UL_PACED_LANE");
+          (paced_us != nullptr) && (paced_us[0] != '\0') && (paced_us[0] != '0')) {
+        const int64_t period_us = std::strtol(paced_us, nullptr, 10);
+        const auto    env_us    = [](const char* name, int64_t fallback) {
+          const char* v = std::getenv(name);
+          return ((v == nullptr) || (v[0] == '\0')) ? fallback : std::strtol(v, nullptr, 10);
+        };
+        const int64_t lead_us = env_us("OCUDU_UL_PACED_LEAD_US", 0);
+        const int64_t wait_us = env_us("OCUDU_UL_PACED_WAIT_US", 300);
+        ocudu::compat::lane_grid_set_slot_duration_ns(period_us * 1000);
+        // The thread is created with the same realtime INTENT the pool workers carry, so that a leg with the
+        // pacing on and the constraint off compares like for like: with `no_realtime()` this thread would sit a
+        // tier below the pool it replaced, and the arm would be measuring the tier as much as the pacing. With a
+        // constraint declared the intent is moot - Darwin drops the QoS class and the reservation takes over,
+        // which the [sched_tc] line says out loud.
+        auto paced = std::make_unique<paced_task_executor>("pusch_lane",
+                                                           default_queue_size,
+                                                           std::chrono::microseconds{period_us},
+                                                           std::chrono::microseconds{lead_us},
+                                                           std::chrono::microseconds{wait_us},
+                                                           os_thread_realtime_priority::max() - 2);
+        paced_lane = paced.get();
+        phy_config.pusch_executor = {paced.get(), 1};
+        // The mapper owns it: `executors` is where this class keeps the executor instances it creates, and the
+        // thread must outlive the PHY that calls into it.
+        executors.push_back(std::move(paced));
+        std::fprintf(stderr,
+                     "[paced_exec] OCUDU_UL_PACED_LANE=%lldus: the PUSCH lane runs on its own thread "
+                     "\"pusch_lane\" (lead=%lldus, band=%lldus); declare its reservation with "
+                     "OCUDU_SCHED_TIME_CONSTRAINT=pusch_lane=<period>/<computation>/<constraint>\n",
+                     static_cast<long long>(period_us),
+                     static_cast<long long>(lead_us),
+                     static_cast<long long>(wait_us));
+        register_p0_report(paced_lane_report);
+      }
       // ---- P0-6: the SHAPE that value produced, next to the value itself ---------------------------
       // All three views come from one create_task_fork_limiter(), so they share max_concurrency. A value
       // of 1 (or less) is not "a limit of one" - it is create_task_fork_limiter() returning a STRAND,

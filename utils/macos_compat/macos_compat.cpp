@@ -1223,6 +1223,33 @@ void lane_grid_note_slot(uint64_t slot, int64_t host_ns, int64_t radio_abs_ns)
 #endif
 }
 
+int64_t lane_grid_next_tick_ns(int64_t prev_ns, int64_t slot_duration_ns)
+{
+  if (slot_duration_ns <= 0) {
+    return -1;
+  }
+  const lane_grid_state& st = lane_grid();
+  if (st.anchor_slot.load(std::memory_order_relaxed) < 0) {
+    return -1; // unarmed: the caller keeps its own cadence (see the executor's scope note)
+  }
+  const int64_t anchor = st.anchor_host_ns.load(std::memory_order_relaxed);
+  // The first tick strictly after `prev_ns`, on the anchor's phase, with the same rate correction the lane's
+  // clamp applies - so the thread's ticks and the clamp's instants are the same clock by construction.
+  const int64_t elapsed = prev_ns - anchor;
+  const int64_t steps   = (elapsed / slot_duration_ns) + 1;
+  return anchor + steps * slot_duration_ns +
+         static_cast<int64_t>((static_cast<double>(steps * slot_duration_ns) *
+                               static_cast<double>(lane_grid_rate_ppb())) /
+                              1e9);
+}
+
+void lane_grid_set_slot_duration_ns(int64_t ns)
+{
+  if (ns > 0) {
+    lane_grid().slot_duration_ns.store(ns, std::memory_order_relaxed);
+  }
+}
+
 void lane_grid_set_rate_ppb_for_test(int64_t ppb)
 {
   g_lane_grid_rate_ppb.store(ppb, std::memory_order_relaxed);
