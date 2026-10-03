@@ -863,6 +863,14 @@ struct lane_grid_state {
   std::atomic<uint64_t> rearmed{0};
   std::atomic<int64_t>  wait_sum_us{0};
   std::atomic<int64_t>  wait_max_us{0};
+  /// How far PAST its target the clamp actually returned, per hop: the clamp's own precision.
+  ///
+  /// It separates two things the wait distribution cannot: a clamp that is precise (a few microseconds - the
+  /// spin's resolution) from a THREAD THAT WAS TAKEN OFF THE CPU during its own clamp. The second is what the
+  /// time-constraint arm exists for, and this is the reading that says whether there is anything for it to fix
+  /// at THIS scale - the 1 ms watchdog cannot see it (see the lane grid's header note).
+  std::atomic<int64_t>  overshoot_sum_us{0};
+  std::atomic<int64_t>  overshoot_max_us{0};
   std::atomic<bool>     params_read{false};
 };
 
@@ -919,14 +927,19 @@ void lane_grid_report_impl()
                      : 0.0;
   std::fprintf(stderr,
                "[lane_grid] OCUDU_UL_LANE_GRID=1: grid armed from %llu hop(s), re-armed %llu time(s); "
-               "clamped=%llu (mean wait %.1fus, max %lldus); late=%llu; unarmed=%llu. late counts the hops "
-               "whose grid instant had ALREADY passed when the lane began - it is the lead's verdict, and it "
-               "is the number to read first\n",
+               "clamped=%llu (mean wait %.1fus, max %lldus; overshoot mean %.1fus, max %lldus); late=%llu; "
+               "unarmed=%llu. late counts the hops whose grid instant had ALREADY passed when the lane began - "
+               "it is the lead's verdict, and it is the number to read first; overshoot is how far past its own "
+               "target the clamp returned, i.e. whether the thread was descheduled inside its clamp\n",
                static_cast<unsigned long long>(st.noted.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(st.rearmed.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(clamped),
                mean_us,
                static_cast<long long>(st.wait_max_us.load(std::memory_order_relaxed)),
+               (clamped != 0) ? (static_cast<double>(st.overshoot_sum_us.load(std::memory_order_relaxed)) /
+                                 static_cast<double>(clamped))
+                              : 0.0,
+               static_cast<long long>(st.overshoot_max_us.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(st.late.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(st.unarmed.load(std::memory_order_relaxed)));
 }
@@ -1117,6 +1130,15 @@ void lane_grid_wait(uint64_t slot)
     else {
       ::sched_yield();
     }
+  }
+  // ... and how far past the target we actually got there. A few microseconds means the clamp did its job; a
+  // millisecond means the thread was descheduled inside its own clamp, and THAT is the quantity a reservation
+  // can remove (this is the sub-millisecond scale the watchdog is blind to).
+  const int64_t overshoot_us = (steady_now_ns() - target) / 1000;
+  st.overshoot_sum_us.fetch_add(overshoot_us, std::memory_order_relaxed);
+  int64_t prev_over = st.overshoot_max_us.load(std::memory_order_relaxed);
+  while ((overshoot_us > prev_over) &&
+         !st.overshoot_max_us.compare_exchange_weak(prev_over, overshoot_us, std::memory_order_relaxed)) {
   }
 #else
   (void)slot;
