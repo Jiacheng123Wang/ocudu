@@ -2855,3 +2855,39 @@ FIFO 把它减半，TC 把它消掉。这就是"①挂起/唤醒"这一类里**�
 | 本机 `ctest -L phy -j8` | **214/214**（`dft_processor_ci16_test` 是 Disabled）。⚠ 其中**有一次** `port_channel_estimator_metal_mmse_unit_test` 在 `-j8` 下**失败**：单独重跑 **3/3 通过**、整标签重跑 **214/214** ⇒ 判为 **Metal 测试在 8 路并行下的争用抖动**，与本次改动无关（改的是 lower-PHY 接收池记账与探针），**但记在这里**，因为"99% passed"出现在我的输出里过 |
 | Ubuntu 台架（`jwang@192.168.100.131`，HEAD `9ff2b95255`）| `FLOW_PROBES=OFF` gnb **RC=0**、`FLOW_PROBES=ON` gnb **RC=0**、探针单测 **20/20**（Linux 侧锚点算术是同一段代码，因此新臂必须在 Linux 也绿）|
 | Fbis.6 检查 #2（Linux 开/关旋钮 loopback `diff`）| **仍待做**（需要台架能连到核心网；见 §Fbis.7）|
+
+### 10.56 2026-10-03 —— **预登记**：p220/p221（对照 / `OCUDU_SCHED_POSIX_RT=1`，即 `SCHED_FIFO` 臂）——**飞腿前写**
+
+用户 2026-10-03 中午裁决：飞这一对。依据见 §10.55(3)：微基准里 `SCHED_FIFO` 把**唤醒尾延迟**从
+max 2567 µs / p99 440.6 µs 打到 **137.1 / 71.7 µs**，而 QoS 档 ≈ baseline（且 p99 更差）；
+而这个臂**从来没有在腿上 A/B 过**（`macos_compat.h` 自己写着 "it never flew a leg"）。
+
+* **目的**：判定"**显式调度（FIFO）**"这条线在**真腿上**有没有读数——它是**最后一条没飞过的调度杠杆**。
+* **改动（commit）**：**无**。同一二进制（`e47d3eb3ae` 之后重打过 stamp），
+  变量只有环境里的 `OCUDU_SCHED_POSIX_RT`（`macos_compat.cpp:604`：默认 `false` = 不调用 POSIX，QoS 档存活；
+  `=1` = 历史臂 = 调用 `pthread_setsockparam(SCHED_FIFO, prio)`，**QoS 档被永久抹掉**）。
+* **对照臂 / 变量**：
+  * p220 = 对照（现默认：QoS 档存活、`posix=OTHER/31`）；
+  * p221 = 臂（`OCUDU_SCHED_POSIX_RT=1`，`[sched]` 应回读 `posix=FIFO/<prio>` 且 `eff=UNSPECIFIED`）。
+  * 两条腿都带同一套仪器：`UL_SLOT_GRID=1 UL_WATCHDOG=1 UL_THREAD_CPU=1 UL_STABILITY_WINDOWS=8
+    UL_PHASE_SEGMENTS=1 UL_TIMING_EVENTS=16 METAL_GPU_TIME=1 SCHED_VERBOSE=1`，`--regime=stress`。
+  * **不带** P5.1（`UL_RX_POLL_WAIT` 不设：§10.54 已证它在池子不见底的配置里是 no-op，带上只会混淆）。
+* **判据（阈值 + 出处）**：
+  1. **体内量**（本对的**主判据**，因为微基准预测的是这里）：`[ul_pipeline]`、`[ul_gpu_pipeline]`、
+     `[ul_time_frequency]`、`[ul_channel_estimation]`、`[ul_equalization_demod]` 的 **p95/p99**，
+     以及 `[ul_rx_wait]` 的 **p95/p99**。**预测：臂更好**（出处 §10.55(3)：p99 440.6 → 71.7 µs）。
+  2. **尾部率**（四条载体 + 三条已登记率，出处 §5.2/§0bis.4）：**预测：不变**（出处 §10.50/§10.54：
+     `max` 是驱动/挂起停顿，调度优先级碰不到它）。**若尾部率显著变差 ⇒ 臂判负。**
+  3. **同一次运行内的稳定性**（`[ul_stability]` 的"最坏窗口 vs 全腿"）：臂不应变差。
+  4. **反例判据（Linux 不得变化）**：`OCUDU_SCHED_POSIX_RT` 在 **Linux 恒为 true**（`#else` 分支不变）；
+     本对腿不动任何 Linux 代码 ⇒ 沿用 §10.36 的台架复核。
+  5. **不作判据**：`ivcsw`（已知 FIFO 臂会变，方向不定；只记录）、`max`（单点次序统计量）。
+* **回退条件**（满足任一即把 `OCUDU_SCHED_POSIX_RT=1` 判负，**不翻默认**）：
+  1. 尾部率任何一条变差超过登记界（AT/BELOW 0 > 0.0025%、slip > 0.0005%、recv > 0.0004%）；
+  2. **体内 p95/p99 没有改善**（这是本对的**唯一**动机；不动就说明调度这条线可以封口）；
+  3. `gaps > 0`、`FATAL`、或 `leg_gate` 出现实质性 FAIL；
+  4. `min` 上升（防"整体上移换尾部"）。
+* **读数位置**：`wip/logs/gnb_gpu_p{220,221}-*.log.stderr` 的
+  `[sched]`（档位/FIFO 回读）、`[ul_stability]`、五条相位系列、`[ul_rx_wait]`、四条载体、三条率。
+* **机器状态必须一起记**（§10.54(5) 的教训）：两条腿起飞前各存一次 `pmset -g` 与 `uptime`，
+  写进腿记录里；两条腿之间**不动机器状态**（不插拔电源、不让显示器睡、不启动别的活）。
