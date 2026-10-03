@@ -530,9 +530,26 @@ public:
       slot_grid_raw_max = raw;
     }
     if ((slot_grid_base >= 0) && (raw < slot_grid_last_raw)) {
-      // A backward jump of more than half the observed range is a wrap, not a late sample.
-      slot_grid_base += slot_grid_raw_max + 1;
-      slot_grid_raw_max = raw;
+      // A backward jump of more than half the observed range is a wrap, not a late sample. The threshold is the
+      // whole point: two PUSCH hops overlap by design (pusch_executor.max_concurrency=2), so two adjacent slots can
+      // finish in either order, and a ONE-slot backward step must not be read as a wrap - that adds a whole counter
+      // period to every later sample and tilts the fit. p219's leg fitted 491.8us against a 500us grid this way
+      // (residuals 238ms p50 / 2.68s max, against -6.8us in its control), and the doc comment below always said
+      // "more than half the observed range" while the code accepted any backward step at all. Test:
+      // slot_grid_counts_a_late_completion_instead_of_inventing_a_wrap.
+      if ((slot_grid_last_raw - raw) > ((slot_grid_raw_max + 1) / 2)) {
+        slot_grid_base += slot_grid_raw_max + 1;
+        slot_grid_raw_max = raw;
+      }
+      else {
+        // KEPT in the fit, not dropped: an out-of-order completion is a real observation and must show up as the
+        // one slot of residual it is. It is COUNTED so the reader can tell a 500 us residual caused by it apart
+        // from one caused by the run.
+        ++slot_grid_backward;
+        if ((slot_grid_last_raw - raw) > slot_grid_backward_max) {
+          slot_grid_backward_max = slot_grid_last_raw - raw;
+        }
+      }
     }
     slot_grid_last_raw = raw;
     slot_grid_samples.push_back(slot_grid_sample{slot_grid_base + raw, end_ns});
@@ -553,9 +570,11 @@ public:
   {
     std::lock_guard<std::mutex> lock(mutex);
     slot_grid_samples.clear();
-    slot_grid_base     = 0;
-    slot_grid_last_raw = -1;
-    slot_grid_raw_max  = -1;
+    slot_grid_base          = 0;
+    slot_grid_last_raw      = -1;
+    slot_grid_raw_max       = -1;
+    slot_grid_backward      = 0;
+    slot_grid_backward_max  = 0;
   }
 
   static bool slot_grid_enabled()
@@ -625,12 +644,14 @@ public:
     std::fprintf(stderr,
                  "[ul_slot_grid] OCUDU_UL_SLOT_GRID=1: %zu slot sample(s); fitted period=%.1fus "
                  "(nominal for this cell: see the config); residual p50/p95/p99/max = %s us; "
-                 "half-means %.1fus vs %.1fus (drift)\n",
+                 "half-means %.1fus vs %.1fus (drift); backward=%lld (largest %lld slot(s))\n",
                  slot_grid_samples.size(),
                  slope_ns / 1000.0,
                  hist,
                  m1 / 1000.0,
-                 m2 / 1000.0);
+                 m2 / 1000.0,
+                 static_cast<long long>(slot_grid_backward),
+                 static_cast<long long>(slot_grid_backward_max));
   }
 
   /// \brief Prints one line per thread that filed windows, with the number to declare (see thread_cpu_accounting).
@@ -3041,6 +3062,9 @@ private:
   int64_t                       slot_grid_base     = 0;
   int64_t                       slot_grid_last_raw = -1;
   int64_t                       slot_grid_raw_max  = -1;
+  /// Completions that landed out of order (see record_slot_grid): counted and kept, never mistaken for a wrap.
+  int64_t slot_grid_backward     = 0;
+  int64_t slot_grid_backward_max = 0;
   start_registry   pending_starts;
   uint64_t         next_start_seq = 0;
   std::vector<double> latencies_us;

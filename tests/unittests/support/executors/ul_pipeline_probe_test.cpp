@@ -2018,4 +2018,67 @@ TEST(ul_pipeline_probe_test, slot_grid_separates_jitter_from_drift)
   ::unsetenv("OCUDU_UL_SLOT_GRID");
 }
 
+/// \brief The anchor must not turn ONE late completion into a counter wrap (p219's leg, dev doc 10.54).
+///
+/// WHY THIS ARM EXISTS, and it is a leg and not a thought experiment. The anchor unwraps slot_point::count(), which
+/// wraps every hyperframe (1024 radio frames x 20 slots = 20480 at 30 kHz), by adding "the largest counter value
+/// seen so far plus one" whenever the counter steps BACKWARD. Two PUSCH hops overlap by design
+/// (pusch_executor.max_concurrency=2), so two adjacent slots can finish in either order, and a single such pair is a
+/// one-slot backward step - which that rule reads as a wrap, adding a whole counter period to every later sample.
+/// p219 measured exactly that: fitted period 491.8 us against a real 500 us grid, residuals of 238 ms (p50) and
+/// 2.68 s (max), against 500.0 us and -6.8 us in its control leg. The fit was reporting the instrument, not the run.
+///
+/// The header always claimed the threshold this test pins down ("a backward jump of more than half the observed
+/// range is a wrap, not a late sample"); the code did not implement it. The third arm is the reverse arm: a REAL
+/// wrap must still be unwrapped, so a fix cannot pass by refusing to unwrap at all.
+TEST(ul_pipeline_probe_test, slot_grid_counts_a_late_completion_instead_of_inventing_a_wrap)
+{
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+
+  ::setenv("OCUDU_UL_SLOT_GRID", "1", 1);
+
+  // The REAL recording path (not the test hook): a slot_point::count() counter over two hyperframes, one sample per
+  // slot, 500 us apart - the same shape the PUSCH processor feeds it (pusch_processor_impl.cpp, pdu.slot.count()).
+  constexpr uint64_t HYPERFRAME = 1024 * 20;
+  const auto         fill       = [&probe](bool one_completion_out_of_order) {
+    probe.reset_slot_grid_for_test();
+    for (uint64_t k = 0; k != 2 * HYPERFRAME; ++k) {
+      uint64_t raw = k % HYPERFRAME;
+      if (one_completion_out_of_order && (k == 10000)) {
+        raw = 10001; // slot 10001's work finished before slot 10000's
+      }
+      else if (one_completion_out_of_order && (k == 10001)) {
+        raw = 10000;
+      }
+      probe.record_slot_grid(raw, static_cast<int64_t>(k) * 500000);
+    }
+  };
+
+  // ---- arm A: the clean counter, wrapping twice ---------------------------------------------
+  fill(/*one_completion_out_of_order=*/false);
+  {
+    const std::string out = capture_report();
+    EXPECT_NE(out.find("fitted period=500.0us"), std::string::npos)
+        << "a real wrap must still be unwrapped - a fix that simply stops unwrapping fails here: " << out;
+    EXPECT_NE(out.find("backward=0"), std::string::npos) << out;
+  }
+
+  // ---- arm B: ONE completion out of order, and the grid is untouched ------------------------
+  fill(/*one_completion_out_of_order=*/true);
+  {
+    const std::string out = capture_report();
+    EXPECT_NE(out.find("fitted period=500.0us"), std::string::npos)
+        << "one late completion must NOT be read as a counter wrap: it adds a whole hyperframe to every later "
+           "sample and tilts the fit (this is the arithmetic p219's 491.8us came from): "
+        << out;
+    EXPECT_NE(out.find("backward=1 (largest 1 slot(s))"), std::string::npos)
+        << "the sample is KEPT in the fit (it is a real observation, not noise), so the report has to say so: " << out;
+    // The kept sample lands one slot late against the grid, so it is the run's residual maximum and nothing else is.
+    EXPECT_NE(out.find("residual p50/p95/p99/max = 0.0/0.0/0.0/500.0 us"), std::string::npos)
+        << "the out-of-order completion is worth exactly one slot of residual: " << out;
+  }
+
+  ::unsetenv("OCUDU_UL_SLOT_GRID");
+}
+
 #endif // OCUDU_FLOW_PROBES
