@@ -990,11 +990,24 @@ lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
     out.rearmed        = true;
     return out;
   }
-  if (residual < -deadband_ns) {
-    // PULL BACK, SLOWLY, and only when the hop arrived EARLIER than the grid. One outlier of a few hundred
-    // microseconds moves the grid by a few microseconds (1/64), while a real drift is tracked in ~0.1 s.
-    out.anchor_host_ns = anchor_host_ns + (residual + deadband_ns) / 64;
-  }
+  // ---- TRACK THE BULK OF THE ARRIVALS, NOT THE FLOOR -------------------------------------------------
+  //
+  // THE FIRST VERSION OF THIS RULE WAS WRONG, AND p223's LEG SAID SO IN ONE NUMBER. It pulled the grid back
+  // only (never forward), on the reasoning that the transport's floor is stable and its tail is not. The
+  // consequence is that the grid ends up pinned at the single EARLIEST arrival of the leg, so with an arrival
+  // spread of about a hop interval - measured: 2 ms - nearly every hop is already past its grid instant when
+  // it begins: p223 read `late = 331237 of 358057 = 92.5%`, i.e. the clamp bound on 7.5% of hops and the seam
+  // was inert. An inert seam is not a null result about the MECHANISM, it is a null result about the ANCHOR.
+  //
+  // The bulk of the arrivals is what the grid has to sit on, and its MEDIAN is as stable as its floor while
+  // being reachable. Symmetric and slow: 1/64 of the residual per hop, so the grid walks to the median arrival
+  // in ~0.1 s and one 20 ms outlier moves it by 300 us.
+  //
+  // NO SEPARATE RATE LIMIT, and that is deliberate rather than omitted: the re-arm band above already bounds
+  // |residual| to two slots, so this step is at most a thirty-second of a slot and a clamp at, say, an eighth
+  // of a slot could never bind. The first draft had one - dead code, caught by writing the test that was
+  // supposed to exercise it.
+  out.anchor_host_ns = anchor_host_ns + residual / 64;
   return out;
 }
 

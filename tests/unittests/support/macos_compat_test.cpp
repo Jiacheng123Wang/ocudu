@@ -668,40 +668,44 @@ TEST(macos_compat_sched_test, lane_grid_filters_arrivals_instead_of_following_th
   EXPECT_EQ(armed.anchor_host_ns, 5000000);
   EXPECT_FALSE(armed.rearmed);
 
-  // ---- REVERSE ARM: a LATE observation must not move the grid -------------------------------------------
+  // ---- the grid TRACKS THE BULK of the arrivals, and one outlier cannot drag it -------------------------
   //
-  // The grid says slot 8 is due at 5.5 ms; the hop arrives at 6.2 ms (700 us late, well outside the 50 us
-  // dead band). The anchor must stay exactly where it was: this is the jitter being filtered out.
+  // THE FIRST RULE WAS WRONG AND THE p223 LEG SAID SO: it pulled the grid back only, so the grid ended up
+  // pinned at the single earliest arrival and 92.5% of hops were already past their instant when they began
+  // (the clamp bound on 7.5% of hops). The grid has to sit on the bulk, and the arm below states the two
+  // properties that make that true: it MOVES TOWARD a late arrival (so it can reach the bulk at all) and it
+  // moves by a FRACTION (so a 20 ms outlier is not the grid).
   const compat::lane_grid_update late_obs =
       compat::lane_grid_update_ns(5000000, 7, 8, 6200000, SLOT_NS, 50000, WRAP);
-  EXPECT_EQ(late_obs.anchor_host_ns, 5000000) << "a late arrival MUST NOT push the commit instants";
-  EXPECT_EQ(late_obs.anchor_slot, 7);
+  EXPECT_GT(late_obs.anchor_host_ns, 5000000)
+      << "a late arrival must PULL THE GRID TOWARD IT - a pull-back-only rule pinned the grid at the earliest "
+         "arrival and made the clamp inert (p223: 92.5% late)";
+  // predicted(slot 8) = anchor(5.0 ms, slot 7) + one slot = 5.5 ms, so the residual is 700 us.
+  EXPECT_EQ(late_obs.anchor_host_ns, 5000000 + (6200000 - 5500000) / 64)
+      << "and by a fraction of the distance, not all of it";
+  EXPECT_LT(late_obs.anchor_host_ns, 5050000) << "one outlier is not the grid";
   EXPECT_FALSE(late_obs.rearmed);
 
-  // ---- an EARLY observation pulls the grid back, SLOWLY --------------------------------------------------
-  //
-  // Slot 8 arrives 700 us before the grid says it is due. The correction is the residual past the dead band
-  // divided by 64, so ONE early outlier cannot drag the grid with it.
-  // The grid says slot 8 is due at 5.5 ms + 0.5 ms = 6.0 ms (the anchor is slot 7's instant); the hop arrives
-  // at 4.8 ms, i.e. 1.2 ms early.
+  // An EARLY arrival moves it the other way, by the same fraction: the fixed point is the BULK.
   const compat::lane_grid_update early_obs =
       compat::lane_grid_update_ns(5500000, 7, 8, 4800000, SLOT_NS, 50000, WRAP);
-  EXPECT_EQ(early_obs.anchor_host_ns, 5500000 + (4800000 - 6000000 + 50000) / 64)
-      << "an early arrival pulls the grid back by the filtered step: " << early_obs.anchor_host_ns;
-  EXPECT_LT(early_obs.anchor_host_ns, 5500000) << "and the sign is a pull-back, not a push-forward";
-  EXPECT_GT(early_obs.anchor_host_ns, 4800000) << "but only a fraction of the way, so one outlier is not the grid";
+  EXPECT_EQ(early_obs.anchor_host_ns, 5500000 + (4800000 - 6000000) / 64)
+      << "an early arrival moves the grid the other way: " << early_obs.anchor_host_ns;
+  EXPECT_LT(early_obs.anchor_host_ns, 5500000);
 
-  // ---- the correction CONVERGES over many early observations ---------------------------------------------
+  // ---- the correction CONVERGES to the bulk of the arrivals ---------------------------------------------
+  //
+  // A stream whose arrivals scatter around 5.6 ms (the grid starts 400 us away from that): the grid must land
+  // ON the scatter, not on its minimum and not on its maximum.
   {
-    int64_t host = 5500000;
     int64_t anchor = 5500000;
-    for (int i = 0; i != 400; ++i) {
-      anchor = compat::lane_grid_update_ns(anchor, 7, 8, host, SLOT_NS, 50000, WRAP).anchor_host_ns;
+    for (int i = 0; i != 900; ++i) {
+      const int64_t arrival = 5600000 + ((i % 7) - 3) * 100000; // +-300 us around 5.6 ms
+      anchor = compat::lane_grid_update_ns(anchor, 7, 8, arrival, SLOT_NS, 0, WRAP).anchor_host_ns;
     }
-    // The fixed point is where an arrival is exactly one dead band early, i.e. predicted(slot) = host + dead
-    // band, and predicted(slot) = anchor + one slot duration for the slot after the anchor's own.
-    EXPECT_NEAR(static_cast<double>(anchor + SLOT_NS), static_cast<double>(host + 50000), 2000.0)
-        << "the filter must converge to (the floor + the dead band), not stall half way: " << anchor + SLOT_NS;
+    // The fixed point is residual == 0, i.e. anchor(7) = the arrival mean(8) - one slot = 5.6 ms - 0.5 ms.
+    EXPECT_NEAR(static_cast<double>(anchor), 5100000.0, 60000.0)
+        << "the grid must converge to the middle of the arrival scatter, not to its minimum: " << anchor;
   }
 
   // ---- a disruption RE-ARMS instead of walking ----------------------------------------------------------
