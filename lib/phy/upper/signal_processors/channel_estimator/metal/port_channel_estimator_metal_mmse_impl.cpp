@@ -1610,6 +1610,14 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // consumer that has to decide about it can ask why the device did not cover it (see
   // mmse_refusals::begin_hop and device_shortfall_reason()).
   mmse_refusals::begin_hop();
+  // ---- P6.1: the LANE GRID (plan doc §11) - a hop commits on a FIXED host-time grid, not when its data
+  // happened to arrive. A delay cannot remove jitter; a clock can. The observation is taken BEFORE the clamp
+  // (the hop's own arrival - the grid tracks the fastest arrival, which is the stable floor) and the clamp
+  // then holds this hop until its grid instant has passed. Both calls are macOS-only and off by default; with
+  // the knob off they return at once, so a leg is byte-identical. `late` in [lane_grid] counts the hops whose
+  // instant had ALREADY passed, and that counter is the lead's verdict.
+  compat::lane_grid_note_hop(args.slot);
+  compat::lane_grid_wait(args.slot);
   // Diagnostics (see ocudu_metal_lane_clock.h): the earliest host reading of this lane. Paired with
   // the shared "front end finished" reading and with the extraction's commit, it splits the lane's
   // GPU gap into "the host had not handed the lane over yet" and "the burst waited on the fence".

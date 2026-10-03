@@ -326,6 +326,90 @@ bool poll_rx_wait_enabled();
 void sprint_wait();
 
 
+/// \brief P6.1: the LANE GRID - the host-time grid a hop's commit is supposed to land on.
+///
+/// WHY (plan doc §11, P6.1-SLOT). The UL pipeline's commit instants are today a function of WHEN THE DATA
+/// ARRIVED, so every transport jitter and every scheduling delay moves them; the user's diagnosis is that
+/// this is why `max` runs away, and the plan's answer is to give the commit thread its own time base and let
+/// it act on a FIXED grid. A delay cannot remove jitter - only a clock can - so this seam is a clock:
+///
+///   * the grid is anchored ONCE from the receive path's slot-completion instants and thereafter ADVANCED BY
+///     THE SLOT DURATION, so an individual late arrival does not move it;
+///   * the anchor is pulled BACK (never forward) when an arrival is earlier than the grid by more than a
+///     dead band. That tracks the transport's FLOOR, which is stable, instead of its tail, which is not;
+///   * at the lane's stage entry, `lane_grid_wait(slot)` returns only once the grid instant for that slot has
+///     passed. The commit therefore lands on the grid whenever the work got there in time, and `late` counts
+///     the times it did not - that counter is how the lead is judged, and it is the number to read first.
+///
+/// WHAT IT IS NOT. It does not make the DATA arrive on time (nothing can, the radio driver is not ours), and
+/// it does not reserve CPU: a preempted thread still commits late. Both of those are separate and named -
+/// the first is out of scope by the user's ruling, the second is what the time-constraint arm is for.
+///
+/// KEYS AND SCOPE: MACOS ONLY, gated by OCUDU_UL_LANE_GRID on top of OCUDU_FLOW_PROBES. Off - the default,
+/// and the only behaviour Linux can reach - both call sites are no-ops, so a leg is byte-identical.
+/// `OCUDU_UL_LANE_GRID_LEAD_US` (default 200) is how long after the grid instant the commit is due, and
+/// `OCUDU_UL_LANE_GRID_DEADBAND_US` (default 50) is the pull-back dead band.
+bool lane_grid_enabled();
+
+/// \brief Publishes one hop's ARRIVAL at the lane and the host instant of it - BEFORE the clamp below.
+///
+/// WHERE THE OBSERVATION COMES FROM, and why it is not the receive path. It is the lane's own entry instant,
+/// taken just before lane_grid_wait(): the receive path's slot-completion reading would be better in principle
+/// (it is the transport's own timing) but it lives inside the probe's compile guard, and a BEHAVIOUR knob must
+/// not depend on OCUDU_FLOW_PROBES. The lane's arrival is the next best thing and it is enough: what the grid
+/// needs is a STABLE FLOOR, and the fastest hop start is exactly that.
+///
+/// The grid is armed on the first observation, then tracks that floor with a SLOW pull-back (never a
+/// push-forward, and never on a single sample - see the dead band and the filter in the .cpp). A re-arm band
+/// catches the cases the filter cannot follow (startup, a disruption), and it is counted.
+void lane_grid_note_hop(uint64_t slot);
+
+/// \brief The host instant the grid's observations are taken on (steady clock, nanoseconds).
+///
+/// Exposed so the ONE call site reads both calls on the same clock as the grid does - a caller passing its own
+/// `now` from another clock would silently poison the anchor, which is the kind of unit error this file has
+/// already paid for once (dev doc 10.31).
+int64_t lane_grid_now_ns();
+
+/// \brief Returns only once \p slot 's grid instant has passed (the lane's stage entry). No-op when unarmed.
+void lane_grid_wait(uint64_t slot);
+
+/// \brief Prints the grid's accounting once, at exit, next to the pool's own report.
+void lane_grid_report();
+
+/// \brief The grid arithmetic, pure so it can be tested without a clock (see the unit test).
+///
+/// \return the host instant \p slot is due at, or -1 when the grid is unarmed.
+int64_t lane_grid_target_ns(int64_t anchor_host_ns,
+                            int64_t anchor_slot,
+                            uint64_t slot,
+                            int64_t slot_duration_ns,
+                            int64_t lead_ns,
+                            uint64_t slots_per_hyperframe);
+
+/// \brief The grid's state after ONE observation - pure, so the filter rule itself is testable.
+struct lane_grid_update {
+  int64_t anchor_host_ns = 0;
+  int64_t anchor_slot    = -1;
+  /// True when this observation RE-ARMED the grid (startup, a restart, a multi-slot disruption) rather than
+  /// being filtered into it. Counted apart, because "the grid re-armed once at startup" and "it re-arms all
+  /// the way through" are different legs.
+  bool rearmed = false;
+};
+
+/// \brief Applies one hop observation to the grid (see lane_grid_note_hop): arm, re-arm, or pull back SLOWLY.
+///
+/// THE RULE THE TEST PINS DOWN: a LATE observation must NOT move the grid. That is what separates a filter
+/// from a follower - a grid that moved on late arrivals would inherit the very jitter it exists to remove -
+/// and it is the reverse arm of the unit test.
+lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
+                                     int64_t anchor_slot,
+                                     uint64_t slot,
+                                     int64_t host_ns,
+                                     int64_t slot_duration_ns,
+                                     int64_t deadband_ns,
+                                     uint64_t slots_per_hyperframe);
+
 /// \brief Host <-> little-endian byte-order conversions used by the MAC PDU decoders.
 ///
 /// Linux: endian.h. macOS: libkern/OSByteOrder (OSSwap*).

@@ -639,3 +639,75 @@ TEST(macos_compat_sched_test, attr_qos_is_opt_in_and_platform_gated)
   }
 #endif
 }
+
+/// \brief P6.1's lane grid: it must FILTER the arrivals, not follow them.
+///
+/// WHY THIS TEST IS THE POINT OF THE WHOLE SEAM (plan doc §11). The UL pipeline's commit instants are today a
+/// function of when the data arrived, so transport jitter and scheduling delays move them; a delay cannot fix
+/// that, only a clock can. The grid is that clock, and the property that makes it one is stated as an
+/// inequality, not as a hope: **a LATE observation must not move the anchor**. A grid that moved on late
+/// arrivals would reproduce the jitter it exists to remove - which is the reverse arm below.
+TEST(macos_compat_sched_test, lane_grid_filters_arrivals_instead_of_following_them)
+{
+  using namespace ocudu;
+  constexpr int64_t  SLOT_NS = 500000;    // 30 kHz SCS
+  constexpr uint64_t WRAP    = 1024 * 20; // slots per hyperframe
+
+  // ---- the target mapping, including the wrap ------------------------------------------------------------
+  EXPECT_EQ(compat::lane_grid_target_ns(1000000, 100, 100, SLOT_NS, 200000, WRAP), 1200000)
+      << "the anchor's own slot is due at anchor + lead";
+  EXPECT_EQ(compat::lane_grid_target_ns(1000000, 100, 101, SLOT_NS, 200000, WRAP), 1700000)
+      << "and one slot later is due exactly one slot later";
+  EXPECT_EQ(compat::lane_grid_target_ns(1000000, WRAP - 1, 0, SLOT_NS, 0, WRAP), 1500000)
+      << "a slot AFTER the wrap is one step ahead, not 20479 steps behind";
+  EXPECT_EQ(compat::lane_grid_target_ns(0, -1, 7, SLOT_NS, 0, WRAP), -1) << "an unarmed grid has no target";
+
+  // ---- the first observation ARMS ------------------------------------------------------------------------
+  const compat::lane_grid_update armed = compat::lane_grid_update_ns(0, -1, 7, 5000000, SLOT_NS, 50000, WRAP);
+  EXPECT_EQ(armed.anchor_slot, 7);
+  EXPECT_EQ(armed.anchor_host_ns, 5000000);
+  EXPECT_FALSE(armed.rearmed);
+
+  // ---- REVERSE ARM: a LATE observation must not move the grid -------------------------------------------
+  //
+  // The grid says slot 8 is due at 5.5 ms; the hop arrives at 6.2 ms (700 us late, well outside the 50 us
+  // dead band). The anchor must stay exactly where it was: this is the jitter being filtered out.
+  const compat::lane_grid_update late_obs =
+      compat::lane_grid_update_ns(5000000, 7, 8, 6200000, SLOT_NS, 50000, WRAP);
+  EXPECT_EQ(late_obs.anchor_host_ns, 5000000) << "a late arrival MUST NOT push the commit instants";
+  EXPECT_EQ(late_obs.anchor_slot, 7);
+  EXPECT_FALSE(late_obs.rearmed);
+
+  // ---- an EARLY observation pulls the grid back, SLOWLY --------------------------------------------------
+  //
+  // Slot 8 arrives 700 us before the grid says it is due. The correction is the residual past the dead band
+  // divided by 64, so ONE early outlier cannot drag the grid with it.
+  // The grid says slot 8 is due at 5.5 ms + 0.5 ms = 6.0 ms (the anchor is slot 7's instant); the hop arrives
+  // at 4.8 ms, i.e. 1.2 ms early.
+  const compat::lane_grid_update early_obs =
+      compat::lane_grid_update_ns(5500000, 7, 8, 4800000, SLOT_NS, 50000, WRAP);
+  EXPECT_EQ(early_obs.anchor_host_ns, 5500000 + (4800000 - 6000000 + 50000) / 64)
+      << "an early arrival pulls the grid back by the filtered step: " << early_obs.anchor_host_ns;
+  EXPECT_LT(early_obs.anchor_host_ns, 5500000) << "and the sign is a pull-back, not a push-forward";
+  EXPECT_GT(early_obs.anchor_host_ns, 4800000) << "but only a fraction of the way, so one outlier is not the grid";
+
+  // ---- the correction CONVERGES over many early observations ---------------------------------------------
+  {
+    int64_t host = 5500000;
+    int64_t anchor = 5500000;
+    for (int i = 0; i != 400; ++i) {
+      anchor = compat::lane_grid_update_ns(anchor, 7, 8, host, SLOT_NS, 50000, WRAP).anchor_host_ns;
+    }
+    // The fixed point is where an arrival is exactly one dead band early, i.e. predicted(slot) = host + dead
+    // band, and predicted(slot) = anchor + one slot duration for the slot after the anchor's own.
+    EXPECT_NEAR(static_cast<double>(anchor + SLOT_NS), static_cast<double>(host + 50000), 2000.0)
+        << "the filter must converge to (the floor + the dead band), not stall half way: " << anchor + SLOT_NS;
+  }
+
+  // ---- a disruption RE-ARMS instead of walking ----------------------------------------------------------
+  const compat::lane_grid_update disruption =
+      compat::lane_grid_update_ns(5000000, 7, 30, 20000000, SLOT_NS, 50000, WRAP);
+  EXPECT_TRUE(disruption.rearmed) << "11 slots of silence cannot be filtered, it has to re-arm";
+  EXPECT_EQ(disruption.anchor_host_ns, 20000000);
+  EXPECT_EQ(disruption.anchor_slot, 30);
+}

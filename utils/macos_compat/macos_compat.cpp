@@ -836,6 +836,256 @@ bool poll_rx_wait_enabled()
 #endif
 }
 
+// ---------------------------------------------------------------------------------------------------
+// P6.1: the LANE GRID (see macos_compat.h for what it is and why a delay cannot do its job).
+// ---------------------------------------------------------------------------------------------------
+namespace {
+
+/// Slot counter wrap: slot_point::count() is a hyperframe-relative counter, so a distance between two slots
+/// has to be taken modulo the hyperframe. It is a parameter because the caller knows the numerology.
+constexpr uint64_t kSlotsPerHyperframe = 1024 * 20; // 30 kHz SCS; the caller passes its own through the API
+
+struct lane_grid_state {
+  std::atomic<int64_t>  anchor_host_ns{0};
+  std::atomic<int64_t>  anchor_slot{-1};
+  std::atomic<int64_t>  slot_duration_ns{500000};
+  std::atomic<int64_t>  lead_ns{200000};
+  std::atomic<int64_t>  deadband_ns{50000};
+  std::atomic<uint64_t> noted{0};
+  std::atomic<uint64_t> clamped{0};
+  std::atomic<uint64_t> late{0};
+  std::atomic<uint64_t> unarmed{0};
+  std::atomic<uint64_t> rearmed{0};
+  std::atomic<int64_t>  wait_sum_us{0};
+  std::atomic<int64_t>  wait_max_us{0};
+  std::atomic<bool>     params_read{false};
+};
+
+lane_grid_state& lane_grid()
+{
+  // Never destroyed, for the reason rx_pool_accounts() spells out: the report is an atexit handler.
+  static lane_grid_state* st = new lane_grid_state();
+  return *st;
+}
+
+int64_t env_us(const char* name, int64_t fallback)
+{
+  const char* env = std::getenv(name);
+  if ((env == nullptr) || (env[0] == '\0')) {
+    return fallback;
+  }
+  const long v = std::strtol(env, nullptr, 10);
+  return (v < 0) ? fallback : static_cast<int64_t>(v) * 1000;
+}
+
+int64_t steady_now_ns()
+{
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+void lane_grid_report_impl()
+{
+  lane_grid_state& st = lane_grid();
+  if ((st.noted.load(std::memory_order_relaxed) == 0) && (st.unarmed.load(std::memory_order_relaxed) == 0)) {
+    return; // the knob was off (or the grid never saw a slot): print nothing rather than a line of zeroes
+  }
+  const uint64_t clamped = st.clamped.load(std::memory_order_relaxed);
+  const double   mean_us =
+      (clamped != 0) ? (static_cast<double>(st.wait_sum_us.load(std::memory_order_relaxed)) /
+                        static_cast<double>(clamped))
+                     : 0.0;
+  std::fprintf(stderr,
+               "[lane_grid] OCUDU_UL_LANE_GRID=1: grid armed from %llu hop(s), re-armed %llu time(s); "
+               "clamped=%llu (mean wait %.1fus, max %lldus); late=%llu; unarmed=%llu. late counts the hops "
+               "whose grid instant had ALREADY passed when the lane began - it is the lead's verdict, and it "
+               "is the number to read first\n",
+               static_cast<unsigned long long>(st.noted.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(st.rearmed.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(clamped),
+               mean_us,
+               static_cast<long long>(st.wait_max_us.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(st.late.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(st.unarmed.load(std::memory_order_relaxed)));
+}
+
+const bool lane_grid_report_registered = []() {
+  std::atexit(lane_grid_report_impl);
+  return true;
+}();
+
+} // namespace
+
+bool lane_grid_enabled()
+{
+#if defined(__APPLE__)
+  // The usual two keys: the call sites are also inside a platform guard, so Linux cannot reach this at all.
+  const char* env = std::getenv("OCUDU_UL_LANE_GRID");
+  if ((env == nullptr) || (env[0] == '\0') || ((env[0] == '0') && (env[1] == '\0'))) {
+    return false;
+  }
+  lane_grid_state& st = lane_grid();
+  if (!st.params_read.exchange(true, std::memory_order_relaxed)) {
+    st.lead_ns.store(env_us("OCUDU_UL_LANE_GRID_LEAD_US", 200), std::memory_order_relaxed);
+    st.deadband_ns.store(env_us("OCUDU_UL_LANE_GRID_DEADBAND_US", 50), std::memory_order_relaxed);
+  }
+  return true;
+#else
+  return false;
+#endif
+}
+
+int64_t lane_grid_target_ns(int64_t anchor_host_ns,
+                            int64_t anchor_slot,
+                            uint64_t slot,
+                            int64_t slot_duration_ns,
+                            int64_t lead_ns,
+                            uint64_t slots_per_hyperframe)
+{
+  if ((anchor_slot < 0) || (slots_per_hyperframe == 0)) {
+    return -1;
+  }
+  const uint64_t distance = (slot + slots_per_hyperframe - static_cast<uint64_t>(anchor_slot)) % slots_per_hyperframe;
+  return anchor_host_ns + static_cast<int64_t>(distance) * slot_duration_ns + lead_ns;
+}
+
+int64_t lane_grid_now_ns()
+{
+  return steady_now_ns();
+}
+
+lane_grid_update lane_grid_update_ns(int64_t anchor_host_ns,
+                                     int64_t anchor_slot,
+                                     uint64_t slot,
+                                     int64_t host_ns,
+                                     int64_t slot_duration_ns,
+                                     int64_t deadband_ns,
+                                     uint64_t slots_per_hyperframe)
+{
+  lane_grid_update out;
+  if (anchor_slot < 0) {
+    // ARM on the first observation: the grid is the host instant of the fastest hop seen, advanced by whole
+    // slot durations from there. A grid re-derived from every arrival would inherit the jitter it exists to
+    // remove, so this happens once.
+    out.anchor_host_ns = host_ns;
+    out.anchor_slot    = static_cast<int64_t>(slot);
+    return out;
+  }
+  out.anchor_host_ns = anchor_host_ns;
+  out.anchor_slot    = anchor_slot;
+  const int64_t predicted = lane_grid_target_ns(anchor_host_ns, anchor_slot, slot, slot_duration_ns, 0,
+                                                slots_per_hyperframe);
+  if (predicted < 0) {
+    return out;
+  }
+  const int64_t residual = host_ns - predicted;
+  if ((residual > 2 * slot_duration_ns) || (residual < -4 * slot_duration_ns)) {
+    // The filter cannot follow this (startup, a stream restart, a multi-slot disruption): re-arm rather than
+    // spend hundreds of hops walking there.
+    out.anchor_host_ns = host_ns;
+    out.anchor_slot    = static_cast<int64_t>(slot);
+    out.rearmed        = true;
+    return out;
+  }
+  if (residual < -deadband_ns) {
+    // PULL BACK, SLOWLY, and only when the hop arrived EARLIER than the grid. One outlier of a few hundred
+    // microseconds moves the grid by a few microseconds (1/64), while a real drift is tracked in ~0.1 s.
+    out.anchor_host_ns = anchor_host_ns + (residual + deadband_ns) / 64;
+  }
+  return out;
+}
+
+void lane_grid_note_hop(uint64_t slot)
+{
+#if defined(__APPLE__)
+  if (!lane_grid_enabled()) {
+    return;
+  }
+  lane_grid_state& st       = lane_grid();
+  const int64_t    anchor   = st.anchor_slot.load(std::memory_order_relaxed);
+  const int64_t    anchor_h = st.anchor_host_ns.load(std::memory_order_relaxed);
+  const lane_grid_update up = lane_grid_update_ns(anchor_h,
+                                                  anchor,
+                                                  slot,
+                                                  steady_now_ns(),
+                                                  st.slot_duration_ns.load(std::memory_order_relaxed),
+                                                  st.deadband_ns.load(std::memory_order_relaxed),
+                                                  kSlotsPerHyperframe);
+  if ((up.anchor_host_ns != anchor_h) || (up.anchor_slot != anchor)) {
+    st.anchor_host_ns.store(up.anchor_host_ns, std::memory_order_relaxed);
+    st.anchor_slot.store(up.anchor_slot, std::memory_order_relaxed);
+  }
+  if (up.rearmed) {
+    st.rearmed.fetch_add(1, std::memory_order_relaxed);
+  }
+  st.noted.fetch_add(1, std::memory_order_relaxed);
+#else
+  (void)slot;
+#endif
+}
+
+void lane_grid_wait(uint64_t slot)
+{
+#if defined(__APPLE__)
+  if (!lane_grid_enabled()) {
+    return;
+  }
+  lane_grid_state& st       = lane_grid();
+  const int64_t    anchor   = st.anchor_slot.load(std::memory_order_relaxed);
+  const int64_t    anchor_h = st.anchor_host_ns.load(std::memory_order_relaxed);
+  const int64_t    target   = lane_grid_target_ns(anchor_h,
+                                                  anchor,
+                                                  slot,
+                                                  st.slot_duration_ns.load(std::memory_order_relaxed),
+                                                  st.lead_ns.load(std::memory_order_relaxed),
+                                                  kSlotsPerHyperframe);
+  if (target < 0) {
+    st.unarmed.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  const int64_t now = steady_now_ns();
+  if (now >= target) {
+    // The grid instant has passed: the work did NOT get here in time, and no wait can fix that. Counted, not
+    // hidden - this is the number that says whether the lead (and, at the next step, the reservation) is
+    // enough. The commit is still made; skipping it would lose the slot's data for a scheduling reason.
+    st.late.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  const int64_t wait_ns = target - now;
+  st.clamped.fetch_add(1, std::memory_order_relaxed);
+  st.wait_sum_us.fetch_add(wait_ns / 1000, std::memory_order_relaxed);
+  int64_t prev_max = st.wait_max_us.load(std::memory_order_relaxed);
+  const int64_t wait_us = wait_ns / 1000;
+  while ((wait_us > prev_max) &&
+         !st.wait_max_us.compare_exchange_weak(prev_max, wait_us, std::memory_order_relaxed)) {
+  }
+  // Two phases, the shape the user's framework uses: SLEEP while there is time to spare (a sleep is free and
+  // this thread may hold a pool thread), then SPIN the last stretch with the yield hint, because Darwin
+  // coalesces short sleeps and a 50us quantum would leave tens of microseconds of jitter - exactly the
+  // quantity this seam exists to remove.
+  constexpr int64_t spin_tail_ns = 100000; // 100 us
+  while (true) {
+    const int64_t left = target - steady_now_ns();
+    if (left <= 0) {
+      break;
+    }
+    if (left > spin_tail_ns) {
+      sprint_wait();
+    }
+    else {
+      ::sched_yield();
+    }
+  }
+#else
+  (void)slot;
+#endif
+}
+
+void lane_grid_report()
+{
+  lane_grid_report_impl();
+}
+
 void sprint_wait()
 {
 #if defined(__APPLE__)
