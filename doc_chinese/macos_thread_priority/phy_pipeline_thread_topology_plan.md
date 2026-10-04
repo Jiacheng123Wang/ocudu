@@ -1775,3 +1775,34 @@ watched-only 的判定也在同一批记录里给出 `watched[running=0..2 starv
 `zero-copy wraps: 1301314 hits, 181992 creates, 0 failures` ✓）。
 **注意**：搬过去之后 `t2f` 这个 landmark 的**语义会变**（提交/排空 vs 执行完成），所以 A/B 的判据要用
 `ul_pipeline` 与设备 busy 的 `front_end`（后者应从 0 变成非 0，作为"开关真的生效"的正向对照），**不能直接比 `t2f`**。
+
+### 11.39 线程清单（代码级）与"曾被哪条臂碰过"的对照表
+
+**命名语义（不同族不同，声明 TC 时逐字对上）**：
+
+| 名字 | `#N` 的含义 | 本线实例 | 出处 |
+|---|---|---|---|
+| `lower_phy_tx#N` / `lower_phy_rx#N` / `lower_phy_ul#N` | **cell id**（`for (cell_id = 0; cell_id != nof_cells; ++cell_id)`）| `#0`（单小区）| `apps/services/worker_manager/worker_manager.cpp:642-672` |
+| `main_pool#N` | 池内 **worker 序号** | `#0..#4` | 同上（`main_pool` 创建处）|
+| `radio` | 无后缀，**共享**电台执行器 | 1 条 | `radio_exec` |
+| `pusch_lane#N` / `lane_commit#N` | **线程序号**（本线新增）| 各 `#0`（可 N 条）| `du_low_executor_mapper.cpp` / `ocudu_metal_burst.mm` |
+
+**三条 lower-phy worker 的形状（同一次创建的三个参数就不同）**：
+
+| 线程 | 队列深度 | 实时意图 | 每 slot 的活 |
+|---|---|---|---|
+| `lower_phy_tx#N` | 128 | `max()` | DL 侧发射交棒 |
+| **`lower_phy_rx#N`** | **1**（严格一次一个任务）| `max()−2` | `ul_process()`：池取缓冲 + `receiver.receive()` + 三次记账 + `uplink_executor.defer()` + 重新投递自己 |
+| **`lower_phy_ul#N`** | 128 | `max()−1` | `uplink_processor.process()`：**OFDM 解调（14 次 FFT，vDSP，CPU）+ 写 resource grid** |
+
+**"曾被哪条臂碰过"**（本线的全部臂 vs 每条线程）：
+
+| 线程 | 被声明过？| 结果 |
+|---|---|---|
+| `main_pool#0..#4` | ✅ P4 七对 + 本线两轮加扰（5000/1300/1800、5000/2500/3000）| ❌ 安静机器无复现收益；加扰下 **`ce` 两轮变差 1.31/1.60×** |
+| `pusch_lane` | ✅ p226/p227（+ `lane_commit` p245）| ❌ 无复现收益（闸门机制成立、效果测不出）|
+| `lower_phy_rx#0` | ✅ p257–p270（500/100/200、500/250/350）| ➖ 载体变化落在**腿间噪声底（同配置 0.28–1.60×）**之内 ⇒ 不成立 |
+| **`lower_phy_ul#0`** | ❌ **从未**（唯一一次是 2026-09-01 的全量 FIFO 臂，p183 的 `[sched]` 显示 `posix=FIFO/45`，该臂因**丢 7 M 样本、上行 −25%** 已回退）| **真腿上无先例** —— 规划文档自己把它列为**首选**（`phy_thread_scheduling_plan.md`），但一直没飞 |
+| `lower_phy_tx#0` / `radio` / `io_broker_epoll` / `SCTP iterator` | ❌ 从未 | — |
+
+⇒ **下一步（p273/p274）就是补上这条唯一的空白**：`lower_phy_ul#0` 是单线程、每 slot 固定 14 次 FFT、位于 UL 关键路径（`t2f` 491.9 µs 落在它身上），周期天然 = 500 µs，且 `t2f` 的 landmark 语义不变 ⇒ 载体可直接比较。
