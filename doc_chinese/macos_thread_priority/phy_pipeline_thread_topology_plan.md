@@ -1994,3 +1994,41 @@ pusch_proc->process(pdu)            ← 跑在 pusch_executor 上（池 或 pusc
 ⇒ 与用户"整条 pipeline 跑 TC 架构"的决定一致的做法是：**给 UL lane 一个专属池**（它的线程形状因此变成
 纯每-slot 的 ✓，与 `pusch_lane` 之所以可被测的"单一用途"性质相同 ✓），再对这批线程按 `period = slot` 声明预留 ✓。
 `pusch_lane` 的失败在**工作单元**（一个 hop = 3 个 slot），不在"专用 worker"这个想法本身 ✓。
+
+### 11.43 ★★★ 用户的追问"3 条 `pusch_lane` 线程能不能解决"——**能解决并发，但我那个实验有两处自身缺陷，使 N 线程从未被真正测过**
+
+#### (1) 先把两个被混在一起的量分开
+
+| 量 | 是什么 | 与线程数的关系 |
+|---|---|---|
+| **每线程的 tick 率** | 一条线程自己多久能回到循环一次 | **算术决定** ✗：一个 hop 的 wall ≈ 1.5 ms ≈ 3 个 slot ⇒ 单线程最多每 3 个 slot tick 一次 ⇒ p238 的 **1238/s vs 2000/s** 在**任何 N** 下都成立 ✓ |
+| **服务并发** | 一个 slot 到来时，**是否至少有一条线程空闲**能接住它 | **需要 N ≳ hop_wall / slot ≈ 3** ✓✓ —— 正是用户说的"3 条" ✓ |
+
+⇒ 用户的判断对：**失败的是并发，不是"节拍"本身**；而"每线程 tick 率只有 1/3"是算术，不是缺陷 ✓（指标要跟着改：看"**至少一条线程空闲的 tick 占比**"，而不是"每线程 tick 率"）。
+
+#### (2) ★ 但对之前那些臂，N 线程根本没被用上——我这边的两处缺陷
+
+| 缺陷 | 代码 | 后果 |
+|---|---|---|
+| **声明的并发是 1** | `phy_config.pusch_executor = {paced.get(), 1}`（`du_low_executor_mapper.cpp:198`）| 上层读 `pusch_config.max_nof_concurrent_threads = pusch_executor.max_concurrency`（`upper_phy_factories.cpp:938`）⇒ 即使 `OCUDU_UL_PACED_THREADS=2`，**上层仍按 1 并发做池化/串行** ✗✗ ⇒ 那两条 2 线程臂**很可能在更高一层就被串行化** |
+| **一个 tick 会把积压全排干** | `paced_task_executor.cpp:290` 的 `continue`（"drain what else is already there"）| 一条线程在一个 tick 里吃掉整个积压 ⇒ 接下来 3 个 slot 都在忙 ✗ ⇒ "每 tick 一个 hop"的节拍语义被自己破坏 ✗ |
+
+⇒ **结论：`OCUDU_UL_PACED_THREADS=2` 从未真正等于"2 条并发的 lane"** ✗✓ —— 这是个必须认领的实验缺陷。
+
+#### (3) 修正后的设计（三处小改动）
+
+1. `phy_config.pusch_executor = {paced.get(), (unsigned)threads}`（让上层也按 N 并发 ✓）；
+2. **每个 tick 只取一个任务**（lane 用途下关掉 drain ⇒ 每次提交都落在某个 tick 上 ✓✓）；
+3. 新增计数：**"至少一条线程空闲的 tick 占比"**（取代"每线程 tick 率"作为节拍判据 ✓）。
+
+**预登记判据**：hop 服务速率必须达到池的水平（~600/s；**之前的 −4~10× 不得复现** ✗）、
+commit 落点保持在带内、四条载体不劣化。
+
+#### (4) 与 §11.41（TC 架构）的关系
+
+| | 代价 | 得到 |
+|---|---|---|
+| **N 线程节拍 lane** | 每个 hop 的**起点被量化**（最多等一个 slot ✗）| **commit 时刻落在网格上** ✓✓（用户原设计要的那个性质）|
+| **TC 预留**（§11.41）| 不量化任何东西 ✓ | CPU 交付有保障 ✓，但**不改变 commit 的相位** ✗ |
+
+两者不冲突：TC 治"该给的 CPU 拿不到"，N 线程节拍 lane 治"**commit 相位**"。若目标就是后者，N=3–4 + (3) 的三处修正是最直接的实验 ✓。
