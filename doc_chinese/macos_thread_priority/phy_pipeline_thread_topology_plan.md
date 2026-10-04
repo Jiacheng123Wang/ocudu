@@ -1806,3 +1806,29 @@ watched-only 的判定也在同一批记录里给出 `watched[running=0..2 starv
 | `lower_phy_tx#0` / `radio` / `io_broker_epoll` / `SCTP iterator` | ❌ 从未 | — |
 
 ⇒ **下一步（p273/p274）就是补上这条唯一的空白**：`lower_phy_ul#0` 是单线程、每 slot 固定 14 次 FFT、位于 UL 关键路径（`t2f` 491.9 µs 落在它身上），周期天然 = 500 µs，且 `t2f` 的 landmark 语义不变 ⇒ 载体可直接比较。
+
+#### §11.39 补：队列语义 + 优先级在 Darwin 上的"坍缩"
+
+**队列容量（`create_prio_worker(name, exec_name, queue_size, policy, sleep_time, mask, prio)` 的第三个参数）**
+
+| 线程 | 队列容量 | 语义 |
+|---|---|---|
+| `lower_phy_tx#0` / `lower_phy_ul#0` | **128** | 最多 128 个待执行任务；满了之后 `defer()/execute()` **返回 false**，由调用方处理（丢弃/报错）|
+| `lower_phy_rx#0` | **1** | 任何时刻最多 1 个排队任务 ⇒ **严格一次一个**（与"干完重新投递自己"的循环一致；第二条并发投递会被拒）|
+
+`sleep_time = 10 µs` = **队列为空时的轮询间隔**。
+
+**`prio max()` / `max()−1` / `max()−2` 在这两个平台上是两回事**
+
+| | Linux / Ubuntu | macOS（本线所有腿）|
+|---|---|---|
+| 定义 | `max() = sched_get_priority_max(SCHED_FIFO) − 1 = 98`（故意低 1 以免与 OS 关键任务相争）| 同一定义（代码共用）|
+| 生效方式 | `pthread_setschedparam(t, SCHED_FIFO, {98/97/96})` ⇒ **相对次序 tx(98) > ul(97) > rx(96) 真实存在** | **不生效** ✗：`darwin_qos_class_for_prio()` 把"任何非 `no_realtime()` 的值"一律映射为 `QOS_CLASS_USER_INTERACTIVE`（`lib/support/scheduling/darwin_thread_scheduling.cpp:18`），由 `apply_worker_thread_scheduling()` **无条件**调用 |
+| 结果 | 三条线程三种优先级 | **三条 + 主池（`max()−2`）全部同档**，`−1/−2` 是死数字 |
+
+腿上 `[sched]` 行印证：每个 PHY 线程都是 `req=USER_INTERACTIVE eff=USER_INTERACTIVE posix=OTHER/31`（同档、无显式策略）。
+
+**⇒ 由此得到的平台结论**：macOS 上"调优先级/调度策略"真正可用的手段**只有两个**——
+① **逐线程的 Mach time constraint**（必须由 `OCUDU_SCHED_TIME_CONSTRAINT` 逐线程点名，且声明后永久失去 QoS 档）；
+② **全局 FIFO**（已证否：丢 7 M 样本、上行 −25%）。
+**QoS 那一层在这台机器上不构成杠杆**（所有 PHY 线程本来同档）——这正是"QoS 档 ≈ 基线"那条读数迟迟无法解释的原因。
