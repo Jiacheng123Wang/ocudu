@@ -93,6 +93,9 @@ struct ul_stall_watchdog::impl {
   };
   series_tally series[SITE_KINDS];
   uint64_t     series_reporter_site_known = 0;
+  /// Every PHY-series sample, i.e. the other half of the class line: the two must reconcile with the samples
+  /// line, and a leg that cannot add them up is a leg whose instrument is dropping records.
+  uint64_t     series_total = 0;
 
   std::mutex           mutex;
   std::thread          waker;
@@ -289,6 +292,7 @@ struct ul_stall_watchdog::impl {
         }
       }
     }
+    ++series_total;
     if (reporter_site != nullptr) {
       ++series_reporter_site_known;
       bool tallied = false;
@@ -408,7 +412,10 @@ struct ul_stall_watchdog::impl {
       prev_obs = cur;
       return;
     }
-    const char* verdict = classify(watchdog_late, busy, advanced, frozen_runnable, frozen_blocked);
+    // THE VERDICT IS ABOUT THE WATCHED THREADS, which is the whole correction: with the process-wide counts,
+    // `driver_block` fired because an epoll thread is parked by design (p252/p253: `blocked=8..12` in every
+    // record while the PHY threads were running). A column that cannot be acted on is worse than no column.
+    const char* verdict = classify(watchdog_late, busy, w_running, w_starved, w_blocked);
     prev_obs            = cur;
 
     std::lock_guard<std::mutex> lock(mutex);
@@ -479,6 +486,7 @@ struct ul_stall_watchdog::impl {
     rec.verdict = verdict;
 
     if (std::strcmp(rec.trigger, "waker") != 0) {
+      ++series_total;
       bool found = false;
       for (series_tally& t : series) {
         if ((t.name[0] != '\0') && (std::strcmp(t.name, rec.trigger) == 0)) {
@@ -642,15 +650,16 @@ void ul_stall_watchdog::report()
   }
   std::fprintf(stderr,
                "[ul_watchdog] OCUDU_UL_WATCHDOG=1: a 1 ms waker, %llu tick(s), late max=%.1fus; "
-               "classified stalls: suspended=%llu saturated=%llu driver_block=%llu cpu_stolen=%llu "
-               "work_slow=%llu\n",
+               "classified stalls (watched threads only): suspended=%llu saturated=%llu driver_block=%llu "
+               "cpu_stolen=%llu work_slow=%llu | phy_series=%llu (in the table below)\n",
                static_cast<unsigned long long>(p->ticks),
                static_cast<double>(p->late_max_ns) / 1000.0,
                static_cast<unsigned long long>(p->verdicts[0]),
                static_cast<unsigned long long>(p->verdicts[1]),
                static_cast<unsigned long long>(p->verdicts[2]),
                static_cast<unsigned long long>(p->verdicts[3]),
-               static_cast<unsigned long long>(p->verdicts[4]));
+               static_cast<unsigned long long>(p->verdicts[4]),
+               static_cast<unsigned long long>(p->series_total));
   // THE SITE TABLE, first: which wait point the PHY threads were inside when the tail events were filed. A
   // leg reads this one line to know whether the tail is a radio receive, a GPU completion wait, an executor
   // park - or something that has no scope yet (`unknown`, counted so it cannot hide).
@@ -718,6 +727,7 @@ void ul_stall_watchdog::reset_for_test()
   p->samples_throttled   = 0;
   p->last_sample_ns      = 0;
   p->series_reporter_site_known = 0;
+  p->series_total                = 0;
   for (impl::series_tally& t : p->series) {
     t = impl::series_tally{};
   }
