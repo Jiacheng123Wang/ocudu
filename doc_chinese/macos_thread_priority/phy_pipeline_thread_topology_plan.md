@@ -1961,3 +1961,36 @@ TC 架构下**"声明总量"会有数个核**（5 条 pool × 数百 µs / 500 �
 而**实测使用量仍只有 ~1.5 核**（pool 0.65 核 ✓）。`computation` 是**上限**、不是消耗 ✓。
 ⇒ 原登记的"总预留 ≤ ~1.5 核"这条**要改成对"实测 CPU 占用"的限制**，否则会误判一个正确的配置 ✗。
 这一点需要用户确认后写进判据。
+
+### 11.42 `pusch_lane` / `lane_commit` 与 `main_pool#0..#4` 的功能分工（代码级）
+
+#### (1) 三个东西各自的角色
+
+| | `main_pool#0..#4`（5 条）| `pusch_lane`（本线新增，默认关）| `lane_commit`（本线新增，默认关）|
+|---|---|---|---|
+| 性质 | **通用工作池**，同时服务**四个**执行器 | **专用执行器**：只承载 lane 任务 | **单行交接闸门**：只承载 `[cb commit]` |
+| 承载的活 | ① `rt_prio_exec`：upper PHY **DL** + MAC 调度；② `high_prio_exec`：控制面 + 定时器；③ **`medium_prio_exec`：PCAP/CU-UP **以及 UL lane**；④ `low_prio_exec`：外部数据 | 一个 lane 任务 = `uplink_processor_impl` 里 `pusch_executor.defer([…]{ pusch_proc->process(pdu) })`（**一个 PDU/一个 hop 的全部主机侧工作**）| `shared_burst::commit()` 的最后一小段：`[cb commit]`（实测 14–47 µs）|
+| 与池的关系 | —— | **替代**（`phy_config.pusch_executor = {paced.get(), 1}`），不是叠加 ✗ | **叠加**：池/lane 线程照旧 encode，只把提交让出去 ✓ |
+| 并发 | `pusch_executor.max_concurrency = 2`（fork limiter，5 条池线程里**最多 2 个 hop 同时在跑**）| `{paced, 1}` ⇒ **每线程 1 个**（`OCUDU_UL_PACED_THREADS` 后来才允许 N）| 1 |
+
+#### (2) 一个 lane 任务内部有什么
+
+```
+pusch_proc->process(pdu)            ← 跑在 pusch_executor 上（池 或 pusch_lane）
+ ├─ 信道估计  → pusch_ch_estimator_executor（= 同一个 medium 池，fork limiter 的 [0]）
+ ├─ 均衡/解映射 → 并入 Metal 的共享 burst，由 [cb commit] 提交（= lane_commit 若开启）
+ └─ LDPC 解码  → 本配置里 pusch_decoder_executor 未由 mapper 赋值 ⇒ 在**同一个任务内**完成
+                  （与 `[ul_ldpc_decode]` 在 hop 线程上被测到一致 ✓）
+```
+
+⇒ **`pusch_lane` 与池的 medium 执行器承载的是同一件功能**，差别只在"**谁跑**"：一个是专用节拍线程，
+一个是**混着 DL/控制面/定时器/PCAP/外部数据**的通用池 ✗✓。
+
+#### (3) 对 §11.41 架构计划的一个直接推论
+
+通用池把 **UL lane 与无关负载混在一起** ⇒ 它的每线程工作是**不规则**的 ✗ ⇒
+在它上面按 `period = slot` 做预留时，**保护 UL 节拍的前提是"其它活不吃掉预算"**，而这正好是它做不到的 ✗。
+
+⇒ 与用户"整条 pipeline 跑 TC 架构"的决定一致的做法是：**给 UL lane 一个专属池**（它的线程形状因此变成
+纯每-slot 的 ✓，与 `pusch_lane` 之所以可被测的"单一用途"性质相同 ✓），再对这批线程按 `period = slot` 声明预留 ✓。
+`pusch_lane` 的失败在**工作单元**（一个 hop = 3 个 slot），不在"专用 worker"这个想法本身 ✓。
