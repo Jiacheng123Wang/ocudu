@@ -776,7 +776,9 @@ bool ul_rx_note_call(int64_t begin_ns, int64_t return_ns, int64_t air_us, baseba
       // FILE IT, do not only count it. `loop` is the largest tail carrier the receive path has (tens of
       // milliseconds on the worst legs, the same order as the ping maximum) and it had no attribution at all:
       // the counter said HOW OFTEN the receive thread was away between two calls, never WHAT it was doing.
-      ul_stall_watchdog::get().notify_series_stall(loop_us, "rx_loop");
+      // The window is [previous return, this call's begin]: the receive scope ends at its START, so passing the
+      // window is what keeps `radio.rx` from being blamed for a gap it does not occupy.
+      ul_stall_watchdog::get().notify_series_stall(loop_us, "rx_loop", last_return_ns, begin_ns);
     }
     if (loop_us > 5000) {
       c.loop_over_5ms.fetch_add(1, std::memory_order_relaxed);
@@ -790,7 +792,7 @@ bool ul_rx_note_call(int64_t begin_ns, int64_t return_ns, int64_t air_us, baseba
       // `slip` = loop + recv - air: how far behind the radio's own timeline the receive path is running. It is
       // the quantity the registered red line is about, and it is filed under its own name so a leg can tell it
       // from the loop that may have produced it.
-      ul_stall_watchdog::get().notify_series_stall(slip_us, "rx_slip");
+      ul_stall_watchdog::get().notify_series_stall(slip_us, "rx_slip", last_return_ns, return_ns);
     }
     prev = c.slip_max_us.load(std::memory_order_relaxed);
     while ((slip_us > prev) && !c.slip_max_us.compare_exchange_weak(prev, slip_us, std::memory_order_relaxed)) {

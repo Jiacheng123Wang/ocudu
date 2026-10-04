@@ -1407,7 +1407,7 @@ public:
     // We are past the floor gate, so this fires only for events slow enough to be worth classifying - and the
     // watchdog rate-limits itself further. Its verdict is the difference between "the thread was runnable and
     // lost the CPU" (the only kind scheduling can fix) and "it was blocked" (no priority can help it).
-    ul_stall_watchdog::get().notify_series_stall(value_us, phase_series_name(kind));
+    ul_stall_watchdog::get().notify_series_stall(value_us, phase_series_name(kind), begin_ns, end_ns);
     timing_event ev;
     ev.kind     = kind;
     ev.value_us = value_us;

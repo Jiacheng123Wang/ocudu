@@ -58,7 +58,13 @@ public:
   ///        decoration: a sample filed because a PHY series was slow and one filed because THIS waker was late
   ///        answer opposite questions, and the first version stored them in one list where the numerous,
   ///        meaningless kind drowned the other.
-  void notify_series_stall(int64_t value_us, const char* series);
+  /// \param window_begin_ns, window_end_ns The exact span the series measured, on the steady clock. They are
+  ///        not decoration: the attribution asks which wait the reporting thread LEFT inside this window, and a
+  ///        wait that ends at the window's START is the PREVIOUS stage's, not this one's. The first version
+  ///        derived the window from "now minus the value" and therefore blamed `radio.rx` for every `rx_loop`
+  ///        - the receive scope ends exactly where the loop begins. Pass 0 for both to fall back to that
+  ///        derivation; a series that has the window must pass it.
+  void notify_series_stall(int64_t value_us, const char* series, int64_t window_begin_ns = 0, int64_t window_end_ns = 0);
 
   /// Prints the histogram and the classified stalls. Does nothing when the knob is off, so a delivery leg's
   /// report stays byte-identical.

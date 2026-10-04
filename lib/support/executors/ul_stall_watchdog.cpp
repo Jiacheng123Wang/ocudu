@@ -609,7 +609,7 @@ void ul_stall_watchdog::start_if_enabled()
   p->waker.detach();
 }
 
-void ul_stall_watchdog::notify_series_stall(int64_t value_us, const char* series_name)
+void ul_stall_watchdog::notify_series_stall(int64_t value_us, const char* series_name, int64_t window_begin_ns, int64_t window_end_ns)
 {
   if ((p == nullptr) || !watchdog_enabled() || (value_us < STALL_FLOOR_US)) {
     return;
@@ -628,10 +628,13 @@ void ul_stall_watchdog::notify_series_stall(int64_t value_us, const char* series
   const uint64_t self_id  = static_cast<uint64_t>(pthread_mach_thread_np(pthread_self()));
   int64_t        site_end = 0;
   const char*    last     = stall_site::last_of(self_id, &site_end);
-  const int64_t  fresh      = impl::now_ns();
-  const char*    reporter   = ((last != nullptr) && (site_end != 0) && ((fresh - site_end) <= value_us * 1000))
-                                  ? last
-                                  : nullptr;
+  const int64_t  fresh    = impl::now_ns();
+  // STRICTLY INSIDE the window the series measured. A wait that ended at the window's START belongs to what came
+  // BEFORE it (for `rx_loop` that is the receive call itself, which ends exactly there), and a wait that is still
+  // open is not a wait the window contains either.
+  const int64_t  begin_ns = (window_begin_ns != 0) ? window_begin_ns : (fresh - value_us * 1000);
+  const int64_t  end_ns   = (window_end_ns != 0) ? window_end_ns : fresh;
+  const char*    reporter = ((last != nullptr) && (site_end > begin_ns) && (site_end <= end_ns)) ? last : nullptr;
   p->sample_light(value_us, series_name, reporter);
 }
 
@@ -762,7 +765,7 @@ void ul_stall_watchdog::inject_late_for_test(int64_t extra_ns)
 #else
 
 void ul_stall_watchdog::start_if_enabled() {}
-void ul_stall_watchdog::notify_series_stall(int64_t, const char*) {}
+void ul_stall_watchdog::notify_series_stall(int64_t, const char*, int64_t, int64_t) {}
 void ul_stall_watchdog::report() {}
 void ul_stall_watchdog::reset_for_test() {}
 void ul_stall_watchdog::tick_for_test(int64_t) {}
