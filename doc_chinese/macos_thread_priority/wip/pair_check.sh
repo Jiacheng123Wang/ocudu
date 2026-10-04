@@ -10,8 +10,16 @@
 #
 # usage:  bash pair_check.sh p267 p268        (run it the moment the second leg's report is out)
 #
-# It prints, per leg, the four things that decide comparability, and then PASS/FAIL for the pair. FAIL does not
-# mean the flight was wasted - it means do not quote a carrier ratio from it.
+# It prints, per leg, the things that decide comparability, and then PASS/FAIL for the pair. FAIL does not mean
+# the flight was wasted - it means do not quote a carrier ratio from it.
+#
+# THE DISRUPTION PROXY IS THE FITH ONE, and it was added after the control-vs-control accident of 2026-10-04
+# (p269 against p270: same binary, same config, same 180 s of traffic, hops within 0.5% and payload within 3%,
+# and yet `ce > 1000 us` read 0.369527% against 0.101533% - a factor of 3.6). The channel estimator's own work
+# was identical in both legs (mean total 55.1 vs 55.3 us, same device path, same 4 refusals): what differed was
+# how much the HOST disrupted it, and that shows in two independent readings at once - the carrier count and
+# the estimator's deferred-wait tail (`defer_wait` p99 1228 vs 1029 us, max 28.4 vs 21.0 ms). A pair whose two
+# legs disagree on that tail is a pair flown under two different disturbance levels, whatever `load1` said.
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 LOGDIR=${LEG_LOGDIR:-$HERE/logs}
@@ -33,12 +41,18 @@ report() {
   local total
   total=$(grep -h 'ul_mac_pdu_size' "$f" | tail -1 | grep -oE 'total=[0-9.]+' | cut -d= -f2)
   pdu=$(python3 -c "print(f'{${total:-0}/${hops:-1}:.0f}')" 2>/dev/null || echo "?")
-  printf "%-6s %-34s %-12s recv=%-9s hops=%-8s B/hop=%s\n" "$leg" "${gaps:-?}" "${dur:-?}" "${recv:-?}" "${hops:-?}" "$pdu"
+  # The disturbance level the PHY itself saw, not what the OS load average said.
+  local dw
+  dw=$(grep -h 'defer_wait distribution' "$f" | tail -1 | grep -oE 'p99=[0-9.]+us' | cut -d= -f2)
+  local ce
+  ce=$(grep -h '  ce  :' "$f" | tail -1 | grep -oE '= [0-9.]+%' | cut -d' ' -f2)
+  printf "%-6s %-30s %-11s recv=%-9s hops=%-8s B/hop=%-6s defer99=%-9s ce>1ms=%s\n" \
+         "$leg" "${gaps%% (*}" "${dur:-?}" "${recv:-?}" "${hops:-?}" "$pdu" "${dw:-?}" "${ce:-?}"
 }
 
 echo "leg    radio continuity                   duration     receives        hops        payload"
 report "$1" || exit 2
 report "$2" || exit 2
 echo
-echo "PASS requires: both OK, durations within ~20%, and B/hop within 10%."
+echo "PASS requires: both OK, durations within ~20%, B/hop within 10%, and defer99 within ~20%."
 echo "Anything else: the pair cannot carry a carrier ratio - re-fly rather than explain."
