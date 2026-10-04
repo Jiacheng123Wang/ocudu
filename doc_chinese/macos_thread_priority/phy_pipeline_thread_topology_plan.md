@@ -1847,3 +1847,26 @@ watched-only 的判定也在同一批记录里给出 `watched[running=0..2 starv
 
 ⇒ 这也解释了本线一条老读数：**"QoS 档 ≈ 基线"** —— 因为在这台机器上**所有 PHY 线程本来就在同一个档**，从来没有相对 QoS 可言；
 macOS 上唯一能按线程制造差别的是 **Mach time constraint**（逐线程点名，代价是永久丢 QoS 档），其次是**全局 FIFO**（已证否）。
+
+#### §11.39 补三：`relative_priority` —— **同一 QoS 档内部还能分优先级**，而本 port 一直传 0
+
+本机 SDK 的权威定义（`…/MacOSX.sdk/usr/include/pthread/qos.h` 的 API 文档 + `sys/qos.h:153`）：
+
+> "A relative priority **within the QOS class**. This value is a negative offset from the maximum supported scheduler priority
+> for the given class. EINVAL will be returned if the value is greater than zero or less than `QOS_MIN_RELATIVE_PRIORITY`."
+> `#define QOS_MIN_RELATIVE_PRIORITY (-15)`
+
+⇒ 合法区间 **`[-15, 0]`，即每档内部最多 16 级** ✓；语义是"从该档的**最高**调度优先级往下偏移"，
+所以它只能把线程在**档内调低**、不能调高 ✗（要让 X 优先于 Y，得把 Y 调低 ✓）；
+层次是**档为大、偏移为小**（class 定 band，offset 在 band 内排序）✓。
+
+**本 port 从未用过它**：`set_this_thread_qos_class()` 里是 `pthread_set_qos_class_self_np(qos, 0)`、
+属性路径是 `pthread_attr_set_qos_class_np(&attr, qos, 0)` —— **两处都是 0** ✗ ⇒ 这是一条**没碰过的杠杆**。
+
+**为什么它对本案有意义**：它能在**不丢掉 P 核 QoS 档**的前提下，给实时 PHY 线程之间一个**相对次序** ✓ ——
+而这正是 Mach time constraint 只能以"**永久放弃 QoS 档**"为代价换来的东西（Darwin 互斥，§10.29 实测）。
+它是"相对优先级"里**代价最小**的候选 ✓。
+
+**先离线验，再飞**（本线一贯纪律）：用现成的微基准骨架，跑两个在 `USER_INTERACTIVE` 内偏移 0 与 −5 的竞争线程，
+量唤醒尾延迟；若在微基准里都没有可测差别，就不值得飞腿 ✗。（已有的对照点：把普通线程提到 `USER_INACTIVE`（偏移 0）
+在唤醒上**没有任何改善**：103.0 vs 103.0 µs p50 —— 那说的是"档"而不是"档内偏移" ✓。）
