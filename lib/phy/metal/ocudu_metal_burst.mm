@@ -10,6 +10,7 @@
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/phy/phy_pipeline_grid_ready.h"
 #include "ocudu/support/executors/paced_task_executor.h"
+#include "ocudu/support/executors/stall_site.h"
 #include "ocudu/support/macos_compat.h"
 
 #include <algorithm>
@@ -1205,6 +1206,9 @@ bool shared_burst::wait_committed()
   bool ok = true;
   for (id<MTLCommandBuffer> cb : outstanding) {
     burst_stats_wait();
+    // The completion wait is where the hop's host thread stands still while the device runs, so it is exactly
+    // what the site table has to be able to name: `defer_wait`'s ~700 us p50 lives inside this scope.
+    ocudu::stall_site_scope waiting("metal.burst_wait");
     [cb waitUntilCompleted];
     if (cb.status != MTLCommandBufferStatusCompleted) {
       ocudulog::fetch_basic_logger("PHY").error("Metal burst: command buffer failed with status {}",

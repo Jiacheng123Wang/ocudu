@@ -15,6 +15,7 @@ using ocudu::metal::mmse_refusals;
 #import <Metal/Metal.h>
 
 #include "ocudu_metal_lane_clock.h"
+#include "ocudu/support/executors/stall_site.h"
 #include "ocudu_metal_lane_probe.h"
 #include "ocudu_metal_burst.h"
 #include "ocudu_metal_queue.h"
@@ -4303,6 +4304,7 @@ static bool wait_pending_impl(mmse_engine_impl* e, bool close_held)
   id<MTLCommandBuffer> cb = e->pending_cb;
   e->pending_cb            = nil;
   ce_wait_trace("wait_pending_impl", cb);
+  ocudu::stall_site_scope waiting("metal.pending_wait");
   [cb waitUntilCompleted];
   mmse_stats_wait();
 

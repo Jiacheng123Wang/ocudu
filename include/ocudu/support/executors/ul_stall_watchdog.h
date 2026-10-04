@@ -65,6 +65,11 @@ public:
   void reset_for_test();
   void tick_for_test(int64_t lateness_ns);
   const char* classify_for_test(bool watchdog_late, int sys_busy_pct, int n_running, int n_runnable, int n_blocked);
+
+  /// Whether \p thread_name belongs to the set the verdict is computed over. Exposed because a filter that is
+  /// wrong in the permissive direction silently restores the old "any parked thread counts" verdict, and one
+  /// wrong in the strict direction yields an empty table - both look like "no stalls" in a leg.
+  static bool is_watched_thread_for_test(const char* thread_name);
   /// Overflow/robustness hook: a tick far beyond any real stall must land in the top bucket, not outside it.
   void inject_late_for_test(int64_t extra_ns);
 

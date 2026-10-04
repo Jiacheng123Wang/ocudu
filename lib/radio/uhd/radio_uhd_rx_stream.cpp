@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "radio_uhd_rx_stream.h"
+#include "ocudu/support/executors/stall_site.h"
 #include "ocudu/ocuduvec/zero.h"
 
 using namespace ocudu;
@@ -109,6 +110,9 @@ baseband_gateway_receiver::metadata radio_uhd_rx_stream::receive(baseband_gatewa
   unsigned nsamples            = buffs[0].size();
   unsigned rxd_samples_total   = 0;
   unsigned timeout_trial_count = 0;
+
+  // The radio receive is the call the whole uplink waits on, and the one a USB/driver stall would hold.
+  ocudu::stall_site_scope waiting("radio.rx");
 
   // Receive stream in multiple blocks.
   while (rxd_samples_total < nsamples) {

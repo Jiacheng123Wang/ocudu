@@ -17,6 +17,7 @@ set(SOURCES
         executors/task_worker.cpp
         executors/task_worker_pool.cpp
         executors/unique_thread.cpp
+        executors/stall_site.cpp          # what a thread is waiting on, readable from the watchdog
         executors/ul_stall_watchdog.cpp
 
         executors/paced_task_executor.cpp

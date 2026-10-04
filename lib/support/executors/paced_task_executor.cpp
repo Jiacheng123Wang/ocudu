@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu/support/executors/paced_task_executor.h"
+#include "ocudu/support/executors/stall_site.h"
 #include "ocudu/support/macos_compat.h"
 #include "ocudu/support/scheduling/thread_sched_snapshot.h"
 
@@ -260,8 +261,13 @@ void paced_task_executor::run()
     tick_ns      = next_ns + lead_ns;
     last_tick_ns = next_ns;
 
-    while (running.load(std::memory_order_relaxed) && (steady_now_ns() < tick_ns)) {
-      compat::sprint_wait();
+    {
+      // A paced thread asleep until its grid instant is IDLE by construction; naming the site keeps that
+      // distinguishable from a stalled one in the table.
+      stall_site_scope waiting("paced.tick");
+      while (running.load(std::memory_order_relaxed) && (steady_now_ns() < tick_ns)) {
+        compat::sprint_wait();
+      }
     }
 
     // Poll for work inside the band. A task that is already queued is run at once; one that arrives during the

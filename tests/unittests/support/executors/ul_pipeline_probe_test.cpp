@@ -21,6 +21,7 @@
 
 #include "ocudu/phy/phy_pipeline_mode.h"
 #include "ocudu/support/executors/ul_pipeline_probe.h"
+#include "ocudu/support/executors/stall_site.h"
 #include "ocudu/support/executors/ul_stall_watchdog.h"
 #include <array>
 #include <cctype>
@@ -28,6 +29,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <future>
 #include <gtest/gtest.h>
 #include <regex>
 #include <sstream>
@@ -1887,6 +1890,85 @@ TEST(ul_pipeline_probe_test, window_counts_agree_with_the_floor_line)
   }
   EXPECT_EQ(total, 3) << "the window counts must add up to the floor line's 3 (a '>' implementation gives 0): ["
                       << body << "]";
+}
+
+/// \brief The wait-site table: the watchdog reads OTHER threads' sites, so the test does exactly that - one
+/// thread publishes, another reads.
+///
+/// WHY THIS ARM EXISTS. The instrument it replaces could not name a wait point at all: its verdict counted any
+/// parked thread of the process, and its printed name was whatever the thread scan returned first
+/// (`first_blocked=io_broker_epoll` on every leg). The property that fixes it is cross-thread readability, and
+/// that is what is asserted - not "the table stores what it was given", which a thread_local would also pass.
+TEST(ul_stall_watchdog_test, a_wait_site_published_on_one_thread_is_readable_from_another)
+{
+#if !defined(__APPLE__)
+  GTEST_SKIP() << "the wait-site table is Mach-thread-id keyed and Darwin-only";
+#else
+  std::promise<bool> inside;
+  auto               future = inside.get_future();
+  std::promise<bool> release;
+  auto               released = release.get_future();
+
+  std::thread publisher([&]() {
+    ocudu::stall_site_scope waiting("test.site");
+    inside.set_value(true);
+    (void)released.wait();
+  });
+
+  ASSERT_TRUE(future.wait_for(std::chrono::seconds(2)) == std::future_status::ready)
+      << "the publishing thread never reached its scope";
+  // The reader is this thread, and the publisher is parked inside the scope: the table must answer for the
+  // OTHER thread, which is the only way the watchdog can use it.
+  bool seen = false;
+  for (int i = 0; i != 200 && !seen; ++i) {
+    ocudu::stall_site::site_count snap[8] = {};
+    const size_t                n         = ocudu::stall_site::snapshot(snap, 8);
+    for (size_t k = 0; k != n; ++k) {
+      if ((snap[k].name != nullptr) && (std::strcmp(snap[k].name, "test.site") == 0)) {
+        seen = true;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  EXPECT_TRUE(seen) << "a thread parked inside a scope must be visible in the snapshot";
+
+  release.set_value(true);
+  publisher.join();
+  // And it must go away again: a site that outlives its scope would make every later stall look like this one.
+  bool gone = false;
+  for (int i = 0; i != 200 && !gone; ++i) {
+    ocudu::stall_site::site_count snap[8] = {};
+    const size_t                n         = ocudu::stall_site::snapshot(snap, 8);
+    gone                                  = true;
+    for (size_t k = 0; k != n; ++k) {
+      if ((snap[k].name != nullptr) && (std::strcmp(snap[k].name, "test.site") == 0)) {
+        gone = false;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  EXPECT_TRUE(gone) << "the scope must clear its entry on destruction";
+#endif
+}
+
+/// \brief The watchdog's verdict is about the PHY's threads, and the filter that decides which are watched is
+/// the difference between a table of wait sites and a table of parked epoll threads.
+TEST(ul_stall_watchdog_test, only_the_threads_that_carry_the_work_are_watched)
+{
+#if !defined(__APPLE__)
+  GTEST_SKIP() << "Darwin-only instrument";
+#else
+  EXPECT_TRUE(ocudu::ul_stall_watchdog::is_watched_thread_for_test("radio"));
+  EXPECT_TRUE(ocudu::ul_stall_watchdog::is_watched_thread_for_test("lower_phy_rx#0"));
+  EXPECT_TRUE(ocudu::ul_stall_watchdog::is_watched_thread_for_test("main_pool#3"));
+  EXPECT_TRUE(ocudu::ul_stall_watchdog::is_watched_thread_for_test("pusch_lane"));
+  EXPECT_TRUE(ocudu::ul_stall_watchdog::is_watched_thread_for_test("lane_commit"));
+  // The ones that must NOT be: they are parked by design, and counting them is what made the old verdict fire
+  // on every sample.
+  EXPECT_FALSE(ocudu::ul_stall_watchdog::is_watched_thread_for_test("io_broker_epoll"));
+  EXPECT_FALSE(ocudu::ul_stall_watchdog::is_watched_thread_for_test("SCTP iterator"));
+  EXPECT_FALSE(ocudu::ul_stall_watchdog::is_watched_thread_for_test("io_timer_tick"));
+#endif
 }
 
 /// \brief The 1 ms stall watchdog: it must SEE a stall, and it must classify one (plan doc D/D.1).

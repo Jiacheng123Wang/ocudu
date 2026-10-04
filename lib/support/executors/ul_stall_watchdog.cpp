@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu/support/executors/ul_stall_watchdog.h"
+#include "ocudu/support/executors/stall_site.h"
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -26,6 +27,24 @@ constexpr int     NBUCKETS       = 40;      ///< log2 buckets of lateness, in ns
 constexpr size_t  WORST_KEPT     = 16;      ///< the records worth printing
 constexpr int64_t STALL_FLOOR_US = 1000;    ///< a series event this slow is worth classifying
 constexpr int64_t SAMPLE_GAP_NS  = 5000000; ///< at most one series-triggered sample per 5 ms
+
+/// WHICH THREADS THE VERDICT IS ABOUT. The first version counted EVERY thread of the process, so `blocked > 0`
+/// was true almost always - an epoll thread and a parked pool worker are in a wait state by design - and the
+/// class it produced (`DRIVER_BLOCK`) therefore named nothing. What a stall is about is the threads that carry
+/// the PHY's real-time work, so they are the only ones the verdict looks at.
+bool is_watched_thread(const char* name)
+{
+  static const char* const PREFIXES[] = {"radio", "lower_phy", "main_pool", "pusch_lane", "lane_commit", "phy_worker"};
+  for (const char* prefix : PREFIXES) {
+    const size_t n = std::strlen(prefix);
+    if (std::strncmp(name, prefix, n) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+constexpr size_t SITE_KINDS = 16; ///< distinct blocking sites the report can carry
 } // namespace
 
 struct ul_stall_watchdog::impl {
@@ -35,9 +54,27 @@ struct ul_stall_watchdog::impl {
     int         running = -1;
     int         runnable = -1;
     int         blocked = -1;
+    int         watched_blocked = -1;
+    int         watched_starved = -1;
+    int         watched_running = -1;
+    char        site[24] = {}; ///< where the first blocked WATCHED thread was waiting
     char        worst_blocked[24] = {};
     const char* verdict = "";
   };
+
+  /// Stalls filed per blocking site - THE table this instrument exists for: a leg reads which wait point the
+  /// PHY threads were inside when the tail events happened, which is the question the class counters could not
+  /// answer.
+  struct site_tally {
+    char     name[24] = {};
+    uint64_t count    = 0;
+  };
+  site_tally sites[SITE_KINDS];
+  /// A watched thread WAS blocked but had published no scope: a blocking path that still needs instrumenting.
+  /// Counted apart from the next one, because they ask for opposite actions.
+  uint64_t   site_uninstrumented = 0;
+  /// No watched thread was blocked at all when the stall was filed: there is no site to attribute.
+  uint64_t   site_none = 0;
 
   std::mutex           mutex;
   std::thread          waker;
@@ -210,15 +247,19 @@ struct ul_stall_watchdog::impl {
     // is the answer: CPU frozen while WAITING/UNINTERRUPTIBLE is a thread with no runnable object (a driver
     // or kernel block - no priority can help it), while CPU frozen in RUNNING is a thread that was on the run
     // queue and never got a processor (the one class a time constraint is meant to fix).
-    int frozen_blocked = 0, frozen_runnable = 0, advanced = 0;
+    int  frozen_blocked = 0, frozen_runnable = 0, advanced = 0;
+    int  w_blocked = 0, w_starved = 0, w_running = 0;
     char first_frozen[24] = {};
+    char first_site[24]   = {};
     for (const thread_obs& c : cur) {
       for (const thread_obs& pv : prev_obs) {
         if ((pv.id != 0) && (pv.id == c.id)) {
-          if ((c.cpu_ns - pv.cpu_ns) > 100000) { // >100 us of CPU: it ran
+          const bool ran     = (c.cpu_ns - pv.cpu_ns) > 100000; // >100 us of CPU: it ran
+          const bool waiting = (c.state == TH_STATE_WAITING) || (c.state == TH_STATE_UNINTERRUPTIBLE);
+          if (ran) {
             ++advanced;
           }
-          else if ((c.state == TH_STATE_WAITING) || (c.state == TH_STATE_UNINTERRUPTIBLE)) {
+          else if (waiting) {
             ++frozen_blocked;
             if (first_frozen[0] == '\0') {
               std::snprintf(first_frozen, sizeof(first_frozen), "%s", c.name);
@@ -228,6 +269,26 @@ struct ul_stall_watchdog::impl {
             ++frozen_runnable;
             if (first_frozen[0] == '\0') {
               std::snprintf(first_frozen, sizeof(first_frozen), "%s", c.name);
+            }
+          }
+          // The watched subset, and - for a watched thread frozen in a wait - WHAT IT WAS WAITING ON. This is
+          // the pair the class counters could never produce: a name that is a PHY thread AND a site that is a
+          // real blocking call, not "some thread of this process is parked somewhere".
+          if (is_watched_thread(c.name)) {
+            if (ran) {
+              ++w_running;
+            }
+            else if (waiting) {
+              ++w_blocked;
+              if (first_site[0] == '\0') {
+                const char* site = stall_site::of(c.id);
+                // An empty string means "blocked, but the path has no scope yet" - kept DISTINCT from a named
+                // site so the report can say which of the two happened instead of merging them.
+                std::snprintf(first_site, sizeof(first_site), "%s", (site != nullptr) ? site : "");
+              }
+            }
+            else if (c.state == TH_STATE_RUNNING) {
+              ++w_starved;
             }
           }
           break;
@@ -261,12 +322,49 @@ struct ul_stall_watchdog::impl {
     else {
       ++verdicts[4];
     }
+    if ((w_blocked > 0) && (first_site[0] == '\0')) {
+      ++site_uninstrumented;
+    }
+    else if (w_blocked == 0) {
+      ++site_none;
+    }
+    if (first_site[0] != '\0') {
+      bool tallied = false;
+      for (site_tally& t : sites) {
+        if ((t.name[0] != '\0') && (std::strcmp(t.name, first_site) == 0)) {
+          ++t.count;
+          tallied = true;
+          break;
+        }
+      }
+      if (!tallied) {
+        for (site_tally& t : sites) {
+          if (t.name[0] == '\0') {
+            std::snprintf(t.name, sizeof(t.name), "%s", first_site);
+            t.count = 1;
+            tallied = true;
+            break;
+          }
+        }
+      }
+      if (!tallied) {
+        // More distinct sites than the report can carry: counted, never silently merged into another name.
+        ++site_uninstrumented;
+      }
+    }
     record rec;
     rec.late_ns      = late_ns;
     rec.sys_busy_pct = busy;
     rec.running      = advanced;        // threads that did get CPU (were executing)
     rec.runnable     = frozen_runnable; // RUNNING state, no CPU: starved
     rec.blocked      = frozen_blocked;  // WAITING/UNINTERRUPTIBLE, no CPU: blocked
+    rec.watched_blocked = w_blocked;
+    rec.watched_starved = w_starved;
+    rec.watched_running = w_running;
+    std::snprintf(rec.site,
+                  sizeof(rec.site),
+                  "%s",
+                  (first_site[0] != '\0') ? first_site : ((w_blocked > 0) ? "uninstrumented" : "-"));
     std::snprintf(rec.worst_blocked, sizeof(rec.worst_blocked), "%s", first_frozen);
     rec.verdict = verdict;
     worst.push_back(rec);
@@ -385,12 +483,30 @@ void ul_stall_watchdog::report()
                static_cast<unsigned long long>(p->verdicts[2]),
                static_cast<unsigned long long>(p->verdicts[3]),
                static_cast<unsigned long long>(p->verdicts[4]));
+  // THE SITE TABLE, first: which wait point the PHY threads were inside when the tail events were filed. A
+  // leg reads this one line to know whether the tail is a radio receive, a GPU completion wait, an executor
+  // park - or something that has no scope yet (`unknown`, counted so it cannot hide).
+  std::fprintf(stderr,
+               "[ul_watchdog] stall sites (watched threads: radio/lower_phy/main_pool/pusch_lane/lane_commit):");
+  for (const impl::site_tally& t : p->sites) {
+    if (t.name[0] != '\0') {
+      std::fprintf(stderr, " %s=%llu", t.name, static_cast<unsigned long long>(t.count));
+    }
+  }
+  std::fprintf(stderr,
+               " | uninstrumented=%llu none=%llu\n",
+               static_cast<unsigned long long>(p->site_uninstrumented),
+               static_cast<unsigned long long>(p->site_none));
   for (const impl::record& r : p->worst) {
     std::fprintf(stderr,
-                 "[ul_watchdog]   late=%7.1fus sys_busy=%3d%% threads[running=%d runnable=%d blocked=%d] "
-                 "first_blocked=%-20s -> %s\n",
+                 "[ul_watchdog]   late=%7.1fus sys_busy=%3d%% watched[running=%d starved=%d blocked=%d] "
+                 "site=%-14s all[running=%d runnable=%d blocked=%d] first_blocked=%-20s -> %s\n",
                  static_cast<double>(r.late_ns) / 1000.0,
                  r.sys_busy_pct,
+                 r.watched_running,
+                 r.watched_starved,
+                 r.watched_blocked,
+                 r.site,
                  r.running,
                  r.runnable,
                  r.blocked,
@@ -410,6 +526,11 @@ void ul_stall_watchdog::reset_for_test()
   p->worst.clear();
   std::memset(p->buckets, 0, sizeof(p->buckets));
   std::memset(p->verdicts, 0, sizeof(p->verdicts));
+  for (impl::site_tally& t : p->sites) {
+    t = impl::site_tally{};
+  }
+  p->site_uninstrumented = 0;
+  p->site_none           = 0;
 }
 
 void ul_stall_watchdog::tick_for_test(int64_t lateness_ns)
@@ -423,6 +544,11 @@ void ul_stall_watchdog::tick_for_test(int64_t lateness_ns)
 const char* ul_stall_watchdog::classify_for_test(bool watchdog_late, int sys_busy_pct, int n_running, int n_runnable, int n_blocked)
 {
   return impl::classify(watchdog_late, sys_busy_pct, n_running, n_runnable, n_blocked);
+}
+
+bool ul_stall_watchdog::is_watched_thread_for_test(const char* thread_name)
+{
+  return (thread_name != nullptr) && is_watched_thread(thread_name);
 }
 
 void ul_stall_watchdog::inject_late_for_test(int64_t extra_ns)
@@ -442,5 +568,6 @@ void ul_stall_watchdog::reset_for_test() {}
 void ul_stall_watchdog::tick_for_test(int64_t) {}
 const char* ul_stall_watchdog::classify_for_test(bool, int, int, int, int) { return ""; }
 void ul_stall_watchdog::inject_late_for_test(int64_t) {}
+bool ul_stall_watchdog::is_watched_thread_for_test(const char*) { return false; }
 
 #endif

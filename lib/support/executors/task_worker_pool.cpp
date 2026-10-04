@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu/support/executors/task_worker_pool.h"
+#include "ocudu/support/executors/stall_site.h"
 #include "execution_context_description_setup.h"
 #include "ocudu/support/synchronization/sync_event.h"
 
@@ -21,6 +22,10 @@ std::function<void()> worker_task_factory(Queue& queue, unsigned nof_workers, un
     auto consumer = queue.create_consumer();
     while (true) {
       unique_task job;
+      // A worker parked here is IDLE, and saying so is half the value of the site table: a leg can then tell
+      // "this thread had nothing to do" from "this thread was waiting for the radio". Without the scope both
+      // read as TH_STATE_WAITING.
+      ocudu::stall_site_scope waiting("exec.park");
       if (not consumer.pop_blocking(job)) {
         break;
       }
