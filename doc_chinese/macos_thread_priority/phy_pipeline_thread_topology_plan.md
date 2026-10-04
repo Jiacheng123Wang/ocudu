@@ -1832,3 +1832,18 @@ watched-only 的判定也在同一批记录里给出 `watched[running=0..2 starv
 ① **逐线程的 Mach time constraint**（必须由 `OCUDU_SCHED_TIME_CONSTRAINT` 逐线程点名，且声明后永久失去 QoS 档）；
 ② **全局 FIFO**（已证否：丢 7 M 样本、上行 −25%）。
 **QoS 那一层在这台机器上不构成杠杆**（所有 PHY 线程本来同档）——这正是"QoS 档 ≈ 基线"那条读数迟迟无法解释的原因。
+
+#### §11.39 补二：这套优先级机制**是 upstream 的**，Darwin 的"坍缩"**是本 port 的**
+
+| 组件 | 出处 | 证据 |
+|---|---|---|
+| `os_thread_realtime_priority`（`max()` = `sched_get_priority_max(SCHED_FIFO)−1`、`native_sched_policy()`、`pthread_setschedparam(SCHED_FIFO, …)`）| **upstream ocudu**（当时路径还是 `include/srsgnb/…`）| 提交 `c2777df160` **2022-04-13 Francisco Paisana** "support: use custom types to represent cpu affinity masks and scheduling priorities"；更早的 `427eb17db7`（2022-04-12，同作者）"redesign threading library to leverage std::thread" |
+| `lib/support/scheduling/darwin_thread_scheduling.cpp`（`darwin_qos_class_for_prio`、`set_this_thread_qos_class`、Mach TC）| **本 port 新增** | `--diff-filter=A` ⇒ 加入于 **2026-08-16 Jiacheng Wang** |
+| `utils/macos_compat/macos_compat.cpp`（`apply_worker_thread_scheduling` 等平台分支）| **本 port 新增** | 加入于 **2026-09-01 Jiacheng Wang** |
+
+⇒ **upstream 给的是"按数值排出的相对次序"（98/97/96，以及主池的 96），而本 port 只保留了它最高的一位**：
+`darwin_thread_scheduling.h` 的注释写明理由是"On Darwin, SCHED_FIFO cannot be set without privileges; the QoS class is the closest equivalent"。
+**这条理由并不完全准确**：后来的 FIFO 臂**确实**把 SCHED_FIFO 设上了（p183 的 `[sched]` 行 `posix=FIFO/44/45/46`），只是那条臂**有害**（丢 7 M 样本、上行 −25%）⇒ 真正的原因是"设得上但代价不可接受"，而不是"设不上"。
+
+⇒ 这也解释了本线一条老读数：**"QoS 档 ≈ 基线"** —— 因为在这台机器上**所有 PHY 线程本来就在同一个档**，从来没有相对 QoS 可言；
+macOS 上唯一能按线程制造差别的是 **Mach time constraint**（逐线程点名，代价是永久丢 QoS 档），其次是**全局 FIFO**（已证否）。
