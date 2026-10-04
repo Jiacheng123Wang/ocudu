@@ -2164,3 +2164,34 @@ DL 侧：`main_pool#*`（`rt_prio_exec`，DL+MAC 调度）→ `lower_phy_tx#0`�
 
 **为什么先在 cpu 模式做**（用户理由，且本线数据支持）：设备不在环里 ⇒ 每条线程的活都是**它自己的 CPU**（预算可直接比较 ✓）、
 尾部归因不含 `metal.burst_wait`（歧义少 ✓）、而且 cpu 模式是主机侧工作量的**上界** ⇒ 在它上面定出的预算是**保守的** ✓✓。
+
+#### §11.45 补：定时/驱动类线程的功能、驱动方式与**时钟基准**（用户 2026-10-04 提问）
+
+| 线程 | 做什么 | 怎么被驱动 | 时钟基准 |
+|---|---|---|---|
+| **`io_timer_tick`**（腿上 **2 条** ✓）| 发出**固定 1 ms 的 tick**，泵动 App 的**定时器轮**（`timer_manager`：MAC/控制面/协议超时）| Linux：**timerfd** ✓；macOS：**pipe + `mach_wait_until(绝对截止)` 循环** ✓（注释写明"绝对截止、不累积漂移"；pipe 满则丢弃积压并重同步 ✓）| **主机单调时钟**：macOS `mach_absolute_time` ✓ / Linux `CLOCK_MONOTONIC` ✓（**明确不用墙钟** ✓）|
+| **`io_broker_epoll`** | App 的 IO 多路复用：把 socket 就绪（NGAP/GTP-U/F1）**以及那条 tick pipe** 变回调 | `epoll_wait`（**自己没有时钟** ✓）| 无（就绪驱动 ✓）|
+| **`ru_timing`** | RU 定时执行器：投递"按电台时刻"的任务（OFH 仿真器用它驱动 timing notifier ✓）| 被投递的任务 | **电台时间**（UHD 时间戳 ✓）+ 主机单调时钟做等待 ✓ |
+| **`radio`** | RU worker：电台 IO 与收发截止期 | 被投递的任务 + UHD 流自身的阻塞调用 ✓ | **电台时间**（收发截止期 ✓）+ 主机单调时钟等待 ✓ |
+| UHD/libusb 线程 | USB 传输机制 | 驱动/中断 ✓ | 设备自己的时钟（**无法用本机制声明** ✗）|
+
+**★ 一个顺带发现**：`ru_timing` 在**我们的 gnb（SDR RU / B200）路径上没有消费者** ✗ —— `ru_timing_exec` 只被 OFH 仿真器例子用到（`examples/ofh/ru_emulator.cpp`）；
+SDR RU 的定时走 **`ru_timing_notifier`**（`ru_lower_phy_timing_adapter`），由**下层 PHY 的接收路径**驱动 ✓。
+⇒ 这条线程在我们这套配置里**存在但不在关键路径上** ✓（清单里必须标注，否则以后会误以为它在链路里）。
+
+**系统里有三个时钟域**：
+
+| 时钟域 | 谁在用 | 本线读数 |
+|---|---|---|
+| **电台时间**（B200 自己的时钟，`clock_source=gpsdo`）| TX/RX 截止期（`[dl_tx_slack]` 的 `due_ts`）、`ru_timing` 的语义 | 与主机速率偏差 **−2.0 ~ +1.8 ppm**（>800 s 基线）✓ |
+| **主机单调时钟**（`mach_absolute_time` / `CLOCK_MONOTONIC`）| 所有探针、1 ms timer tick、**本线的 lane grid**（把主机时间锚到电台 frontier）| frontier 投递延迟 p50 **32 µs** ✓ |
+| **墙钟**（`CLOCK_REALTIME`）| 只用于日志 | —— |
+| （另有 **CPU 时间**）| 每线程 CPU 记账 | —— |
+
+**周期对照（对新架构的意义）**：
+
+| 周期源 | 值 | 备注 |
+|---|---|---|
+| `io_timer_tick` | **1 ms**（写死在 `du_high_clock_controller_factory.cpp:142`）| 且是 `no_realtime()`（`rt_intent=0` ✓）⇒ **普通线程、粒度比 slot 粗一倍** ✗ ⇒ 它**不能**驱动 per-slot 的 PHY 工作（它是 MAC/控制面/协议超时用的 ✓）|
+| 电台/slot | **500 µs**（30 kHz）| PHY 自己的节拍 ✓ |
+| 本线探针 | watchdog 1 ms、lane grid 500 µs | —— |
