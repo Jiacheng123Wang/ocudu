@@ -54,7 +54,11 @@ public:
 
   /// Called by the probe when a measured series files a tail event, so an ON-TIME watchdog still gets to
   /// classify a stall. Ignored when the watchdog is off.
-  void notify_series_stall(int64_t value_us);
+  /// \param series The PHY series that reported the slow span (`rx_wait`, `ce`, `ldpc`, ...). It is kept, not
+  ///        decoration: a sample filed because a PHY series was slow and one filed because THIS waker was late
+  ///        answer opposite questions, and the first version stored them in one list where the numerous,
+  ///        meaningless kind drowned the other.
+  void notify_series_stall(int64_t value_us, const char* series);
 
   /// Prints the histogram and the classified stalls. Does nothing when the knob is off, so a delivery leg's
   /// report stays byte-identical.

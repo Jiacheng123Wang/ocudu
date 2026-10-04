@@ -57,6 +57,8 @@ struct ul_stall_watchdog::impl {
     int         watched_blocked = -1;
     int         watched_starved = -1;
     int         watched_running = -1;
+    char        trigger[12] = {};  ///< `waker` (this thread was late) or the PHY series that was slow
+    char        reporter_site[24] = {}; ///< where the REPORTING thread was, when a series filed the sample
     char        site[24] = {}; ///< where the first blocked WATCHED thread was waiting
     char        worst_blocked[24] = {};
     const char* verdict = "";
@@ -75,6 +77,15 @@ struct ul_stall_watchdog::impl {
   uint64_t   site_uninstrumented = 0;
   /// No watched thread was blocked at all when the stall was filed: there is no site to attribute.
   uint64_t   site_none = 0;
+  /// Samples filed because a PHY SERIES was slow, per series - and, for those, the site the reporting thread
+  /// was inside. This is the pair that answers "when the PHY says it was slow, where was the thread", and it is
+  /// kept apart from the waker-late samples because those measure the OBSERVER's scheduling instead.
+  struct series_tally {
+    char     name[12] = {};
+    uint64_t count    = 0;
+  };
+  series_tally series[SITE_KINDS];
+  uint64_t     series_reporter_site_known = 0;
 
   std::mutex           mutex;
   std::thread          waker;
@@ -141,6 +152,11 @@ struct ul_stall_watchdog::impl {
 
   /// THE one place a lateness reading becomes state, shared by the real waker and the test hook - a test with
   /// its own copy of this arithmetic would test the copy (the lesson of dev doc 10.31).
+  /// Waker-late samples: the observation is about THIS thread (an undeclared 1 ms waker), and the leg must be
+  /// able to see that separately - it is the number that says "the machine could not schedule a plain 1 ms
+  /// thread", which is a fact about the machine and not about the uplink.
+  uint64_t waker_samples = 0;
+
   void file_tick(int64_t late_ns)
   {
     if (late_ns < 0) {
@@ -237,7 +253,7 @@ struct ul_stall_watchdog::impl {
 
   /// Samples the state of our own threads. Only called on suspicion: ~48 Mach calls per sample is nothing
   /// once in a while, and an observer that ran every millisecond would not be (dev doc 2.4).
-  void sample(bool watchdog_late, int64_t late_ns)
+  void sample(bool watchdog_late, int64_t late_ns, const char* trigger, const char* reporter_site)
   {
     const int busy = sys_busy_pct();
     std::vector<thread_obs> cur;
@@ -358,6 +374,11 @@ struct ul_stall_watchdog::impl {
     rec.running      = advanced;        // threads that did get CPU (were executing)
     rec.runnable     = frozen_runnable; // RUNNING state, no CPU: starved
     rec.blocked      = frozen_blocked;  // WAITING/UNINTERRUPTIBLE, no CPU: blocked
+    std::snprintf(rec.trigger, sizeof(rec.trigger), "%s", (trigger != nullptr) ? trigger : "?");
+    std::snprintf(rec.reporter_site,
+                  sizeof(rec.reporter_site),
+                  "%s",
+                  (reporter_site != nullptr) ? reporter_site : "-");
     rec.watched_blocked = w_blocked;
     rec.watched_starved = w_starved;
     rec.watched_running = w_running;
@@ -367,9 +388,41 @@ struct ul_stall_watchdog::impl {
                   (first_site[0] != '\0') ? first_site : ((w_blocked > 0) ? "uninstrumented" : "-"));
     std::snprintf(rec.worst_blocked, sizeof(rec.worst_blocked), "%s", first_frozen);
     rec.verdict = verdict;
+
+    if (std::strcmp(rec.trigger, "waker") != 0) {
+      bool found = false;
+      for (series_tally& t : series) {
+        if ((t.name[0] != '\0') && (std::strcmp(t.name, rec.trigger) == 0)) {
+          ++t.count;
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        for (series_tally& t : series) {
+          if (t.name[0] == '\0') {
+            std::snprintf(t.name, sizeof(t.name), "%s", rec.trigger);
+            t.count = 1;
+            break;
+          }
+        }
+      }
+      if (std::strcmp(rec.reporter_site, "-") != 0) {
+        ++series_reporter_site_known;
+      }
+    }
     worst.push_back(rec);
+    // KEEP THE WORST, NOT THE LAST. The list was a ring of the newest records, and the waker-late samples
+    // outnumber the series ones by an order of magnitude, so the printed "worst" was simply the most recent
+    // waker hiccups - the largest stalls never appeared at all.
     if (worst.size() > WORST_KEPT) {
-      worst.erase(worst.begin());
+      size_t smallest = 0;
+      for (size_t i = 1; i < worst.size(); ++i) {
+        if (worst[i].late_ns < worst[smallest].late_ns) {
+          smallest = i;
+        }
+      }
+      worst.erase(worst.begin() + static_cast<ptrdiff_t>(smallest));
     }
   }
 
@@ -389,7 +442,9 @@ struct ul_stall_watchdog::impl {
       }
       file_tick(late_ns);
       if (late_ns >= SUSPICION_NS) {
-        sample(true, late_ns);
+        std::lock_guard<std::mutex> lock(mutex);
+        ++waker_samples;
+        sample(true, late_ns, "waker", nullptr);
       }
       deadline += ticks_from_ns(PERIOD_NS);
       if (deadline < mach_absolute_time()) {
@@ -443,7 +498,7 @@ void ul_stall_watchdog::start_if_enabled()
   p->waker.detach();
 }
 
-void ul_stall_watchdog::notify_series_stall(int64_t value_us)
+void ul_stall_watchdog::notify_series_stall(int64_t value_us, const char* series_name)
 {
   if ((p == nullptr) || !watchdog_enabled() || (value_us < STALL_FLOOR_US)) {
     return;
@@ -456,7 +511,17 @@ void ul_stall_watchdog::notify_series_stall(int64_t value_us)
     }
     p->last_sample_ns = now;
   }
-  p->sample(false, value_us * 1000);
+  // THE REPORTING THREAD'S LAST WAIT, not its current one. A series is reported after the span it measured has
+  // ended, so "what is it waiting at now" always answers "nothing": what matters is whether the span the series
+  // just called slow contains a wait this thread left - and only then is the wait the thing to blame.
+  const uint64_t self_id  = static_cast<uint64_t>(pthread_mach_thread_np(pthread_self()));
+  int64_t        site_end = 0;
+  const char*    last     = stall_site::last_of(self_id, &site_end);
+  const int64_t  fresh      = impl::now_ns();
+  const char*    reporter   = ((last != nullptr) && (site_end != 0) && ((fresh - site_end) <= value_us * 1000))
+                                  ? last
+                                  : nullptr;
+  p->sample(false, value_us * 1000, series_name, reporter);
 }
 
 void ul_stall_watchdog::report()
@@ -486,6 +551,19 @@ void ul_stall_watchdog::report()
   // THE SITE TABLE, first: which wait point the PHY threads were inside when the tail events were filed. A
   // leg reads this one line to know whether the tail is a radio receive, a GPU completion wait, an executor
   // park - or something that has no scope yet (`unknown`, counted so it cannot hide).
+  // THE TWO KINDS FIRST, because mixing them is what made the previous reading unreadable: `waker=N` samples say
+  // the machine could not schedule this undeclared 1 ms thread, and only the series counts are about the uplink.
+  std::fprintf(stderr,
+               "[ul_watchdog] samples: waker_late=%llu (about THIS undeclared 1 ms waker) | phy series:",
+               static_cast<unsigned long long>(p->waker_samples));
+  for (const impl::series_tally& t : p->series) {
+    if (t.name[0] != '\0') {
+      std::fprintf(stderr, " %s=%llu", t.name, static_cast<unsigned long long>(t.count));
+    }
+  }
+  std::fprintf(stderr,
+               " (reporting thread inside a scope: %llu)\n",
+               static_cast<unsigned long long>(p->series_reporter_site_known));
   std::fprintf(stderr,
                "[ul_watchdog] stall sites (watched threads: radio/lower_phy/main_pool/pusch_lane/lane_commit):");
   for (const impl::site_tally& t : p->sites) {
@@ -499,18 +577,16 @@ void ul_stall_watchdog::report()
                static_cast<unsigned long long>(p->site_none));
   for (const impl::record& r : p->worst) {
     std::fprintf(stderr,
-                 "[ul_watchdog]   late=%7.1fus sys_busy=%3d%% watched[running=%d starved=%d blocked=%d] "
-                 "site=%-14s all[running=%d runnable=%d blocked=%d] first_blocked=%-20s -> %s\n",
+                 "[ul_watchdog]   late=%7.1fus sys_busy=%3d%% trigger=%-6s reporter=%-14s "
+                 "watched[running=%d starved=%d blocked=%d] site=%-14s -> %s\n",
                  static_cast<double>(r.late_ns) / 1000.0,
                  r.sys_busy_pct,
+                 r.trigger,
+                 r.reporter_site,
                  r.watched_running,
                  r.watched_starved,
                  r.watched_blocked,
                  r.site,
-                 r.running,
-                 r.runnable,
-                 r.blocked,
-                 r.worst_blocked,
                  r.verdict);
   }
 }
@@ -531,6 +607,11 @@ void ul_stall_watchdog::reset_for_test()
   }
   p->site_uninstrumented = 0;
   p->site_none           = 0;
+  p->waker_samples       = 0;
+  p->series_reporter_site_known = 0;
+  for (impl::series_tally& t : p->series) {
+    t = impl::series_tally{};
+  }
 }
 
 void ul_stall_watchdog::tick_for_test(int64_t lateness_ns)
@@ -562,7 +643,7 @@ void ul_stall_watchdog::inject_late_for_test(int64_t extra_ns)
 #else
 
 void ul_stall_watchdog::start_if_enabled() {}
-void ul_stall_watchdog::notify_series_stall(int64_t) {}
+void ul_stall_watchdog::notify_series_stall(int64_t, const char*) {}
 void ul_stall_watchdog::report() {}
 void ul_stall_watchdog::reset_for_test() {}
 void ul_stall_watchdog::tick_for_test(int64_t) {}
