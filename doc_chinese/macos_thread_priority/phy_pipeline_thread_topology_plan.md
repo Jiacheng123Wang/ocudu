@@ -2118,3 +2118,49 @@ commit 落点保持在带内、四条载体不劣化。
    —— 这也解释了为什么它们只体现在 **`max` 与超阈计数**上，而**不体现在中位/p99**（事件太稀有）✓✓。
 2. **低频 regime 不是"更抖"，而是"更贵"**：同一份活的 CPU 在空闲时是负载下的 **3 倍**（47 vs 21 µs 中位）✓
    ⇒ 它影响的是**预算申报值**，不是时刻 ✓（这也是"预算必须在交付 regime 下量"那条的来源 ✓）。
+
+### 11.45 ★★★ PHY pipeline 的 CPU 线程清单（按数据流顺序）+ 在 cpu 模式先落地 TC 架构的分阶段计划
+
+#### (1) 线程清单（UL 为主，DL/MAC 一并列出；名字逐字用于 TC 声明）
+
+| # | 线程（可声明名）| 承载什么 | 由哪个执行器喂养 | 已知读数 |
+|---|---|---|---|---|
+| 1 | `radio` | RU worker：电台/收发的时序与 UHD 交互（每应用一条，共享）| `radio_exec` | —— |
+| 2 | `lower_phy_rx#0` | `receiver.receive()`（UHD 收包）+ 池取缓冲 + 三次记账 + **defer 给 UL** | `lower_phy_rx_exec#0`（队列深度 **1**）| RX-TC 两对腿：载体变化落在噪声底内 ✗；大部分时间**阻塞**在电台上 |
+| 3 | **`lower_phy_ul#0`** | **OFDM 解调：14 次 FFT/slot（vDSP，CPU）+ 写 resource grid** | `lower_phy_ul_exec#0`（队列 128）| **`t2f` 中位 492 µs** = hop 第二大项 ✓；**从未声明过** ✓ |
+| 4 | **`main_pool#0..#4`**（5 条，四类活混在一起）| (a) `rt_prio_exec`：upper PHY **DL + MAC 调度**；(b) `high_prio_exec`：控制面/定时器；(c) **`medium_prio_exec`：UL lane（PUSCH 任务 + 信道估计）+ PCAP/CU-UP**；(d) `low_prio_exec`：外部数据 | 四个执行器 | 每条占空 **13%**，突发可达 **~90%** ✗；TC 用过但形状错（period 5000、预算 26/50%）⇒ `ce` −30…−60% ✗ |
+| 5 | `lower_phy_tx#0` | DL 发射交棒（**硬空口截止期**）| `lower_phy_tx_exec#0` | 载体 `AT/BELOW 0` 已登记 ✓；**从未声明过** ✓ |
+| 6 | `phy_worker` | DU-low 的杂项 PHY 工作 | `phy_exec` | —— |
+| 7 | `ru_timing` | RU 定时执行器 | `ru_timing_exec` | —— |
+| — | UHD/libusb、SCTP、`io_broker_epoll`、`io_timer_tick` | 驱动/网络/定时器 | —— | **不在 `unique_thread` 覆盖内 ⇒ 无法用本机制声明** ✗ |
+
+**数据流顺序**（一次 UL 处理）：
+`radio` → `lower_phy_rx#0`（收）→ `lower_phy_ul#0`（**FFT/解调**）→ `main_pool#*` 的 medium 执行器（**lane 任务：CE → 均衡/解映射 → 解码**）→ FAPI/MAC（`main_pool#*` 的 `rt_prio_exec`）。
+DL 侧：`main_pool#*`（`rt_prio_exec`，DL+MAC 调度）→ `lower_phy_tx#0`（交棒）→ `radio`（发射）✓。
+
+#### (2) 三种模式共用同一套线程形状（用户的判断，成立）
+
+`cpu` / `cpu_gpu` / `gpu` 之间变化的是**算术落在主机还是设备**，**上面 7 条线程与它们的交接关系不变** ✓；
+变化的只是**各段的时长**（设备等待会出现在 `defer_wait` 那一类里 ✓）以及**主机侧的 CPU 量**（gpu 模式下 CE/eqd 的主机活只剩 encode+submit ✓）。
+⇒ **period（工作节拍）是模式无关的，computation（预算）必须按模式各量一次** ✓。
+
+#### (3) 分阶段计划（先在 cpu 模式落地，再平移）
+
+**Phase 0（离线，不占空中时间）**
+1. 给 `[ul_thread_cpu]` 加**单 slot CPU 直方图**（现在只有窗口 ✗）⇒ 预算 = 该线程单 slot 的 **p99.9**（不是均值 ✗）；
+2. 把判据改成"**实测 CPU 占用**"（`computation` 上限不计入，§11.41(4) ✓）。
+
+**Phase 1（`cpu` 模式，逐条声明、逐条验证）**——顺序按数据流，一条一腿（对照/臂各一）：
+1. **`lower_phy_ul#0`**：period 500 µs，预算按 Phase 0 的 p99.9（这是唯一"形状正确且从未试过"的线程 ✓）；
+2. **`lower_phy_tx#0`**：period 500 µs，预算按 `[dl_tx_call]` 的 p99.9；载体 `AT/BELOW 0` ✓；
+3. **`lower_phy_rx#0`**：按已测参数保留（500/250/350）；
+4. **池的 UL lane**：**period 500（不是 5000 ✗）**、预算覆盖突发（~90%）✓；若仍伤 `ce`，则按 §11.42 的结论
+   **把 UL lane 拆到专属池**（线程形状变纯每-slot ✓），再声明；
+5. `radio`：仅在它出现在尾部归因里时再动 ✓。
+   **全程固定 `--pusch_dft_type cpu`**（DFT 后端是**另一根轴** ✗，Phase 1 不许它变化 ✓）。
+
+**Phase 2（平移）**：`cpu_gpu` → `gpu`，**线程名与 period 不变**，只按各模式重测 computation ✓；
+判据仍是四条载体 + per-stage 分布 + `pair_check` 有效性 + "实测 CPU ≤ ~1.5 核" ✓。
+
+**为什么先在 cpu 模式做**（用户理由，且本线数据支持）：设备不在环里 ⇒ 每条线程的活都是**它自己的 CPU**（预算可直接比较 ✓）、
+尾部归因不含 `metal.burst_wait`（歧义少 ✓）、而且 cpu 模式是主机侧工作量的**上界** ⇒ 在它上面定出的预算是**保守的** ✓✓。
