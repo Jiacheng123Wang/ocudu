@@ -69,6 +69,45 @@ TEST(paced_task_executor_test, a_destroyed_executor_is_out_of_the_exit_report_re
   paced_task_executor::report_all_live(); // must be a no-op, not a lock on a dead mutex
 }
 
+/// \brief The hand-off API: a task submitted with `execute_and_wait` runs ON THE EXECUTOR'S THREAD and the
+/// caller returns only once it has, which is what the commit gate needs (it hands over `[cb commit]` and must
+/// not touch the buffer again until the commit has been issued).
+TEST(paced_task_executor_test, the_hand_off_runs_the_task_on_the_executor_and_the_caller_waits)
+{
+  ::unsetenv("OCUDU_UL_LANE_GRID");
+  paced_task_executor exec("paced_test_wait", 64, 20ms, 0us, 2ms);
+
+  const auto caller_id = std::this_thread::get_id();
+  std::thread::id ran_on{};
+  std::atomic<int> runs{0};
+  ASSERT_TRUE(exec.execute_and_wait(
+      [&ran_on, &runs]() {
+        ran_on = std::this_thread::get_id();
+        ++runs;
+      },
+      1s));
+  EXPECT_EQ(runs.load(), 1);
+  EXPECT_NE(ran_on, caller_id) << "the whole point is that the EXECUTOR runs it, not the caller";
+}
+
+/// \brief And when the budget runs out the caller is told so, and the task still runs EXACTLY ONCE - the
+/// property the commit gate depends on, because committing one command buffer twice is a fault, not a retry.
+TEST(paced_task_executor_test, a_hand_off_that_times_out_runs_the_task_exactly_once)
+{
+  ::unsetenv("OCUDU_UL_LANE_GRID");
+  // A band of zero with a period of a second: a tick that has just gone by cannot carry the task, so the
+  // deadline is reached with the work still nobody's and the caller takes it back (the false return).
+  paced_task_executor exec("paced_test_wait_to", 64, 1s, 0us, 0us);
+
+  std::atomic<int> runs{0};
+  const bool       waited = exec.execute_and_wait([&runs]() { ++runs; }, 1ms);
+  if (!waited) {
+    ++runs; // the caller's fallback, which is what the false return MEANS
+  }
+  std::this_thread::sleep_for(300ms); // long enough for a late claim to show up as a second run
+  EXPECT_EQ(runs.load(), 1) << "the claim decides: never twice, and never zero (waited=" << waited << ")";
+}
+
 /// \brief A band longer than the period is CLAMPED, because it would stop the thread keeping one tick per slot.
 ///
 /// This is the sweep's own finding turned into a rule. The air legs asked for 500us, 1ms, 2ms and 4ms bands; the

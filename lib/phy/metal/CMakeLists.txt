@@ -24,4 +24,7 @@ target_compile_options(ocudu_metal_queue PRIVATE -Wno-deprecated-declarations)
 target_include_directories(ocudu_metal_queue PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ocudu_metal_queue
     PUBLIC ocudulog ocudu_macos_compat ocudu_phy_support
+    # ocudu_support: the PACED COMMIT GATE (paced_task_executor, plan doc 11.26) - the gate is a task executor
+    # with a grid tick, and it is created here because this file owns the lane's commit.
+    PRIVATE ocudu_support
     PRIVATE "-framework Metal" "-framework Foundation")

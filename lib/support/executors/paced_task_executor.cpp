@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <memory>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -135,6 +137,59 @@ bool paced_task_executor::execute(unique_task task)
 bool paced_task_executor::defer(unique_task task)
 {
   return pending.try_push(std::move(task));
+}
+
+bool paced_task_executor::execute_and_wait(unique_task task, std::chrono::nanoseconds timeout)
+{
+  // EXACTLY ONCE, whichever side runs it. The state machine is the whole mechanism: 0 = nobody has claimed
+  // the work yet, 1 = the paced thread has, 2 = the caller has. A claim is taken by compare-and-swap, so a
+  // timeout can only ever end in "the caller runs it" or "the thread is running it right now, wait".
+  //
+  // Why this and not a promise/future: the work may be DROPPED (the queue is full, the executor is stopping),
+  // and a broken promise turns that into an exception on a thread that has nothing to do with the failure. It
+  // also must not be run TWICE - the caller here commits a Metal command buffer, and committing one twice is
+  // not a retry, it is a fault.
+  // C++17, so the wait is a condition variable rather than a semaphore - and the predicate is the flag, which
+  // is also what makes a spurious wake-up harmless.
+  struct handoff {
+    std::atomic<int>        claim{0};
+    std::mutex              mutex;
+    std::condition_variable cv;
+    bool                    finished{false};
+  };
+  auto h = std::make_shared<handoff>();
+
+  const bool queued = pending.try_push(unique_task([h, t = std::move(task)]() mutable {
+    int expected = 0;
+    if (!h->claim.compare_exchange_strong(expected, 1)) {
+      return; // the caller already took it back (it timed out and ran the work itself)
+    }
+    t();
+    {
+      std::lock_guard<std::mutex> lock(h->mutex);
+      h->finished = true;
+    }
+    h->cv.notify_all();
+  }));
+  if (!queued) {
+    return false; // nothing was taken: the caller does the work itself
+  }
+
+  std::unique_lock<std::mutex> lock(h->mutex);
+  if (h->cv.wait_for(lock, timeout, [&h]() { return h->finished; })) {
+    return true;
+  }
+  // The budget is gone. Either the work is still nobody's - in which case the caller takes it back and runs it
+  // (that is what the false return means) - or the thread claimed it a moment ago, and then running it here as
+  // well would be the second commit of one command buffer. The claim decides, atomically.
+  lock.unlock();
+  int expected = 0;
+  if (h->claim.compare_exchange_strong(expected, 2)) {
+    return false;
+  }
+  lock.lock();
+  h->cv.wait(lock, [&h]() { return h->finished; });
+  return true;
 }
 
 paced_task_executor::stats paced_task_executor::get_stats() const

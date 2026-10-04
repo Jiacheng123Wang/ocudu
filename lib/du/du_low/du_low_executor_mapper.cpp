@@ -213,8 +213,7 @@ public:
         // registered with the P0 registry only and was lost on a GRACEFUL exit - an air leg's stop prints the
         // atexit reports, and no P0 dump runs. A reading that is only on one path is a reading that goes
         // missing exactly when someone needs it.
-        std::atexit(paced_task_executor::report_all_live);
-        register_p0_report(paced_task_executor::report_all_live);
+        register_exit_report(paced_task_executor::report_all_live);
       }
       // ---- P0-6: the SHAPE that value produced, next to the value itself ---------------------------
       // All three views come from one create_task_fork_limiter(), so they share max_concurrency. A value

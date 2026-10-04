@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <mutex>
 #include <vector>
@@ -57,6 +58,26 @@ void ocudu::register_p0_report(void (*fn)())
                  max_reports,
                  slot + 1);
   }
+}
+
+void ocudu::register_exit_report(void (*fn)())
+{
+  if (fn == nullptr) {
+    return;
+  }
+  // Registration happens while the PHY is being built, so a mutex here costs nothing - and the alternative
+  // (an atomic flag per call site) cannot answer "was THIS function already registered".
+  static std::mutex                  once_mutex;
+  static std::vector<void (*)()>     already;
+  std::lock_guard<std::mutex>        lock(once_mutex);
+  for (void (*f)() : already) {
+    if (f == fn) {
+      return;
+    }
+  }
+  already.push_back(fn);
+  std::atexit(fn);
+  register_p0_report(fn);
 }
 
 bool ocudu::p0_dump_reports(const char* reason, uint64_t min_interval_ms)

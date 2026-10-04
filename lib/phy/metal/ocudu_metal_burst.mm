@@ -9,6 +9,8 @@
 
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/phy/phy_pipeline_grid_ready.h"
+#include "ocudu/support/executors/paced_task_executor.h"
+#include "ocudu/support/macos_compat.h"
 
 #include <algorithm>
 #include <atomic>
@@ -27,6 +29,94 @@ using namespace ocudu;
 
 namespace ocudu {
 namespace metal {
+
+namespace {
+
+/// \brief The PACED COMMIT GATE: one thread on the slot grid that issues the lane's commits (plan doc §11.26).
+///
+/// WHY THIS EXISTS, in one measurement. The first version of the pacing put the WHOLE hop on the grid-timed
+/// thread, and it could not keep its own cadence: a hop's wall time is ~1.5 ms (three slots, of which ~700 us
+/// is the deferred burst's window), so the thread was still inside a task when the next tick arrived and 38% of
+/// the ticks were lost (p238: 1238 ticks/s per thread against the 2000/s the grid defines). What the leg was
+/// built to do - make the COMMIT INSTANTS periodic - does not need the hop on that thread at all. The commit is
+/// one line, `[cb commit]`, measured at 14-47 us; a thread that only issues it can keep every tick with two
+/// orders of magnitude to spare.
+///
+/// WHAT IS HANDED OVER, EXACTLY. Only `[cb commit]`. Everything around it stays on the committing thread,
+/// because the readings there are thread_local and would land in the wrong lane record if they moved:
+/// `lane_clock.mark_lane_commit()` (the lane's own timeline), `gpu_lane_probe::register_commit()` (the lane
+/// residency) and the Q9-F commit ticket. The buffer can be committed from any thread - Metal command buffers
+/// are not thread-affine once the encoder is closed, and the queue's order is the commit order, which the
+/// gate's FIFO preserves.
+///
+/// THE ELASTIC BAND APPLIES HERE TOO, and it is the same object: the gate is a `paced_task_executor`, so a
+/// commit task is run inside [tick + lead, tick + lead + band] and a tick with nothing to commit is skipped and
+/// counted. A commit that does not arrive inside the band is committed by its own thread (the hand-off returns
+/// false) - the grid shapes WHEN a commit can land, it never loses one.
+ocudu::paced_task_executor* the_commit_gate()
+{
+  static ocudu::paced_task_executor* gate    = nullptr;
+  static bool                        decided = false;
+  if (decided) {
+    return gate;
+  }
+  decided = true;
+
+  // The usual two keys (platform guard + env), so a leg with the knob off is byte-identical.
+  const char* env = std::getenv("OCUDU_UL_PACED_COMMIT");
+  if ((env == nullptr) || (env[0] == '\0') || ((env[0] == '0') && (env[1] == '\0'))) {
+    return nullptr;
+  }
+  const auto env_us = [](const char* name, int64_t fallback) {
+    const char* v = std::getenv(name);
+    return ((v == nullptr) || (v[0] == '\0')) ? fallback : std::strtol(v, nullptr, 10);
+  };
+  const int64_t period_us = std::strtol(env, nullptr, 10);
+  if (period_us <= 0) {
+    std::fprintf(stderr, "[paced_commit] refusing OCUDU_UL_PACED_COMMIT=%s: the period must be > 0 us\n", env);
+    return nullptr;
+  }
+  const int64_t lead_us  = env_us("OCUDU_UL_PACED_COMMIT_LEAD_US", 0);
+  const int64_t wait_us  = env_us("OCUDU_UL_PACED_COMMIT_WAIT_US", period_us / 2);
+  const int64_t threads  = std::max<int64_t>(1, env_us("OCUDU_UL_PACED_COMMIT_THREADS", 1));
+
+  // The same period the lane clamp uses, so the gate's ticks and the grid describe one clock.
+  ocudu::compat::lane_grid_set_slot_duration_ns(period_us * 1000);
+  // Never destroyed: the threads must outlive every stage that hands them a commit, and the exit report reads
+  // the object (see paced_task_executor's live registry - this is the case that registry was built for).
+  gate = new ocudu::paced_task_executor("lane_commit",
+                                        64,
+                                        std::chrono::microseconds{period_us},
+                                        std::chrono::microseconds{lead_us},
+                                        std::chrono::microseconds{wait_us},
+                                        static_cast<unsigned>(threads),
+                                        os_thread_realtime_priority::max() - 2);
+  // Both exit paths, once per process, however many components ask (the mapper asks for the same function when
+  // its own knob is on).
+  ocudu::register_exit_report(ocudu::paced_task_executor::report_all_live);
+  std::fprintf(stderr,
+               "[paced_commit] OCUDU_UL_PACED_COMMIT=%lldus: the lane's command-buffer commits are issued by "
+               "%lld grid-paced thread(s) \"lane_commit\" (lead=%lldus, band=%lldus - clamped below the "
+               "period); grid %s. Declare its reservation with "
+               "OCUDU_SCHED_TIME_CONSTRAINT=lane_commit=<period>/<computation>/<constraint>\n",
+               static_cast<long long>(period_us),
+               static_cast<long long>(threads),
+               static_cast<long long>(lead_us),
+               static_cast<long long>(wait_us),
+               ocudu::compat::lane_grid_enabled() ? "ARMED (ticks follow the radio)" : "NOT armed (ticks follow this process's own clock)");
+  return gate;
+}
+
+/// The budget a committing thread gives the gate before it commits the buffer itself: two periods covers the
+/// wait for the next tick plus the band, with room for a descheduled gate thread.
+int64_t commit_gate_timeout_us()
+{
+  const char* env = std::getenv("OCUDU_UL_PACED_COMMIT");
+  return ((env == nullptr) || (env[0] == '\0')) ? 0 : 3 * std::strtol(env, nullptr, 10);
+}
+
+} // namespace
+
 
 /// How many hand-over records are kept. A record now lives until its grid has been PRODUCED (so a late
 /// reader can be told "already written" rather than "unknown"), which is why this is a few slots of history
@@ -1076,7 +1166,19 @@ bool shared_burst::commit()
   // participation in the hop (the head of it is handover_us, entry -> extraction commit). It must be taken
   // with the buffer still open and immediately before the commit, so the span covers the encoding too.
   metal::lane_clock.mark_lane_commit();
-  [cb commit];
+  // ---- P6.2 (plan doc §11.26): the COMMIT INSTANT, on the grid ------------------------------------------
+  // The commit may be handed to the paced commit gate, which issues it at the next grid tick. The ticket
+  // above and the landmarks below stay HERE: they are thread_local readings of the committing lane, and moving
+  // them would file them under the gate's (empty) lane record. A gate that does not run the task inside its
+  // budget returns false, and the buffer is committed right here instead - a commit is never lost, only timed.
+  bool committed = false;
+  if (ocudu::paced_task_executor* gate = the_commit_gate(); gate != nullptr) {
+    committed = gate->execute_and_wait(ocudu::unique_task([cb]() { [cb commit]; }),
+                                       std::chrono::microseconds{commit_gate_timeout_us()});
+  }
+  if (!committed) {
+    [cb commit];
+  }
   // Dev doc 6.20: if this buffer is a handed-over block (the merged route adopts one), its commit is what a
   // consumer of that grid may order itself against - published here, AFTER the commit.
   shared_burst::note_block_commit_issued(cb);

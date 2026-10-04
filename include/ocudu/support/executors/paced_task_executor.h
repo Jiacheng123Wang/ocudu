@@ -85,6 +85,20 @@ public:
   [[nodiscard]] bool execute(unique_task task) override;
   [[nodiscard]] bool defer(unique_task task) override;
 
+  /// \brief Submits \p task to the grid and returns once it HAS RUN - the hand-off a caller uses when the
+  /// ORDER of the operation matters and it cannot be fire-and-forget (plan doc §11.26: the lane's commit).
+  ///
+  /// WHY A SECOND ENTRY POINT. `execute()` is right for work whose result is awaited somewhere else (the lane's
+  /// hop: the caller returns and a later stage waits). It is wrong for an operation the caller must observe as
+  /// done before it continues - and the commit is exactly that, because the very next thing the committing
+  /// thread does is `wait_committed()`, which waits on a command buffer that must have been committed first.
+  ///
+  /// \param timeout When the task has not run within this budget the call gives up, returns false, and THE
+  ///        TASK IS NOT RUN - the caller must then do the work itself. That fallback is deliberate: a hand-off
+  ///        that can silently lose an operation is worse than no hand-off, and a shutting-down executor, a
+  ///        saturated queue and a stopped thread all have to land somewhere safe.
+  [[nodiscard]] bool execute_and_wait(unique_task task, std::chrono::nanoseconds timeout);
+
   /// The accounting a leg reads: how many ticks ran work, how many were skipped, and how late the loop was.
   ///
   /// \note With N threads the counters are the SUM over them, so `ticks` is N times the number of grid ticks

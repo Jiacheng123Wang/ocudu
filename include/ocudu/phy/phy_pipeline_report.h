@@ -38,6 +38,15 @@ namespace ocudu {
 /// any thread and must not throw.
 void register_p0_report(void (*fn)());
 
+/// \brief Registers \p fn on BOTH exit paths, exactly once however many components ask for it.
+///
+/// The two calls it replaces (`std::atexit` + `register_p0_report`) were written out at each site, and a reading
+/// that two components want - `paced_task_executor::report_all_live()` is one, because a process may run a paced
+/// lane AND a paced commit gate - would then be printed twice, once per registration. A duplicated reading is
+/// not harmless: it makes a leg's report say the same thing twice and invites reading one of them as a second
+/// event. One helper, idempotent per function pointer.
+void register_exit_report(void (*fn)());
+
 /// \brief Runs every registered report NOW, unless one ran less than \c min_interval_ms ago.
 ///
 /// \param[in] reason Short tag printed with the dump (`stall`, `manual`), so a reader can tell which.
