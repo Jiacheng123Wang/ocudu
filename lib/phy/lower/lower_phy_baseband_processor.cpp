@@ -16,7 +16,9 @@
 // caught it (the warning did not exist before the S-7g-13 shutdown path).
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/ran/slot_point_extended.h"
+#include "ocudu/support/executors/stall_site.h"
 #include "ocudu/support/executors/thread_utils.h" // cpu_relax()
+#include "ocudu/support/executors/ul_stall_watchdog.h"
 #include "ocudu/support/executors/ul_pipeline_probe.h"
 #include <algorithm>
 #include <chrono>
@@ -771,6 +773,10 @@ bool ul_rx_note_call(int64_t begin_ns, int64_t return_ns, int64_t air_us, baseba
     const int64_t loop_us = (begin_ns - last_return_ns) / 1000;
     if (loop_us > 1000) {
       c.loop_over_1ms.fetch_add(1, std::memory_order_relaxed);
+      // FILE IT, do not only count it. `loop` is the largest tail carrier the receive path has (tens of
+      // milliseconds on the worst legs, the same order as the ping maximum) and it had no attribution at all:
+      // the counter said HOW OFTEN the receive thread was away between two calls, never WHAT it was doing.
+      ul_stall_watchdog::get().notify_series_stall(loop_us, "rx_loop");
     }
     if (loop_us > 5000) {
       c.loop_over_5ms.fetch_add(1, std::memory_order_relaxed);
@@ -781,6 +787,10 @@ bool ul_rx_note_call(int64_t begin_ns, int64_t return_ns, int64_t air_us, baseba
     const int64_t slip_us = loop_us + recv_us - air_us;
     if (slip_us > 1000) {
       c.slip_over_1ms.fetch_add(1, std::memory_order_relaxed);
+      // `slip` = loop + recv - air: how far behind the radio's own timeline the receive path is running. It is
+      // the quantity the registered red line is about, and it is filed under its own name so a leg can tell it
+      // from the loop that may have produced it.
+      ul_stall_watchdog::get().notify_series_stall(slip_us, "rx_slip");
     }
     prev = c.slip_max_us.load(std::memory_order_relaxed);
     while ((slip_us > prev) && !c.slip_max_us.compare_exchange_weak(prev, slip_us, std::memory_order_relaxed)) {
@@ -1418,7 +1428,15 @@ void lower_phy_baseband_processor::ul_process()
   // rx_park_budget, and the block it receives must be DISCARDED.
   const auto rx_take_t0 = std::chrono::steady_clock::now();
   bool       dropped  = false;
-  std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> rx_buffer = pop_rx_buffer_or_reserve(dropped);
+  std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> rx_buffer;
+  {
+    // THE OTHER HALF OF THE LOOP TIME. `loop` is measured from the previous receive's return to this one's
+    // begin, so it contains everything the receive thread does in between - and this take is the first of those
+    // things. Without the scope the table can only answer "no site", which is indistinguishable from a thread
+    // that was descheduled.
+    ocudu::stall_site_scope taking("pool.take");
+    rx_buffer = pop_rx_buffer_or_reserve(dropped);
+  }
   rx_pool_note_wait(
       std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - rx_take_t0).count());
   rx_pool_note_taken(rx_pool->buffers.size(), rx_pool->buffers.max_size());
