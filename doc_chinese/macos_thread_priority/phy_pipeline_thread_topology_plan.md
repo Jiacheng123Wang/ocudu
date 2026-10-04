@@ -1744,3 +1744,34 @@ watched-only 的判定也在同一批记录里给出 `watched[running=0..2 starv
 | `ce > 1 ms` 在两条同配置腿上差 3.6 倍 | 它的算术只有 69 µs ⇒ 超阈全是**主机被扰动**（与 `defer_wait` 尾部同步恶化 ✓）|
 | 站点表把慢跨度归因到 `exec.park`（排队）与 `metal.burst_wait`（完成等待）| 与上表的"62% 非设备"**同指一处** ✓ |
 | 想缩短 hop，只有三处能动 | ① 气口/接收粒度（`t2f` 的 ~490 µs）② 提交/排队（`exec.park`）③ 完成投递（`metal.burst_wait` 的 ~222 µs）——**都不是线程优先级** |
+
+### 11.38 ★★★ 澄清：**FFT 一直在 CPU（vDSP）上算**，不在 Metal kernel 里；而它一个开关就能搬到 GPU
+
+用户问"FFT 是 CPU 逐符号算的，还是在 Metal kernel 里"。答案（代码 + 每腿的启动诊断）：
+
+* 后端由 **`expert_phy --pusch_dft_type`** 决定（`lib/ru/sdr/lower_phy/lower_phy_factory.cpp:28`），**不是** `phy_pipeline` 模式；
+* 本线飞过的**每一条腿**都是默认值 ⇒ 启动行写着
+  `[lower_phy] DFT backend: rx=cpu tx=cpu (expert_phy --pusch_dft_type cpu; CPU implementation: vdsp)`
+  ⇒ **14 次/slot 的 FFT 是主机 CPU 工作**（Apple vDSP），TX 侧（IFFT）按构造也是 CPU；
+* 这也解释了之前两个"零"读数：`[metal_stats] gpu busy (front_end): commits=0` 与
+  `dft radio inputs: 0 transform(s) went through the two submit routes` —— 那两条探针量的是**设备 DFT 路径**，
+  为零正说明 FFT 不在设备上 ✓（它们从来不是"没有 FFT"的证据）。
+
+**各段算术的真实位置（本线这些腿）**：
+
+| 段 | 算术在 | 证据 |
+|---|---|---|
+| `t2f`（FFT/DFT）| **CPU（vDSP）**，14 次/slot | 启动诊断行 + `front_end busy=0` |
+| `ce`（信道估计）| **设备** | `busy split: ch_wt=38.8us/lane` |
+| `eqd`（均衡+解映射）| **设备**（融合核）| `busy split: merged_hop=468.5us/lane` |
+| `ldpc`（解码）| 本机走 **SW** 工厂（HW 工厂为 nullptr）；解码器内部有 Metal 钩子，未确认本腿是否走它 | `upper_phy_factories.cpp:891` vs `:881`；`[ul_ldpc_decode]` 59–90 µs |
+
+⇒ §11.37 的收支表要修一处：`t2f` 的 491.9 µs **不只是"等 slot 到齐"**，里面还有 **14 次主机 FFT** ✓ ——
+所以它是**真正的主机 CPU 工作**（也因此确实对 CPU 调度敏感 ✓），并且是 hop"62% 非设备"里的重要一块。
+
+**可用的杠杆（一个开关，无需改代码）**：`ENABLE_METAL_DFT=ON` ⇒ 这个二进制**已经编进了 Metal DFT**，
+`--expert_phy.pusch_dft_type=metal` 即可把 **UL 接收侧的 DFT**（OFDM 解调 + PRACH）搬到设备；
+代码侧已有配套机制（D1 hand-over：`retain_symbol_input`、零拷贝 wrap 路径、`grid_ready`；本线腿的
+`zero-copy wraps: 1301314 hits, 181992 creates, 0 failures` ✓）。
+**注意**：搬过去之后 `t2f` 这个 landmark 的**语义会变**（提交/排空 vs 执行完成），所以 A/B 的判据要用
+`ul_pipeline` 与设备 busy 的 `front_end`（后者应从 0 变成非 0，作为"开关真的生效"的正向对照），**不能直接比 `t2f`**。
