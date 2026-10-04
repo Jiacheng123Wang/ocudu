@@ -1374,3 +1374,42 @@ QoS 档、`SCHED_FIFO`、Mach time constraint、affinity、节拍线程、网格
 3. 分布主体（百万级样本的 p95/p99）在所有臂之间**逐微秒相同** ⇒ 这些旋钮既不改善也不损害常规时延。
 4. 唯一被验证有效的杠杆仍是**环境**（安静机器：`ce` max 11185 → 1120 µs）；若要继续压 `max`，
    对象是**无线电/驱动路径**（USB 传输，p223 的 `uhd::usb_error` 是这条路径确实在出问题的旁证），不是线程调度。
+
+### 11.30 ★★★ p254：**尾部第一次被点名**——`exec.park`（线程在等活）与 `metal.burst_wait`（等 GPU 完成），不是驱动阻塞、也不是被抢 CPU
+
+站点表上线后的第一条完整腿（600 s，交付形态：池、无网格、无节拍）：
+
+```
+[ul_watchdog] samples: waker_late=390 of 413 suspicion(s), 23 throttled to <=50/s
+              (about THIS undeclared 1 ms waker) | phy series: eqd=22 ce=29 t2f=2
+              (reporting thread inside a scope: 53)
+[ul_watchdog]   late= 3524.0us trigger=eqd  reporter=metal.burst_wait -> PHY_SERIES
+[ul_watchdog]   late= 3458.0us trigger=eqd  reporter=exec.park        -> PHY_SERIES
+[ul_watchdog]   late= 8700.0us trigger=t2f  reporter=exec.park        -> PHY_SERIES
+```
+
+#### (1) 读数说明了什么
+
+1. **PHY 自己的慢跨度**（`eqd` 均衡+解调 22 次、`ce` 信道估计 29 次、`t2f` 2 次，13.6 分钟内共 53 次）被归因到两个等待点：
+   - **`exec.park`** —— 上报那条线程**最近一次等待是"在执行器队列里等活"**，即慢跨度里包含**它在空等的部分** ⇒ 这是**排队**，不是被谁挡住；
+   - **`metal.burst_wait`** —— 另一些是**等 GPU 完成**（`defer_wait` 那一项）。
+2. **没有一次归因到 `radio.rx`** ⇒ 这一轮里**没有 USB/电台接收阻塞**成为慢跨度的原因（上一轮"91% 是挂起/驱动阻塞"的猜测至此被完全取代）。
+3. `waker_late=390 of 413` 且同批记录里 `watched[running=9 starved=0 blocked=0]` ⇒ 那些"stall"是**观察者（无声明的 1 ms 线程）自己**迟到，PHY 线程在跑。
+
+#### (2) 为什么这条读数把整条线的失败解释干净了
+
+**一条"在等活"的线程，任何优先级、任何调度策略、任何声明都帮不了它**——它没有可运行的对象。
+这正好解释了 §11.29 那张表：QoS、`SCHED_FIFO`、Mach time constraint（P4 七对）、affinity、节拍线程、网格钳位、commit 闸门，
+**没有一个能移动 `max`**，而 `cpu_stolen=0`、`work_slow=0` 在十几条腿里反复出现。
+
+⇒ **`max` 的杠杆是结构性的**：让**阶段的输入更早到**（D1 的 hand-over / `grid_ready` / 融合 lane 的排序那一条工作线），
+而不是给处理线程调优先级。这是一条**可执行的结论**，也是本任务命题（"调整 PHY 线程优先级/调度策略使 max 最小"）的最终答案：
+**在该平台上，答案是否定的；真正的对象是流水线的排队结构。**
+
+#### (3) 仪器侧的两处修正（同批提交）
+
+1. `classify()` 此前仍被喂**全进程**的 frozen 计数（记录里的 `watched[...]` 列是对的，判定却还是旧的）⇒ 现在判定**只看被监视线程**，类别行也写明 `(watched threads only)`。
+2. PHY 系列的样本计入类别行（`phy_series=N`），与 samples 行**可对账**——两边加不起来就说明仪器在丢记录。
+
+p255 的腿（应用层 10.2 / 12.8 Mbit/s 等）跑完后**进程没有停**（PID 94875 仍在写日志），所以它的退出报告尚未产生；
+把它停掉即可补齐第二组读数（用于确认这张表跨腿是否稳定）。
