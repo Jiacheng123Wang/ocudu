@@ -45,6 +45,13 @@ bool is_watched_thread(const char* name)
 }
 
 constexpr size_t SITE_KINDS = 16; ///< distinct blocking sites the report can carry
+
+/// HOW OFTEN THE EXPENSIVE SAMPLE MAY RUN. `sample()` reads every thread of the process through Mach - a few
+/// tens of calls, one of which (`task_threads`) allocates - and the waker path can be late on EVERY tick, so
+/// without a cap a struggling system gets 1000 samples a second from the very thread that is already behind.
+/// The cap is on the WAKER path only; a PHY series is rare by construction and is rate-limited where it is
+/// filed. Suspicions that are not sampled are COUNTED, so the reading never silently thins out.
+constexpr int64_t SAMPLE_MIN_GAP_NS = 20000000; ///< 50 samples/s at most
 } // namespace
 
 struct ul_stall_watchdog::impl {
@@ -100,7 +107,9 @@ struct ul_stall_watchdog::impl {
   /// 5 s apart, with different tick counts). The instrument reports once: a diagnostic that repeats itself
   /// makes a reader wonder which copy is the leg's.
   std::atomic<bool>    reported{false};
-  int64_t              last_sample_ns = 0;
+  int64_t              last_sample_ns   = 0;
+  uint64_t             waker_suspicions  = 0;
+  uint64_t             samples_throttled = 0;
 
   // host_statistics gives per-CPU cumulative ticks; the delta over the interval is millisecond-scale system
   // busyness. load1 cannot do this job (a 60 s average cannot see a 10 ms event, discipline 78).
@@ -253,6 +262,86 @@ struct ul_stall_watchdog::impl {
 
   /// Samples the state of our own threads. Only called on suspicion: ~48 Mach calls per sample is nothing
   /// once in a while, and an observer that ran every millisecond would not be (dev doc 2.4).
+  /// \brief The cheap half of a sample: what the REPORTING thread is, and what it was waiting on.
+  ///
+  /// A PHY series files this from inside the pipeline, sometimes under the probe's own lock, so it must not walk
+  /// the process's threads: one `thread_info` on ourselves is microseconds, the full scan is tens of Mach calls
+  /// and an allocation. The columns a light sample leaves out are reported as -1 (not measured), never as 0.
+  void sample_light(int64_t value_us, const char* trigger, const char* reporter_site)
+  {
+    const char* verdict = "PHY_SERIES";
+    std::lock_guard<std::mutex> lock(mutex);
+    // The series tallies and the site attribution still happen here: they do not need the scan.
+    bool found = false;
+    for (series_tally& t : series) {
+      if ((t.name[0] != '\0') && (std::strcmp(t.name, trigger) == 0)) {
+        ++t.count;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      for (series_tally& t : series) {
+        if (t.name[0] == '\0') {
+          std::snprintf(t.name, sizeof(t.name), "%s", trigger);
+          t.count = 1;
+          break;
+        }
+      }
+    }
+    if (reporter_site != nullptr) {
+      ++series_reporter_site_known;
+      bool tallied = false;
+      for (site_tally& t : sites) {
+        if ((t.name[0] != '\0') && (std::strcmp(t.name, reporter_site) == 0)) {
+          ++t.count;
+          tallied = true;
+          break;
+        }
+      }
+      if (!tallied) {
+        for (site_tally& t : sites) {
+          if (t.name[0] == '\0') {
+            std::snprintf(t.name, sizeof(t.name), "%s", reporter_site);
+            t.count = 1;
+            tallied = true;
+            break;
+          }
+        }
+      }
+      if (!tallied) {
+        ++site_uninstrumented;
+      }
+    }
+    else {
+      ++site_uninstrumented;
+    }
+    record rec;
+    rec.late_ns         = value_us * 1000;
+    rec.sys_busy_pct    = -1;
+    rec.running         = -1;
+    rec.runnable        = -1;
+    rec.blocked         = -1;
+    rec.watched_blocked = -1;
+    rec.watched_starved = -1;
+    rec.watched_running = -1;
+    std::snprintf(rec.trigger, sizeof(rec.trigger), "%s", trigger);
+    std::snprintf(rec.reporter_site, sizeof(rec.reporter_site), "%s", (reporter_site != nullptr) ? reporter_site : "-");
+    std::snprintf(rec.site, sizeof(rec.site), "%s", (reporter_site != nullptr) ? reporter_site : "-");
+    std::snprintf(rec.worst_blocked, sizeof(rec.worst_blocked), "%s", "-");
+    rec.verdict = verdict;
+    worst.push_back(rec);
+    if (worst.size() > WORST_KEPT) {
+      size_t smallest = 0;
+      for (size_t i = 1; i < worst.size(); ++i) {
+        if (worst[i].late_ns < worst[smallest].late_ns) {
+          smallest = i;
+        }
+      }
+      worst.erase(worst.begin() + static_cast<ptrdiff_t>(smallest));
+    }
+  }
+
   void sample(bool watchdog_late, int64_t late_ns, const char* trigger, const char* reporter_site)
   {
     const int busy = sys_busy_pct();
@@ -442,9 +531,23 @@ struct ul_stall_watchdog::impl {
       }
       file_tick(late_ns);
       if (late_ns >= SUSPICION_NS) {
-        std::lock_guard<std::mutex> lock(mutex);
-        ++waker_samples;
-        sample(true, late_ns, "waker", nullptr);
+        bool take = false;
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          ++waker_suspicions;
+          const uint64_t now_t = mach_absolute_time();
+          if ((last_sample_ns == 0) || (ns_from_ticks(now_t - static_cast<uint64_t>(last_sample_ns)) >= SAMPLE_MIN_GAP_NS)) {
+            last_sample_ns = static_cast<int64_t>(now_t);
+            ++waker_samples;
+            take = true;
+          }
+          else {
+            ++samples_throttled;
+          }
+        }
+        if (take) {
+          sample(true, late_ns, "waker", nullptr);
+        }
       }
       deadline += ticks_from_ns(PERIOD_NS);
       if (deadline < mach_absolute_time()) {
@@ -521,7 +624,7 @@ void ul_stall_watchdog::notify_series_stall(int64_t value_us, const char* series
   const char*    reporter   = ((last != nullptr) && (site_end != 0) && ((fresh - site_end) <= value_us * 1000))
                                   ? last
                                   : nullptr;
-  p->sample(false, value_us * 1000, series_name, reporter);
+  p->sample_light(value_us, series_name, reporter);
 }
 
 void ul_stall_watchdog::report()
@@ -554,8 +657,11 @@ void ul_stall_watchdog::report()
   // THE TWO KINDS FIRST, because mixing them is what made the previous reading unreadable: `waker=N` samples say
   // the machine could not schedule this undeclared 1 ms thread, and only the series counts are about the uplink.
   std::fprintf(stderr,
-               "[ul_watchdog] samples: waker_late=%llu (about THIS undeclared 1 ms waker) | phy series:",
-               static_cast<unsigned long long>(p->waker_samples));
+               "[ul_watchdog] samples: waker_late=%llu of %llu suspicion(s), %llu throttled to <=50/s "
+               "(about THIS undeclared 1 ms waker) | phy series:",
+               static_cast<unsigned long long>(p->waker_samples),
+               static_cast<unsigned long long>(p->waker_suspicions),
+               static_cast<unsigned long long>(p->samples_throttled));
   for (const impl::series_tally& t : p->series) {
     if (t.name[0] != '\0') {
       std::fprintf(stderr, " %s=%llu", t.name, static_cast<unsigned long long>(t.count));
@@ -608,6 +714,9 @@ void ul_stall_watchdog::reset_for_test()
   p->site_uninstrumented = 0;
   p->site_none           = 0;
   p->waker_samples       = 0;
+  p->waker_suspicions    = 0;
+  p->samples_throttled   = 0;
+  p->last_sample_ns      = 0;
   p->series_reporter_site_known = 0;
   for (impl::series_tally& t : p->series) {
     t = impl::series_tally{};
