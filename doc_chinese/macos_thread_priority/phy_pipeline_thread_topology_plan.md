@@ -3178,3 +3178,46 @@ sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh p285-dual   dual  
   ⇒ **cpu 模式下零交棒** ✓✓；
 * 然后按测得的每线程 CPU 写 **period/computation/constraint** 声明（`OCUDU_SCHED_TIME_CONSTRAINT` ✓）；
 * 再用一对腿验证声明后的效果（含 `max` 是否下降 ✓），之后才把同一形状平移到 cpu_gpu/gpu ✓。
+
+### §11.66 ★★ 历史 cpu 腿给出了参考；GPU 那 680 µs 的真相是**设备完成等待**
+
+用户提示"以前的工作主要在 metal kernel，可能很少有纯 CPU mode 可参考" ⇒ 扫描 `.stderr`（避开 76 GB 的 `.log`）找到
+**7 条纯 cpu 模式的历史腿** ✓（9/24–9/28，`configs/gnb_rf_b200_tdd_n78_20mhz.yml` ✓）。
+
+#### (1) ★ cpu 模式参考（与 gpu 模式并排）
+
+| 段 | **cpu（p95/p96）** | cpu（p62/p63）| **gpu（p280–p283）** |
+|---|---|---|---|
+| `t2f` | 528.8 / 532.4 | 528.0 / 528.2 | 477.5–492.6 |
+| `ce` | 21.5 / 21.8 | 17.6 / 18.1 | 67.9–73.8 |
+| **`eqd`** | **19.9 / 21.8** ✓✓ | 35.0 / 35.2 | **678.8–688.1** ✗✗ |
+| `ldpc` | 26.0 / 24.0 | 64.0 / 68.0 | 73.0–77.0 |
+| **`ul_pipeline`** | **602.0 / 607.0** | 661 / 667 | 1313–1330 |
+| `t2f` max | **779 / 711** ✓ | — | 10 429–19 276 ✗ |
+| `pipeline` max | **941 / 842** ✓✓ | — | 7 144–7 636 ✗ |
+
+**主机工作量（cpu 模式，span ≈ 工作量）**：`t2f` 529 µs 中约 500 是**空中等待** ✓ ⇒ FFT ≈30 µs；
+再加 ce 22 + eqd 20 + ldpc 26 ⇒ **每 slot 主机计算 ≈98 µs** ✓✓（= 一个 slot 的 ~20 %）
+⇒ **用户的判断成立：cpu 模式下整条 PHY 链装得进 500 µs，余量约 5×** ✓✓，而且**尾部也紧得多**（max 0.8–0.9 ms vs gpu 的 7–19 ms ✗）。
+
+#### (2) ★ GPU 那 680 µs 的真相：**主机卡在设备完成等待**
+
+```
+[mmse_time_sum] defer_wait distribution: median=687.4/690.3us  p95=818/828  p99=903/916  max=19636/12341   (p283/p280)
+```
+代码自述（`lib/phy/metal/ocudu_metal_burst.mm:1206-1212`）：
+> "The completion wait is where the hop's host thread stands still while the device runs … `defer_wait`'s ~700 us p50 lives inside this scope"
+> `stall_site_scope waiting("metal.burst_wait"); [cb waitUntilCompleted];`
+
+⇒ **`eqd` ≈ `defer_wait` = 主机线程在 `[cb waitUntilCompleted]` 上站住等设备** ✗✗（不是池排队 ✗，我此前那句错了），
+且该 burst 覆盖**同一队列上先前提交的整条链**（DFT+CE+均衡+解调 ✓）
+⇒ **它占 pipeline 的 52 %，是 gpu 模式最大的单项** ✗✗。
+（`[metal_stats] mmse_ce commits=100607 waits=7` 只说明**估计器**是 fire-and-forget ✓；**lane burst 的这次等待**才是那 680 µs ✓。）
+
+#### (3) 对"cpu 先立框架、再平移"的直接含义
+
+* **cpu 模式**：该段只有 20 µs ✓ ⇒ 主机工作量 ~98 µs/slot ✓ ⇒ **把 PUSCH 链 inline 到合并线程完全可行** ✓✓
+  ⇒ 框架（单线程形状 + period/computation/constraint 声明）可以在 cpu 模式下**立起来并验证** ✓；
+* **平移到 gpu 时**，要处理的**不是"交棒"而是"这次设备完成等待"** ✗✓：
+  它必须**移出关键路径**（异步完成 / 延后到真正需要结果时再等 ✓）—— 而 120 深的网格与 fire-and-forget 的提交
+  已经把条件备好了 ✓✓。这正是"CPU 立框架、GPU 只换 offload"路线的第一处真正差异 ✓。
