@@ -1,6 +1,29 @@
 #!/usr/bin/env bash
 # One on-air leg of the fused-lane work, with the PIPELINE MODE as a required argument.
 #
+# -------------------------------------------------------------------------------------------------------------------
+# WHAT A "LEG" IS (the word this file, fly_leg.sh and leg_gate.sh are named after - defined here because the whole
+# record uses it and, until 2026-10-05, nothing said what it meant).
+#
+# A leg is ONE ON-AIR RUN OF ONE CONFIGURATION: gnb started, the phone attached and driven through its traffic
+# (iperf3 or ping, started by the operator at the cue), the run stopped by protocol (Ctrl-C, never SIGTERM), and
+# one configuration - one ARM - with one log pair and one .protocol.txt. It is the atomic unit of EVIDENCE here: it
+# carries a label (p297), a health verdict, a gate result, and a partner leg; and it is either QUOTABLE or VOID, in
+# which case it is re-flown rather than explained.
+#
+# WHY "LEG". The word is inherited from full_gpu_chain/wip/run_air_leg.sh ("One on-air leg of the UL/cpu_gpu
+# configuration"), which this script replaces, and it comes from FLIGHT TEST: there a leg is one continuous segment
+# from take-off to landing, a sortie can carry several, and each is a complete, separately readable record. An
+# over-the-air run has the same properties, and they are why this workstream's rules look the way they do:
+#   * EXPENSIVE and ONE-SHOT - radio, phone, and a person on site; it cannot be replayed;
+#   * decided by its ENVIRONMENT - RF conditions are the weather (leg p294 was voided by 27.6% CRC, not by code);
+#   * its criteria are REGISTERED BEFORE it flies - the .protocol.txt, one variable per pair;
+#   * a leg that fails its gate is WASTED, not reinterpreted.
+# The name is kept because the scripts, the log names (gnb_cpu_p297-dual_1005_*), the gates and the generated knob
+# inventory's "legs flown" column are all built on it; renaming would leave the record with two vocabularies while
+# the past logs kept the old one. Defined in the plan document as well (macos_thread_priority plan doc 11.102).
+# -------------------------------------------------------------------------------------------------------------------
+#
 # Why this script exists instead of reusing full_gpu_chain/wip/run_air_leg.sh: that one HARD-CODES
 # --expert_phy.phy_pipeline cpu_gpu, so every leg it ever ran was the module-level-offload mode -
 # which by its own definition "keeps its own host <-> device crossing at every module boundary", i.e.

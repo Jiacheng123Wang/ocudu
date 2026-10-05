@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # ONE COMMAND = ONE LEG *WITH ITS PROTOCOL*.  usage:  sudo -E bash fly_leg.sh <label> <triple|dual> <quiet|stress> [cpu|cpu_gpu|gpu]
 #
+# WHAT A LEG IS - see run_leg.sh's header (the "WHAT A LEG IS" block) or plan doc 11.102: ONE ON-AIR RUN OF ONE
+# CONFIGURATION, the atomic unit of evidence, either quotable or re-flown. The word is flight-test vocabulary and
+# this script is where it is most literal: it is the command that flies one.
+#
 # WHY THIS EXISTS (dev doc 11.61). Two sessions in a row were flown with the protocol driver sitting on a separate
 # line of the instructions, and two sessions in a row it did not run: no traffic cue at a recorded instant, no
 # disturbance (`late max` 0.95-2.7 ms against the 11 ms a real 16-burner window produces), no .protocol.txt. The
