@@ -29,8 +29,8 @@ if pgrep -x gnb >/dev/null; then
   exit 1
 fi
 
-echo "arm        run  banner                        handoff-samples  clean-exit  report"
-printf '%.0s-' {1..86}; echo
+echo "arm        run  banner                        handoff-samples  clean  exit-s  report"
+printf '%.0s-' {1..94}; echo
 
 for arm in poll block; do
   for i in $(seq 1 "$RUNS"); do
@@ -56,12 +56,19 @@ for arm in poll block; do
     # the loopback application leaves 5.14 s after TERM or INT, which is the shutdown's own five-second grace and is
     # the same for both arms - hence the 8 s window, wide enough to tell "slow by design" from "parked forever").
     clean="no"
-    for t in $(seq 1 32); do
+    t_kill=$(date +%s.%N)
+    for _ in $(seq 1 32); do
       st=$(ps -o state= -p "$pid" 2>/dev/null | tr -d ' ')
-      if [ -z "$st" ] || [ "$st" = "Z" ]; then clean="yes"; exit_s=$((t * 25 / 100)); break; fi
+      if [ -z "$st" ] || [ "$st" = "Z" ]; then clean="yes"; break; fi
       sleep 0.25
     done
-    kill -9 "$pid" 2>/dev/null
+    exit_s=$(echo "$(date +%s.%N) - $t_kill" | bc)
+    # Belt and braces only: a process that has ended is invisible to `ps` here (macOS prints NOTHING for a zombie,
+    # measured 2026-10-05), so this usually does not run at all. When it does - a run that really did not stop - bash
+    # prints a `Killed: 9` job notice MIXED INTO the table below; that notice is not a failure of the run it appears
+    # next to, and the columns `clean` and `exit-s` are the reading. The pattern tolerates `Z`, `Z+`, `Z<n>`.
+    st=$(ps -o state= -p "$pid" 2>/dev/null | tr -d ' ')
+    case "$st" in ""|Z*) ;; *) kill -9 "$pid" 2>/dev/null ;; esac
     wait "$pid" 2>/dev/null
 
     banner=$(grep -h 'Lower PHY worker wait:' "$out" "$err" 2>/dev/null | tail -1 | sed 's/^Lower PHY worker wait: //')
@@ -70,10 +77,12 @@ for arm in poll block; do
     [ -n "$samples" ] || samples=0
     if grep -q 'contract MET' "$err"; then report="MET"; elif grep -q 'contract' "$err"; then report="see-log"; else report="none"; fi
 
-    printf '%-8s  %-4s %-30s %-16s %-11s %s\n' "$arm" "$i" "${banner:0:30}" "$samples" "$clean" "$report"
+    printf '%-8s  %-4s %-30s %-16s %-6s %-7s %s\n' "$arm" "$i" "${banner:0:30}" "$samples" "$clean" "$exit_s" "$report"
   done
 done
 
 echo
 echo "readings in $OUT (*.err, *.out). PASS requires: the block arm names the condition variable, both arms report"
 echo "handoff samples, and every run exits clean on TERM (within 8 s - the application's own grace is 5.14 s)."
+echo "NOTE: bash may print a 'Killed: 9' job notice beside a row. It is the belt-and-braces kill of a child that had"
+echo "      already stopped; the clean/exit-s columns are the reading, and a genuine hang shows there as clean=no."
