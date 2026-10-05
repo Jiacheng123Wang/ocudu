@@ -4265,3 +4265,18 @@ probe 的 `[ul_thread_cpu]` 只登记 rx 线程 ✓ ⇒ 用 **`observe_threads.s
 inline 形状下 **UL 链全程在 rx 线程上**（样本→CRC ✓），**池不在这条路径上** ✗ —— 池负责 DL/MAC/RLC/GTPU ✓。
 所以池声明的正确判据是 **DL 侧**：`[dl_tx_slack]` 的 `below 1ms` / `below 500us` / **`AT/BELOW 0`** ✓，
 而不是 `[ul_pipeline]` ✗。用 UL 序列判池声明，等于测一条不经过被测线程的路径 ✗。
+
+### §11.93 新工具 `dl_gate.sh`：**停顿闸门 + DL 判据**（8 条腿验证通过 ✓）
+
+一次踩了两个坑，所以两个都写进一个命令 ✓（`doc_chinese/macos_thread_priority/wip/dl_gate.sh`）：
+
+1. **闸门不能用 frontier/rx_wait 的 max** ✗ —— p296/p297（**判决所依据的那一对** ✓）的 frontier max 是
+   2900/1108 µs、rx_wait max 2730/1785 µs，但它们**依然可读** ✓：一次长的 receive 等待**只有落在"载有被判读 TB"
+   的时隙上才伤人** ✓，而那两条腿各自只有 **1 个** ≥750 µs 的 pipeline 样本（948/869 ✓）；
+2. **要闸的是 DL 症状** ✓：`[dl_tx_slack]` 的 **`AT/BELOW 0`** 计数 + **`below1ms` 每千次传输的比率**：
+   健康腿 **6.79–7.85**，p298 **19.27**（33 次迟到 ✗）、p295 **8.58**（21 次 ✗）✓✓。
+
+脚本一次打印：`rttc`（本腿声明了几条线程，app 与 `ps -M` 互证 ✓）、frontier/rx_wait（**诊断** ✓）、
+`below1ms/1k`、`below500`、`AT/BELOW 0`、watchdog late、健康判决，并给 **PASS / STALL - re-fly / HEALTH** ✓。
+八条腿回测：**p292 ✓ p293 ✓ p296 ✓ p297 ✓ PASS；p294/p295 ✗ HEALTH；p298 ✗ STALL（33 次）；p299 ✗ marginal** ✓
+—— 与我们人工得出的结论完全一致 ✓✓。
