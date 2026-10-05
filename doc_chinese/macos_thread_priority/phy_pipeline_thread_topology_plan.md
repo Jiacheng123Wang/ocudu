@@ -4754,3 +4754,52 @@ configuration" ✓，本工作流的 `run_leg.sh` 就是替换它而写的 ✓�
 **离线预检** ✓：两个配置 + `--pusch_ldpc_decoder_type=metal` 的 `--dryrun`（cpu_gpu + dual）**exit 0** ✓。
 **预登记读数** ✓：§11.104 的八项 ✓ + **解码器侧**：`[ul_ldpc_decode]` 的 median/p95/max ✓、
 `[metal_stats]` 里解码器的提交/等待计数 ✓（异步变体才可能 in-flight>1 ✓）、以及 `[ul_tail]` 的计数 ✓。
+
+### §11.106 p307 起飞失败：**是我的命令行写错了** ✗，不是 Metal 解码器 —— 但**你的历史经验被记录完全证实** ✓✓
+
+#### (1) 真实原因：选项传了两次 ⇒ gNB 根本没启动 ✗
+
+p307 的 stderr 只有一行关键信息 ✓：
+```
+--pusch_ldpc_decoder_type: At Most 1 required but received 2
+```
+* runner 的 `LEG_CG_MODULES=all`（默认 ✓）**已经注入** `--expert_phy.pusch_ldpc_decoder_type auto` ✓，
+  我又在 `EXTRA_KNOBS` 里加了 `…=metal` ✗ ⇒ **CLI11 直接拒绝、进程在任何横幅之前退出** ✗
+  （stdout 只有 42 字节、**没有小区行** ✓）；
+* ⇒ 你看到的"手机接不进去、多次开关飞行模式、CN 无反应"✓ **是"天上没有 gNB"的结果** ✗ ——
+  与 Metal 解码器的时延**无关** ✓（这次 ✗）。
+
+**已修** ✓：`run_leg.sh` 现在**在起飞前拦住任何重复的 `--option`** ✓（一般是 `MODE_ARGS` 注入 + 调用者自己传 ✗），
+并直接给出 workaround ✓：`LEG_CG_MODULES=dft+ce+eq+grid`（显式模块表**不含解码器** ✓ ⇒ 调用者的
+`--pusch_ldpc_decoder_type=metal` 成为唯一那一个 ✓）。双向自测通过 ✓（重复 ⇒ 拦下并提示 ✓；显式表 ⇒ 放行 ✓）。
+
+#### (2) ★★ 但历史经验成立 ✓✓：记录里 Metal 解码器的时延是 CPU 的 **30–80 倍**
+
+| 变体 | 本地定标（BG1 Z208 rate 0.5 cap 25，**与 OTA 同几何** ✓）| OTA 实测 |
+|---|---|---|
+| `metal`（分层）| **3663 µs**（GPU 3346）✗ | — |
+| `metal_persistent` | **1407 µs** ✗ | **1658.9 µs（占 pipeline 60.9 %）**、**p99 8.6–10.5 ms** ✗✗ |
+| `metal_flooding` | 2524 µs ✗ | — |
+| **CPU（现用 ✓）** | **48 µs** ✓ | 26–48 µs ✓ |
+
+出处：`full_gpu_chain/full_chain_gpu_uma_zero_copy_refactor_plan.md`（S-7c-2 ✓）与
+`full_gpu_chain/pipeline_audit_2026-09.md`（分段占比表 ✓）。**蓝图预算 LDPC ≤ 50–200 µs** ⇒ Metal 超预算 **8–80 倍** ✗。
+机理（同记录 ✓）：分层核每层一次 dispatch ≈ 4.3 µs × 46 层 × 迭代数 ✓；持久变体单 dispatch 下每轮仍有
+46 × ~8.7 µs 的 barrier + 打包/回读 ✓，p99 是提交序串行下的排队 ✗。
+
+⇒ **接入流程（PRACH → RAR → Msg3 → Msg4）里 Msg3 的 PUSCH 解码要在这个窗口内到达** ✓，
+1.4–3.7 ms（p99 8.6–10.5 ms ✗）**做不到** ✓ —— 这就是"历史上一直把 LDPC 留在 CPU"的原因 ✓✓。
+**即便是修好命令后的 p307，也几乎必然接不进去** ✗ ⇒ 这条腿**不值得飞** ✓（唯一的读数是我们已经有的时延 ✓）。
+
+#### (3) 结论：**可行的"混合"就是 p306 已经飞过的那个形状** ✓
+
+`dft + ce + eq + grid` 在 GPU ✓ + **解码器在 CPU** ✓ = `LEG_CG_MODULES=all`（runner 默认 ✓）✓。
+p306（N1）之所以作废，是**业务把 5 MHz 打爆** ✗（§11.105 ✓），**不是**形状问题 ✓。
+⇒ 下一步要飞的是**同一个形状 + 轻业务**（ping ✓），在 n78 上取一个**可读**的混合读数 ✓：
+
+```
+sudo -E env EXTRA_KNOBS="OCUDU_SCHED_TIME_CONSTRAINT=lower_phy_rx#0=1000/300/500" \
+  bash doc_chinese/macos_thread_priority/wip/fly_leg.sh p309-cg-hybrid dual quiet cpu_gpu
+```
+（**不要**再加 `--expert_phy.pusch_ldpc_decoder_type` ✗ —— runner 的 `all` 已经把它定在 `auto`=CPU ✓；
+真要换解码器，必须同时写 `LEG_CG_MODULES=dft+ce+eq+grid` ✓，否则新闸门会拦下你 ✓。）

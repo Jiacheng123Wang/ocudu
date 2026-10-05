@@ -304,6 +304,29 @@ case "$MODE" in
     MODE_ARGS=() ;;
 esac
 
+# A REPEATED --option IS A SILENT-FAILURE TRAP, refused here (2026-10-06). MODE_ARGS and the caller's own
+# --options both reach argv, and gnb's parser rejects a repeat OUTRIGHT, so the process exits before it prints a
+# single banner. Measured on p307-cg-metaldec: the caller wanted `--expert_phy.pusch_ldpc_decoder_type=metal` while
+# the mode's own `all` set injected `... auto`, gnb answered
+#
+#   --pusch_ldpc_decoder_type: At Most 1 required but received 2
+#
+# and died - stdout 42 bytes with no cell line, while the operator watched a phone refuse to attach, toggled
+# airplane mode and saw nothing at the core: every symptom of a radio fault, and none of it about the arm. The
+# refusal belongs here, where the message can name the workaround.
+for _a in ${MODE_ARGS[@]+"${MODE_ARGS[@]}"}; do
+  _name=${_a%%=*}
+  for _b in ${CLI_ARGS[@]+"${CLI_ARGS[@]}"}; do
+    case "$_b" in
+      "$_name"|"$_name"=*)
+        echo "refusing: '$_name' would be passed twice - once by this mode's module set (LEG_CG_MODULES=${LEG_CG_MODULES:-all}) and once by you." >&2
+        echo "  gnb's parser rejects the repeat and exits before any banner (p307-cg-metaldec, 2026-10-06)." >&2
+        echo "  Fix: name the modules explicitly instead of 'all' - e.g. LEG_CG_MODULES=dft+ce+eq+grid leaves the decoder out of the set, so your own $_name=... is the only one." >&2
+        exit 2 ;;
+    esac
+  done
+done
+
 echo "pipeline mode : $MODE" >&2
 echo "mode options  : ${MODE_ARGS[*]:-<none: the mode resolves the backends itself>}" >&2
 echo "leg           : $LABEL" >&2
