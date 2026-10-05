@@ -23,7 +23,12 @@
 # the sender has to be on the far side of the radio link. That is the one step this script cannot do for you -
 # hence the cue. Run the IDENTICAL iperf3 command in both legs:
 #
-#     iperf3 -R -b 40M -P 4 -t 180 -c 10.45.0.21
+#     iperf3 -u -b 30M -l 1400 -R -P 4 -t 180 -c 10.45.0.21
+#
+# WHY UDP SATURATED (plan doc 11.58): `-b` is IGNORED for TCP, so the offered rate was never controlled and the
+# payload per hop floated +-26% between legs - the confound that voided three rounds. 30 Mbit/s is well above what
+# this link delivers (~10-13 Mbit/s), so the UE's buffer stays full and each slot's transport block is decided by
+# the available PRBs and the pinned MCS instead of by TCP's bursts.
 #
 # USAGE
 #   terminal 1:  sudo -E LEG_CONFIG=... bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu <label> ...
@@ -89,7 +94,7 @@ CUE=$(date +%s)
 STAMP=$(date '+%Y-%m-%d %H:%M:%S')
 echo
 echo "  ============================================================"
-echo "   TRAFFIC NOW  ($STAMP)   ->   iperf3 -R -b 40M -P 4 -t ${TRAFFIC_SECS} -c <server>"
+echo "   TRAFFIC NOW  ($STAMP)   ->   iperf3 -u -b 30M -l 1400 -R -P 4 -t ${TRAFFIC_SECS} -c <server>"
 echo "  ============================================================"
 echo
 
@@ -105,7 +110,7 @@ if [ "$DIST_N" -eq 0 ]; then
     echo "leg            : $LABEL"
     echo "leg log        : $LEG"
     echo "traffic cue    : $STAMP (epoch $CUE), i.e. leg start + ${PRE}s"
-    echo "traffic        : iperf3 -R -b 40M -P 4 -t ${TRAFFIC_SECS} -c <server>   (started by the operator at the cue)"
+    echo "traffic        : iperf3 -u -b 30M -l 1400 -R -P 4 -t ${TRAFFIC_SECS} -c <server>   (started by the operator at the cue)"
     echo "disturbance    : NONE (quiet arm, DIST_N=0)"
     echo "mid-arm CPU    : ${MID:-<none>}"
     echo "leg stop       : Ctrl-C (SIGINT) - SIGTERM skips the shutdown report block (see run_leg.sh)"
@@ -138,7 +143,7 @@ echo "[$(date '+%H:%M:%S')] mid-arm: ${MID:-<no top reading>}"
   echo "leg            : $LABEL"
   echo "leg log        : $LEG"
   echo "traffic cue    : $STAMP (epoch $CUE), i.e. leg start + ${PRE}s"
-  echo "traffic        : iperf3 -R -b 40M -P 4 -t ${TRAFFIC_SECS} -c <server>   (started by the operator at the cue)"
+  echo "traffic        : iperf3 -u -b 30M -l 1400 -R -P 4 -t ${TRAFFIC_SECS} -c <server>   (started by the operator at the cue)"
   echo "disturbance    : disturbance2.sh start $DIST_N $DIST_SECS   (no --watch)"
   echo "disturbance at : traffic cue + ${DIST_DELAY}s, ran $((D1 - D0))s (epoch $D0..$D1)"
   echo "mid-arm CPU    : ${MID:-<none>}"
