@@ -3706,3 +3706,21 @@ decoder_config.executor                  = pusch_decoder_executor.executor;
 
 ⇒ **目标不是"一个线程"，而是"一条不含排队等待的依赖线"** ✓✓：
 能 inline 的 inline（去等待 ✓），**需要并行的保留并行**（解码 ✓）—— 这正是 §11.73 第 1 步的用意 ✓。
+
+### §11.79 工具修正（用户发现）：飞腿日志一直写在**旧工作流**的目录里
+
+用户指出：飞腿的日志落在 `doc_chinese/phy_pipeline_gpu/wip/logs/`，而工作目录早已移到 `doc_chinese/macos_thread_priority/`。
+
+**根因** ✗：`fly_leg.sh:35` 的 `LOGDIR` 默认值指向旧路径 ✗，而且它**从未把日志目录传给 runner** ✗✗
+（只用来自查审计文件 ✓）⇒ runner 用**它自己的默认**（`run_leg.sh:50` = `phy_pipeline_gpu/wip/logs` ✗✓）
+⇒ 新腿全部写进了旧工作流的目录 ✓。
+
+**修复** ✓（`fly_leg.sh`）：
+1. 默认值改为本工作流的 `doc_chinese/macos_thread_priority/wip/logs` ✓；
+2. **显式把 `LEG_LOGDIR` 交给 runner**（两个分支都加 ✓）⇒ "腿写在哪里"由本脚本决定，不再由两个工作流之外的默认值决定 ✓✓；
+3. 横幅新增 `logs : <目录>` 一行 ✓（可归属 ✓）。
+**离线验证** ✓：用 stub 确认 runner **收到** `LEG_LOGDIR`（`seen.txt` = `/tmp/flytest5` ✓）且审计文件落在该目录 ✓。
+
+**已飞的腿原地保留** ✓（它们是证据 ✓，文档里引用其路径 ✓，而所有读取工具本来就在**两个目录**里搜索 ✓：
+`ul_health.sh` / `leg_protocol_driver.sh` 的 `LEG_LOG_DIRS` ✓；`pair_check.sh` 的默认本来就是新目录 ✓
+⇒ 新腿从此**不再需要显式 `LEG_LOGDIR`** ✓）。

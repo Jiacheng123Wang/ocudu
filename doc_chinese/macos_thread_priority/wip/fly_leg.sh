@@ -32,7 +32,15 @@ ROOT="$(cd "$HERE/../../.." && pwd)"
 CFG="${LEG_CFG:-$ROOT/doc_chinese/macos_thread_priority/wip/gnb_pinned_mcs13.yml}"
 DRV="$HERE/leg_protocol_driver.sh"
 RUN="${RUN_LEG:-$ROOT/doc_chinese/phy_pipeline_gpu/wip/run_leg.sh}"
-LOGDIR="${LEG_LOGDIR:-$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs}"
+# WHERE THE LEGS LAND. The workstream moved to doc_chinese/macos_thread_priority/, and until 2026-10-05 this
+# script kept the runner's own default (doc_chinese/phy_pipeline_gpu/wip/logs) - because it never PASSED a log
+# directory to the runner at all, only used one for its own audit check. New legs therefore went to the old
+# workstream's directory while every reader here (ul_health.sh, leg_protocol_driver.sh, pair_check.sh) had
+# already been pointed at both. The default is now this workstream's, and LEG_LOGDIR is handed to the runner
+# explicitly, so where a leg is written is decided HERE and not by a default two workstreams away.
+# The legs already flown stay where they are: they are evidence, the documents name their paths, and every reader
+# searches both directories (LEG_LOG_DIRS).
+LOGDIR="${LEG_LOGDIR:-$ROOT/doc_chinese/macos_thread_priority/wip/logs}"
 
 [ -f "$CFG" ] || { echo "refusing: missing $CFG" >&2; exit 2; }
 [ -f "$DRV" ] || { echo "refusing: missing $DRV" >&2; exit 2; }
@@ -68,6 +76,7 @@ fi
 
 echo "==================================================================================="
 echo " leg      : $LABEL   (profile=$PROFILE, load=$LOAD, regime=$REGIME, pipeline=$MODE)"
+echo " logs     : $LOGDIR"
 echo " traffic  : at the cue -> iperf3 -u -b 30M -l 1400 -R -P 4 -t 180 -c 10.45.0.21"
 echo " load     : $( [ "$DIST_N" -gt 0 ] && echo "$DIST_N user-space burners for ${DIST_SECS:-60} s, ${DIST_DELAY:-60} s after the cue" || echo "none (quiet arm)" )"
 echo "==================================================================================="
@@ -85,9 +94,9 @@ SUDO_BIN="${SUDO-sudo}"
 LEG_ARGS=("$MODE" "$LABEL" --regime="$REGIME" --smoke=40 "${KNOBS[@]}"
           --expert_execution.threads.lower_phy.execution_profile="$PROFILE")
 if [ -n "$SUDO_BIN" ]; then
-  "$SUDO_BIN" -E LEG_CONFIG="$CFG" bash "$RUN" "${LEG_ARGS[@]}"
+  "$SUDO_BIN" -E LEG_CONFIG="$CFG" LEG_LOGDIR="$LOGDIR" bash "$RUN" "${LEG_ARGS[@]}"
 else
-  LEG_CONFIG="$CFG" bash "$RUN" "${LEG_ARGS[@]}"
+  LEG_CONFIG="$CFG" LEG_LOGDIR="$LOGDIR" bash "$RUN" "${LEG_ARGS[@]}"
 fi
 rc=$?
 
