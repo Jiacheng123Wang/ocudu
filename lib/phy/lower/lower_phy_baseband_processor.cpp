@@ -16,6 +16,7 @@
 // caught it (the warning did not exist before the S-7g-13 shutdown path).
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/ran/slot_point_extended.h"
+#include "ocudu/support/executors/handoff_probe.h"
 #include "ocudu/support/executors/stall_site.h"
 #include "ocudu/support/executors/thread_utils.h" // cpu_relax()
 #include "ocudu/support/executors/ul_stall_watchdog.h"
@@ -984,6 +985,14 @@ lower_phy_baseband_processor::lower_phy_baseband_processor(const lower_phy_baseb
   // goes when the pool is dry and the wait has run out - so the radio is still consumed and the samples are
   // dropped, instead of the receive thread parking and the radio's ring overflowing behind it.
   rx_reserve_buffer = std::make_shared<baseband_gateway_buffer_dynamic_aligned>(config.nof_rx_ports, rx_buffer_size);
+
+  // The hand-off reading is on BOTH exit paths, as every other reading of this workflow is: registered here (the PHY
+  // layer owns that registry) on behalf of a probe that lives in the support layer and must not depend on it. The
+  // registration is idempotent per function pointer, so one per cell is the same as one per process, and a run
+  // without the probe registered prints nothing at all (no sample was taken).
+  if (handoff_probe_enabled()) {
+    register_exit_report(&handoff_probe_report);
+  }
 }
 
 void lower_phy_baseband_processor::start(baseband_gateway_timestamp init_time, baseband_gateway_timestamp sfn0_ref_time)
@@ -1919,12 +1928,19 @@ void lower_phy_baseband_processor::ul_process()
           nof_samples);
     }
   } else if (!establishes_phase) {
-    const bool deferred =
+    // Hand-off instrument (dev doc 11.48): the instant this block leaves the receive thread. It is 0 when the probe is
+    // off - one predictable branch per block - and the consumer measures from it, so the reading covers the queue push,
+    // the consumer's WAIT (a sleep-poll phase, or a condition-variable wake) and its scheduling, which is exactly the
+    // uncertainty a slot-periodic declaration has to absorb (see handoff_probe.h).
+    const uint64_t handoff_pushed_ns = handoff_probe_now_ns();
+    const bool     deferred =
         uplink_executor.defer([this,
                                ul_buffer = std::move(rx_buffer),
                                rx_metadata,
                                rx_offset,
-                               nof_samples]() mutable {
+                               nof_samples,
+                               handoff_pushed_ns]() mutable {
+          handoff_probe_note(handoff_site::rx_to_ul, handoff_pushed_ns);
           trace_point ul_tp = ru_tracer.now();
 
           // Process UL. The handle travels with the samples: the processor keeps the buffer alive for as

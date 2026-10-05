@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu/support/executors/task_worker.h"
+#include "ocudu/support/executors/stall_site.h"
 #include <future>
 
 using namespace ocudu;
@@ -31,7 +32,19 @@ unique_function<void()> general_task_worker<QueuePolicy, WaitPolicy>::make_block
     auto consumer = pending_tasks.create_consumer();
 
     unique_task t;
-    while (consumer.pop_blocking(t)) {
+    while (true) {
+      {
+        // The same scope the pool workers publish (task_worker_pool.cpp), and the reason the PHY threads were invisible
+        // in the site table until now: a worker parked HERE is idle, which is what separates "this thread had nothing to
+        // do" from "this thread was waiting for the radio" - the two readings that look identical as TH_STATE_WAITING.
+        // It also makes the wait itself a reading: with a polling queue the park is short and repeated, with a
+        // condition-variable queue (OCUDU_PHY_BLOCKING_WAIT) it is one long park ended by the push.
+        ocudu::stall_site_scope waiting("exec.park");
+        if (not consumer.pop_blocking(t)) {
+          break;
+        }
+      }
+
       // Call task.
       t();
 

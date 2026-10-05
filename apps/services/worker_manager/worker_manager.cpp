@@ -19,6 +19,52 @@ static const uint32_t task_worker_queue_size = 2048;
 
 namespace {
 
+/// \brief True when the lower-PHY workers wait on a condition variable instead of polling their task queue.
+///
+/// WHY (dev doc 11.48). Every lower-PHY thread used to wait for work by re-checking its queue every few microseconds
+/// (`std::this_thread::sleep_for`: 10 us for the baseband workers, 50 us for the radio - see the callers below). Across
+/// one cell that is hundreds of thousands of wake-ups per second, each one a kernel-entry timer sleep, and it has two
+/// costs this workflow has already met: a thread that never truly parks keeps its core busy and its driver traffic
+/// alive, and - the reason this is a scheduling matter at all - the HAND-OFF LATENCY becomes quantised by the poll
+/// period, because a task pushed just after a poll waits out the rest of that period before anyone looks at it. That
+/// interval is what handoff_probe.h measures, and it is the uncertainty a slot-periodic declaration has to absorb.
+///
+/// The alternative needs no new machinery: `single_worker::wait_sleep_time` documents "If not set, a condition variable
+/// is used to wake up the worker when a new task is pushed", and the factory enforces it - a `locking_mpmc` queue
+/// REFUSES a sleep time and is instantiated with `concurrent_queue_wait_policy::condition_variable`
+/// (task_execution_manager.cpp). So this is a switch of wait policy, not a new wait.
+///
+/// WHAT IT COSTS. The queue takes a mutex on push - uncontended, tens of nanoseconds, against a task that is hundreds
+/// of microseconds of PHY work - and a wake-up becomes a signal instead of a timer expiry. Priority, affinity and any
+/// time constraint are untouched: this only decides HOW an idle thread waits, never when it runs once awake.
+///
+/// DEFAULT OFF, deliberately: it is one arm of an A/B whose reading is the hand-off distribution, and a default that
+/// changes silently produces legs nobody can attribute (workflow protocol: two keys, compile and environment).
+bool phy_workers_wait_on_push()
+{
+  static const bool enabled = []() {
+    const char* v = std::getenv("OCUDU_PHY_BLOCKING_WAIT");
+    return v != nullptr and v[0] != '\0' and v[0] != '0';
+  }();
+  return enabled;
+}
+
+/// Queue policy plus wait time of one lower-PHY worker: either polling every \p poll_period, or parked until a push
+/// wakes it (an empty sleep_time).
+struct phy_worker_wait_config {
+  concurrent_queue_policy                  queue_policy;
+  std::optional<std::chrono::microseconds> sleep_time;
+};
+
+phy_worker_wait_config phy_worker_wait(std::chrono::microseconds poll_period)
+{
+  if (phy_workers_wait_on_push()) {
+    // A locking_mpmc queue is created with a condition variable, and the factory rejects a sleep time for it.
+    return {concurrent_queue_policy::locking_mpmc, std::nullopt};
+  }
+  return {concurrent_queue_policy::lockfree_mpmc, poll_period};
+}
+
 /// Observer that preinitializes the byte buffer pool and timers resources in each created thread.
 class thread_resource_preinitializer final : public unique_thread::observer
 {
@@ -545,12 +591,24 @@ void worker_manager::create_lower_phy_executors(const worker_manager_config::ru_
 {
   using namespace execution_config_helper;
 
+  // How every worker created below waits for its next task (see phy_workers_wait_on_push): polling its queue, or parked
+  // until a push wakes it. Both shapes are stated in the banner, because an A/B reading is only attributable if the log
+  // says which arm produced it.
+  const phy_worker_wait_config phy_wait_phy   = phy_worker_wait(std::chrono::microseconds{10});
+  const phy_worker_wait_config phy_wait_radio = phy_worker_wait(std::chrono::microseconds{50});
+  fmt::print("Lower PHY worker wait: {} (baseband), {} (radio).\n",
+             phy_wait_phy.sleep_time.has_value() ? fmt::format("poll every {} us", phy_wait_phy.sleep_time->count())
+                                                 : std::string("condition variable, woken on push"),
+             phy_wait_radio.sleep_time.has_value()
+                 ? fmt::format("poll every {} us", phy_wait_radio.sleep_time->count())
+                 : std::string("condition variable, woken on push"));
+
   // Radio Unit worker and executor. As the radio is unique per application, use the first cell of the affinity manager.
   create_prio_worker("radio",
                      "radio_exec",
                      task_worker_queue_size,
-                     concurrent_queue_policy::lockfree_mpmc,
-                     std::chrono::microseconds{50},
+                     phy_wait_radio.queue_policy,
+                     phy_wait_radio.sleep_time,
                      affinity_mng.front().calcute_affinity_mask(sched_affinity_mask_types::ru),
                      // Platform mapping lives in the compat layer: on macOS the radio channel loop is treated as
                      // real-time (QoS elevation), on Linux it keeps the upstream non-realtime priority.
@@ -586,8 +644,8 @@ void worker_manager::create_lower_phy_executors(const worker_manager_config::ru_
         create_prio_worker(name,
                            exec_name,
                            128,
-                           concurrent_queue_policy::lockfree_mpmc,
-                           std::chrono::microseconds{10},
+                           phy_wait_phy.queue_policy,
+                           phy_wait_phy.sleep_time,
                            affinity_mng[cell_id].calcute_affinity_mask(sched_affinity_mask_types::ru),
                            os_thread_realtime_priority::max());
 
@@ -614,15 +672,15 @@ void worker_manager::create_lower_phy_executors(const worker_manager_config::ru_
         create_prio_worker(name_tx,
                            exec_tx,
                            128,
-                           concurrent_queue_policy::lockfree_mpmc,
-                           std::chrono::microseconds{10},
+                           phy_wait_phy.queue_policy,
+                           phy_wait_phy.sleep_time,
                            affinity_mng[cell_id].calcute_affinity_mask(sched_affinity_mask_types::ru),
                            os_thread_realtime_priority::max());
         create_prio_worker(name_rx,
                            exec_rx,
                            2,
-                           concurrent_queue_policy::lockfree_mpmc,
-                           std::chrono::microseconds{10},
+                           phy_wait_phy.queue_policy,
+                           phy_wait_phy.sleep_time,
                            affinity_mng[cell_id].calcute_affinity_mask(sched_affinity_mask_types::ru),
                            os_thread_realtime_priority::max() - 1);
 
@@ -651,22 +709,22 @@ void worker_manager::create_lower_phy_executors(const worker_manager_config::ru_
         create_prio_worker(name_tx,
                            exec_tx,
                            128,
-                           concurrent_queue_policy::lockfree_mpmc,
-                           std::chrono::microseconds{10},
+                           phy_wait_phy.queue_policy,
+                           phy_wait_phy.sleep_time,
                            affinity_mng[cell_id].calcute_affinity_mask(sched_affinity_mask_types::ru),
                            os_thread_realtime_priority::max());
         create_prio_worker(name_rx,
                            exec_rx,
                            1,
-                           concurrent_queue_policy::lockfree_mpmc,
-                           std::chrono::microseconds{10},
+                           phy_wait_phy.queue_policy,
+                           phy_wait_phy.sleep_time,
                            affinity_mng[cell_id].calcute_affinity_mask(sched_affinity_mask_types::ru),
                            os_thread_realtime_priority::max() - 2);
         create_prio_worker(name_ul,
                            exec_ul,
                            128,
-                           concurrent_queue_policy::lockfree_mpmc,
-                           std::chrono::microseconds{10},
+                           phy_wait_phy.queue_policy,
+                           phy_wait_phy.sleep_time,
                            affinity_mng[cell_id].calcute_affinity_mask(sched_affinity_mask_types::ru),
                            os_thread_realtime_priority::max() - 1);
 

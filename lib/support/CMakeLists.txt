@@ -19,6 +19,7 @@ set(SOURCES
         executors/unique_thread.cpp
         executors/stall_site.cpp          # what a thread is waiting on, readable from the watchdog
         executors/ul_stall_watchdog.cpp
+        executors/handoff_probe.cpp       # push -> consumer-start, the interval between two threads (dev doc 11.48)
 
         executors/paced_task_executor.cpp
         executors/execution_context_description.cpp
