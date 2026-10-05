@@ -4414,3 +4414,50 @@ UL 侧的结论**不受影响** ✓：停顿**没有落到被判读的样本上*
 这也是把 gpu 从 **1459 µs 中位压向 cpu+inline 的 555 µs** 的**唯一**途径 ✓ —— 声明已经证明做不到 ✓。
 
 **池线程 duty（gpu 实测）**：5.1–5.2 %/线程（两腿一致 ✓）⇒ 300 µs 声明有 **5.8 倍**余量 ✓（不是欠声明 ✓）。
+
+### §11.97 gpu 延迟归因：**设备几乎不忙，1444 µs 里只有 ~400 µs 是 lane 事务** ⇒ 需要一条诊断腿定位剩下的 ~420 µs
+
+#### (1) 代码侧：**"提交不等待"的零件已经存在** ✓（不用造新机制 ✓）
+
+* `shared_burst::commit()`（`ocudu_metal_burst.mm:~1150-1190`）**只提交、不等待** ✓（把 cb 放进 thread-local
+  `s.outstanding` ✓）；等待在**另一个函数**里：`shared_burst::wait_committed()`（`~1192`）逐条
+  `[cb waitUntilCompleted]`，并包在 `stall_site_scope("metal.burst_wait")` 里 ✓✓；
+* demapper 侧已有**三形态** ✓：`demodulate_soft()`（同步）/ **`submit()` + `wait()`（延后 ✓）** /
+  `enqueue_burst_deferred()` ✓（`demodulation_mapper_metal.cpp:154/164/288/297/330` ✓）；
+* ⇒ **要把等待挪下关键路径，改的是"在哪里 wait"，不是新建机制** ✓。
+
+#### (2) gpu 腿里**已经测到**的分解（p303，全部非扰动探针 ✓）
+
+| 量 | 中位 | 说明 |
+|---|---|---|
+| `[ul_gpu_pipeline]`（IQ→LLR ✓）| **1431 µs** | 融合 lane 的跨度 |
+| `[ul_pipeline]`（IQ→CRC OK ✓）| 1475 µs | 只比上面多 ~31 µs ✓（= `ldpc` 29 µs ✓ 自洽 ✓）|
+| `iq2ce`（IQ→CE）= `t2f 484.5 + ce 116.1` | **607 µs** | 前端 + 估计器 |
+| `[ul_gpu_lane] busy`（提交→完成 ✓）| **398 µs** | lane 事务（含排队 ✓）|
+| `[ul_gpu_lane] busy split`：merged_hop / ch_wt | 382.8 / 31.1 µs | 92 % 在 eq+demap ✓ |
+| `[ul_gpu_lane] gap: 入口→提交（host 编码 ✓）| 86.7 µs | host 自己的活很轻 ✓ |
+| `[ul_handoff] ul_to_lane`（网格→lane 入口 ✓）| **14 µs**（p99 54、max 63 ✓）| **不是派发/池排队** ✓ |
+
+⇒ 账目：`1431 ≈ 607（IQ→CE）+ 398（lane）+ 14（派发）+ ~410（未解释 ✗）`。
+
+#### (3) ★ 关键量级：**GPU 其实几乎不忙** ✓
+
+UL hop 速率 ≈ 1065 hops / 127 s ≈ **8.4 hop/s** ✓，每次设备工作 ~400 µs ⇒ **GPU 占用 ≈ 0.3 %** ✗✗。
+⇒ gpu 的 1444 µs **不是算力问题**，而是**等待/延迟**问题 ✓；而且 ~410 µs 还没定位 ✗。
+
+#### (4) 下一步：一条**诊断腿**（`OCUDU_METAL_GPU_TIME=1` ✓，公认**有扰动** ✗ ⇒ 数字不引用 ✓）
+
+```
+sudo -E env EXTRA_KNOBS="OCUDU_METAL_GPU_TIME=1" \
+  bash doc_chinese/macos_thread_priority/wip/fly_leg.sh p304-diag dual quiet gpu
+```
+
+它一次回答三件事 ✓（`[metal_stats] queue occupancy (Q9-F3)` 给出**每队列的设备执行窗口与空洞** ✓，
+另有每命令缓冲的 `GPUStartTime/GPUEndTime` ✓）：
+
+| 观测 | 结论 | 对应的改动 |
+|---|---|---|
+| 设备时间 ≈ 跨度 ✓ | 设备/驱动提交延迟为主 ✓ | **异步重叠**（用现成的 submit/wait 分离 ✓）|
+| 设备时间 ≪ 跨度、且**队列有空洞** ✓ | 队列空转、等的是驱动/提交 ✓ | 同上（重叠能把等待藏起来 ✓）|
+| 设备忙、无空洞 ✓ | 共享队列上与别的缓冲（DFT/解码）争用 ✗ | **分队列**（`front_end`/`back_end` 已有两队列 ✓）|
+| 诊断腿里某条 lane 的 `busy` ≈ 400 µs 但 `GPUStartTime` 远晚于提交 ✓ | 提交→开跑之间就是那 ~410 µs ✗ | 重叠 ✓（等待可藏 ✓）|
