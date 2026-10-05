@@ -2617,59 +2617,58 @@ public:
                    pct(sorted, 0.99));
     };
 
-    /// \brief THE TAIL CENSUS: how many samples of a series crossed a fixed absolute anchor, and how the ones
-    /// that did distribute above it.
+    /// \brief THE TAIL CENSUS: how many samples of a series crossed each anchor - relative to the series' own
+    /// median and in absolute microseconds.
     ///
     /// WHY IT EXISTS. `max` is ONE sample, so it cannot be compared between two legs unless their populations
-    /// are equal - and it is the number a reader looks at first. Measured on the 2026-10-05 ping pair (p292 vs
+    /// are equal - and it is the number a reader looks at first. Measured on the 2026-10-05 ping pairs (p292 vs
     /// p293, 1083 and 1068 samples of [ul_pipeline]): the max moved 1129 -> 859 us, i.e. -24 %, while the
-    /// population-weighted quantiles barely moved (p95 667 -> 663, p99 685 -> 678). One of those two readings is
-    /// the truth about the arm and the other is the truth about one draw, and the aggregate line cannot say
-    /// which. This line can: it prints the COUNT of samples above each anchor, so two legs' tails can be
-    /// subtracted instead of compared sample-by-sample.
+    /// population-weighted p95/p99 barely moved (667 -> 663, 685 -> 678). One of those two readings is the truth
+    /// about the arm and the other is the truth about one draw, and the aggregate line cannot say which. This
+    /// line can: it prints COUNTS, which can be subtracted between two legs and added across two legs of the
+    /// same arm.
     ///
-    /// The anchors are absolute microseconds and deliberately NOT derived from the series under test (a
-    /// self-relative anchor would move with the thing being measured). 500 us is half a cpu-mode slot, 1000 us
-    /// the declared period of the reservation on the same legs.
+    /// TWO FAMILIES OF ANCHOR, because neither serves both shapes this pipeline takes:
+    ///  - RELATIVE (multiples of this series' own median). The cpu-mode pipeline has a median near 580 us and
+    ///    the fused-lane one near 1300 us, so a fixed anchor is either saturated or empty - measured on p294,
+    ///    99.9 % of the samples sat above the 500 us anchor, which says nothing about that leg's tail. Relative
+    ///    anchors read the same on both shapes and answer "how heavy is the tail against the body". They are NOT
+    ///    subtractable between legs: each leg's median is its own.
+    ///  - ABSOLUTE (microseconds, from the slot and the reservation this workstream declares: 500 = half a
+    ///    cpu-mode slot, 1000 = the declared period). Deliberately NOT derived from the series under test, so
+    ///    two legs' counts CAN be subtracted.
     auto print_tail = [&pct](const char* name, std::vector<double>& sorted) {
       if (sorted.empty()) {
         return;
       }
       std::sort(sorted.begin(), sorted.end());
-      // Upper edges of the bins; the last bin is open-ended above.
-      static constexpr double upper[] = {500.0, 750.0, 1000.0, 1250.0, 1500.0, 2000.0, 3000.0, 4000.0};
-      constexpr size_t        nof_upper = sizeof(upper) / sizeof(upper[0]);
-      constexpr size_t        nof_bins  = nof_upper + 1;
-      uint64_t                bins[nof_bins] = {};
-      for (double v : sorted) {
-        size_t i = 0;
-        while ((i + 1 < nof_bins) && (v >= upper[i])) {
-          ++i;
-        }
-        ++bins[i];
-      }
-      const uint64_t over = sorted.size() - bins[0];
+      const double median = pct(sorted, 0.5);
       std::fprintf(stderr,
-                   "[ul_tail] %s: n=%zu p99=%.1fus p99.9=%.1fus | over 500us: %llu (%.1f%%)",
+                   "[ul_tail] %s: n=%zu p50=%.1fus p99=%.1fus p99.9=%.1fus",
                    name,
                    sorted.size(),
+                   median,
                    pct(sorted, 0.99),
-                   pct(sorted, 0.999),
-                   static_cast<unsigned long long>(over),
-                   (100.0 * static_cast<double>(over)) / static_cast<double>(sorted.size()));
-      for (size_t i = 1; i != nof_bins; ++i) {
-        if (i + 1 == nof_bins) {
-          std::fprintf(stderr,
-                       " >%.0f:%llu",
-                       upper[nof_upper - 1],
-                       static_cast<unsigned long long>(bins[i]));
-        } else {
-          std::fprintf(stderr,
-                       " %.0f-%.0f:%llu",
-                       upper[i - 1],
-                       upper[i],
-                       static_cast<unsigned long long>(bins[i]));
+                   pct(sorted, 0.999));
+      // Relative: strictly above k x the median. The smallest factor is above 1.0 on purpose - a flat series
+      // (every sample AT the median) must not report its whole population as tail.
+      static constexpr double mult[] = {1.05, 1.1, 1.25, 1.5, 2.0};
+      std::fprintf(stderr, " | vs own median:");
+      for (double k : mult) {
+        const uint64_t count = static_cast<uint64_t>(
+            std::count_if(sorted.begin(), sorted.end(), [&](double v) { return v > k * median; }));
+        std::fprintf(stderr, " %.3gx=%llu", k, static_cast<unsigned long long>(count));
+      }
+      // Absolute: at or above each anchor (>= , so the printed number names the boundary it includes).
+      static constexpr double abs_us[] = {500.0, 750.0, 1000.0, 1500.0, 2000.0, 4000.0};
+      std::fprintf(stderr, " | abs(us):");
+      const size_t nof_samples = sorted.size();
+      size_t       first       = 0; // sorted: one cursor serves every anchor instead of one scan per anchor
+      for (double anchor : abs_us) {
+        while ((first != nof_samples) && (sorted[first] < anchor)) {
+          ++first;
         }
+        std::fprintf(stderr, " >=%.0f:%llu", anchor, static_cast<unsigned long long>(nof_samples - first));
       }
       std::fprintf(stderr, "\n");
     };

@@ -2311,9 +2311,9 @@ TEST(ul_pipeline_probe_test, the_tail_census_counts_the_population_not_one_draw)
     probe.record_end_crc_ok(slot, 64);
   };
 
-  hop(10, std::chrono::microseconds(0));    // below the first anchor
-  hop(11, std::chrono::microseconds(1500)); // somewhere in the middle of the census
-  hop(12, std::chrono::microseconds(5000)); // above the last edge (4000+)
+  hop(10, std::chrono::microseconds(0));    // below every anchor
+  hop(11, std::chrono::microseconds(1000)); // in the body of the census
+  hop(12, std::chrono::microseconds(5000)); // above every anchor
 
   const std::string report = capture_report();
   EXPECT_EQ(samples(report, "ul_pipeline"), 3) << report;
@@ -2332,22 +2332,24 @@ TEST(ul_pipeline_probe_test, the_tail_census_counts_the_population_not_one_draw)
   // The census and the series it qualifies must be the same population - that is the property that lets one
   // leg's counts be subtracted from another leg's.
   EXPECT_EQ(count_after("n="), samples(report, "ul_pipeline")) << line;
-  // The two slow hops are above the anchor and the immediate one is not, and each slow hop is counted in EXACTLY
-  // one bin: the coarse one (4000+) or one of the seven in between, never both and never neither. The sleep is a
-  // device, not a measurement - a sleep_for(750us) really takes ~840us on this host - so the assertions are on
-  // "which side of the anchors" and not on the bin a specific microsecond lands in. The edge rule itself (a value
-  // exactly on an anchor belongs to the bin ABOVE it, which is what `v >= upper[i]` in the loop gives) is left to
-  // the comment in the probe: it cannot be exercised without being able to hand the probe a timestamp.
-  EXPECT_EQ(count_after("over 500us: "), 2) << line;
-  EXPECT_EQ(count_after(">4000:"), 1) << line;
-  const long long in_between = count_after("500-750:") + count_after("750-1000:") + count_after("1000-1250:") +
-                               count_after("1250-1500:") + count_after("1500-2000:") + count_after("2000-3000:") +
-                               count_after("3000-4000:");
-  EXPECT_EQ(in_between, 1) << line;
-  // The p99.9 the census carries is a population-weighted reading of the same tail. On three samples it is the
-  // slowest one, which is the property that makes it comparable across legs of different lengths, unlike `max`.
+  EXPECT_NE(line.find("p50="), std::string::npos) << line;
   EXPECT_NE(line.find("p99="), std::string::npos) << line;
   EXPECT_NE(line.find("p99.9="), std::string::npos) << line;
+  // Absolute anchors: the two slow hops are at or above the 500 us anchor and the immediate one is not, and only
+  // the slowest one reaches the 2000 us and 4000 us anchors. The sleep is a device, not a measurement - a
+  // sleep_for(500us) really takes ~590 us on this host - so the middle hop is placed with a wide margin and the
+  // assertions are on "which side of an anchor", never on a microsecond.
+  EXPECT_EQ(count_after(">=500:"), 2) << line;
+  EXPECT_EQ(count_after(">=2000:"), 1) << line;
+  EXPECT_EQ(count_after(">=4000:"), 1) << line;
+  // Relative anchors: the median of three samples is the middle hop, so the slowest one alone is above every
+  // factor. This half of the line is why it scales: the fused lane's median is ~1300 us and an absolute anchor
+  // set that fits the cpu-mode pipeline says nothing about it (99.9 % of p294's samples sat above 500 us).
+  EXPECT_EQ(count_after("1.05x="), 1) << line;
+  EXPECT_EQ(count_after("1.5x="), 1) << line;
+  EXPECT_EQ(count_after("2x="), 1) << line;
+  // ... and the fastest hop is below every anchor, so no count may claim it.
+  EXPECT_EQ(count_after(">=500:") + count_after(">=750:"), 4) << line;
 }
 
 #endif // OCUDU_FLOW_PROBES
