@@ -4594,3 +4594,40 @@ OCUDU_SCHED_TIME_CONSTRAINT=lower_phy_rx#0=1000/300/500
 p305 过闸门但**贴边**：`frontier 4506 / rx_wait 4883 µs`（界是 5000 ✓）。
 密集业务本身会抬高"合理的等待" ✓ ⇒ **5 ms 的界是给稀疏（ping）判读定的** ✓；
 跑 iperf3 时要么按吞吐/中位判读 ✓，要么把界按业务量放大 ✓（已记，不改脚本默认 ✓）。
+
+### §11.101 ✗→✓ Ubuntu 构建失败（用户报告）：**probes-OFF 那一支缺桩** —— 而它正是**默认配置**
+
+**症状**（用户，Ubuntu `~/work/ocudu`，`ENABLE_FLOW_PROBES:BOOL=OFF` ✓）：
+```
+lower_phy_baseband_processor.cpp:1609: error: no member named 'record_thread_cpu_boundary'
+```
+**根因** ✓：`ul_pipeline_probe` 有两个分支 —— 真探针（`OCUDU_FLOW_PROBES` ✓）与 **no-op 桩类**（`#else` ✓）。
+§11.70 加的 `record_thread_cpu_boundary` 只在**真探针**那一支有 ✓，而调用点**故意不在** `#if defined(OCUDU_FLOW_PROBES)`
+守卫内（它每时隙给"要写声明的那条线程"记一笔 ✓）⇒ **默认构建编不过** ✗。
+★ 为什么在 macOS 没暴露：**`ENABLE_FLOW_PROBES` 默认 OFF** ✓，而本工作流的每条飞行腿都是 **ON** ✓
+⇒ **没人编的那一支，恰好是默认那一支** ✗✗。
+
+**0.5 秒本地复现法** ✓（值得记住）：从该 TU 自己的 `flags.make` 取出 `CXX_DEFINES/INCLUDES/FLAGS`，
+**去掉 `-DOCUDU_FLOW_PROBES`**，`-fsyntax-only` 编一次 ⇒ 立刻复现 ✓。
+
+#### 修复 + 新守卫 ✓
+
+* `record_thread_cpu_boundary` 补桩 ✓；随后用扫描找到**同族的另外两处** `record_slot_grid` / `record_commit_grid`
+  （lane probe 里 COMMIT 是无守卫调用 ✓）✓；
+* 新脚本 **`wip/probes_off_syntax_check.sh`** ✓：对每个提到探针的 TU 取它**自己目标**的 flags、
+  去掉探针宏、语法检查 ✓ —— **macOS 34 个 TU / Ubuntu 18 个** ✓，约 50 s ✓，bash 3.2 兼容 ✓（飞行 Mac 是 3.2 ✓）。
+  它自己踩过两个**误报**，都写进注释 ✓：① 用 basename 找目标会撞上别的 target（表现为假的 "file not found" ✗）；
+  ② `.mm` 是 ObjC++，flags 在 **`OBJCXX_*`** 而不是 `CXX_*` ✓ —— 后者还带 `-Werror`，于是我在
+  `ocudu_metal_mmse_engine.mm` 上误加了 5 处 `[[maybe_unused]]` ✗，**已全部撤回** ✓（正确 flags 下 0 告警 ✓）。
+
+#### 验证矩阵（全绿 ✓）
+
+| 配置 | 结果 |
+|---|---|
+| macOS **probes-ON**（飞行配置）| `gnb` 重建 ✓ + 探针单测 **24/24** ✓ |
+| macOS **probes-OFF** 扫描 | **34/34 TU** ✓ |
+| **Ubuntu probes-OFF** 扫描 | **18/18 TU** ✓ |
+| **Ubuntu `gnb` 全量构建** | **100 %、0 error** ✓（随后默认目标进入 `ctest` 阶段，为不占用户机器已停止 ✓）|
+
+已推 gitlab（`apple-silicon` ✓），Ubuntu 工作树已快进到同一提交 ✓。
+**教训**：默认配置是"没人编"的那个；**每加一个探针方法，就把它加进扫描** ✓。
