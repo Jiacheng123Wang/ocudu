@@ -166,13 +166,38 @@ is_n1_fdd  = ("fdd_n1" in leg_cfg)
 # view. It reads NOTHING new - it re-cuts the sample vectors the probe already keeps, in their recording order,
 # at report time - so on the hot path it costs zero and it changes no delivery decision.
 KNOB_ANY = ("OCUDU_METAL_GPU_TIME", "OCUDU_UL_PHASE_SEGMENTS", "OCUDU_UL_SLOT_TRACE", "OCUDU_UL_TIMING_EVENTS",
-            "OCUDU_SCHED_VERBOSE", "OCUDU_UL_STABILITY_WINDOWS", "OCUDU_UL_THREAD_CPU", "OCUDU_UL_WATCHDOG")
+            "OCUDU_SCHED_VERBOSE", "OCUDU_UL_STABILITY_WINDOWS", "OCUDU_UL_THREAD_CPU", "OCUDU_UL_WATCHDOG",
+            # OCUDU_UL_HANDOFF_PROBE and OCUDU_UL_LANE_GRID joined 2026-10-05 (macos_thread_priority plan doc
+            # 11.6x/11.8x). Both only RECORD and PRINT: the hand-off probe keeps two latency histograms and
+            # prints [ul_handoff] at shutdown; the lane grid arms a slot grid that nothing consumes unless the
+            # paced-lane/commit arms (default OFF) are on, and prints [lane_grid]. run_leg.sh's standard KNOBS
+            # already carry the grid on every leg, so refusing it here would refuse the standard leg.
+            "OCUDU_UL_HANDOFF_PROBE", "OCUDU_UL_LANE_GRID",
+            # OCUDU_UL_SLOT_GRID joined 2026-10-05, and it was a GAP rather than a decision: fly_leg.sh's
+            # standard KNOBS have carried `OCUDU_UL_SLOT_GRID=1` on every leg of this workstream, and the
+            # whitelist never listed it - so the delivery gate failed on a DELIVERY leg (found by running this
+            # check on p297). It records one landmark per slot and prints [ul_slot_grid] (fitted period +
+            # residual quantiles); nothing consumes it. The two gates are byte-identical by construction and
+            # both were missing it, which is what the "run the gate on a known-good leg after touching it" rule
+            # is for.
+            "OCUDU_UL_SLOT_GRID")
 KNOB_EQ  = ("OCUDU_DFT_BATCH_SYMBOLS=14", "OCUDU_DFT_OPEN_BLOCK=1", "OCUDU_DFT_RELEASE_BLOCK=1",
             "OCUDU_CE_LANE_ORDER=merged",
             # OCUDU_DFT_BACKEND=vdsp joined 2026-10-01: on Apple that IS the value an unset leg resolves to
             # (dev doc 6.231-6.233), so spelling it out changes nothing. `=generic` is the A/B arm and stays
             # refused on purpose - an arm satisfies every other criterion here, which is what this check is for.
-            "OCUDU_DFT_BACKEND=vdsp")
+            "OCUDU_DFT_BACKEND=vdsp",
+            # THE UPLINK DELIVERY SHAPE (2026-10-05, macos_thread_priority plan doc 11.99). These three
+            # together ARE the shape that workstream adopted after three independent judging pairs: IQ -> CRC OK
+            # all on one thread (the two INLINE knobs) and that thread holding a Mach time constraint of
+            # 1000us/300us/500us. Measured: max -8..-24% with the across-leg spread of the max collapsing from
+            # 204us to 10us, while median/p95/p99 and the within-run stability stayed inside the noise.
+            # ONLY THAT VALUE OF THE CONSTRAINT IS ACCEPTED: `=1`/`=default` reproduces the 2026-09-01 arm, and
+            # ANY pool thread's declaration is refused - in the cpu+inline shape the pool is not on the uplink
+            # path (declaring it cost a 2.9x fatter downlink low tail for zero uplink benefit), and in gpu mode
+            # the pool IS the lane but blocks in the GPU wait, where a reservation cannot help it (11.95/11.96).
+            "OCUDU_UL_INLINE_PUSCH=1", "OCUDU_UL_INLINE_DECODE=1",
+            "OCUDU_SCHED_TIME_CONSTRAINT=lower_phy_rx#0=1000/300/500")
 CRC_FLOOR_PCT = 60.0
 
 knobs = re.findall(r"^knob\s*:\s*(\S+)", leg_err, re.M)

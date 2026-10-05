@@ -42,6 +42,13 @@ import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
 LOGDIR = os.path.join(ROOT, "doc_chinese", "phy_pipeline_gpu", "wip", "logs")
+# WHERE THE LEGS ARE. TWO roots since 2026-10-05, and this is the difference between a correct inventory and a
+# misleading one: the macos_thread_priority workstream writes its own legs under its own wip/logs, while
+# phy_pipeline_gpu/wip/logs keeps the history it grew up with. Scanning one root silently reports every knob the
+# other workstream flew as "never flown" - and the flight column is the one column this file exists for (the
+# source cannot tell a new instrument from a retired one). Both readers of the whitelist (leg_gate.sh,
+# milestone_audit.sh) were pointed at both roots for the same reason on the same day.
+LOGDIRS = [LOGDIR, os.path.join(ROOT, "doc_chinese", "macos_thread_priority", "wip", "logs")]
 SELF = os.path.join(ROOT, "doc_chinese", "ocudu_env_knobs_inventory_and_leg_whitelist.md")  # own output
 SRC_EXT = (".cpp", ".h", ".mm", ".metal")
 
@@ -208,22 +215,24 @@ def doc_mentions():
 
 def legs_per_knob():
     """How many legs carried each knob, from the `knob : NAME=VALUE` lines run_leg.sh prints into stderr.
-    This is the column that separates 'new instrument' from 'retired': the source cannot tell them apart."""
+    This is the column that separates 'new instrument' from 'retired': the source cannot tell them apart.
+    Both log roots are scanned (see LOGDIRS) - a leg is evidence wherever the workstream that flew it writes."""
     counts = collections.Counter()
     values = collections.defaultdict(set)
-    if not os.path.isdir(LOGDIR):
-        return counts, values
-    for name in os.listdir(LOGDIR):
-        if not name.endswith(".log.stderr"):
+    for logdir in LOGDIRS:
+        if not os.path.isdir(logdir):
             continue
-        try:
-            with open(os.path.join(LOGDIR, name), errors="replace") as fh:
-                head = fh.read(262144)  # the knob lines are in the report header
-        except OSError:
-            continue
-        for m in re.finditer(r"^knob\s*:\s*(OCUDU_[A-Z0-9_]+)=(\S*)", head, re.M):
-            counts[m.group(1)] += 1
-            values[m.group(1)].add(m.group(2))
+        for name in os.listdir(logdir):
+            if not name.endswith(".log.stderr"):
+                continue
+            try:
+                with open(os.path.join(logdir, name), errors="replace") as fh:
+                    head = fh.read(262144)  # the knob lines are in the report header
+            except OSError:
+                continue
+            for m in re.finditer(r"^knob\s*:\s*(OCUDU_[A-Z0-9_]+)=(\S*)", head, re.M):
+                counts[m.group(1)] += 1
+                values[m.group(1)].add(m.group(2))
     return counts, values
 
 
@@ -257,7 +266,9 @@ def main():
     print("> 生成器只认**本旋钮自己那次读取**的守卫（窗口在下一个旋钮的读取处截断），并且只认几种写法："
           "`?` 里绝大多数是「置位即开」的探针/实验选择器（`static const bool x = (std::getenv(\"X\") != nullptr);`），"
           "生成器**故意不把它们判成 `ON`** —— §1 是验收腿白名单，**宁可漏，不可错**。")
-    print("> **飞过的腿数**来自 `logs/*.log.stderr` 顶部的 `knob : NAME=VALUE` 登记行 —— 这是**唯一能区分「新仪器」与「已退役」的一列**，源码里两者长得一样。")
+    print("> **飞过的腿数**来自**两个日志根**（`phy_pipeline_gpu/wip/logs` 与 `macos_thread_priority/wip/logs`，"
+          "2026-10-05 起）里 `*.log.stderr` 顶部的 `knob : NAME=VALUE` 登记行 —— 这是**唯一能区分「新仪器」与「已退役」的一列**，"
+          "源码里两者长得一样；只扫一个根会把另一条工作线飞过的旋钮报成「从没飞过」✗。")
     print()
     n_leg = sum(1 for k in hits if leg_counts.get(k))
     n_doc = sum(1 for k in hits if doc_counts.get(k) and not leg_counts.get(k))
@@ -313,7 +324,22 @@ def main():
         "OCUDU_SCHED_ATTR_QOS": "**实验臂（改 macOS 调度，**不在**白名单，fail-closed）**：把 QoS 类**声明在线程属性上**（`pthread_attr_set_qos_class_np`），让关键线程**从第一条指令**就在目标档上。默认关 = 历史行为。★ 注意它与 `OCUDU_SCHED_POSIX_RT=1` **不能同时用**：只要那个 POSIX 调用还在（现在只剩对照臂才调用），attr 上声明的档**同样会被抹掉**（实测，开发文档 10.5）。默认已经跳过那个调用，所以这一臂现在才有意义 —— 它买的是「起跑那一刻就在 P 核」",
         "OCUDU_UL_THREAD_CPU": "**探针（只打印，白名单可带；macos_thread_priority 开发文档 10.31）**：每条线程在自己的 **slot 变化**处读一次**自己的**累计 CPU，把两次之间的差值记进本线程的 count/sum/max + 一个 log2 直方图（40 桶），关停时每线程打一行 `[ul_thread_cpu] thread=… slots=… mean=… p99.9<=… max=… -> declare computation >= …`。★ 它存在的理由：**P4（Mach 时间约束）要申报「每 period 需要多少 CPU」，唯一诚实的来源就是线程自己每 slot 烧掉多少** —— 而相位事件的 `tcpu=` 在池线程上是**结构性**的 `-`（工作窃取 ⇒ 开窗与关窗不是同一条线程，`attach_cpu_delta` 只认同线程基线），进程口径的 `cpu=` 又是全进程（窗口 1.3–1.8 ms 却记到 4.4–6.9 ms）。两把钥匙：`ENABLE_FLOW_PROBES` 编译 + 本变量非 0；关着只读一次环境变量就返回，**不读时钟、不注册、不打印**（交付腿逐字节不变）；开着每次地标一次 Mach 调用（为此加了窄接口 `this_thread_cpu_ns()`）。反向臂已实测：把「按 slot 变化记一笔」改成「每次调用记一笔」，单测 3 条断言变红（开发文档 10.31(1)）",
         "OCUDU_SCHED_POSIX_RT": "**对照臂（改 macOS 调度，**不在**白名单，fail-closed）**：`=1` = **恢复历史行为**，即对实时意图线程调用 `pthread_setschedparam(SCHED_FIFO,prio)`。★ **不设它才是新默认**（2026-10-01 用户裁决）：实测 Darwin 上线程**要么**由 QoS 管、**要么**是显式调度，那个 POSIX 调用会把刚设好的 QoS 类**静默抹掉且不可恢复**（再设返回 EPERM）；默认跳过它以后，`[sched]` 回读 `eff=USER_INTERACTIVE`（真腿读数见开发文档 10.15 与本次裁决 10.16）。保留这个臂是为了能**在同一个二进制上**做 A/B 推翻默认，而不是靠重新编译",
-        "OCUDU_SCHED_TIME_CONSTRAINT": "**实验臂 / P4（改 macOS 调度，**不在**白名单，fail-closed）**：Mach **时间约束**（`THREAD_TIME_CONSTRAINT_POLICY`）—— macOS 上**唯一**能向内核「预留 CPU」的机制。语法：不设/`0` = **关**（默认，逐字节不变）｜`1`/`default` = **把 2026-09-01 那一臂原样复现**（每个实时意图 worker 拿到同一个 `1 ms/1 ms/1 ms`，含其作用域）｜`NAME=P/C/K[;NAME=…]` = **逐线程**微秒值，`NAME=*` 匹配所有 worker（**同名精确匹配优先于 `*`**，与书写顺序无关）。畸形请求**一律拒绝且不施用**：`constraint<computation` 是唯一被实测有害的形状（p50 793 µs / max 7.3 ms），`period<constraint` 自相矛盾。★ **代价是必然的：施加它就等于删掉该线程的 QoS 档**（Darwin 上两者双向互斥且不可逆，实测开发文档 10.29）——换来的是 2× 超订下唤醒尾延迟 **5358 → 9.9 µs**。★ 为什么不许「给所有线程发同一参数」：2026-09-01 回归**唯一**未被微基准否掉的解释，就是统一参数把 FIFO 优先级（44/46/…）编码的线程间次序拍平了（开发文档 §10.29）。施加时每个被选中的线程打一行 `[sched_tc]`，且 `[sched]` 行多一个 `tc=` 字段（`tc=none` / `tc=500/200/400us(duty=40%)`）",
+        # ---- macos_thread_priority：内联形状与预留（2026-10-05，计划文档 11.72–11.100）------------------
+        "OCUDU_UL_INLINE_PUSCH": "**交付形状的一部分（2026-10-05 采纳）**：把 PUSCH 链（时间-频率之后的 CE、均衡、解映射）**内联到产出网格的那条线程**上 ⇒ 网格→lane 的派发消失；**解码仍留在池**（实例数 = 配置的 `max_pusch_and_srs_concurrency` ✓，p288 那次把它一起降到 1 的事故已修）。★ 与 `OCUDU_UL_PACED_LANE` **互斥**（两者都要拥有 `pusch_executor` ⇒ 同时给会 `report_fatal_error` ✓，而不是静默取最后一个写入者）。★ 在 **gpu/融合 lane** 下它会把 **Metal 提交+等待一起搬到调用线程**（实测 680 µs 塞 500 µs 时隙 ⇒ rx 线程必然落后 ✗）⇒ 那里它是**诊断臂**、不是交付形状，横幅会明说这一句（计划文档 11.94）",
+        "OCUDU_UL_INLINE_DECODE": "**交付形状的一部分（2026-10-05 采纳）**：LLR→CRC 判决之间也无派发 ⇒ **IQ→CRC OK 全在一个线程上**（= 一个预留主体 ✓）。代价：一个 TB 的码块**串行**解码（`pusch_decoder_executor={}` ✓ 有意为之）—— 在 528 B（单码块）TB 上实测无差别 ✓，大 TB 上才有 ✗。与 `OCUDU_UL_INLINE_PUSCH` **独立**（回答不同问题：一个管到 LLR，一个管到 CRC）",
+        "OCUDU_UL_HANDOFF_PROBE": "**探针（只打印，白名单可带）**：两个交接点的延迟直方图 —— `rx_to_ul`（网格压给上行执行器）与 `ul_to_lane`（PUSCH lane 派发），关停时打 `[ul_handoff]`（p50/p90/p99/p99.9/max/mean + `over4ms` 计数 + 32×8 µs 直方图）✓。两把钥匙：`ENABLE_FLOW_PROBES` 编译 + 本变量非 0；关着只读一次环境变量（一个可预测分支 ✓）。★ 它是把「合并 rx+UL 把交接从 9 µs 变成 1 µs」量出来的那件仪器（计划文档 11.6x）",
+        "OCUDU_UL_LANE_GRID": "**节拍记账 + 探针（只记录与打印，白名单可带）**：武装 lane 的时隙网格，关停时打 `[lane_grid]`（armed/re-armed/clamped/**late**/unarmed ✓ + **FRONTIER 交付滞后**分布 + 相对最好偏移的**绝对滞后**及其 32 个 1 s 窗口最小值 —— 后者是**棘轮探测器** ✓）。★ 它**本身不改变调度**：消费它的是 `OCUDU_UL_PACED_LANE`/`OCUDU_UL_PACED_COMMIT` 那条臂（默认关 ✓）⇒ 验收腿带着它无害（`run_leg.sh` 的标准 KNOBS 一直带 ✓）。★ 读法：`late` 是「网格时刻已经过去」的跳数 = 该臂的判词 ✓",
+        "OCUDU_UL_SLOT_GRID": "**探针（只记录与打印，白名单可带）**：每时隙记一次地标（CE / COMMIT）并打印 `[ul_slot_grid]`（拟合周期 + 残差的 p50/p95/p99/max + 前后半均值漂移 ✓）—— 用来把「抖动」与「漂移」分开 ✓。★ 它是白名单的一次**漏登记**（不是判断）：`fly_leg.sh` 的标准 KNOBS 每条腿都带它，而两条闸门都没列，于是**交付腿自己会被判 FAIL** ✗ —— 2026-10-05 在 p297 上跑闸门时发现并补上 ✓（教训：动过闸门就要拿一条已知好腿回测 ✓）",
+        "OCUDU_UL_LANE_GRID_GAIN_SHIFT": "**修饰符**（只在 lane grid 开着时有意义）：网格对到达的增益，默认 `1/65536` 是**设计而非调参** —— 网格必须是到达的**时钟**、不是它的跟随器，否则 `late` 与滞后读数会被它自己吸收掉 ✗（1/64 时 100 µs 的滞后偏移只让网格动 1.5 µs）",
+        "OCUDU_UL_RX_POLL_WAIT": "**改行为（不在白名单，fail-closed）**：接收侧的等待策略（轮询 vs 阻塞）。不设 = 交付形态 ✓；只在 Apple 上编进调用点 ✓",
+        "OCUDU_PHY_BLOCKING_WAIT": "**改行为（不在白名单，fail-closed）**：四个 lower-PHY worker 的等待策略 —— 不设 = lockfree 队列 + 10/50 µs 轮询（交付默认 ✓）；`=1` = locking 队列 + 条件变量唤醒（**零轮询**，代价是每次唤醒一次系统调用）。启动横幅打印 `Lower PHY worker wait: …`，所以腿自己能证明它拿到的是哪一支 ✓",
+        "OCUDU_UL_LANE_CONCURRENCY": "**实验臂（不在白名单）**：覆盖 lane 的并发度（`max_pusch_and_srs_concurrency`）。`=1` = 把 lane **串行化**，用来把「只有一个 worker」与「跑在网格上」这两件事分开 ✓（第一轮带宽扫描把两者混在一起了）",
+        "OCUDU_UL_PACED_LANE": "**实验臂（不在白名单）**：把 PUSCH lane 放到它自己的**网格节拍线程**（`pusch_lane`，lead/band 见启动打印 ✓）上。与 `OCUDU_UL_INLINE_PUSCH` **互斥** ✓。配套声明：`OCUDU_SCHED_TIME_CONSTRAINT=pusch_lane=<period>/<computation>/<constraint>`（周期取**实测的 UL 时隙周期**，别假设 ✓）",
+        "OCUDU_UL_PACED_COMMIT": "**实验臂（不在白名单）**：把 lane 的**提交**交给网格节拍线程（`lane_commit`）⇒ 提交**时刻**周期化，而 hop 不必在该线程上 ✓（提交只有一行 `[cb commit]`，实测 14–47 µs ✓）",
+        "OCUDU_UL_PACED_LEAD_US": "**修饰符**（只在 paced lane/commit 开着时有意义）：节拍线程的 lead（µs）✓",
+        "OCUDU_UL_PACED_WAIT_US": "**修饰符**（只在 paced lane/commit 开着时有意义）：节拍线程的等待/band（µs）✓",
+        "OCUDU_SCHED_TIME_CONSTRAINT": "**已采纳为交付形状的一部分（2026-10-05），但只接受一个值**：`lower_phy_rx#0=1000/300/500` ✓（与上面两个 INLINE 开关一起构成 UL 延迟的交付形状；该线程实测 duty 16.4–17.7 %，声明 30 % ⇒ 1.7 倍余量 ✓）。语法：不设/`0` = **关**（默认，逐字节不变）｜`1`/`default` = **把 2026-09-01 那一臂原样复现**（每个实时意图 worker 拿到同一个 `1 ms/1 ms/1 ms`，含其作用域）✗ 不许｜`NAME=P/C/K[;NAME=…]` = **逐线程**微秒值，`NAME=*` 匹配所有 worker（**同名精确匹配优先于 `*`**，与书写顺序无关）。畸形请求**一律拒绝且不施用**：`constraint<computation` 是唯一被实测有害的形状（p50 793 µs / max 7.3 ms），`period<constraint` 自相矛盾。★ **代价是必然的：施加它就等于删掉该线程的 QoS 档**（Darwin 上两者双向互斥且不可逆，实测开发文档 10.29）—— 对 rx 线程这笔交易划算 ✓，对池线程**不划算** ✗（见下）。★ **三对独立配对的判决**（计划文档 11.91/11.95/11.96）：rx 线程声明使 **max −8…−24 %**、跨腿 max 离散度 **204 → 10 µs** ✓、最坏线程 CPU 窗口与 watchdog late max **减半** ✓，而 median/p95/p99 与运行内稳定性（最差窗口 1.2–1.4 %）都在噪声内 ✓；**池线程声明一律拒绝** ✗ —— cpu+inline 下池不在 UL 链上（声明只换来 DL 低尾劣化 **2.9 倍**：`below1ms/1k` 7.07 → 20.52、p1 1005 → 975 µs，UL 侧零收益 ✓）；gpu 下池=lane，但它**阻塞在 GPU 等待上，预留对它无效**（UL 侧仍零收益）而 DL 代价照旧 ✗。施加时每个被选中的线程打一行 `[sched_tc]`，且 `[sched]` 行多一个 `tc=` 字段（`tc=none` / `tc=1000/300/500us(duty=30%)` ✓）；`ps -M` 里这些线程读作 `PRI 97R` ⇒ 两套独立读数可互证 ✓",
+
     }
     for knob, note in curated_new.items():
         rows = hits.get(knob, [])
@@ -329,9 +355,25 @@ def main():
           "只打印、不改调度；默认关时一个字都不打印 —— 见 `doc_chinese/macos_thread_priority/` 开发文档 10.5）、"
           "`OCUDU_UL_THREAD_CPU`（2026-10-01 加入：**每线程每 slot CPU 记账**，关停时每线程打一行；"
           "P4 的 `computation` 只能从这个读数来，因为相位事件的 `tcpu=` 在池线程上是结构性的 `-`。"
-          "关着不读时钟、不注册、不打印 —— 见该目录开发文档 10.31）。")
+          "关着不读时钟、不注册、不打印 —— 见该目录开发文档 10.31）、"
+          "`OCUDU_UL_HANDOFF_PROBE`（2026-10-05 加入：两个交接点的延迟直方图 + `over4ms` 计数，只打印；"
+          "关着只读一次环境变量 —— 计划文档 11.6x）、"
+          "`OCUDU_UL_LANE_GRID`（2026-10-05 加入：节拍记账与 `[lane_grid]` 报告（含棘轮探测器），"
+          "**本身不改调度** —— 消费它的是默认关的 paced-lane/commit 臂 —— `run_leg.sh` 的标准 KNOBS 一直带着它；"
+          "计划文档 11.8x）、"
+          "`OCUDU_UL_SLOT_GRID`（2026-10-05 加入，**补的是一次漏登记而不是一次判断**：`fly_leg.sh` 的标准 KNOBS "
+          "每条腿都带它，两条闸门却都没列，于是**交付腿自己会被判 FAIL** ✗ —— 在 p297 上跑闸门时发现 ✓）。")
     print("> **视为「等于交付默认」**：`OCUDU_DFT_BATCH_SYMBOLS=14`、`OCUDU_DFT_OPEN_BLOCK=1`、`OCUDU_DFT_RELEASE_BLOCK=1`、`OCUDU_CE_LANE_ORDER=merged`、"
-          "`OCUDU_DFT_BACKEND=vdsp`（2026-10-01 加入：Apple 上这就是不设它时的值）。其余一律判 FAIL（**fail-closed**）。")
+          "`OCUDU_DFT_BACKEND=vdsp`（2026-10-01 加入：Apple 上这就是不设它时的值）；"
+          "**`OCUDU_UL_INLINE_PUSCH=1`、`OCUDU_UL_INLINE_DECODE=1`、`OCUDU_SCHED_TIME_CONSTRAINT=lower_phy_rx#0=1000/300/500`**"
+          "（2026-10-05 加入：这三个一起**就是** UL 延迟的交付形状 —— IQ→CRC OK 全在一个线程上、该线程拿 30 % duty 的预留。"
+          "三对独立配对实测：max −8…−24 % 且跨腿离散度 204 → 10 µs，median/p95/p99 与运行内稳定性在噪声内 ✓ —— 计划文档 11.99）。"
+          "其余一律判 FAIL（**fail-closed**）。")
+    print("> ⚠ **`OCUDU_SCHED_TIME_CONSTRAINT` 只接受上面那一个值** ✗：`=1`/`=default`（2026-09-01 那一臂）**不许**；"
+          "**任何池线程**（`main_pool#*`）的声明也**不许** —— cpu+inline 下池不在 UL 链上（声明只换来 DL 低尾劣化 2.9 倍、"
+          "UL 侧零收益），gpu 下池=lane 但阻塞在 GPU 等待上、预留无效而 DL 代价照旧（计划文档 11.95/11.96）。"
+          "`OCUDU_PHY_BLOCKING_WAIT`、`OCUDU_UL_RX_POLL_WAIT` 同属**改行为**的旋钮：不在白名单，默认（不设）才是交付形态。")
+
     print("> `OCUDU_SCHED_POSIX_RT`（改 macOS 调度）与 `OCUDU_SCHED_ATTR_QOS` 同样**故意不**在白名单里（臂，fail-closed）；"
           "`OCUDU_DFT_BACKEND=generic` **故意不**在白名单里：那是一条 A/B **臂**——臂可以满足其余所有判据（p84 就是这样），闸门拦的就是它。")
     print("> 6.215 起交付车道的网格由 **host** 写，所以 `OCUDU_DFT_BATCH_SYMBOLS`/`OCUDU_DFT_OPEN_BLOCK`/`OCUDU_DFT_RELEASE_BLOCK` 对交付腿是 **MOOT**（那个引擎根本不在路上）；**最有力的交付腿是一个旋钮都不设**，白名单只是给「已经设了」的腿留出等于默认的写法。")

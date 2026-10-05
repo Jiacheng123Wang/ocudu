@@ -244,16 +244,25 @@ leg_commit_check() {   # <label> <leg .stderr path> <kind>
 # it prints the worst receive waits / hand-over margins with host wall clocks and decides nothing.
 # OCUDU_SCHED_VERBOSE joined 2026-10-01 (macos_thread_priority dev doc 10.5): also report-only - one line per
 # worker thread saying which QoS class / POSIX policy the kernel actually GRANTED it, printed once at creation.
-# The knobs that change macOS scheduling (OCUDU_SCHED_SKIP_POSIX_RT, OCUDU_SCHED_ATTR_QOS,
-# OCUDU_SCHED_TIME_CONSTRAINT) are arms and stay refused, exactly like OCUDU_DFT_BACKEND=generic.
-kNOB_ANY=" OCUDU_METAL_GPU_TIME OCUDU_UL_PHASE_SEGMENTS OCUDU_UL_SLOT_TRACE OCUDU_UL_TIMING_EVENTS OCUDU_SCHED_VERBOSE OCUDU_UL_STABILITY_WINDOWS OCUDU_UL_THREAD_CPU OCUDU_UL_WATCHDOG "
+# The knobs that change macOS scheduling (OCUDU_SCHED_SKIP_POSIX_RT, OCUDU_SCHED_ATTR_QOS) are arms and stay
+# refused, exactly like OCUDU_DFT_BACKEND=generic. `OCUDU_SCHED_TIME_CONSTRAINT` USED to be refused here and is
+# not any more - 2026-10-05 it became part of the uplink delivery shape, at exactly one value (see kNOB_EQ
+# below): the arms are `=1`/`=default` and ANY pool-thread declaration, and those are still refused.
+kNOB_ANY=" OCUDU_METAL_GPU_TIME OCUDU_UL_PHASE_SEGMENTS OCUDU_UL_SLOT_TRACE OCUDU_UL_TIMING_EVENTS OCUDU_SCHED_VERBOSE OCUDU_UL_STABILITY_WINDOWS OCUDU_UL_THREAD_CPU OCUDU_UL_WATCHDOG OCUDU_UL_HANDOFF_PROBE OCUDU_UL_LANE_GRID OCUDU_UL_SLOT_GRID "
+# `OCUDU_UL_HANDOFF_PROBE` and `OCUDU_UL_LANE_GRID` joined 2026-10-05 (macos_thread_priority plan doc 11.6x/11.8x):
+# both only record and print (two hand-off histograms; a slot grid nothing consumes unless the default-OFF
+# paced-lane/commit arms are on), and run_leg.sh's standard KNOBS carry the grid on every leg.
 # `== the delivery default`. SINCE 2026-09-30 (dev doc 6.215) the delivered lane writes the grid from the HOST,
 # so the three DFT entries are MOOT on a delivery leg (that engine is not on the path at all) while
 # `CE_LANE_ORDER=merged` still is the delivered value. A delivery leg should set NONE of them - that is the
 # strongest case, and the one the delivered configuration now is.
 # `OCUDU_DFT_BACKEND=vdsp` joined 2026-10-01 (dev doc 6.231-6.233): on Apple that is what an unset leg resolves
 # to, so it is a spelling of the default and not a change. `=generic` stays refused - that is the A/B arm.
-kNOB_EQ=" OCUDU_DFT_BATCH_SYMBOLS=14 OCUDU_DFT_OPEN_BLOCK=1 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_CE_LANE_ORDER=merged OCUDU_DFT_BACKEND=vdsp "
+kNOB_EQ=" OCUDU_DFT_BATCH_SYMBOLS=14 OCUDU_DFT_OPEN_BLOCK=1 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_CE_LANE_ORDER=merged OCUDU_DFT_BACKEND=vdsp OCUDU_UL_INLINE_PUSCH=1 OCUDU_UL_INLINE_DECODE=1 OCUDU_SCHED_TIME_CONSTRAINT=lower_phy_rx#0=1000/300/500 "
+# THE UPLINK DELIVERY SHAPE (2026-10-05, macos_thread_priority plan doc 11.99): IQ -> CRC OK on one thread plus
+# that thread's Mach time constraint of 1000us/300us/500us. Three independent pairs measured max -8..-24% with
+# the across-leg spread of the max collapsing 204us -> 10us, the body and the within-run stability unchanged.
+# ONLY that constraint value is accepted (no `=1`/`=default`, and no pool declaration - see 11.95/11.96).
 kCRC_FLOOR_PCT=60
 kCRC_MIN_HOPS=20000
 
