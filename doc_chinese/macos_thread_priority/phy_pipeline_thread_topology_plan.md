@@ -4280,3 +4280,39 @@ inline 形状下 **UL 链全程在 rx 线程上**（样本→CRC ✓），**池�
 `below1ms/1k`、`below500`、`AT/BELOW 0`、watchdog late、健康判决，并给 **PASS / STALL - re-fly / HEALTH** ✓。
 八条腿回测：**p292 ✓ p293 ✓ p296 ✓ p297 ✓ PASS；p294/p295 ✗ HEALTH；p298 ✗ STALL（33 次）；p299 ✗ marginal** ✓
 —— 与我们人工得出的结论完全一致 ✓✓。
+
+### §11.94 ★ gpu 侧准备：拓扑已查清，**gpu 模式的"关键路径线程"就是池工作者** ✓（与 cpu+inline 相反）
+
+用已有 gpu 腿 **p283-dual**（`gpu`、dual、quiet ✓）的读数查清拓扑 ✓：
+
+1. **SL 链（融合 lane）作为 `pusch_executor` 任务跑在 `main_pool#0..#4`** ✓✓ —— 证据：
+   `[ul_thread_cpu]` 的**五个账户全在 `main_pool#0..#4`**（gpu 模式下 rx 线程**没有**账户 ✗）：
+   每个 `cpu mean≈775 µs / window`、`window median 8.39 ms`、**duty 8.1–8.3 %** ✓
+   （≈92 µs/时隙；5 个线程合计 ≈41 % of one core ✓ 与 cpu 模式测的池合计一致 ✓）；
+2. ⇒ **cpu+inline 形状里"池不在这条路径上"**（§11.92 的教训 ✗）**在 gpu 模式里反过来** ✓：
+   gpu 模式下**池工作者就是 lane 本人** ⇒ **池声明在 gpu 模式下打的就是关键路径** ✓✓
+   —— 这也让 p298/p299 那个"未判"的实验**直接与 gpu 相关** ✓；
+3. **结构性停顿（真正的 7 ms 尾巴来源）**：`[metal_stats] burst commits=100600 waits=100600`
+   **`max_in_flight=1`** ✗✗ —— 每个 burst **提交后立刻等**，GPU 工作**完全不重叠** ✓；
+   另有 `[ul_gpu_pipeline] max 7216 µs`、`stale=20`（span > 8 ms = HARQ RTT ✗）
+   ⇒ **gpu 的尾巴是"吞吐/积压"问题，不是优先级问题** ✗（与 port 注释记的"host 站在
+   `[cb waitUntilCompleted]` 里 ~680 µs" ✓ 一致）；
+   而 `mmse_ce commits=100607 waits=7` ✓ 说明**fire-and-forget 机制已经存在** ✓（估计器就是异步的 ✓）
+   ⇒ "让 burst 也能 in-flight>1 / 把等待挪下关键路径"**有现成零件** ✓。
+
+#### gpu 阶段计划（一步一个变量 ✓）
+
+1. **先声明、不改结构**：`gpu` + `dual` + `OCUDU_SCHED_TIME_CONSTRAINT="lower_phy_rx#0=1000/300/500;main_pool#0..4=1000/300/600"`
+   （池实测 duty 8.2 % ⇒ 300 µs computation = **3.6 倍余量** ✓，`constraint 600 ≥ computation 300` ✓）；
+   判据用 **`[ul_tail]` 打在 `[ul_gpu_pipeline]` 上** ✓（融合 lane 的跨度 ✓）+ `[ul_pipeline]`，
+   闸门仍用 `dl_gate.sh` ✓（gpu 模式同样适用 ✓）；
+2. **再做结构**：让 burst **in-flight > 1**（或把等待交给另一个线程）⇒ 目标是把 680 µs 的等待**重叠**掉 ✓；
+3. **可选第三条臂（单独飞 ✓）**：`OCUDU_UL_PACED_LANE` + `pusch_lane=<period>/<computation>/<constraint>`
+   （mapper 自己的横幅就建议这个组合 ✓），period 取**实测的 UL 时隙周期**（TDD 里 ~1/4–1/5 时隙 ✓），不要假设 ✓。
+
+#### 顺手加的护栏 ✓（已编译/提交/重戳 `1645e936f8` ✓）
+
+`OCUDU_UL_INLINE_PUSCH` 是**模式无关**的 ⇒ 在 gpu 模式下它会把 **Metal 提交+等待一起搬到 rx 线程** ✗
+（680 µs 塞 500 µs 时隙 ⇒ rx 线程必然落后 ✗）。**不拒绝**（有腿可能正想看这个读数 ✓），但**大声说出来** ✓：
+横幅现在多一行 `NOTE: in the fused-lane (gpu) pipeline this moves the Metal submit+wait onto the calling thread
+too - a DIAGNOSTIC arm there, not the shape to declare` ✓。
