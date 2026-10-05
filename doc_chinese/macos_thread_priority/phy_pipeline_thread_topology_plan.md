@@ -3221,3 +3221,17 @@ sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh p285-dual   dual  
 * **平移到 gpu 时**，要处理的**不是"交棒"而是"这次设备完成等待"** ✗✓：
   它必须**移出关键路径**（异步完成 / 延后到真正需要结果时再等 ✓）—— 而 120 深的网格与 fire-and-forget 的提交
   已经把条件备好了 ✓✓。这正是"CPU 立框架、GPU 只换 offload"路线的第一处真正差异 ✓。
+
+### §11.67 工具缺陷修复：工具把日志前缀写死成 `gnb_gpu_`，cpu 模式的腿因此"找不到"
+
+用户报（2026-10-05）：p284 跑完时 `fly_leg.sh` 报 `!! PROTOCOL MISSING` ✗。
+
+**原因**：runner 按**流水线模式**命名日志 —— `LOG=$LOGDIR/gnb_${MODE}_${LABEL}_<时间>.log`（`run_leg.sh:53`）⇒
+cpu 腿是 **`gnb_cpu_p284-triple_…`** ✗，而 `leg_protocol_driver.sh` / `fly_leg.sh` 的 glob 写死了 **`gnb_gpu_`** ✗✗
+⇒ 驱动器等了 120 s 也没找到腿 ⇒ 没有提示、没有审计文件 ✓。
+
+**修复**（三处，均改为与模式无关的 `gnb_*_${LABEL}_*` ✓，并用 **cpu 命名**的 stub 日志离线验证过：修复后报 `PROTOCOL OK` ✓✓）：
+`leg_protocol_driver.sh:61,82`、`fly_leg.sh:81,87`、`pair_check.sh:31`（后者是工作流自己的工具，同样写死了 `gnb_gpu_` ✗）。
+
+**p284 本身是条好腿，保留** ✓：`pipeline mode : cpu` ✓、**0 gaps over 8 985 511 blocks** ✓、有流量 ✓，
+且当场复现了 §11.66 的 cpu 参考：**`eqd` 51.5 µs**（gpu 模式 ~680 µs ✗）、`ce` 23.2、`ldpc` 65.0、`t2f` 488.6 µs ✓。

@@ -28,7 +28,7 @@ LOGDIR=${LEG_LOGDIR:-$HERE/logs}
 
 report() {
   local leg=$1 f
-  f=$(ls -t "$LOGDIR"/gnb_gpu_${leg}-*.log.stderr 2>/dev/null | head -1)
+  f=$(ls -t "$LOGDIR"/gnb_*_${leg}*.log.stderr 2>/dev/null | head -1)
   if [ -z "$f" ]; then echo "$leg: no .stderr in $LOGDIR" >&2; return 1; fi
   local gaps recv hops dur pdu
   gaps=$(grep -h 'radio sample continuity' "$f" | tail -1 | grep -oE '[0-9]+ gaps[^>]*-> (OK|FAILED)' | head -1)

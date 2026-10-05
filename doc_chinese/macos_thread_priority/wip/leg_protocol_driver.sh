@@ -58,13 +58,16 @@ LEG_LOG_DIRS="${LEG_LOG_DIRS:-$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs:$ROOT/
 find_leg() {
   local dir f
   for dir in ${LEG_LOG_DIRS//:/ }; do
-    f=$(ls -t "$dir"/gnb_gpu_${LABEL}_*.log.stderr 2>/dev/null | head -1)
+    f=$(ls -t "$dir"/gnb_*_${LABEL}_*.log.stderr 2>/dev/null | head -1)
     [ -n "$f" ] && { printf '%s\n' "$f"; return 0; }
   done
   return 1
 }
 
 echo "leg_protocol_driver: waiting for leg '$LABEL' to appear..."
+# The runner names the log by PIPELINE MODE (gnb_gpu_/gnb_cpu_/gnb_cpu_gpu_): the first version of this script
+# hard-coded gnb_gpu_ and therefore never found a cpu-mode leg (p284, 2026-10-05) - the cue and the audit were
+# reported missing for a leg that had run perfectly well.
 LEG=""
 for _ in $(seq 1 "${LEG_WAIT:-120}"); do
   if LEG=$(find_leg); then
@@ -76,7 +79,7 @@ for _ in $(seq 1 "${LEG_WAIT:-120}"); do
   sleep 1
 done
 if [ -z "$LEG" ]; then
-  echo "REFUSING: no leg '$LABEL' started within ${LEG_WAIT:-120} s (looked for gnb_gpu_${LABEL}_*.log.stderr)." >&2
+  echo "REFUSING: no leg '$LABEL' started within ${LEG_WAIT:-120} s (looked for gnb_*_${LABEL}_*.log.stderr)." >&2
   exit 2
 fi
 LOGDIR="$(dirname "$LEG")"

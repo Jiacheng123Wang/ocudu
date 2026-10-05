@@ -78,13 +78,13 @@ fi
 rc=$?
 
 wait "$DRV_PID" 2>/dev/null
-AUDIT=$(ls -t "$LOGDIR"/gnb_gpu_${LABEL}_*.protocol.txt 2>/dev/null | head -1)
+AUDIT=$(ls -t "$LOGDIR"/gnb_*_${LABEL}_*.protocol.txt 2>/dev/null | head -1)
 echo
 if [ -n "$AUDIT" ]; then
   echo "PROTOCOL OK - the cue and the load window are on disk:"
   sed 's/^/  /' "$AUDIT"
   if [ "$DIST_N" -gt 0 ]; then
-    DLOG=$(ls -t "$LOGDIR"/gnb_gpu_${LABEL}_*.disturbance.log 2>/dev/null | head -1)
+    DLOG=$(ls -t "$LOGDIR"/gnb_*_${LABEL}_*.disturbance.log 2>/dev/null | head -1)
     [ -n "$DLOG" ] && { echo "  (disturbance log: $DLOG)"; tail -2 "$DLOG" | sed 's/^/    /'; }
   fi
 else
