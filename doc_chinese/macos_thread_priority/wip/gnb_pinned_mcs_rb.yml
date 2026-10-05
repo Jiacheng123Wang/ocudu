@@ -88,8 +88,22 @@ cell_cfg:
     # 51 = the whole 20 MHz n78 band, which is what the scheduler was already granting on average (a 51-PRB grant
     # at the pinned MCS 19 is ~2950 B per hop, the observed magnitude). Pinning min=max removes the last free
     # variable, so the payload becomes a property of the CONFIGURATION rather than of the arm.
-    min_rb_size: 51
-    max_rb_size: 51
+    # 25, NOT 51 - and the first attempt at 51 is worth recording because it cost a leg (p274, 2026-10-05).
+    #
+    # min=max=51 means the ONLY legal grant is the WHOLE BAND starting at PRB 0, and the PUCCH lives at the band
+    # edges: the scheduler then cannot place a dedicated UL grant in the very slots it needs one, and the shared
+    # channels it toppled show it - across the whole failed leg there were exactly two widths, `rb=[8..11)` (3 PRBs,
+    # 78x, the fallback/msg3 path) and `rb=[8..19)` (11 PRBs, 10x); after the UE context was created the UE got NO
+    # dedicated grant at all. With no UL grant the UE cannot ACK the DL signalling, so SRB1 hit "RLC max ReTxs
+    # reached" (three attach attempts, three different C-RNTIs, all the same), the RLF timer expired and the AMF
+    # released the UE - the phone could never stay attached.
+    #
+    # 25 is taken from the WORKING leg's own allocation history (p272, unpinned): its dedicated grants were
+    # 51/50/25/46/43/44/6/31 PRBs wide, with 25 occurring 10372 times - a width the scheduler reaches for
+    # routinely, and one that leaves the band half free for PUCCH. The payload is still pinned (which is the point:
+    # the +-26% per-hop variation was the confound), but at a width the cell can actually allocate.
+    min_rb_size: 25
+    max_rb_size: 25
 
 # The USRP clock may introduce some CFO: configure the channel estimator to compensate for it.
 # With good clocks (e.g., external ones), the default setup may provide better performance.
