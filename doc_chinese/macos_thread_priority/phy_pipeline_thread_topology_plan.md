@@ -4803,3 +4803,56 @@ sudo -E env EXTRA_KNOBS="OCUDU_SCHED_TIME_CONSTRAINT=lower_phy_rx#0=1000/300/500
 ```
 （**不要**再加 `--expert_phy.pusch_ldpc_decoder_type` ✗ —— runner 的 `all` 已经把它定在 `auto`=CPU ✓；
 真要换解码器，必须同时写 `LEG_CG_MODULES=dft+ce+eq+grid` ✓，否则新闸门会拦下你 ✓。）
+
+### §11.107 ★★ p309（cpu_gpu 混合，n78，ping）：**中位数 1901 µs = cpu+inline 的 3.4 倍** ✗ —— 混合形状对**时延**是结构性不利 ✓✓
+
+#### (1) 腿的效力：闸门 FAIL ✗，但**中位数不受污染** ✓
+
+| 闸门读数 | 值 |
+|---|---|
+| frontier / rx_wait max | **19782 / 20280 µs** ✗ |
+| `[dl_tx_slack]` AT/BELOW 0 | **102** ✗（below1ms/1k 17.25 ✗）|
+| watchdog | late max 18417 µs ✗、`phy_series=130` ✗（suspended=2 saturated=4 ✓）|
+| 健康 | 96.7 % all / **97.5 % steady**（marginal ✗；retx 56 ✓ 与停顿造成丢授权一致 ✓）|
+
+⇒ 作为**配对/比值**腿**不可引用** ✗（与 p295/p298/p302/p306 同类的环境性停顿 ✗）。
+**但结构结论成立** ✓，理由是可证的 ✓：一次 19.8 ms 的停顿最多覆盖 ~40 个时隙 = **1074 个样本的 3.7 %** ✗，
+不可能把它 1901 µs 的中位数拉动 1.35 ms ✓；且该腿的分布**极紧** ✓（min 1283 / p50 1901 / p95 2044 ✓，
+相对普查 1.05×=99 ✓）✓。
+
+#### (2) ★ 读数：**模块级混合是三种形状里最慢的** ✗
+
+| 形状 | `[ul_pipeline]` median | 出处 |
+|---|---|---|
+| **cpu + inline（交付形状 ✓）** | **552–555 µs** ✓ | p296/p297 等 ✓ |
+| gpu 融合 lane | 1430–1464 µs ✗ | p302/p303/p304 ✓ |
+| **cpu_gpu 模块级混合（本次 ✓）** | **1901 µs** ✗✗ | p309 ✓ |
+| cpu_gpu 历史基线（2026-09-21，N1 ✓）| **2450 µs** ✗✗ | `s27-d1-base` ✓ |
+
+`[ul_ldpc_decode]` median **34 µs** ✓（解码器**在 CPU** ✓，与形状设计一致 ✓）；`[ul_thread_cpu]` rx duty **19.7 %** ✓、
+池线程各 **5.5–5.6 %** ✓。
+
+#### (3) ★★ 机理：**每跨一次模块边界就付一次设备提交等待** ✓✓
+
+* `[ul_handoff] ul_to_lane` p50 **15 µs** ✓（p99 52 ✓）⇒ **派发不是原因** ✗；
+* 多出来的 ~1.35 ms = **4 个模块边界 × ~340 µs** ✓✓ —— 与 §11.98 在我们自己的 gpu 腿上量到的
+  **"每次提交等驱动的提交窗口 300–400 µs"** ✓ 完全一致 ✓✓；
+* **历史腿给了同一答案** ✓：`s27-d1-base` 的分段里 `[ul_equalization_demod]` median **819 µs** ✗
+  （而 CPU 上同一件活儿 ~20 µs ✓）、`[ul_dft_wait]` 506.6 µs ✗、`[ul_channel_estimation]` 38.8 µs ✓
+  ⇒ 代价在**往返**，不在算力 ✓；
+* ⇒ 合并成**一条命令缓冲**的融合 lane（gpu ✓）之所以比 cpu_gpu 快，正是因为它把多次提交压成**一次** ✓✓。
+
+#### (4) 结论：**"混合"两半对时延都不利** ✗ —— cpu+inline 仍是 UL 时延的交付形状 ✓
+
+* 每个 Metal 模块 +~340 µs 的提交等待 ✗（本腿 ✓）；解码器上 Metal 再 +1.4–3.7 ms ✗（§11.106 的记录 ✓）；
+* ⇒ **cpu_gpu 模块级混合 = 两者的坏处之和** ✗ ⇒ 对 UL **时延**这条指标，它不该是交付形状 ✓；
+  它的价值只在"整条链路 offload 后的吞吐/CPU 占用" ✓（那是另一个指标 ✗）；
+* 形状排序（UL 时延 ✓）：**cpu+inline 555 ✓ < gpu 融合 lane 1430 ✗ < cpu_gpu 1901 ✗**（历史 2450 ✗）✓。
+
+#### (5) 两点环境观察 ✓
+
+1. **本腿没有复现历史 batch 3 的已知故障** ✓：`[ul_rx_pool] starved_takes=0 starved_events=0 dropped=0` ✓、
+   ring held_max=3/32 ✓ ⇒ "receive-pool dry-out + host waits for the DFT"（当时 all-four 的 0.111 % ✗）今天**没有**出现 ✓；
+2. **停顿是环境性的、与模式无关** ✓：最近 5 条腿的停顿横跨 cpu（p295 21 ms、p298 7.3 ms ✗）、gpu（p302 12.5 ms ✗）、
+   cpu_gpu（p306 10.2 s、p309 19.8 ms ✗）⇒ **不是 cpu_gpu 引发的** ✓。
+   ⇒ **飞行前先跑 `wip/preflight_quiet.sh`**（GO/NO-GO ✓）✓，并且**带停顿的腿一律作废** ✓。
