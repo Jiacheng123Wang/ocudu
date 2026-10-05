@@ -4629,8 +4629,21 @@ lower_phy_baseband_processor.cpp:1609: error: no member named 'record_thread_cpu
 | **Ubuntu probes-OFF** 扫描 | **18/18 TU** ✓ |
 | **Ubuntu `gnb` 全量构建** | **100 %、0 error** ✓（随后默认目标进入 `ctest` 阶段，为不占用户机器已停止 ✓）|
 
-已推 gitlab（`apple-silicon` ✓），Ubuntu 工作树已快进到同一提交 ✓。
+已推远端、Ubuntu 工作树已快进到同一提交 ✓（**推错远端的那次已按下节修正** ✗ —— 见 §11.103）。
 **教训**：默认配置是"没人编"的那个；**每加一个探针方法，就把它加进扫描** ✓。
+
+### §11.103 远端与分支约定（用户 2026-10-05 指出：默认远端已改为 GitHub）
+
+| 远端 | 地址 | 用途 |
+|---|---|---|
+| **`origin`** ★ **唯一规范远端** | `git@github.com:Jiacheng123Wang/ocudu.git` ✓ | 工作分支 **`apple-silicon`**（**连字符** ✓）+ **`main`** ✓ |
+| `gitlab` | `git@gitlab.com:JiachengWang/ocudu.git` ✓ | 只跟 **`dev`**（CI ✓）—— **不是**工作分支的去处 ✗ |
+
+★ **当天的教训** ✓：本工作流的提交被我推到了 **gitlab 的 `apple-silicon`** ✗（那个分支历史上存在 ✓，所以推成功了、毫无征兆 ✗），
+于是**规范远端 `origin` 落后两个提交** ✗；而 Ubuntu 机器 `git pull` 报 **"Already up to date"** ✓ —— 因为它的上游本来就是
+`origin/apple-silicon` ✓。症状是"**推了，但另一台机器拉不到**" ✗，而且两边**看起来都正常** ✗。
+处置 ✓：`git push origin apple-silicon` ✓ ⇒ 三个位置（local / origin / gitlab）现在同为 `760a46d1d4` ✓；
+**此后只推 `origin`** ✓。gitlab 上那个 `apple-silicon` 分支是被我更新过的（内容与 origin 相同 ✓）—— 留或删由用户决定 ✓，我不擅自删 ✗。
 
 ### §11.102 术语：**什么是一条 leg（"飞腿"）** —— 用户 2026-10-05 问，此前全树没有定义过 ✗
 
