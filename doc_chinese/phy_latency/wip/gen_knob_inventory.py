@@ -268,7 +268,9 @@ def main():
           "生成器**故意不把它们判成 `ON`** —— §1 是验收腿白名单，**宁可漏，不可错**。")
     print("> **飞过的腿数**来自**两个日志根**（`phy_pipeline_gpu/wip/logs` 与 `macos_thread_priority/wip/logs`，"
           "2026-10-05 起）里 `*.log.stderr` 顶部的 `knob : NAME=VALUE` 登记行 —— 这是**唯一能区分「新仪器」与「已退役」的一列**，"
-          "源码里两者长得一样；只扫一个根会把另一条工作线飞过的旋钮报成「从没飞过」✗。")
+          "源码里两者长得一样；只扫一个根会把另一条工作线飞过的旋钮报成「从没飞过」✗。"
+          "**什么叫一条 leg**（本表这一列的计量单位）：**一次空口运行 + 一份配置** = 一个 arm、一对日志、一份 `.protocol.txt`，"
+          "是本工作流的**证据原子**（要么可引用、要么作废重飞）；词源是飞行试验里的一个航段 —— 定义见 `run_leg.sh` 头部与计划文档 11.102 ✓。")
     print()
     n_leg = sum(1 for k in hits if leg_counts.get(k))
     n_doc = sum(1 for k in hits if doc_counts.get(k) and not leg_counts.get(k))
