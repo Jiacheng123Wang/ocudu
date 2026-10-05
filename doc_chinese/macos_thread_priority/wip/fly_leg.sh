@@ -49,8 +49,14 @@ else
   DIST_N=0;  REGIME=default
 fi
 
+# OCUDU_UL_LANE_GRID=1 IS PART OF THE SET (2026-10-05): until today it was not, and the [lane_grid] report
+# therefore never appeared in an air leg at all - checked on p285, zero lines - which also meant that the ABSOLUTE
+# lag and its per-second window minima (the permanent-backlog detector, dev doc 11.70) would have been silent.
+# With the paced-lane/paced-commit knobs off the grid is an OBSERVER: it notes the frontier, fits the rate and
+# reports; the only thing it can move is the paced gate, which is not in this set.
 KNOBS=(OCUDU_SCHED_VERBOSE=1 OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_UL_SLOT_GRID=1 OCUDU_UL_STABILITY_WINDOWS=8
-       OCUDU_UL_THREAD_CPU=1 OCUDU_UL_TIMING_EVENTS=16 OCUDU_UL_WATCHDOG=1 OCUDU_UL_HANDOFF_PROBE=1)
+       OCUDU_UL_THREAD_CPU=1 OCUDU_UL_TIMING_EVENTS=16 OCUDU_UL_WATCHDOG=1 OCUDU_UL_HANDOFF_PROBE=1
+       OCUDU_UL_LANE_GRID=1)
 
 echo "==================================================================================="
 echo " leg      : $LABEL   (profile=$PROFILE, load=$LOAD, regime=$REGIME, pipeline=$MODE)"

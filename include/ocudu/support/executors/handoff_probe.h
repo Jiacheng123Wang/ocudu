@@ -63,6 +63,25 @@ uint64_t handoff_probe_now_ns();
 /// \param[in] pushed_ns The value handoff_probe_now_ns() returned in the producer (0 disables the sample).
 void handoff_probe_note(handoff_site site, uint64_t pushed_ns);
 
+/// \brief The calling THREAD's CPU time (user + system) in nanoseconds, or 0 when the probe is disabled.
+///
+/// WHY IT EXISTS (dev doc 11.69). A thread declaration - Mach's `period/computation/constraint`, or any
+/// reservation - has to be sized from what ONE ACTIVATION burns, and nothing in this workflow measured that:
+/// `[ul_thread_cpu]` files CPU per WINDOW, a window aggregates several activations, and its `max` is a backlog
+/// reading rather than a compute reading (that report says so itself). Read this at the entry of the work and
+/// hand the value to handoff_probe_note_cpu() at its exit: the difference is that activation's own CPU, measured
+/// on the thread that actually ran it.
+uint64_t handoff_probe_thread_cpu_ns();
+
+/// \brief Books the CPU one activation burned, which began at \p cpu_begin_ns.
+///
+/// Pairs with handoff_probe_thread_cpu_ns(). A 0 begin value disables the sample, so a caller can capture it once
+/// and leave the pair in place whether the probe is on or off.
+///
+/// \param[in] site         Which boundary this activation belongs to.
+/// \param[in] cpu_begin_ns The value handoff_probe_thread_cpu_ns() returned at the activation's entry.
+void handoff_probe_note_cpu(handoff_site site, uint64_t cpu_begin_ns);
+
 /// \brief Prints the hand-off readings (count, percentiles, max, and the coarse histogram).
 ///
 /// Printed nothing when no sample was taken. Register it at the call site with register_exit_report() so the readings

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu/support/executors/handoff_probe.h"
+#include "ocudu/support/scheduling/thread_sched_snapshot.h" // this_thread_cpu_ns(): Mach on macOS, RUSAGE_THREAD on Linux
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -68,6 +69,31 @@ struct site_readings {
 site_readings& readings_of(handoff_site site)
 {
   static site_readings sites[static_cast<unsigned>(handoff_site::nof_sites)];
+  return sites[static_cast<unsigned>(site)];
+}
+
+/// The CPU one ACTIVATION burned, per site (dev doc 11.69). Same shape as the latency histogram, because the
+/// question has the same form: what does one of these cost, in the body and in the tail. The number a
+/// `computation` declaration is written from is the p99.9 of THIS, not the mean of a window that aggregated
+/// several activations.
+struct site_cpu_readings {
+  std::atomic<uint64_t> buckets[nof_buckets];
+  std::atomic<uint64_t> nof_samples{0};
+  std::atomic<uint64_t> nof_overflow{0};
+  std::atomic<uint64_t> sum_ns{0};
+  std::atomic<uint64_t> max_ns{0};
+
+  site_cpu_readings()
+  {
+    for (auto& b : buckets) {
+      b.store(0, std::memory_order_relaxed);
+    }
+  }
+};
+
+site_cpu_readings& cpu_readings_of(handoff_site site)
+{
+  static site_cpu_readings sites[static_cast<unsigned>(handoff_site::nof_sites)];
   return sites[static_cast<unsigned>(site)];
 }
 
@@ -151,6 +177,41 @@ void report_site(handoff_site site)
   std::fprintf(stderr, " (bins of %uus, from 0)\n", bin_width_us);
 }
 
+/// The per-activation CPU reading (see handoff_probe_note_cpu). Printed next to the latency line for the same
+/// site, because they answer the two questions a declaration needs: how long the hand-off took, and how much CPU
+/// the work it started actually burned.
+void report_cpu_site(handoff_site site)
+{
+  const site_cpu_readings& r   = cpu_readings_of(site);
+  const uint64_t           nof = r.nof_samples.load(std::memory_order_relaxed);
+  if (nof == 0) {
+    return;
+  }
+  const auto pct_us = [&r](uint64_t n, double q) -> uint64_t {
+    const uint64_t target = static_cast<uint64_t>(q * static_cast<double>(n) + 0.5);
+    uint64_t       seen   = 0;
+    for (unsigned i = 0; i != nof_buckets; ++i) {
+      seen += r.buckets[i].load(std::memory_order_relaxed);
+      if (seen >= target) {
+        return static_cast<uint64_t>(i) + 1;
+      }
+    }
+    return nof_buckets;
+  };
+  std::fprintf(stderr,
+               "[ul_handoff_cpu] %s: n=%llu p50=%lluus p90=%lluus p99=%lluus p99.9=%lluus max=%lluus mean=%.1fus "
+               "over4ms=%llu  <- CPU of ONE activation; a `computation` declaration is written from p99.9\n",
+               site_name(site),
+               static_cast<unsigned long long>(nof),
+               static_cast<unsigned long long>(pct_us(nof, 0.50)),
+               static_cast<unsigned long long>(pct_us(nof, 0.90)),
+               static_cast<unsigned long long>(pct_us(nof, 0.99)),
+               static_cast<unsigned long long>(pct_us(nof, 0.999)),
+               static_cast<unsigned long long>(r.max_ns.load(std::memory_order_relaxed) / bucket_ns),
+               static_cast<double>(r.sum_ns.load(std::memory_order_relaxed)) / static_cast<double>(nof) / 1000.0,
+               static_cast<unsigned long long>(r.nof_overflow.load(std::memory_order_relaxed)));
+}
+
 } // namespace
 
 bool ocudu::handoff_probe_enabled()
@@ -185,9 +246,42 @@ void ocudu::handoff_probe_note(handoff_site site, uint64_t pushed_ns)
   }
 }
 
+uint64_t ocudu::handoff_probe_thread_cpu_ns()
+{
+  // The portable reader is this workflow's own (Mach THREAD_BASIC_INFO on macOS, RUSAGE_THREAD on Linux, behind
+  // one interface - see thread_sched_snapshot.h). Reusing it is what keeps this file free of platform code.
+  return probe_enabled() ? static_cast<uint64_t>(this_thread_cpu_ns()) : 0;
+}
+
+void ocudu::handoff_probe_note_cpu(handoff_site site, uint64_t cpu_begin_ns)
+{
+  if (cpu_begin_ns == 0) {
+    return;
+  }
+  const uint64_t now_cpu_ns = static_cast<uint64_t>(this_thread_cpu_ns());
+  if (now_cpu_ns < cpu_begin_ns) {
+    return; // A thread CPU counter that went backwards is not a sample this histogram can carry.
+  }
+  const uint64_t     delta = now_cpu_ns - cpu_begin_ns;
+  site_cpu_readings& r     = cpu_readings_of(site);
+
+  r.nof_samples.fetch_add(1, std::memory_order_relaxed);
+  r.sum_ns.fetch_add(delta, std::memory_order_relaxed);
+  uint64_t prev_max = r.max_ns.load(std::memory_order_relaxed);
+  while (delta > prev_max and not r.max_ns.compare_exchange_weak(prev_max, delta, std::memory_order_relaxed)) {
+  }
+  const uint64_t idx = delta / bucket_ns;
+  if (idx < nof_buckets) {
+    r.buckets[idx].fetch_add(1, std::memory_order_relaxed);
+  } else {
+    r.nof_overflow.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
 void ocudu::handoff_probe_report()
 {
   for (unsigned i = 0; i != static_cast<unsigned>(handoff_site::nof_sites); ++i) {
     report_site(static_cast<handoff_site>(i));
+    report_cpu_site(static_cast<handoff_site>(i));
   }
 }

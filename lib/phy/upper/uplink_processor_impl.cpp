@@ -7,6 +7,7 @@
 #include "ocudu/phy/phy_pipeline_ul_slot_plan.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/adt/scope_exit.h"
+#include "ocudu/support/executors/handoff_probe.h"
 #include "ocudu/instrumentation/traces/du_traces.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/phy/support/prach_buffer_context.h"
@@ -334,8 +335,23 @@ void uplink_processor_impl::process_pusch(const uplink_pdu_slot_repository::pusc
   }
 
   // Try to enqueue asynchronous processing.
-  bool success = task_executors.pusch_executor.defer([this, data, rm_buffer2 = std::move(rm_buffer), &pdu]() mutable {
-    // Select and configure notifier adaptor.
+  //
+  // INSTRUMENTED (dev doc 11.69): this `defer` is the grid -> lane hand-off, and the phase it starts is the
+  // largest single item of the whole uplink pipeline - 680 us of a 1313 us `[ul_pipeline]` on the air legs, which
+  // the metal burst's own comment identifies as the host standing still in waitUntilCompleted. The probe books
+  // two things here, both no-ops when OCUDU_UL_HANDOFF_PROBE is unset: the interval from this push to the
+  // consumer's first instruction, and the CPU the activation burns ON THE POOL THREAD - the number a
+  // `computation` declaration is written from, which [ul_thread_cpu] cannot give (its windows aggregate several
+  // activations and its `max` is a backlog reading).
+  const uint64_t handoff_pushed_ns = handoff_probe_now_ns();
+  bool           success =
+      task_executors.pusch_executor.defer([this, data, rm_buffer2 = std::move(rm_buffer), &pdu, handoff_pushed_ns]() mutable {
+        handoff_probe_note(handoff_site::ul_to_lane, handoff_pushed_ns);
+        const uint64_t cpu_begin = handoff_probe_thread_cpu_ns();
+        auto           cpu_note  = make_scope_exit([cpu_begin]() {
+          handoff_probe_note_cpu(handoff_site::ul_to_lane, cpu_begin);
+        });
+        // Select and configure notifier adaptor.
     // Assume that count_pusch_adaptors will not exceed MAX_PUSCH_PDUS_PER_SLOT.
     unsigned                         notifier_adaptor_id = count_pusch_adaptors.fetch_add(1, std::memory_order_acq_rel);
     pusch_processor_result_notifier& processor_notifier  = pusch_adaptors[notifier_adaptor_id].configure(
