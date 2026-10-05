@@ -3446,6 +3446,30 @@ public:
     return *instance;
   }
   void record_start(uint64_t /*slot*/) {}
+  /// \brief The per-thread CPU window (dev doc 10.31), a LOAD-BEARING stub rather than a decorative one.
+  ///
+  /// The call site in the lower PHY's uplink path is NOT wrapped in `#if defined(OCUDU_FLOW_PROBES)`: it files one
+  /// boundary per slot for the thread a declaration has to be written for, and it has to compile in BOTH arms. On
+  /// 2026-10-05 the arm that broke was the one nobody had compiled since the method was added - `ENABLE_FLOW_PROBES`
+  /// is **OFF by default** (CMakeLists.txt), while every macOS leg of this workstream is flown with it ON, so the
+  /// Ubuntu/default build failed on `lower_phy_baseband_processor.cpp:1609: no member named
+  /// 'record_thread_cpu_boundary'`. Reproduced locally in 0.5 s by replaying that one TU with the flag removed from
+  /// its own flags.make (the recipe is worth keeping: the probes-OFF arm is the default build and needs its own
+  /// compile of every TU a probe was added to).
+  ///
+  /// THE RULE, stated where the next addition will read it: any probe method CALLED FROM CODE THAT IS NOT INSIDE a
+  /// probe guard must exist in BOTH arms with the same signature and defaults. Methods whose call sites ARE guarded
+  /// may omit the stub (they are compiled out with their callers) - which is why this arm is not a mirror of the
+  /// real one.
+  void record_thread_cpu_boundary(uint64_t /*slot*/) {}
+  /// The two slot-grid landmarks (P6.1-SLOT). Same rule as the CPU window above, and for the same reason: the real
+  /// arm declares them with an in-body `#else` fallback - i.e. they were WRITTEN to be callable whether or not the
+  /// probes are compiled in - and the lane probe files the COMMIT one from unguarded code. Missing here, they fail
+  /// a default (probes-OFF) build of the Metal lane probe; the probes-OFF syntax sweep
+  /// (doc_chinese/macos_thread_priority/wip/probes_off_syntax_check.sh) is what found them, minutes after the
+  /// header's own `record_thread_cpu_boundary` gap had broken the Ubuntu build.
+  void record_slot_grid(uint64_t /*slot*/, int64_t /*end_ns*/) {}
+  void record_commit_grid(uint64_t /*slot*/, int64_t /*end_ns*/) {}
   void record_ldpc_start(uint64_t /*slot*/) {}
   void record_t2f_end(uint64_t /*slot*/) {}
   void record_ce_end(uint64_t /*slot*/) {}
