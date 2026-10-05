@@ -300,6 +300,15 @@ public:
                    "own pool, so the codeblocks of a transport block still overlap; the upper PHY keeps {} concurrent "
                    "instance(s)\n",
                    inline_concurrency);
+        // WHERE THIS KNOB IS NOT THE DELIVERY SHAPE. It is mode-agnostic, and in the FUSED LANE the work it moves
+        // onto the calling thread includes the Metal submission and its wait: measured in gpu mode, the host stands
+        // ~680us in `[cb waitUntilCompleted]` per hop (dev doc 11.94), which does not fit a 500us slot and would
+        // leave the receive thread permanently behind. There the POOL WORKER that runs the lane is the thread to
+        // declare, and this knob is a DIAGNOSTIC arm (it measures what the lane costs on the front end's thread).
+        // Said out loud rather than refused: a leg may want exactly that reading, and a leg that states an arm it
+        // did not get is worse than one that fails loudly - but a silent one would be read as the delivery shape.
+        fmt::print("  NOTE: in the fused-lane (gpu) pipeline this moves the Metal submit+wait onto the calling "
+                   "thread too - a DIAGNOSTIC arm there, not the shape to declare\n");
       }
       // ---- dev doc 11.85: the LDPC DECODE inline as well, so the whole chain IQ -> CRC OK is ONE thread ---------
       //
