@@ -2459,3 +2459,40 @@ UL 线程：  pop_blocking(task) → try_pop 失败 → sleep_wait_policy::wait(
    * 但 SDR 这条路径**永远传 `true`**（`puxch_processor_impl.cpp:243,273` 两处硬编码）⇒ 该通道在本路径上**从未被触发**；
    * 丢块的真实后果是：`rx_fill` 把丢失样本的位置**跳过**，slot 里留下**一个洞（陈旧样本）**，其余样本位置正确
      （`lower_phy_baseband_processor.cpp:1568-1575`）—— **洞被当作有效样本继续处理**，只有腿级的连续性检查（gap）事后判 void 才知道 ✗。
+
+### §11.51 ★ 更正与撤回：FRONTIER 滞后**不是**绝对交付滞后，它的负值是"相对锚点"的残差
+
+用户质疑（2026-10-05）："−544 µs 从逻辑上讲不通，主机不可能提前于该块在空中出现的时间拿到它。" **质疑成立，§11.48/§11.50 借用的那个数必须撤回重测。** 读码结论：
+
+**`[lane_grid]` FRONTIER 滞后 = 相对"第一个 frontier"的残差，不是"主机 vs 空中"的绝对差：**
+
+```
+predicted = anchor_host_ns + (distance − anchor_slot) × 500 µs + rate_correction
+lag_us    = (host_ns − predicted) / 1000                      # macos_compat.cpp:1227-1232
+anchor_host_ns 在第一个 frontier 上一次性锁定（anchor_slot < 0 ⇒ ARM once，:1146-1152）
+偏移**故意不随到达走**，只有 rate（host-vs-radio ppm）被修正（:1162-1170）；只有位移 >1 s 才重锚（:1175-1180）
+```
+
+⇒ **负值 = "这一块比第一个观测来得更不晚"**，与"提前于空中"无关 ✓ 自洽。
+**`radio_abs_ns`（电台绝对时间）只被用于 rate 估计（:1200-1219），从未参与 lag 计算** ✗ —— 报告里那句
+"radio -> host readable" 与 "REPORTED/not reported: lag is relative" 的标签指的是 **rate** 的来源，不是 lag 的基准，
+我此前按字面读成了绝对值（错误来源）。
+
+**锚点污染有独立证据**：起播第一次 `receive()` 实测跨度 **100 629 µs**，我们自己在 `[ul_rx_wait]` 里把它作为 `startup` 排除
+（"the first receive() of the run spans the radio's stream start"）。零点定在**这个**观测上 ⇒
+稳态 p50 = −32 µs 恰恰说明**锚点比典型值多背了 ~32 µs 的滞后** ✗。
+
+**后果（必须降级的三处）**：
+1. **上游交付滞后的绝对值目前没有被测量** ✗。−544/+1469 µs 只是"围绕一个受污染零点的散布"；常数项未知，
+   而 `lead` 要的正是绝对值（常数项本应由 `lead` 吸收 —— 常数错了，`lead` 就错）。
+2. **rate 估计也继承了同一个污染对**（`abs_first/host_first` 就是起播那一次）：首样本晚 L ⇒ 隐含 rate 偏差 ≈ −L/基线。
+   L≈32 µs、基线 60 s ⇒ **0.53 ppm**，与主机晶体的 ~2 ppm 同量级 ✗（clamp ±200 ppm 的存在正是因为起播污染可以更大）。
+3. §11.48 里"上游 −544…+1469 µs 只能由 `lead` 吸收"的**方向仍成立**，但**量级作废**，需重测后才能给 `lead` 定尺寸。
+
+**修法（不需要新状态，换估计量即可，且树里已有先例）**：
+* 进程已存 `(abs_first_ns, host_first_ns)` 对 ⇒ `offset = host − abs` 可算；**长窗最小值** `min(host_ns − radio_abs_ns − 该块空中时长)`
+  是最少被队列污染的估计（最小值天然剔除排队/停顿）⇒ 用它 (a) 定零点/重锚，(b) 报告**绝对**滞后的 p50/p99/max（`lead` 的输入）与 min（时钟偏置）。
+* **先例**：下行方向的 `[dl_tx_slack]` 早就用"差分"做到无纪元依赖的绝对迟到量
+  （`margin = (due_ts − rx_ts)/srate − (host_now − rx_host_ns)`，见 `lower_phy_baseband_processor.cpp:1639-1664` 及其块长修正）
+  ⇒ 同一个技巧搬到接收侧即可，**不需要把主机时钟与 UTC 对齐**。
+* 这与用户此前指出的"长窗最小滞后重锚"是同一件事；此前记了未做 ✗ —— 现在它是**必需项**（因为 `lead` 依赖它）。
