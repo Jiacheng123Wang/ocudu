@@ -30,6 +30,7 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIRS=("$HERE/logs" "$HERE/../../phy_pipeline_gpu/wip/logs")
 LATE_BOUND=${LATE_BOUND:-5}   # [dl_tx_slack] AT/BELOW 0 tolerated before a leg is called stalled
+STALL_BOUND=${STALL_BOUND:-5000}  # frontier/rx_wait max (us) that separates a stalled leg from a readable one
 
 resolve() {
   local a="$1"
@@ -47,7 +48,7 @@ HEALTH="$(bash "$HERE/ul_health.sh" "$@" 2>&1)"
 health_of() { echo "$HEALTH" | awk -v l="$1" '$1==l {print $NF}'; }
 
 fail=0
-echo "STALL GATE + DL CRITERION   (late bound: AT/BELOW 0 <= $LATE_BOUND)"
+echo "STALL GATE + DL CRITERION   (late bound: AT/BELOW 0 <= $LATE_BOUND; stall bound: frontier/rx_wait < $STALL_BOUND us)"
 printf '%-11s %-6s %-9s %-11s %-11s %-9s %-9s %-9s %-9s %s\n' \
   leg rttc frontier rx_wait "below1ms/1k" "below500" "AT/BELOW0" "wd late" health verdict
 for leg in "$@"; do
@@ -65,8 +66,16 @@ for leg in "$@"; do
   rate=$(awk -v a="${b1:-0}" -v b="${tx:-0}" 'BEGIN { printf (b > 0) ? "%.2f" : "?", (b > 0) ? 1000.0 * a / b : 0 }')
   h="$(health_of "$leg")"
   verdict="PASS"
+  # TWO CONDITIONS, because either one alone lets a stalled leg through - measured on 2026-10-05:
+  #  * the DL late count alone passed p302 (4 late) while it carried a 12.5 ms delivery stall, and
+  #  * the maxima alone would fail p296/p297 (2900/1108 us), which are perfectly readable
+  #    (one long receive wait only damages a slot that carries a judged transport block).
+  # The 5 ms bound separates every leg flown so far: stalled = p295 (21375), p298 (7332), p302 (12495);
+  # readable = the rest, all at or below 2900 us.
   if [ -z "$late" ]; then verdict="NO DL READING"; fail=1
   elif [ "$late" -gt "$LATE_BOUND" ]; then verdict="STALL - re-fly"; fail=1
+  elif [ -n "$frontier" ] && [ "$frontier" -ge "$STALL_BOUND" ]; then verdict="STALL(frontier) - re-fly"; fail=1
+  elif [ -n "$rxwait" ] && [ "${rxwait%.*}" -ge "$STALL_BOUND" ]; then verdict="STALL(rx_wait) - re-fly"; fail=1
   elif [ "$h" != "CLEAN" ]; then verdict="HEALTH ($h)"; fail=1
   fi
   printf '%-11s %-6s %-9s %-11s %-11s %-8s %-9s %-9s %-9s %s\n' \
