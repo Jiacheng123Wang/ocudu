@@ -23,7 +23,7 @@
 # the sender has to be on the far side of the radio link. That is the one step this script cannot do for you -
 # hence the cue. Run the IDENTICAL iperf3 command in both legs:
 #
-#     iperf3 -c <server> -t 180 -P 4
+#     iperf3 -R -b 40M -P 4 -t 180 -c 10.45.0.21
 #
 # USAGE
 #   terminal 1:  sudo -E LEG_CONFIG=... bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu <label> ...
@@ -89,11 +89,32 @@ CUE=$(date +%s)
 STAMP=$(date '+%Y-%m-%d %H:%M:%S')
 echo
 echo "  ============================================================"
-echo "   TRAFFIC NOW  ($STAMP)   ->   iperf3 -c <server> -t ${TRAFFIC_SECS} -P 4"
+echo "   TRAFFIC NOW  ($STAMP)   ->   iperf3 -R -b 40M -P 4 -t ${TRAFFIC_SECS} -c <server>"
 echo "  ============================================================"
 echo
 
 sleep "$DIST_DELAY"
+# DIST_N=0 is the QUIET arm of a pair: no disturbance, but the cue and the audit file still happen, so a leg
+# flown without load is still a leg whose protocol is on disk (the p272/p273 pair had no audit at all, and the
+# missing disturbance had to be inferred from the readings afterwards - which worked, but only in hindsight).
+if [ "$DIST_N" -eq 0 ]; then
+  D0=$(date +%s); D1=$D0
+  MID=$(top -l 1 -n 0 2>/dev/null | grep '^CPU usage' | tail -1)
+  echo "[$(date '+%H:%M:%S')] quiet arm: no disturbance (DIST_N=0); mid-arm CPU: ${MID:-<none>}"
+  {
+    echo "leg            : $LABEL"
+    echo "leg log        : $LEG"
+    echo "traffic cue    : $STAMP (epoch $CUE), i.e. leg start + ${PRE}s"
+    echo "traffic        : iperf3 -R -b 40M -P 4 -t ${TRAFFIC_SECS} -c <server>   (started by the operator at the cue)"
+    echo "disturbance    : NONE (quiet arm, DIST_N=0)"
+    echo "mid-arm CPU    : ${MID:-<none>}"
+    echo "leg stop       : Ctrl-C (SIGINT) - SIGTERM skips the shutdown report block (see run_leg.sh)"
+  } >"$AUDIT"
+  echo
+  echo "[$(date '+%H:%M:%S')] protocol written to: $AUDIT"
+  echo "Let iperf3 run out (${TRAFFIC_SECS}s from the cue), then stop the leg with Ctrl-C."
+  exit 0
+fi
 D0=$(date +%s)
 echo "[$(date '+%H:%M:%S')] starting disturbance: $DIST_N burners for ${DIST_SECS}s (no --watch: fixed N by construction)"
 bash "$HERE/disturbance2.sh" start "$DIST_N" "$DIST_SECS" >"$LOGDIR/$(basename "$LEG" .log.stderr).disturbance.log" 2>&1 &
@@ -117,7 +138,7 @@ echo "[$(date '+%H:%M:%S')] mid-arm: ${MID:-<no top reading>}"
   echo "leg            : $LABEL"
   echo "leg log        : $LEG"
   echo "traffic cue    : $STAMP (epoch $CUE), i.e. leg start + ${PRE}s"
-  echo "traffic        : iperf3 -c <server> -t ${TRAFFIC_SECS} -P 4   (started by the operator at the cue)"
+  echo "traffic        : iperf3 -R -b 40M -P 4 -t ${TRAFFIC_SECS} -c <server>   (started by the operator at the cue)"
   echo "disturbance    : disturbance2.sh start $DIST_N $DIST_SECS   (no --watch)"
   echo "disturbance at : traffic cue + ${DIST_DELAY}s, ran $((D1 - D0))s (epoch $D0..$D1)"
   echo "mid-arm CPU    : ${MID:-<none>}"
