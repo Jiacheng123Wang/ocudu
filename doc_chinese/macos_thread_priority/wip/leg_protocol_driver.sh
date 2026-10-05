@@ -66,7 +66,7 @@ find_leg() {
 
 echo "leg_protocol_driver: waiting for leg '$LABEL' to appear..."
 LEG=""
-for _ in $(seq 1 120); do
+for _ in $(seq 1 "${LEG_WAIT:-120}"); do
   if LEG=$(find_leg); then
     # The provenance block is the runner's FIRST write, so seeing it means the leg has started - and seeing
     # `[leg] regime=` means the runner got as far as printing it, not merely creating the file.
@@ -76,7 +76,7 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 if [ -z "$LEG" ]; then
-  echo "REFUSING: no leg '$LABEL' started within 120 s (looked for gnb_gpu_${LABEL}_*.log.stderr)." >&2
+  echo "REFUSING: no leg '$LABEL' started within ${LEG_WAIT:-120} s (looked for gnb_gpu_${LABEL}_*.log.stderr)." >&2
   exit 2
 fi
 LOGDIR="$(dirname "$LEG")"
