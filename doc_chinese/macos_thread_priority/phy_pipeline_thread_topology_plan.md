@@ -3861,3 +3861,41 @@ period 只管**预算如何记账** ✓。
 
 > **在 macOS 上：队列顺序有效 ✓、线程优先级基本无效 ✗、时间约束是唯一的预留手段 ✓✓、
 > 而池的轮询周期决定派发延迟上界 ✗✓。**
+
+### §11.83 查证（用户提问）：主池 50 µs 轮询是 **upstream 原有** ✓✓，不是 macOS 移植新增 ✗ —— 而且**今天就能用命令行改** ✓
+
+#### (1) 出处：upstream，Linux 上完全一样
+
+```
+33d3fccf79 | 2025-07-31 | frankist | gnb: add sleep backoff parameter to main pool
+```
+* 作者 **frankist**（upstream 作者 ✓，不是本移植 ✓），字段注释也是 upstream 原文
+  （"Main thread pool back-off period, in microseconds, when the task queue is empty." ✓，`worker_manager_config.h:116` ✓）；
+* 整条链路**全是 upstream 代码** ✓：`worker_pool.sleep_time`（`task_execution_manager.h:56` ✓）
+  → `base_priority_task_queue(queue_params, wait_sleep_time)`（`task_worker_pool.cpp:80` ✓）
+  → `priority_task_queue` 的 policy ✓ → **`sleep_wait_policy::wait() { std::this_thread::sleep_for(sleep_time); }`**
+  （`concurrent_queue_helper.h:58` ✓✓）⇒ **Linux/Ubuntu 跑的是同一份逻辑、同一个默认值 50 µs** ✓✓。
+
+**本移植新增的是别的东西** ✓：QoS 折叠（`darwin_thread_scheduling.cpp` ✓）、兼容层（`macos_compat.cpp` ✓）、
+以及 **只作用于 lower-PHY 线程**的 `OCUDU_PHY_BLOCKING_WAIT` ✓（默认关 ✓）—— **主池从未被本移植改动过** ✗✓。
+
+#### (2) ✗ 但"效果"在两平台上不同（这才是 macOS 的问题所在）
+
+同一份代码，在这台机器上实测：`sleep_for(10 µs)` **实际睡成 ~15.6 µs**（1.6× ✓）；
+而无 TC 的普通线程**被唤醒**延迟 p50 **103–108 µs** ✗ ⇒ **主池轮询的有效周期比请求的 50 µs 更大、也更不可预测** ✓✓。
+⇒ 结论：**不是移植引入的回归 ✗，但在 macOS 上代价更高** ✓。
+
+#### (3) ★ 两个旋钮今天就能用（无需改代码，已用 `--dryrun` 实证 ✓✓）
+
+| 选项 | 作用 | 默认 |
+|---|---|---|
+| `--expert_execution.threads.main_pool.backoff_period=<µs>` ✓ | 主池轮询退避周期 | 50 µs |
+| `--expert_execution.threads.main_pool.nof_threads=<N>` ✓ | **主池线程数**（= §11.81 的"加池子" ✓）| 自动（`avail_cpus-3` ⇒ 本机 5 ✓）|
+
+⚠ `backoff_period=0` 会变成**自旋** ✗（烧满一个核 ✓ —— 我们在 CV 那轮已经量过 ✓）；
+要"彻底去掉轮询"应当做成 **CV 等待** ✓（同 `OCUDU_PHY_BLOCKING_WAIT` 的思路 ✓）。
+
+#### (4) ★ 一条重要的定性判断
+
+**"去掉轮询"不是移植的权宜之计，而是对两个平台都成立的改进** ✓✓（upstream 也轮询 ✓）
+⇒ 它是**可以回馈 upstream 的改动** ✓，与 QoS/兼容层那些 macOS 专属部分性质不同 ✓。
