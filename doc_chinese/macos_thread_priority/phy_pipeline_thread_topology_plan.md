@@ -2423,3 +2423,39 @@ UL 线程：  pop_blocking(task) → try_pop 失败 → sleep_wait_policy::wait(
   3. `[ul_stall]` 站点表里 `exec.park` 的**次数与时长形状**（轮询=许多短 park，条件变量=少量长 park）✓ 免费旁证。
 * 判据（延续用户的规则）：**max 要降、min 不许升**；若 `t2f` 中位下降但 max 不变，说明省下的是"体"，
   尾仍归环境 —— 这正是本轮预期的结果，不算失败。
+
+### §11.50 事实核定：IQ 样本流是"速率锁定 + 带时间戳 + 迟到即丢"的信道，**不存在"积压多个 slot 一起返回"**
+
+用户的问题（2026-10-05）：若上游交付不确定性高达 ~2000 µs，rx 以 500 µs 周期取数，最坏会"扑空 4 次"，
+那么第 5 次拿到的是**一个 slot** 还是**积压的 4 个 slot**？
+
+**答：都不会 —— 一次 `receive()` 只返回"调用者请求的那些样本"，积压只会以连续的多次调用被排空，每块带自己的时间戳。**
+而且是"请求驱动 + 阻塞"，不存在"扑空"这个动作。逐条证据：
+
+| 事实 | 出处 |
+|---|---|
+| **请求长度由调用者的 buffer 决定**："The data buffer provides the number of samples to receive through `get_nof_samples`" | `include/ocudu/gateways/baseband/baseband_gateway_receiver.h:62-68` |
+| UHD 侧 `while (rxd_samples_total < nsamples) recv(...)`：跨 USB 包**凑齐**请求的数量；时间戳取**首样本** | `lib/radio/uhd/radio_uhd_rx_stream.cpp:110-136` |
+| 默认**每次请求 1 个 OFDM 符号（822 样本 = 35.7 µs）**，14 次填进同一个 slot buffer（`rx_fill`/`rx_offset`）⇒ **slot 是主机拼出来的** | `lower_phy_baseband_processor.cpp:1466-1533`；代码注释 `:1649` |
+| 代码自称 **28k receives/s**（= 2000 slot/s × 14） | `lower_phy_baseband_processor.cpp:1631` |
+| 接收是**阻塞**调用（`radio.rx` 站点包着它），节奏由电台样本时钟决定 | `radio_uhd_rx_stream.cpp:114-118` |
+| 环满 ⇒ **电台丢样本**：`ERROR_CODE_OVERFLOW` ⇒ "the receive ring filled and the radio DROPPED samples … the event the lower PHY's continuity check sees as a gap"；且**11 条腿里 overflow 计数与 gap 计数逐事件相等** | `radio_uhd_rx_stream.cpp:164-168`；`baseband_gateway_receiver.h:27-37` |
+| 相位**全部来自样本时间戳**（`last_rx_timestamp` + `locate_symbols` + `ts / nof_samples_per_slot`）⇒ 迟到的块仍被**正确放置**，只是晚了 | `lower_phy_baseband_processor.cpp:1481-1533`、`:1595-1601`、`:1679-1691` |
+| "滞后"读数的真实含义 = **主机拿到该块首样本的时刻 − 该样本的空中绝对时刻**（FRONTIER 投递滞后 p50 −32 µs、max +1469 µs）| `lower_phy_baseband_processor.cpp:1665-1691`；`metadata::absolute_ns` 定义于 `baseband_gateway_receiver.h:43-57` |
+
+**推论（架构级，必须写进计划）**：
+
+1. **rx 不能被"周期化"**：若让 rx 每 500 µs 醒来去要一个 slot，请求就会在样本已到期之后才发出 ——
+   UHD 对这种情形的分类正是 `ERROR_CODE_LATE_COMMAND`（枚举注释原文："the request was issued after its samples were due"）
+   ⇒ **把 rx 做成 slot 周期线程，等于把调度抖动变成"迟到命令"** ✗✗。rx 的正确形状是"**永远有一个请求在路上**"（请求/事件驱动），
+   它的真实节奏是**符号**（35.7 µs），不是 slot。
+2. **上游不确定性的量级 ~1500 µs 是"主机落后空中多少"，不是"数据缺了多少"**。落后时接下来的 `receive` **立刻返回**（数据已在环里），
+   主机**全速回放追赶**；只有超过环深才变成 overflow/gap（丢样本，协议判 void）。
+3. **环深没有被我们固定**：`recv_frame_size=8000` 只对网络型 USRP 生效（`radio_uhd_device.h:127-138`），B200 走 UHD/USB 默认
+   ⇒ 实测"滞后到 +1469 µs 仍无丢样本"说明环深 ≳1.5 ms。**这是一个应当显式钉住、而不是继承默认值的架构参数**（决策点）。
+4. ★ **今天运行时没有"迟到即丢"的兜底，这条路径上有一条空白的通道**：
+   * 上层 PHY **有**该机制：`handle_rx_symbol(i, is_valid=false)` ⇒ "discard all PDUs for the rest of the slot"
+     + `notify_discard_pusch/pucch`（`lib/phy/upper/uplink_processor_impl.cpp:146-170`，日志 "the resource grid was not produced in time"）；
+   * 但 SDR 这条路径**永远传 `true`**（`puxch_processor_impl.cpp:243,273` 两处硬编码）⇒ 该通道在本路径上**从未被触发**；
+   * 丢块的真实后果是：`rx_fill` 把丢失样本的位置**跳过**，slot 里留下**一个洞（陈旧样本）**，其余样本位置正确
+     （`lower_phy_baseband_processor.cpp:1568-1575`）—— **洞被当作有效样本继续处理**，只有腿级的连续性检查（gap）事后判 void 才知道 ✗。
