@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+# SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+
+
+# This example configuration outlines how to configure the OCUDU gNB to create a single TDD cell
+# transmitting in band 78, with 20 MHz bandwidth and 30 kHz sub-carrier-spacing. A USRP B200 is configured
+# as the RF frontend using split 8. Note in this example an external clock source is not used, so the sync
+# is not defined and the default is used.
+
+cu_cp:
+  amf:
+    addrs: 192.168.100.153
+    port: 38412
+    bind_addrs: 192.168.100.125
+    supported_tracking_areas:
+      - tac: 7
+        plmn_list:
+          - plmn: "00101"
+            tai_slice_support_list:
+              - sst: 1
+
+ru_sdr:
+  device_driver: uhd
+  # num_recv_frames is the radio's RECEIVE RING DEPTH, i.e. how long a stall the transport may take before the
+  # B200 drops samples. Measured A/B (dev doc 6.53), same binary, this line the only difference:
+  #   64 frames  -> 5 discontinuities (max 35.3 ms of lost uplink samples), pool holds 11/16, starved_events 0
+  #   256 frames -> 0 discontinuities (a 19.5 ms backlog absorbed),        pool holds 16/16, starved_events 2
+  # So the ring converts a LOST SAMPLE into a DELIVERED BACKLOG; the backlog arrives as a burst, which is why
+  # the pool it feeds was re-sized with it (lower_phy_factory: peak 16 + rx path 2 + margin 3 -> 32, dev doc
+  # 6.53). What it does NOT do is remove the stall: the stalls are inside receive() itself (dev doc 6.53 (2),
+  # the `[ul_rx_timing] overflow_ctx` of every overflow), i.e. the host/USB path - the root cause still open.
+  #
+  # 512 frames (dev doc 6.56, ruling B): the margin was sitting ON the worst stall ever measured. At 8200
+  # bytes/frame and sc12 (3 bytes/sample) one frame is 2733 samples, so the ring absorbs
+  #   64 frames = 7.6 ms   256 = 30.4 ms   512 = 60.7 ms
+  # while the measured worst drifts are 33.9 ms (p34, which lost 35.3 ms of samples at 64 frames) and
+  # 28.1 ms (bench, CPU pinned). 256 therefore covers the observed range with ~0 headroom - one 34 ms stall
+  # eats the whole ring - and 512 doubles it. Measured healthy on the bench with RX and TX streaming at once
+  # (wip/uhd_rx_health: 100% duty, 0 radio errors); 1024 is healthy too, for whoever wants 121 ms.
+  # num_send_frames stays 64 ON PURPOSE: the transmit ring is NOT the lever for the RF underflows. They occur
+  # with the hand-over ~1.5 ms EARLY and the host's send ring FULL (p35: transmit() blocked >1 ms 447 times,
+  # `AT/BELOW 0` only 23, against 649 underflows) - i.e. the samples are queued and not moving over the wire,
+  # which no ring depth can fix, and the bench cannot reproduce it either (0 underflows at 64 or 512 frames,
+  # even with 20 ms feeder stalls). See dev doc 6.56 (2) for why arm C was retired rather than flown.
+  #device_args: type=b200,num_recv_frames=512,num_send_frames=64
+  device_args: type=b200,num_recv_frames=512,num_send_frames=64,clock_source=gpsdo,time_source=gpsdo,gpsdo=1
+  srate: 23.04
+  otw_format: sc12
+  tx_gain: 80
+  rx_gain: 70
+  clock: gpsdo
+  sync: internal
+
+cell_cfg:
+#  dl_arfcn: 632628         # 20M BW, onePlus8T only
+#  dl_arfcn: 625920         # 10M BW, iPhone17 only
+#  dl_arfcn: 624000         # 20M BW
+#  dl_arfcn: 621600         # 20M BW 
+  dl_arfcn: 627264         # 20M BW
+
+  band: 78
+  channel_bandwidth_MHz: 20
+  common_scs: 30
+  plmn: "00101"
+  tac: 7
+  pci: 1
+
+  # ★ 2026-09-28 用户裁决（一页清单：doc_chinese/phy_latency/delivery_config_decision_2026-09-28.md）：
+  # 默认的 `[0]` 让 36% 的重传全是 rv0（无增量冗余，重传基本白费）。实测只改这一个变量：
+  # TCP 收到 7.39 → 9.93 Mbit/s（+34.4%）、重传 25.8% → 8.3%、CRC BLER 33.2% → 7.9%、
+  # 有效 bit/RE 1.90 → 2.54、MAC 新数据→TCP 存活率 78% → 92%（§6.143⑦）。
+  # `[0, 2, 3, 1]` 是标准 RV 循环，也是本仓 DL 侧的默认。
+  pusch:
+    rv_sequence: [0, 2, 3, 1]
+    # ---- PINNED MCS (2026-10-04, plan doc 11.35): an A/B on ANY PHY stage carrier was confounded by the
+    # transport block size - the two arms' MAC PDU medians differed by 24-30% (1761 vs 2178 B, 3009 vs 2112 B),
+    # and the decode's cost is a function of the TB and the LDPC iterations. Pinning min=max removes the
+    # scheduler's link adaptation from the experiment: the payload is then a property of the RUN, not of the arm.
+    # ---- MCS 13, NOT 19 (2026-10-05, plan doc 11.59): 64QAM WAS TOO CLOSE TO THE EDGE FOR AN OTA A/B. ----
+    #
+    # The pinned MCS 19 (64QAM) left the uplink marginal, and the CRC failure rate of the PUSCH swung between
+    # legs of the SAME configuration: 99.4% and 98.6% OK on the good legs, 84.6% and 77.4% on the bad ones
+    # (571 retransmissions against 14751). Every pair flown so far had exactly one degraded leg - in both arms,
+    # so it is the channel (OTA, a phone), not the code under test.
+    #
+    # Why that is not a detail: a failed transmission runs the LDPC decoder to its maximum iteration count and is
+    # then retransmitted, so it changes the MIX of work per DELIVERED transport block. That is what pair_check was
+    # measuring when it reported the payload per hop differing by 26% - the transport-block MEDIAN was 4612 B in
+    # every working leg, and the payload per hop is a "delivered PDUs" statistic, which a failing uplink biases.
+    # In other words the payload was never the free variable; the error rate was.
+    #
+    # 16QAM buys ~6 dB of margin, which is what it takes to get both legs of a pair into the CLEAN band
+    # (>=99% CRC OK, see wip/ul_health.sh). The grant WIDTH mix is unchanged (it is chosen per slot from the
+    # available PRBs, and is reproducible: 51/50/25/46/43 PRBs in every leg), so the payload stays pinned per slot.
+    min_ue_mcs: 13
+    max_ue_mcs: 13
+
+# The USRP clock may introduce some CFO: configure the channel estimator to compensate for it.
+# With good clocks (e.g., external ones), the default setup may provide better performance.
+expert_phy:
+#  pusch_channel_estimator_td_strategy: average
+#  pusch_channel_estimator_cfo_compensation: true
+  pusch_ldpc_decoder_type:  auto
+  pusch_dec_max_iterations: 6 
+
+# ★ 2026-09-28：把验收腿一直在**命令行**带的并发度写进配置 —— 在那之前，全部近期证据（p85–p96）都是在
+# conc 2 上飞的，而本配置解析出 1（AUTO 对本小区推导为 1）⇒ **证据描述的不是出厂配置**（§6.150、一页清单）。
+# 实测（p76 conc1 vs p72/p75 conc2）：V1 1606.2 → 1399.5 µs（−13%），只改等待类量
+# （wait 206.5→54.4、residency 623.4→495.7、gap 125.7→0.0）。
+# ⚠ 历史：conc 2 曾在 s88/s88b 关联过两次 ~5 s 停顿（gaps=2），其后修复 A/B 落地；最近 12 条腿
+# （p85–p96，全部 conc 2）gaps=0、池绿、契约 9/9 ⇒ 风险当前未复现，本配置的第一次飞行即为重新取证。
+expert_execution:
+  threads:
+    upper_phy:
+      max_pusch_and_srs_concurrency: 2
+
+log:
+  filename: /tmp/gnb.log
+  all_level: info
+
+pcap:
+  mac_enable: false
+  mac_filename: /tmp/gnb_mac.pcap
+  ngap_enable: false
+  ngap_filename: /tmp/gnb_ngap.pcap
