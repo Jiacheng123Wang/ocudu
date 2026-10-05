@@ -2597,3 +2597,60 @@ pipeline 时延"。
 
 ⇒ 决定性的未测量项是**每 block 的 CPU 开销**（读 `[ul_thread_cpu]`，现成 ✓）。
 若它显著，则大 N 同时赢下 CPU 与架构简洁性，代价只有那 40 µs（可用自旋窗口与 tick 预算吸收）⇒ **用户方向大概率正确**。
+
+### §11.54 ★ 用户提案：rx 与 ul 合并为一个 slot 周期线程 —— 这已经是**现成配置**（`dual`/`single`），今天飞的 `triple` 恰是唯一拆开它的那个
+
+**用户提案（2026-10-05）**：把 rx 与 ul 合成一个线程，周期固定 500 µs（= 1 slot），每个周期内完成
+① 从 USB buffer 取 1 slot 的 IQ；② 14 个符号的 FFT；③ 结果写入网格；④（GPU 路径）metal encode/commit。
+上游 UHD/USB 的不确定性（用户记作 ~2 ms，要求确认）由**环形 buffer/DMA** 吸收。
+
+#### 1. 核实结果：合并**不需要新代码**，三个 profile 本来就是合一的
+
+| profile | `ul_exec`（UL 处理运行处）| 出处 |
+|---|---|---|
+| `sequential` | **inline**（与 rx 同线程）| `lib/ru/sdr/ru_sdr_executor_mapper.cpp:87` |
+| `single` | **inline** | `:124` |
+| `dual` | **inline** | `:156` |
+| `triple`（**今天的默认**）| 专用 `lower_phy_ul#0` ✗ | `:191` 起 |
+
+且 `inline_task_executor::defer` 就是**直接在当前线程调用**（`include/ocudu/support/executors/inline_task_executor.h:19-22`）
+⇒ **这三个 profile 下 rx→UL 交棒根本不存在** ✓✓✓。
+默认 profile 在 ≥8 核的机器上是 `triple`（`apps/units/flexible_o_du/split_8/helpers/ru_sdr_config.h:92-99`），
+而腿配置 `wip/gnb_pinned_mcs.yml` **没有**钉 `expert_execution.threads.lower_phy.execution_profile` ⇒ 今天跑的正是唯一拆开它的那个 ✗。
+开关：`--expert_execution.threads.lower_phy.execution_profile {single,dual,triple}`（`ru_sdr_config_cli11_schema.cpp:191-230`；CLI 不接受 sequential/blocking）。
+
+#### 2. 上游不确定性：**"~2 ms"不能确认** ✗，能确认的是环深
+
+* §11.51 刚刚撤回那个读数（它是相对一个受污染锚点的残差）⇒ **绝对交付滞后目前没有可信数字** ✗；
+* 能确认的：UHD 侧 `STREAM_MODE_START_CONTINUOUS`（`radio_uhd_rx_stream.cpp:84-88`）⇒ **连续流式，环由驱动填** ✓
+  ⇒ **用户的"环吸收"模型成立** ✓；丢样本只在环满时发生（`rx_error::overflow`，且 overflow == gap 逐事件相等 ✓）；
+* 由"滞后到 +1469 µs 仍未丢样本"反推：**环深 ≳1.5 ms** ✓；
+* 但 `receive()` 是**阻塞拉取**（凑齐请求数量才返回）⇒ 正确表述是"**线程以样本率的平均速度持续拉取，环吸收短期落后**"，
+  而不是"随时可读"；且**这个线程的周期必须是电台的 500 µs**（用样本时间戳锁定 + rate 修正），不是主机自由跑表
+  ✗（2 ppm ⇒ 8 分钟漂 ~0.5 ms）⇒ **§11.51 的绝对零点估计量仍是第 0 步** ✓。
+
+#### 3. 合并的真实代价 = 隔离性，而它的预算就是环深
+
+分开跑（triple）时 rx 线程只管收，FFT/CE 再慢也不影响排空；合并后 ②③④ 的耗时**直接延迟环的排空** ✗。
+可承受性有实测支撑：每 slot 的**串行**前端工作只有 ~40 µs 级（=`t2f` 496.2 vs 536.0 的差，§11.53），
+而环深 ≳1.5 ms ⇒ **裕量 ~37×** ✓✓。但这条裕量是"共享预算"，合并后任何一处变慢都会先吃掉它。
+
+#### 4. 合并不取消 N 的选择，而且"**合并 + 小 N**"可能同时拿到零交棒与零额外时延
+
+* `N=14`（一次请求整 slot）：线程**必须等最后一个符号**才拿到数据 ⇒ 14 个 FFT（~40 µs）串到空中之后 ⇒ **+~40 µs**；
+* `N=1`（一次一符号）：每个符号到达后立刻 FFT，而**电台在 FFT 期间继续流入** ⇒ FFT 被环吸收 ✓ **不额外加时延**；
+* 两者都是**零交棒**（inline）⇒ 可以兼得，代价是 14 倍的每段固定开销（这仍由 `[ul_thread_cpu]` 决定）。
+⇒ 第一轮实验应包含 `N ∈ {1,4,14}` × `dual`，而不是先验选 14。
+
+#### 5. 配置解决不了的那一件（正是用户第 1 条）
+
+合并后的线程今天仍是"**自我 defer 的请求驱动链**"，**没有任何周期声明** ⇒
+"500 µs tick + TC 预算 + 自旋窗口 + 绝对零点"仍然必须实现。合并只是把这条链从两个线程变成一个 ✓。
+
+#### 6. 判定"合并已生效"的读数（全部现成）
+
+1. **启动横幅**变为 `Lower PHY in dual baseband executor mode.`，且 **`lower_phy_ul#0` 线程消失** ✓；
+2. **`[ul_handoff]` 塌到 ~0 µs** —— 交棒探针测的是"defer 之前 → 任务入口"，inline 时两者几乎同时发生
+   ⇒ **这就是"交棒消失"的直接证据** ✓✓（不需要改代码，探针照常工作）；
+3. `[ul_thread_cpu]`：rx 线程的 CPU 应上升约一个前端（FFT+网格）的量，UL 线程的读数消失 ✓；
+4. `t2f` / `[ul_pipeline]` / gap-overflow：合并是否侵蚀环位（看有没有新增 gap ✗）。
