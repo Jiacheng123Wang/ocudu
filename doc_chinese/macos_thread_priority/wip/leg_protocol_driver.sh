@@ -49,8 +49,18 @@ TRAFFIC_SECS="${TRAFFIC_SECS:-180}"
 # THE TRAFFIC CUE. Small packets on purpose (user, 2026-10-05): the question this workflow is on now is the TAIL,
 # and a saturated iperf3 upload answers a different one - it measures throughput and is tolerant of a late packet.
 # `ping` puts one small uplink packet (the echo reply) on the wire and times it, so the pipeline is nearly idle and
-# a late one is visible as the RTT max. sudo is needed because macOS refuses -i below 0.2 s to a normal user.
-TRAFFIC_CUE="${TRAFFIC_CUE:-$PING}"
+# a late one shows up as the RTT max.
+#
+# TWO CORRECTIONS FROM THE OPERATOR (2026-10-05), both kept because they change what the reading means:
+#   * the ping runs from the CORE side, not from this Mac: the Mac is only the gNB/RAN in the middle of the path, so
+#     the command below is to be run on the CN host (the same side the iperf3 client ran on). The macOS `ping`'s
+#     refusal of -i below 0.2 s therefore has nothing to do with this cue - it was my mistake to bring it up;
+#   * the interval is 0.1 s (10 Hz), not 0.02: 20 ms between packets is dense enough to block, and a rate that
+#     changes the load defeats the purpose of a probe that is supposed to leave the pipeline nearly idle.
+# Consequence to keep in mind when reading: at 10 Hz a 180 s window is ~1800 packets, so the PHY side sees ~1800
+# [ul_pipeline] samples instead of 108k - the MAX is still the reading (it is what a late packet shows up in), but
+# the fine percentiles are thin, and a single late packet is a single sample.
+TRAFFIC_CUE="${TRAFFIC_CUE:-ping -i 0.1 -c 1800 <UE-IP, e.g. 10.45.0.21>   (run it on the CORE side, not on this Mac)}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 
