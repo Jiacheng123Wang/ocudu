@@ -4666,3 +4666,42 @@ configuration" ✓，本工作流的 `run_leg.sh` 就是替换它而写的 ✓�
 （`gnb_cpu_p297-dual_1005_*` ✓）、闸门与**生成物里的「飞过的腿数」一列**全都建在它上面 ✓；改名会让**记录留下两套词汇**
 而历史日志仍是旧的 ✗。**代价是它此前是未定义的行话** ✗ —— 现在定义写在三处：`run_leg.sh` 头部（"WHAT A LEG IS" ✓）、
 `fly_leg.sh` 头部（一句指引 ✓）、以及这里的 §11.102 ✓。
+
+### §11.104 预登记：**cpu_gpu 在最新代码上的 N1/FDD 检验腿**（用户要求：至少一次 ✓）
+
+**为什么飞**：`cpu_gpu` 是三种模式里唯一**没在最新代码上飞过**的 ✗（cpu ✓ 与 gpu ✓ 都飞过），
+用户要求至少一次检验 ✓，而且要求用 **N1/FDD** 小区而不是我们一直用的 n78/TDD ✓。
+
+#### 新配置 `wip/gnb_pinned_mcs13_n1.yml` ✓（由 n78 飞行配置派生，只差 5 个值 ✓）
+
+| | n78/TDD（原）| **N1/FDD（新）** |
+|---|---|---|
+| `ru_sdr.srate` | 23.04 | **15.36** ✓ |
+| `cell_cfg.dl_arfcn` | 627264 | **430500** ✓ |
+| `cell_cfg.band` | 78 | **1** ✓（band 1 本身就是 FDD 的来源 ✓，两个文件都没有 `tdd_pattern` 键 ✓）|
+| `channel_bandwidth_MHz` | 20 | **5** ✓ |
+| `common_scs` | 30 | **15** ✓（**1 ms 时隙** ⇒ 声明的 period 正好 = 一个时隙 ✓）|
+
+其余（device_args、增益 80/70、GPSDO、cu_cp、`pusch.rv_sequence`、**MCS 13 pin** ✓、`expert_phy`、log/pcap）**原样继承** ✓。
+
+**两个坑都已在配置头部写明** ✓：
+1. **采样率不能用 5 MHz 的自然值 7.68 Msps** ✗ —— B210 在该主时钟下 AD9361 停止给 FPGA 供钟，寄存器写全部超时 ✗
+   （`AssertionError: accum_timeout < _timeout`；实测 5.0/5.76/7.68 失败、≥9.6 正常 ✓，不用 ocudu 也能复现 ✓）
+   ⇒ 用 **15.36**（2× 过采样 ✓），与仓库自己的 N1 配置一致 ✓；
+2. **5 MHz 的 PUCCH 陷阱**：默认 PUCCH 资源超过 BWP PRB 的 50 % ⇒ 翻译器会换成缩减档 ✓，
+   **但只要配置文件里写了任何一个 `pucch` 键**（含 `max_consecutive_kos` ✓）哨兵就失效 ⇒ 小区被**拒绝** ✗。
+   本文件**不设任何 pucch 键** ✓ ⇒ 缩减档生效 ✓。
+
+**离线预检已完成** ✓：`--dryrun`（`cpu_gpu` + `dual`）**exit 0、无 PUCCH/PRB 拒绝** ✓；
+解析出的小区与历史 N1 腿（`s27-d1-base` ✓）**逐字一致** ✓；二进制已重戳到 `HEAD=65e0117fc1` ✓（否则 runner 拒绝起飞 ✗）。
+
+#### 这次的形状与预登记判据 ✓
+
+* **一个变量** ✓：只验模式 —— `cpu_gpu` + `dual` + **rx 声明** ✓，**不加**两个 `INLINE_*` ✗
+  （cpu_gpu 下模块可各自 offload，把链路内联到 rx 线程会把 Metal 等待搬到它身上 ✗ —— 那是 gpu 阶段已测过的坑 ✓）；
+* 业务：**ping**（core 侧 ✓）—— ✗ **不要用 `iperf3 -b 30M`**：30 Mbit/s 塞不进 5 MHz 小区 ✗（要 iperf3 就用 `-b 5M` ✓）；
+* 跑完预登记的读数 ✓：① `[sched_tc]` + `[sched]`（声明是否生效 ✓，必要时用 `observe_threads.sh` 看 `PRI 97R` ✓）；
+  ② 启动横幅（dual ✓ + cpu_gpu 的模块解析 ✓）；③ **0 gaps** ✓；④ `ul_health.sh` **CLEAN** ✓；⑤ `dl_gate.sh` **PASS** ✓；
+  ⑥ `[metal_stats]`（哪几个模块真的走了 Metal ✓）；⑦ `[ul_thread_cpu]` 的 duty 对 30 % 声明 ✓；
+  ⑧ `[ul_tail]`/`[ul_pipeline]` 的 N1 时隙形状 ✓。
+  ★ **N1 的数字不与 n78 腿可比** ✗（带宽/RB/时隙全不同 ✓）—— 这条腿的结论只回答"**模式在最新代码上能不能跑、健不健康**" ✓。
