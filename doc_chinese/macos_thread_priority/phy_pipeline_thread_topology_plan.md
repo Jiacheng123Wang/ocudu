@@ -3482,3 +3482,39 @@ limiter, and the channel estimator runs inline as well` ✓✓。
   2. **声明**：按实测写 `period/computation/constraint`（合并线程 ~500–600 µs 预算 / 1000 µs 周期 ✓），
      池线程按它剩下的 duty ✓；
   3. **再平移 gpu**：那里的第一件事是把 `waitUntilCompleted`（680 µs ✗）移出关键路径 ✓。
+
+### §11.74 ★ 两处更正（用户提问）：`ul_ldpc_decode` 的增长是**并发度丢失**（不是边界伪影 ✗），以及 **max 为何不动**
+
+#### (1) `ul_ldpc_decode` 66 → 169 µs：我上一轮的解释是**错的** ✗✓
+
+**两个端点（代码）**：
+* 起点 = `record_ldpc_start`，在 `pusch_decoder_impl.cpp:359-360` 的 **`if (cb_id == 0)`** 里 ——
+  注释原话："T_start of the pure LDPC decode measurement: the first codeblock's decode invocation" ✓
+  ⇒ **第一个码块开始解码的瞬间**；
+* 终点 = `record_end_crc_ok`（`pusch_processor_notifier_adaptor.h:251`）⇒ 该 TB **整个解码完成** ✓。
+⇒ 该序列 = **"第一个码块 → 整个 TB 的 CRC OK"**，就是 LDPC 解码本身的墙钟跨度 ✓。
+
+**真实机制**（我写错的地方 ✗）：我的接线把 `pusch_executor` 的 `max_concurrency` 写成 **1** ✗，
+而这个数**与 inline 无关** —— 工厂在两处读它：
+* `upper_phy_factories.cpp:938`：`max_nof_concurrent_threads = pusch_executor.max_concurrency` ✓；
+* `processor_factories.cpp:162`：`std::vector<concurrent_dependencies> dependencies(config.max_nof_concurrent_threads)`
+  ⇒ **决定上层"并发实例数"**（每个实例自带估计器/解调器/解码器 ✓✓）；
+* `upper_phy_factories.cpp:966`：解码器没有自己的 executor 时（我设了 `{}` ✓），
+  `nof_regular_processors = pusch_executor.max_concurrency` ✓。
+⇒ 2 → 1 ⇒ **解码从"两个实例可并行"退化为"单实例串行"** ✗ ⇒ 同一 TB 的解码跨度 66 → 169 µs ✗✓
+—— **一次真实退化，且由我不小心引入** ✗✓（不是边界伪影 ✗）。
+
+**已修** ✓：inline 时保留**配置的**并发度（`flexible.max_pusch_and_srs_concurrency` = 2 ✓），
+横幅写明 `keeps N concurrent instance(s)` ✓✓ ⇒ **把"谁来跑"（inline）与"跑几份"（并发度）分离** ✓（单变量原则 ✓）。
+
+#### (2) 端到端 `[ul_pipeline]` 的 **max 为什么不动**（5 254 → 5 270 µs）
+
+* max 来自**罕见的主机停顿**（一次约 5 ms 的失调度/系统事件 ✓），其量级是结构性差异（146 µs）的 **约 35 倍** ✗
+  ⇒ 无论流水线怎么接线，那一次停顿都会让那个 slot 晚 ~5 ms ⇒ **max 由环境决定，不由结构决定** ✓✓；
+* 本对内部的旁证：p95/p99 **每个窗口一致地** +45/+30 µs ✗（系统性 ⇒ 结构与并发度 ✓），而 **max 丝毫不动** ✓
+  ⇒ 两者**不是同一个机制** ✓✓；环境读数两腿相当（都 `suspended=1, saturated=0` ✓；
+  p287 `late max=972 µs` vs p288 `1900 µs` ✗ —— 臂腿机器略忙 ✓，但解释不了 146 µs 的中位位移 ✓）；
+  合并线程的**最坏窗口 CPU 反而更好**（4 944 → 2 179 µs ✓）。
+* **按用户判据**（"max 尽量小、min 不许升"）：本轮 **max 不变 ✓、min 更低（275 → 200 µs ✓✓）、中位 −146 µs ✓✓**
+  ⇒ **真实改进，没有靠抬 min 粉饰** ✓✓；唯一代价 p95/p99 +30–45 µs ✗ —— 机制已查明并已修 ✓。
+* ⇒ **max 要靠"预留/环境"治，不靠接线** ✓✓ —— 即下一步的声明（TC）阶段 ✓（与"环境治尾、策略治体"一致 ✓）。

@@ -268,11 +268,23 @@ public:
               paced_us);
         }
         executors.emplace_back(std::make_unique<inline_task_executor>());
-        phy_config.pusch_ch_estimator_executor = {executors.back().get(), 1};
-        phy_config.pusch_executor              = {executors.back().get(), 1};
+        // THE CONCURRENCY NUMBER IS NOT ABOUT THE INLINE EXECUTOR - IT IS ABOUT HOW MANY INSTANCES THE UPPER PHY
+        // BUILDS, and the first version of this block got that wrong (p288, 2026-10-05). The factory reads it in
+        // two places: `max_nof_concurrent_threads` sizes the vector of concurrent estimator/demodulator/decoder
+        // instances (processor_factories.cpp:162), and when the decoder has no executor of its own it also sizes
+        // the number of PUSCH processors (upper_phy_factories.cpp:966). Writing 1 there therefore SERIALISED the
+        // LDPC decode - one decoder instead of two - and that, not a measurement boundary, is why
+        // [ul_ldpc_decode] read 169us in the arm against 66us in the control. The lane's own fork limiter is not
+        // involved here at all (the executor is assigned directly), so the honest value is the one the CONTROL
+        // would have used: the configured PUSCH/SRS concurrency. One change per arm.
+        const unsigned inline_concurrency = std::max(1U, flexible.max_pusch_and_srs_concurrency);
+        phy_config.pusch_ch_estimator_executor = {executors.back().get(), inline_concurrency};
+        phy_config.pusch_executor              = {executors.back().get(), inline_concurrency};
         phy_config.pusch_decoder_executor      = {};
         fmt::print("Upper PHY PUSCH chain: INLINE on the calling thread (OCUDU_UL_INLINE_PUSCH=1) - no lane "
-                   "dispatch, no fork limiter, and the channel estimator runs inline as well\n");
+                   "dispatch, no fork limiter, the channel estimator runs inline as well, and the upper PHY keeps "
+                   "{} concurrent instance(s) so the decode stays as parallel as the control's\n",
+                   inline_concurrency);
       }
     }
 
