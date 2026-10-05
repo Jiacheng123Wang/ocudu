@@ -78,32 +78,25 @@ cell_cfg:
     # scheduler's link adaptation from the experiment: the payload is then a property of the RUN, not of the arm.
     min_ue_mcs: 19
     max_ue_mcs: 19
-    # ---- PINNED GRANT WIDTH (2026-10-05, plan doc 11.56). Pinning the MCS was not enough: the payload per hop
-    # still floated, because the RB COUNT and the MCS are two independent knobs and only one was pinned. Measured
-    # across four air legs with min=max MCS: 3045 / 3906 / 3976 / 2942 B per hop - a spread of +-26%, which is
-    # exactly the confound that voided three rounds (p263/p264, p270/p271, p272/p273) and left every TB-dependent
-    # stage (CE, equalization, LDPC) unquotable. The traffic could not fix it: `iperf3 -b` is IGNORED for TCP, so
-    # the offered rate was never controlled either.
+    # ---- GRANT-WIDTH PIN: TRIED TWICE, AND DISABLED (2026-10-05, plan doc 11.57/11.58). DO NOT RE-ENABLE. ----
     #
-    # 51 = the whole 20 MHz n78 band, which is what the scheduler was already granting on average (a 51-PRB grant
-    # at the pinned MCS 19 is ~2950 B per hop, the observed magnitude). Pinning min=max removes the last free
-    # variable, so the payload becomes a property of the CONFIGURATION rather than of the arm.
-    # 25, NOT 51 - and the first attempt at 51 is worth recording because it cost a leg (p274, 2026-10-05).
+    # Pinning the MCS did not stop the payload per hop from floating (+-26% across four air legs), because the RB
+    # COUNT is a second, independent knob. Pinning it too looked like the fix, and it is not:
+    #   * min=max=51 (only the whole band is then a legal grant) -> the UE gets NO dedicated UL grant at all, so it
+    #     cannot ACK the DL signalling: SRB1 hits "RLC max ReTxs reached" and the phone is released (p274, three
+    #     attach attempts, three C-RNTIs, all identical);
+    #   * min=max=25 -> the SAME failure (see the attach test log: the only grants issued were the fallback path's
+    #     3 and 11 PRBs, 18x and 2x - exactly as with 51).
+    # Any non-zero min_rb_size therefore kills the dedicated uplink path in this build. The configuration
+    # validator cannot see it: it checks min<=max, never whether a grant can be PLACED beside the PUCCH.
     #
-    # min=max=51 means the ONLY legal grant is the WHOLE BAND starting at PRB 0, and the PUCCH lives at the band
-    # edges: the scheduler then cannot place a dedicated UL grant in the very slots it needs one, and the shared
-    # channels it toppled show it - across the whole failed leg there were exactly two widths, `rb=[8..11)` (3 PRBs,
-    # 78x, the fallback/msg3 path) and `rb=[8..19)` (11 PRBs, 10x); after the UE context was created the UE got NO
-    # dedicated grant at all. With no UL grant the UE cannot ACK the DL signalling, so SRB1 hit "RLC max ReTxs
-    # reached" (three attach attempts, three different C-RNTIs, all the same), the RLF timer expired and the AMF
-    # released the UE - the phone could never stay attached.
-    #
-    # 25 is taken from the WORKING leg's own allocation history (p272, unpinned): its dedicated grants were
-    # 51/50/25/46/43/44/6/31 PRBs wide, with 25 occurring 10372 times - a width the scheduler reaches for
-    # routinely, and one that leaves the band half free for PUCCH. The payload is still pinned (which is the point:
-    # the +-26% per-hop variation was the confound), but at a width the cell can actually allocate.
-    min_rb_size: 25
-    max_rb_size: 25
+    # The lever that does exist is the TRAFFIC, not the allocation. The scheduler's grant-width distribution is
+    # already reproducible between legs (p272 vs p273, same config: 42.5% / 40.6% of grants at 51 PRBs, 15.1% /
+    # 15.9% at 25); what differed was how much DATA those grants carried (306 hops/s x 3976 B vs 364 x 2942) - TCP
+    # dynamics, not the scheduler. A saturated UDP offer is what should make the payload a property of the
+    # configuration, and it needs no configuration change at all.
+    # min_rb_size: 25        # ◀◀ disabled: see the note above
+    # max_rb_size: 25        #     (this file is otherwise identical to gnb_pinned_mcs.yml)
 
 # The USRP clock may introduce some CFO: configure the channel estimator to compensate for it.
 # With good clocks (e.g., external ones), the default setup may provide better performance.
