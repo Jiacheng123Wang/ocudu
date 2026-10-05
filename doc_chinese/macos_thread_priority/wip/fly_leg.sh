@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ONE COMMAND = ONE LEG *WITH ITS PROTOCOL*.  usage:  sudo -E bash fly_leg.sh <label> <triple|dual> <quiet|stress>
+# ONE COMMAND = ONE LEG *WITH ITS PROTOCOL*.  usage:  sudo -E bash fly_leg.sh <label> <triple|dual> <quiet|stress> [cpu|cpu_gpu|gpu]
 #
 # WHY THIS EXISTS (dev doc 11.61). Two sessions in a row were flown with the protocol driver sitting on a separate
 # line of the instructions, and two sessions in a row it did not run: no traffic cue at a recorded instant, no
@@ -19,11 +19,13 @@
 # radio link. That is what the cue is for.
 set -u
 
-LABEL="${1:?usage: fly_leg.sh <label> <triple|dual> <quiet|stress>}"
+LABEL="${1:?usage: fly_leg.sh <label> <triple|dual> <quiet|stress> [cpu|cpu_gpu|gpu]}"
 PROFILE="${2:?profile: triple or dual}"
 LOAD="${3:-quiet}"
+MODE="${4:-gpu}"
 case "$PROFILE" in triple|dual) ;; *) echo "refusing profile '$PROFILE' (triple|dual)" >&2; exit 2 ;; esac
 case "$LOAD" in quiet|stress) ;; *) echo "refusing load '$LOAD' (quiet|stress)" >&2; exit 2 ;; esac
+case "$MODE" in cpu|cpu_gpu|gpu) ;; *) echo "refusing mode '$MODE' (cpu|cpu_gpu|gpu)" >&2; exit 2 ;; esac
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
@@ -51,7 +53,7 @@ KNOBS=(OCUDU_SCHED_VERBOSE=1 OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_UL_SLOT_GRID=1 OCUD
        OCUDU_UL_THREAD_CPU=1 OCUDU_UL_TIMING_EVENTS=16 OCUDU_UL_WATCHDOG=1 OCUDU_UL_HANDOFF_PROBE=1)
 
 echo "==================================================================================="
-echo " leg      : $LABEL   (profile=$PROFILE, load=$LOAD, regime=$REGIME)"
+echo " leg      : $LABEL   (profile=$PROFILE, load=$LOAD, regime=$REGIME, pipeline=$MODE)"
 echo " traffic  : at the cue -> iperf3 -u -b 30M -l 1400 -R -P 4 -t 180 -c 10.45.0.21"
 echo " load     : $( [ "$DIST_N" -gt 0 ] && echo "$DIST_N user-space burners for ${DIST_SECS:-60} s, ${DIST_DELAY:-60} s after the cue" || echo "none (quiet arm)" )"
 echo "==================================================================================="
@@ -66,7 +68,7 @@ DRV_PID=$!
 # ${arr[@]+...} idiom because /bin/bash on macOS is 3.2, where an EMPTY array under `set -u` is an error - the
 # first version of this file died with "-E: command not found" for exactly that reason (measured, offline test).
 SUDO_BIN="${SUDO-sudo}"
-LEG_ARGS=(gpu "$LABEL" --regime="$REGIME" --smoke=40 "${KNOBS[@]}"
+LEG_ARGS=("$MODE" "$LABEL" --regime="$REGIME" --smoke=40 "${KNOBS[@]}"
           --expert_execution.threads.lower_phy.execution_profile="$PROFILE")
 if [ -n "$SUDO_BIN" ]; then
   "$SUDO_BIN" -E LEG_CONFIG="$CFG" bash "$RUN" "${LEG_ARGS[@]}"

@@ -3137,3 +3137,44 @@ UL grant 集合来自 MAC 调度，**在该 slot 的样本到达之前**就已�
 1. **cpu 模式下各段的"主机工作量"**（span 在那里就等于工作量 ✓）⇒ rx+FFT+grid+CE+eqd+LDPC 是否 < 500 µs ✓；
 2. **网格→lane 交棒的分布**（探针 `ul_to_lane` 已预留 ✓）⇒ 680 µs 里"交棒"与"实际工作"各占多少 ✓✓；
 3. 网格持有的安全性已确认 ✓（120 实例 ✓）。
+
+### §11.65 cpu 模式那一轮：目的、读数与判定（用户决定先立"线程框架"）
+
+**用户决定（2026-10-05）**：先做 **cpu 模式**那一轮 —— 因为 cpu 模式跑通后，**整条 PHY pipeline 线程的
+`thread_policy_set`（period/computation/constraint）框架就立起来了** ✓，之后 cpu_gpu/gpu 只是把部分模块的
+计算 offload 到 metal kernel，形状照搬 ✓。
+
+#### 已完成的准备
+
+1. **cpu 模式离线验证** ✓：loopback 上 `--expert_phy.phy_pipeline cpu` + `dual` 正常起停（横幅正确、
+   `[ul_handoff]` mean 0.0 ✓、报告完整 ✓）；
+2. **`fly_leg.sh` 支持第 4 个参数**：`<label> <triple|dual> <quiet|stress> [cpu|cpu_gpu|gpu]` ✓
+   （默认 gpu 以兼容既有命令 ✓；已离线用 stub 验证 `mode=cpu` 被正确传给 runner ✓）；
+3. **代码事实**（决定"inline PUSCH 链"能不能接线）：
+   * `du_low_executor_mapper.cpp:80-99` 的 **`single` 变体**把 `pusch_executor`、`pusch_ch_estimator_executor`
+     （**inline**）、`pusch_decoder_executor`（**同步**）全部放在**同一个 `common_executor`** 上 ✓✓
+     —— 即"一个线程做完 PUSCH 链"的形状**代码里已经存在** ✓；
+   * 但该变体目前只在**非实时路径**被选中（`worker_manager.cpp:445-460`，`not rt_mode` ✗）；RF 路径走 `flexible`
+     变体 ⇒ CE/PUSCH 在 lane/pool（`pusch_srs_execs[0/1]` ✓）⇒ **要 inline 需要一次接线改动** ✓。
+
+#### 本轮（cpu 模式基线，安静，2 条腿）
+
+```bash
+sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh p284-triple triple quiet cpu
+sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh p285-dual   dual   quiet cpu
+```
+
+**读四样**：
+1. **各段的"主机工作量"**（cpu 模式下 span ≈ 工作量 ✓）：`t2f` / `ce` / `eqd` / `ldpc` / `pipeline`
+   —— 关键是 **`eqd` 那 ~680 µs 会不会缩** ✓✓（gpu 模式下它是 defer/池延迟 ✗，`waits=7/100607` 已证设备不阻塞 ✓）
+   ⇒ 这一条直接给出"inline PUSCH 链"的收益上限 ✓；
+2. **交棒的负载免疫性**在 cpu 模式是否同样成立 ✓（`[ul_handoff]` ✓）；
+3. **健康度**（`ul_health.sh` ✓）+ gaps/overflow ✓；
+4. **每线程 CPU/duty**（`[ul_thread_cpu]` ✓）—— 这是后面写 `computation` 声明的**依据** ✓✓。
+
+**判定与后续（框架三步）**：
+* 若 `rx + FFT + grid + CE + eqd + LDPC` 的主机工作量 **≪ 500 µs** ⇒ 把 `pusch_executor` /
+  `pusch_ch_estimator_executor` 接到**合并后的 lower-PHY worker** 上（复用 `single` 变体已有的接线 ✓）
+  ⇒ **cpu 模式下零交棒** ✓✓；
+* 然后按测得的每线程 CPU 写 **period/computation/constraint** 声明（`OCUDU_SCHED_TIME_CONSTRAINT` ✓）；
+* 再用一对腿验证声明后的效果（含 `max` 是否下降 ✓），之后才把同一形状平移到 cpu_gpu/gpu ✓。
