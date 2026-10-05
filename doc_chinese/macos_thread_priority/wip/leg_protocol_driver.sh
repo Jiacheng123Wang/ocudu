@@ -46,6 +46,11 @@ DIST_DELAY="${DIST_DELAY:-60}"   # traffic cue -> disturbance start
 DIST_N="${DIST_N:-16}"           # burners (the workflow's usual 16 on 14 cores)
 DIST_SECS="${DIST_SECS:-60}"
 TRAFFIC_SECS="${TRAFFIC_SECS:-180}"
+# THE TRAFFIC CUE. Small packets on purpose (user, 2026-10-05): the question this workflow is on now is the TAIL,
+# and a saturated iperf3 upload answers a different one - it measures throughput and is tolerant of a late packet.
+# `ping` puts one small uplink packet (the echo reply) on the wire and times it, so the pipeline is nearly idle and
+# a late one is visible as the RTT max. sudo is needed because macOS refuses -i below 0.2 s to a normal user.
+TRAFFIC_CUE="${TRAFFIC_CUE:-$PING}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 
@@ -97,7 +102,7 @@ CUE=$(date +%s)
 STAMP=$(date '+%Y-%m-%d %H:%M:%S')
 echo
 echo "  ============================================================"
-echo "   TRAFFIC NOW  ($STAMP)   ->   iperf3 -u -b 30M -l 1400 -R -P 4 -t ${TRAFFIC_SECS} -c <server>"
+echo "   TRAFFIC NOW  ($STAMP)   ->   $TRAFFIC_CUE"
 echo "  ============================================================"
 echo
 
@@ -113,7 +118,7 @@ if [ "$DIST_N" -eq 0 ]; then
     echo "leg            : $LABEL"
     echo "leg log        : $LEG"
     echo "traffic cue    : $STAMP (epoch $CUE), i.e. leg start + ${PRE}s"
-    echo "traffic        : iperf3 -u -b 30M -l 1400 -R -P 4 -t ${TRAFFIC_SECS} -c <server>   (started by the operator at the cue)"
+    echo "traffic        : $TRAFFIC_CUE   (started by the operator at the cue)"
     echo "disturbance    : NONE (quiet arm, DIST_N=0)"
     echo "mid-arm CPU    : ${MID:-<none>}"
     echo "leg stop       : Ctrl-C (SIGINT) - SIGTERM skips the shutdown report block (see run_leg.sh)"

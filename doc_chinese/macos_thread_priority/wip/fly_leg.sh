@@ -77,7 +77,7 @@ fi
 echo "==================================================================================="
 echo " leg      : $LABEL   (profile=$PROFILE, load=$LOAD, regime=$REGIME, pipeline=$MODE)"
 echo " logs     : $LOGDIR"
-echo " traffic  : at the cue -> iperf3 -u -b 30M -l 1400 -R -P 4 -t 180 -c 10.45.0.21"
+echo " traffic  : at the cue -> ${TRAFFIC_CUE:-sudo ping -i 0.02 -c 9000 10.45.0.21}"
 echo " load     : $( [ "$DIST_N" -gt 0 ] && echo "$DIST_N user-space burners for ${DIST_SECS:-60} s, ${DIST_DELAY:-60} s after the cue" || echo "none (quiet arm)" )"
 echo "==================================================================================="
 

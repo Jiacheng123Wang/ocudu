@@ -301,6 +301,33 @@ public:
                    "instance(s)\n",
                    inline_concurrency);
       }
+      // ---- dev doc 11.85: the LDPC DECODE inline as well, so the whole chain IQ -> CRC OK is ONE thread ---------
+      //
+      // WHY IT IS A SEPARATE KNOB from OCUDU_UL_INLINE_PUSCH. They answer two different questions and the user
+      // asked for both together, so each has to be selectable on its own:
+      //   * INLINE_PUSCH   = "no dispatch between the grid and the LLRs"      (keeps the decode's pool)
+      //   * INLINE_DECODE  = "no dispatch between the LLRs and the CRC verdict"
+      // With both on, the whole path from the samples to the CRC verdict runs on the thread that produced the grid.
+      //
+      // WHAT IT TRADES. The decoder turns one transport block into N codeblocks and can decode them CONCURRENTLY on
+      // its pool (pusch_decoder_impl.cpp:396 defers one task per codeblock and waits at a barrier); with `{}` there
+      // is no executor, the code takes its synchronous path, and the codeblocks are decoded one after another. That
+      // is a real cost - measured at +100us on p288, when it happened by accident - and it is accepted here ON
+      // PURPOSE for a different property: with no dispatch inside the chain, the END-TO-END path is ONE reservation
+      // subject, so a Mach time constraint on this thread covers IQ samples -> CRC verdict as one thing. A decode
+      // left on the pool is protected only by ITS OWN reservation (or by none at all), which is the shape the tail
+      // reading just pointed at.
+      //
+      // NOTE the instance count is NOT touched here: `pusch_executor.max_concurrency` still feeds
+      // max_nof_concurrent_threads and the PUSCH processor count (see the INLINE_PUSCH block above), so this knob
+      // drops the codeblock parallelism on purpose and nothing else.
+      if (const char* inline_decode = std::getenv("OCUDU_UL_INLINE_DECODE");
+          (inline_decode != nullptr) && (inline_decode[0] != '\0') && (inline_decode[0] != '0')) {
+        phy_config.pusch_decoder_executor = {};
+        fmt::print("Upper PHY PUSCH decode: INLINE on the calling thread (OCUDU_UL_INLINE_DECODE=1) - the codeblocks "
+                   "of one transport block are decoded one after another, in exchange for having no dispatch "
+                   "between the LLRs and the CRC verdict\\n");
+      }
     }
 
     ocudu_assert(phy_config.pdcch_executor.is_valid(), "Invalid PDCCH executor.");
