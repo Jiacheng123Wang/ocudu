@@ -2617,6 +2617,63 @@ public:
                    pct(sorted, 0.99));
     };
 
+    /// \brief THE TAIL CENSUS: how many samples of a series crossed a fixed absolute anchor, and how the ones
+    /// that did distribute above it.
+    ///
+    /// WHY IT EXISTS. `max` is ONE sample, so it cannot be compared between two legs unless their populations
+    /// are equal - and it is the number a reader looks at first. Measured on the 2026-10-05 ping pair (p292 vs
+    /// p293, 1083 and 1068 samples of [ul_pipeline]): the max moved 1129 -> 859 us, i.e. -24 %, while the
+    /// population-weighted quantiles barely moved (p95 667 -> 663, p99 685 -> 678). One of those two readings is
+    /// the truth about the arm and the other is the truth about one draw, and the aggregate line cannot say
+    /// which. This line can: it prints the COUNT of samples above each anchor, so two legs' tails can be
+    /// subtracted instead of compared sample-by-sample.
+    ///
+    /// The anchors are absolute microseconds and deliberately NOT derived from the series under test (a
+    /// self-relative anchor would move with the thing being measured). 500 us is half a cpu-mode slot, 1000 us
+    /// the declared period of the reservation on the same legs.
+    auto print_tail = [&pct](const char* name, std::vector<double>& sorted) {
+      if (sorted.empty()) {
+        return;
+      }
+      std::sort(sorted.begin(), sorted.end());
+      // Upper edges of the bins; the last bin is open-ended above.
+      static constexpr double upper[] = {500.0, 750.0, 1000.0, 1250.0, 1500.0, 2000.0, 3000.0, 4000.0};
+      constexpr size_t        nof_upper = sizeof(upper) / sizeof(upper[0]);
+      constexpr size_t        nof_bins  = nof_upper + 1;
+      uint64_t                bins[nof_bins] = {};
+      for (double v : sorted) {
+        size_t i = 0;
+        while ((i + 1 < nof_bins) && (v >= upper[i])) {
+          ++i;
+        }
+        ++bins[i];
+      }
+      const uint64_t over = sorted.size() - bins[0];
+      std::fprintf(stderr,
+                   "[ul_tail] %s: n=%zu p99=%.1fus p99.9=%.1fus | over 500us: %llu (%.1f%%)",
+                   name,
+                   sorted.size(),
+                   pct(sorted, 0.99),
+                   pct(sorted, 0.999),
+                   static_cast<unsigned long long>(over),
+                   (100.0 * static_cast<double>(over)) / static_cast<double>(sorted.size()));
+      for (size_t i = 1; i != nof_bins; ++i) {
+        if (i + 1 == nof_bins) {
+          std::fprintf(stderr,
+                       " >%.0f:%llu",
+                       upper[nof_upper - 1],
+                       static_cast<unsigned long long>(bins[i]));
+        } else {
+          std::fprintf(stderr,
+                       " %.0f-%.0f:%llu",
+                       upper[i - 1],
+                       upper[i],
+                       static_cast<unsigned long long>(bins[i]));
+        }
+      }
+      std::fprintf(stderr, "\n");
+    };
+
     /// \brief The samples the series above LEFT OUT because they are too late to be used.
     ///
     /// Printed next to its series rather than folded in, because the two answer different questions: the
@@ -2710,6 +2767,9 @@ public:
                    sorted_pipeline.back(),
                    pct(sorted_pipeline, 0.95),
                    pct(sorted_pipeline, 0.99));
+      // The tail census, next to the aggregate it qualifies (see print_tail): the `max` on the line above is one
+      // draw, these counts are the population.
+      print_tail("ul_pipeline", sorted_pipeline);
       print_stale("ul_pipeline", sorted_stale_pipeline);
     }
 
@@ -2722,6 +2782,7 @@ public:
     // says how much of that window the device was actually executing).
     if (in_fused_lane()) {
       print_series("ul_gpu_pipeline", sorted_gpu_pipeline);
+      print_tail("ul_gpu_pipeline", sorted_gpu_pipeline);
       print_stale("ul_gpu_pipeline", sorted_stale_gpu_pipeline);
     }
     if (records_phase_segments()) {
