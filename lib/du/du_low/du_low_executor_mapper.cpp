@@ -280,10 +280,25 @@ public:
         const unsigned inline_concurrency = std::max(1U, flexible.max_pusch_and_srs_concurrency);
         phy_config.pusch_ch_estimator_executor = {executors.back().get(), inline_concurrency};
         phy_config.pusch_executor              = {executors.back().get(), inline_concurrency};
-        phy_config.pusch_decoder_executor      = {};
-        fmt::print("Upper PHY PUSCH chain: INLINE on the calling thread (OCUDU_UL_INLINE_PUSCH=1) - no lane "
-                   "dispatch, no fork limiter, the channel estimator runs inline as well, and the upper PHY keeps "
-                   "{} concurrent instance(s) so the decode stays as parallel as the control's\n",
+        // THE DECODER KEEPS THE LOW-PRIORITY POOL IT ALREADY HAD - NOT `{}`, WHICH IS WHAT THE FIRST VERSION DID
+        // (p288) AND WHAT MADE [ul_ldpc_decode] READ 169us INSTEAD OF 66us.
+        //
+        // The dependency first, because it decides what "parallel" can even mean here: inside one PUSCH the LLRs
+        // must exist before the decode starts, so those two stages can NEVER overlap (the user's point, and it is
+        // right). What CAN overlap is the CODEBLOCKS OF ONE TRANSPORT BLOCK: the decoder splits the TB into N
+        // codeblocks and hands each one to its executor as a separate task
+        // (pusch_decoder_impl.cpp:396: `if ((executor != nullptr) && (nof_codeblocks > 1)) executor->defer(...)`),
+        // waiting for all of them at a barrier (cb_task_counter -> join_and_notify). With `{}` there is no
+        // executor, the code falls through to its synchronous path, and the codeblocks are decoded one after
+        // another on the calling thread - which is exactly the extra ~100us that reappeared in the arm.
+        //
+        // So this arm inlines everything UP TO THE LLRs and leaves the decode where the control had it. That is
+        // also the shape a thread declaration can budget for: the grid thread carries the receive, the FFT, the
+        // grid, the CE and the equalization (~150us p99.9 per activation measured), not the decode.
+        fmt::print("Upper PHY PUSCH chain: INLINE up to the LLRs on the calling thread (OCUDU_UL_INLINE_PUSCH=1) - no "
+                   "lane dispatch, no fork limiter, the channel estimator runs inline too; the LDPC decoder KEEPS its "
+                   "own pool, so the codeblocks of a transport block still overlap; the upper PHY keeps {} concurrent "
+                   "instance(s)\n",
                    inline_concurrency);
       }
     }
