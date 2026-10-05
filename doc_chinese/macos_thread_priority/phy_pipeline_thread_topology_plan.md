@@ -4856,3 +4856,46 @@ sudo -E env EXTRA_KNOBS="OCUDU_SCHED_TIME_CONSTRAINT=lower_phy_rx#0=1000/300/500
 2. **停顿是环境性的、与模式无关** ✓：最近 5 条腿的停顿横跨 cpu（p295 21 ms、p298 7.3 ms ✗）、gpu（p302 12.5 ms ✗）、
    cpu_gpu（p306 10.2 s、p309 19.8 ms ✗）⇒ **不是 cpu_gpu 引发的** ✓。
    ⇒ **飞行前先跑 `wip/preflight_quiet.sh`**（GO/NO-GO ✓）✓，并且**带停顿的腿一律作废** ✓。
+
+### §11.108 预登记：**全 Metal 的 cpu_gpu**（LDPC 也上 GPU）—— 用户要求：先看**能不能起飞/接入** ✓
+
+**问题**（用户 2026-10-06）：把 LDPC 也放到 GPU Metal 上，**能不能成功接入** ✓？时延最差是**预料之中** ✓
+（用户原话：各模块之间切换、提交、排队等 overhead 占了大头 ✓ —— §11.107 的机理正是这个 ✓）。
+
+#### 命令（这次用**显式模块表**，避开 §11.106 的重复选项坑 ✓）
+
+```
+cd /Users/jiachengwang/dev/ocudu
+sudo -E env LEG_CG_MODULES=dft+ce+eq+grid \
+     EXTRA_KNOBS="OCUDU_SCHED_TIME_CONSTRAINT=lower_phy_rx#0=1000/300/500 --expert_phy.pusch_ldpc_decoder_type=metal_persistent" \
+  bash doc_chinese/macos_thread_priority/wip/fly_leg.sh p310-cg-fullmetal dual quiet cpu_gpu
+```
+
+* `LEG_CG_MODULES=dft+ce+eq+grid` = **`all` 减去解码器** ✓ ⇒ runner 不再注入 `--pusch_ldpc_decoder_type auto` ✓
+  ⇒ EXTRA_KNOBS 里那一个成为**唯一** ✓（新闸门会在写错时拦下并提示 ✓）；
+* **为什么先用 `metal_persistent`**（而不是字面的 `metal`）✓：问的是"**能不能接入**" ✓，
+  而 persistent 是 Metal 家族里**最快**的（本地定标 **1407 µs** vs 分层 `metal` **3663 µs** ✗，§11.106 ✓）。
+  若最快的 Metal 都接不进去 ⇒ 分层 `metal` 必然更不行 ✓；若 persistent 能接入 ✓ ⇒ `metal` 才值得作为后续单变量臂 ✓。
+  想飞字面 `metal` 就把上面的值换成 `metal` ✓（其余不动 ✓）。
+* 业务：**ping** ✓（`ping -i 0.1 -c 1000 <UE-IP>`，core 侧 ✓）；
+* ★ **起飞前先跑 `wip/preflight_quiet.sh`** ✓（最近 5 条腿 4 条撞环境性停顿 ✗）。
+  对本问（"能不能接入" ✓）停顿影响有限 ✓，但**时延数字会作废** ✗。
+
+**离线预检** ✓：全 metal 参数（`dft metal + ce metal_mmse + eq metal + ldpc metal_persistent + grid on` + `dual`）
+`--dryrun` **exit 0** ✓ —— 即 pipeline 校验器接受这个组合 ✓（这正是可能被拒的地方 ✓）。
+
+#### 与 p309 的关系 = **一个变量** ✓
+
+p309 = `dft+ce+eq+grid` 上 GPU + **解码器在 CPU**（median **1901 µs** ✗）✓；
+p310 = 同样的四个模块 + **解码器 `metal_persistent`** ✓ ⇒ 两者之差**就是解码器上 GPU 的代价** ✓✓。
+（p309 因停顿不可引用比值 ✗，但其中位数可证未污染 ✓ —— 若 p310 干净 ✓，这一对给出的正是那个数 ✓。）
+
+#### 预登记的读数 ✓
+
+1. ★ **能否接入** ✓：日志里的 RRC/NAS/UE 注册行 + `ul_health.sh`（new-tx > 0 ✓）+ **CN 侧是否出现 UE** ✓；
+   若接入失败 ⇒ 记下失败发生在哪一步（PRACH / Msg3 / Msg4 / NAS ✓）✗；
+2. ★★ `[ldpc_time_sum]` / `[ldpc_time_shape]` ✓（**无需旋钮、始终编译、atexit 打印** ✓）：
+   **wall / pack / submit / gpu / gap / unpack** 的均值 + 迭代与上限直方图 ✓ —— 这就是"overhead 花在哪"的直接答案 ✓；
+3. `[ul_ldpc_decode]`（median/p95/p99/max ✓）与 `[ul_pipeline]`/`[ul_tail]` ✓；
+4. `[metal_stats]`（burst / mmse_ce / 解码器计数 ✓）；
+5. `dl_gate.sh` ✓ + 健康 ✓ + 0 gaps ✓。
