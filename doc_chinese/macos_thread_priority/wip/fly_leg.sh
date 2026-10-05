@@ -57,6 +57,14 @@ fi
 KNOBS=(OCUDU_SCHED_VERBOSE=1 OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_UL_SLOT_GRID=1 OCUDU_UL_STABILITY_WINDOWS=8
        OCUDU_UL_THREAD_CPU=1 OCUDU_UL_TIMING_EVENTS=16 OCUDU_UL_WATCHDOG=1 OCUDU_UL_HANDOFF_PROBE=1
        OCUDU_UL_LANE_GRID=1)
+# EXTRA_KNOBS is how an A/B passes the ONE knob under test without editing this file:
+#   EXTRA_KNOBS="OCUDU_UL_INLINE_PUSCH=1" bash fly_leg.sh p288-dual dual quiet cpu
+# A flight's other leg must be flown with the SAME standard set and nothing extra, which is what makes the pair a
+# pair - the wrapper prints what it will pass, so the log says which arm it was.
+if [ -n "${EXTRA_KNOBS:-}" ]; then
+  # shellcheck disable=SC2206
+  KNOBS+=(${EXTRA_KNOBS})
+fi
 
 echo "==================================================================================="
 echo " leg      : $LABEL   (profile=$PROFILE, load=$LOAD, regime=$REGIME, pipeline=$MODE)"

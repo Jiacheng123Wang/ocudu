@@ -12,6 +12,7 @@
 #include "ocudu/support/executors/paced_task_executor.h"
 #include "ocudu/support/executors/strand_executor.h"
 #include "ocudu/support/executors/task_fork_limiter.h"
+#include "ocudu/support/error_handling.h"
 #include "ocudu/support/ocudu_assert.h"
 #include <algorithm> // std::max (the paced thread count)
 #include <cstdio>
@@ -241,6 +242,38 @@ public:
       // adding threads (design document 5.9.33).
       phy_config.pusch_decoder_executor = flexible.non_rt_low_prio_exec;
       phy_config.srs_executor           = flexible.non_rt_low_prio_exec;
+
+      // ---- dev doc 11.72: the PUSCH CHAIN INLINE on the thread that produced the grid --------------------
+      //
+      // WHY. On p284/p285 running the front end on the receive thread bought 13.2us of `[ul_time_frequency]` and
+      // the end-to-end `[ul_pipeline]` gained NOTHING (-2.0us, the two legs' window populations overlapping): the
+      // downstream phases grew by +3.6/+3.0/+2.0us, because the work that left the pool arrived on a thread that
+      // then competed with the pool for the same cores. This is the other half of that trade - run the chain ON
+      // THE THREAD THAT PRODUCED THE GRID, so neither a dispatch nor a competing thread stands between them.
+      // Measured on air (p286): the grid -> lane dispatch is p50 19us / p99 56us, and the merged receive thread
+      // carries 99.2us of work per 500us slot, so the chain (CE ~22us + equalization ~52us + LDPC ~65us in cpu
+      // mode) fits inside the slot with room to spare.
+      //
+      // WHY IT IS A KNOB, default off. It changes WHO runs the work, so it is one arm of an A/B and nothing else
+      // (the workflow's two-key rule); the reading that judges it is the same pair of legs with and without it.
+      //
+      // WHY IT REFUSES THE PACED LANE. Both want to own `pusch_executor`; a leg that silently kept the last writer
+      // would carry a header line for a knob that did nothing - the failure mode this map has met before.
+      if (const char* inline_pusch = std::getenv("OCUDU_UL_INLINE_PUSCH");
+          (inline_pusch != nullptr) && (inline_pusch[0] != '\0') && (inline_pusch[0] != '0')) {
+        if (const char* paced_us = std::getenv("OCUDU_UL_PACED_LANE");
+            (paced_us != nullptr) && (paced_us[0] != '\0') && (paced_us[0] != '0')) {
+          report_fatal_error(
+              "OCUDU_UL_INLINE_PUSCH=1 and OCUDU_UL_PACED_LANE={} both want to own the PUSCH executor; enable one",
+              paced_us);
+        }
+        executors.emplace_back(std::make_unique<inline_task_executor>());
+        phy_config.pusch_ch_estimator_executor = {executors.back().get(), 1};
+        phy_config.pusch_executor              = {executors.back().get(), 1};
+        phy_config.pusch_decoder_executor      = {};
+        fmt::print("Upper PHY PUSCH chain: INLINE on the calling thread (OCUDU_UL_INLINE_PUSCH=1) - no lane "
+                   "dispatch, no fork limiter, and the channel estimator runs inline as well\n");
+      }
     }
 
     ocudu_assert(phy_config.pdcch_executor.is_valid(), "Invalid PDCCH executor.");
