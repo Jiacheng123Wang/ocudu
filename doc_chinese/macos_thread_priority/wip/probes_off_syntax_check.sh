@@ -33,7 +33,12 @@ command -v c++ >/dev/null || { echo "no c++ in PATH" >&2; exit 2; }
 
 # The TUs that can break: the ones that name a probe. A file that merely includes the header transitively cannot
 # call a missing method, so naming is the right filter - and it keeps this at ten seconds instead of an hour.
-mapfile -t SRC < <(git ls-files lib apps utils include | grep -E '\.(cpp|mm)$' | while read -r f; do
+# A `while read` loop rather than `mapfile`: the flight Mac's /bin/bash is 3.2 and has no mapfile (the script is
+# meant to run there too - it is the machine whose build nobody ever compiles with the probes OFF).
+SRC=()
+while IFS= read -r f; do
+  SRC+=("$f")
+done < <(git ls-files lib apps utils include | grep -E '\.(cpp|mm)$' | while read -r f; do
   grep -lqE 'ul_pipeline_probe|handoff_probe|macos_compat' "$f" 2>/dev/null && echo "$f"
 done)
 
