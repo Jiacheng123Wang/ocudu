@@ -4705,3 +4705,52 @@ configuration" ✓，本工作流的 `run_leg.sh` 就是替换它而写的 ✓�
   ⑥ `[metal_stats]`（哪几个模块真的走了 Metal ✓）；⑦ `[ul_thread_cpu]` 的 duty 对 30 % 声明 ✓；
   ⑧ `[ul_tail]`/`[ul_pipeline]` 的 N1 时隙形状 ✓。
   ★ **N1 的数字不与 n78 腿可比** ✗（带宽/RB/时隙全不同 ✓）—— 这条腿的结论只回答"**模式在最新代码上能不能跑、健不健康**" ✓。
+
+### §11.105 p306（N1 上的第一次 cpu_gpu）：模式成立 ✓，**但腿被业务打爆** ✗；并更正"cpu_gpu 默认=cpu"的前提
+
+#### (1) 这条腿里**有效**的事实 ✓
+
+* `dual` ✓ + **n1/FDD 5 MHz** 小区起来了 ✓（stdout：`bw=5 MHz, dl_arfcn=430500 (n1), dl_freq=2152.5 MHz, ul_freq=1962.5 MHz` ✓，
+  与历史 N1 腿逐字一致 ✓）；commit `e25002c279` ✓ = 当时的 HEAD ✓；
+* **声明生效** ✓：`[sched_tc] lower_phy_rx#0 … 1000/300/500us(duty=30%)` ✓ + `[sched] tc=1000/300/500us` ✓；
+* **RF 流健康** ✓：`0 gaps over 6245707 blocks`、0 overflow、0 timestamp-0 ✓；
+* ★ **N1 时隙形状的实测**（有用 ✓）：rx 线程 `window mean=1.00ms`（= 1 ms 时隙 ✓）、`cpu mean=169.6 µs/时隙`、`duty=17.0 %`
+  ⇒ **30 % 的声明在 N1 上有 1.8 倍余量** ✓；`[ul_pipeline] median 1786 µs`（≈ n78 的 3.2 倍，符合 1 ms 时隙 ✓）。
+
+#### (2) ✗ 腿作废的原因：**96 MB 上行灌进 5 MHz 小区**
+
+| 读数 | 值 | 读法 |
+|---|---|---|
+| `[ul_mac_pdu_size]` | p50 **1505 B**、total **96.2 MB** | 这不是 ping 的量级 ✗ |
+| new-tx / retx | 76859 / **106655** | 重传多于新传 ✗ |
+| CRC steady | **3.6 %** | 只有 38 % 的尝试成功 ✗ |
+| `[dl_tx_slack]` | transmissions **446113**、AT/BELOW 0 = 25 ✗ | 下行也在超载 ✓ |
+| watchdog | `phy_series=361` ✗、frontier max **10.2 s** ✗ | 宿主侧也被拖垮 ✓ |
+
+5 MHz（25 RB、15 kHz）在 MCS 13 下的上行峰值 ≈ **5–6 Mbit/s** ✗ ⇒ 这条腿是**链路被业务打爆** ✓，
+不是 RF 故障 ✓（0 gaps ✓），也不是模式问题 ✓ —— 与 §11.104 里"别用 `iperf3 -b 30M`"的提醒正好撞上 ✗。
+
+#### (3) ★★ 更正前提：`cpu_gpu` **默认**确实等于 cpu ✓，但**我们的 runner 不是默认** ✗
+
+* 用户的前提在 **gNB 自身**意义上成立 ✓ —— `run_leg.sh` 自己的注释就写着：`"auto" resolves to CPU in this mode` ✓；
+* **但 `run_leg.sh` 默认 `LEG_CG_MODULES=all`** ✓ ⇒ 它会给 cpu_gpu **注入整套 offload** ✓：
+  `--pusch_dft_type metal --pusch_channel_estimator_algo metal_mmse --pusch_channel_equalizer_backend metal
+  --pusch_ldpc_decoder_type auto --device_resource_grid on` ✓；
+* p306 的 stderr 里就有这行 `mode options : …` ✓，且 `[metal_stats] burst commits=183514 waits=183514
+  dispatches=734054 (equalizer=183514 demapper=183514 channel_estimator=367026)` ✓ ⇒
+  **t2f/ce/eqd/grid 四个家族确实都跑在 GPU 上** ✓✓；
+* ⇒ **唯一还留在 CPU 的是 LDPC 解码器**（`auto` ✗）✓ —— 也就是用户要补的那一块 ✓。
+
+#### (4) 预登记：两条"带 Metal 解码器"的混合腿 ✓（历史上**从未飞过** ✗ ⇒ 第一次）
+
+`--expert_phy.pusch_ldpc_decoder_type` 接受 `metal | metal_flooding | metal_persistent | metal_async | metal_lls` ✓，
+且按 schema 注明**只在 cpu_gpu 下有意义** ✓。本次取 **`metal`** ✓（`metal_persistent`/`metal_async` 是后续单变量臂 ✓）。
+
+| 腿 | 小区 | 配置 | 业务 | 目的 |
+|---|---|---|---|---|
+| **p307** ★推荐先飞 | n78/TDD 20 MHz（已知良好 ✓、可与 100+ 条腿比较 ✓）| `gnb_pinned_mcs13.yml` ✓ | ping ✓ | 干净地回答"**解码器上 GPU 后 pipeline/尾延迟与健康如何**" ✓ |
+| **p308** | **N1/FDD 5 MHz** | **`gnb_n1_nopin.yml`**（**去掉 MCS-13 pin** ✓ 自适应 MCS ✓）| **ping** ✓ | 在 N1 上同样的问题 ✓（p306 已证明 MCS 13 + 重业务会打爆 5 MHz ✗）|
+
+**离线预检** ✓：两个配置 + `--pusch_ldpc_decoder_type=metal` 的 `--dryrun`（cpu_gpu + dual）**exit 0** ✓。
+**预登记读数** ✓：§11.104 的八项 ✓ + **解码器侧**：`[ul_ldpc_decode]` 的 median/p95/max ✓、
+`[metal_stats]` 里解码器的提交/等待计数 ✓（异步变体才可能 in-flight>1 ✓）、以及 `[ul_tail]` 的计数 ✓。
