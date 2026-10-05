@@ -393,6 +393,15 @@ private:
   std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>                    rx_fill_buffer;
   /// Samples of rx_fill_buffer written by the radio so far.
   unsigned                                                                   rx_fill = 0;
+  /// \brief Slot of the last thread-CPU boundary filed for THIS receive chain (dev doc 11.70), or ~0 before the
+  /// first one.
+  ///
+  /// WHY IT IS A MEMBER. The probe's CPU accounting closes a window when the slot NUMBER changes, and it
+  /// overwrites its open boundary on every call - so it has to be called exactly once per slot. This chain runs
+  /// fourteen blocks per slot and they all carry the same slot number: a call per block would restart the
+  /// window each time and end up filing the CPU of the LAST block only. The guard belongs here, next to the
+  /// chain that has the per-block cadence, not inside a probe shared with the PUSCH path.
+  uint64_t                                                                   thread_cpu_slot = ~static_cast<uint64_t>(0);
   std::optional<std::chrono::time_point<std::chrono::steady_clock>> last_tx_time;
   unsigned                                                                   last_tx_buffer_size = 0;
   /// Flow instrumentation probe for the DL production rate (debug aid for cross-platform comparison).

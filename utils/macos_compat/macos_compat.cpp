@@ -859,6 +859,11 @@ constexpr int64_t  LAG_LO_US     = -32768;
 constexpr int64_t  LAG_RES_US    = 64;
 constexpr unsigned LAG_BUCKETS   = 1024; // 64 ms of range at 64 us resolution
 
+/// Shape of the ABSOLUTE-lag histogram and of its ratchet detector (see lane_grid_state::abs_min_ns).
+constexpr unsigned ABS_BUCKETS      = 8192; ///< 1 us resolution up to 8 ms, then counted as overflow
+constexpr unsigned ABS_WINDOWS      = 32;   ///< 1 s of slots each (ABS_WINDOW_SLOTS), written in ring order
+constexpr int64_t  ABS_WINDOW_SLOTS = 2000; ///< slots per window at 500 us: one second
+
 struct lane_grid_state {
   std::atomic<int64_t>  anchor_host_ns{0};
   std::atomic<int64_t>  anchor_slot{-1};
@@ -899,6 +904,29 @@ struct lane_grid_state {
   /// Whether a radio ABSOLUTE time has ever been seen (see metadata::absolute_ns), and the pair it anchored.
   std::atomic<bool>     absolute_seen{false};
   std::atomic<int64_t>  absolute_anchor_ns{-1};
+  /// \name The ABSOLUTE lag over the best offset ever seen (dev doc 11.51/11.70): the reading that needs no
+  /// anchor, and the one that answers "is this pipeline falling permanently behind the air".
+  ///
+  /// WHAT IT IS. (host_ns - radio_abs_ns) is the offset of two clocks with different origins, so its VALUE means
+  /// nothing at all. What means something is how much LATER than the best offset so far a block arrived: the best
+  /// is the sample least contaminated by queueing and by the transport, so subtracting it removes the epoch
+  /// difference AND the constant part of the path, and what is left is the lag that varies. Unlike the FRONTIER
+  /// line above - a residual against an anchor armed on the first frontier, whose zero point is therefore
+  /// arbitrary (11.51) - this one needs no anchor and cannot read negative.
+  ///
+  /// WHY THE PER-WINDOW MINIMA. They are the ratchet detector. A consumer that follows the DATA catches up after
+  /// an upstream transient and returns to the same floor; a consumer that ran at a fixed rate instead would leave
+  /// the window minima stepping up and staying up - a permanent backlog (11.70). Printed as "how far above the
+  /// best offset", so the healthy answer is a row of near-zeros.
+  ///@{
+  std::atomic<int64_t>  abs_min_ns{INT64_MAX};
+  std::atomic<uint64_t> abs_n{0};
+  std::atomic<uint64_t> abs_over{0};
+  std::atomic<uint64_t> abs_win_no{static_cast<uint64_t>(-1)}; ///< window being filled; -1 = none yet
+  int64_t               abs_buckets[ABS_BUCKETS] = {};
+  int64_t               abs_win_min[ABS_WINDOWS] = {};
+  std::mutex            abs_mutex;
+  ///@}
   /// The first and latest (radio absolute, host) pairs, for the host-vs-radio RATE - the drift check the
   /// absolute time base exists for. Both clocks are crystals, so the interesting number is ppm, and it is only
   /// visible over a baseline: 100 us of lag jitter over 100 s of baseline is 1 ppm.
@@ -1022,6 +1050,50 @@ void lane_grid_report_impl()
                    static_cast<double>(abs_span) / 1e9,
                    rate_ppm);
     }
+  }
+
+  // ---- The ABSOLUTE lag and the ratchet detector (see the state's note; dev doc 11.70) -------------------
+  if (st.abs_n.load(std::memory_order_relaxed) != 0) {
+    std::lock_guard<std::mutex> lock(st.abs_mutex);
+    const uint64_t n     = st.abs_n.load(std::memory_order_relaxed);
+    const auto     pct_m = [&](double q) -> int64_t {
+      const uint64_t target = static_cast<uint64_t>(q * static_cast<double>(n) + 0.999999);
+      uint64_t       seen   = 0;
+      for (unsigned i = 0; i != ABS_BUCKETS; ++i) {
+        seen += static_cast<uint64_t>(st.abs_buckets[i]);
+        if (seen >= target) {
+          return static_cast<int64_t>(i);
+        }
+      }
+      return ABS_BUCKETS;
+    };
+    std::fprintf(stderr,
+                 "[lane_grid]   ABSOLUTE lag over the best offset so far (us, 0 = the best block ever seen): "
+                 "n=%llu p50=%lld p95=%lld p99=%lld p999=%lld over8ms=%llu\n",
+                 static_cast<unsigned long long>(n),
+                 static_cast<long long>(pct_m(0.50)),
+                 static_cast<long long>(pct_m(0.95)),
+                 static_cast<long long>(pct_m(0.99)),
+                 static_cast<long long>(pct_m(0.999)),
+                 static_cast<unsigned long long>(st.abs_over.load(std::memory_order_relaxed)));
+    // The ratchet: the minimum offset of each one-second window, as "how far above the best offset ever". A
+    // consumer that follows the DATA returns to the same floor after a transient; one that ran at a fixed rate
+    // would leave these stepping up and staying up, which is a permanent backlog.
+    const int64_t  best = st.abs_min_ns.load(std::memory_order_relaxed);
+    const uint64_t cur  = st.abs_win_no.load(std::memory_order_relaxed);
+    std::fprintf(stderr, "[lane_grid]   ABS window minima above the best offset (us, oldest first, 1 s each):");
+    for (unsigned k = 0; k != ABS_WINDOWS; ++k) {
+      const int64_t w = static_cast<int64_t>(cur) - static_cast<int64_t>(ABS_WINDOWS - 1 - k);
+      if (w < 0) {
+        continue;
+      }
+      std::fprintf(stderr,
+                   " %lld",
+                   static_cast<long long>((st.abs_win_min[static_cast<unsigned>(w % ABS_WINDOWS)] - best) / 1000));
+    }
+    std::fprintf(stderr,
+                 "\n                  -> flat = the pipeline tracks the DATA and catches up after a transient; "
+                 "rising = a permanent backlog\n");
   }
 }
 
@@ -1223,6 +1295,32 @@ void lane_grid_note_slot(uint64_t slot, int64_t host_ns, int64_t radio_abs_ns)
   // THE LAG, before the filter moves the anchor: the residual against the grid the anchor already defines IS
   // the delivery lag (the grid instant is the radio's own cadence; the observation is when the host got it).
   const int64_t distance = lane_grid_distance_of(slot, /*advance=*/true);
+  // ---- The ABSOLUTE lag: see the state's note. Filed here, next to the relative one, so a reader has both ---
+  if (radio_abs_ns >= 0) {
+    const int64_t offset_ns = host_ns - radio_abs_ns;
+    int64_t       prev_best = st.abs_min_ns.load(std::memory_order_relaxed);
+    while ((offset_ns < prev_best) &&
+           !st.abs_min_ns.compare_exchange_weak(prev_best, offset_ns, std::memory_order_relaxed)) {
+    }
+    const int64_t best       = st.abs_min_ns.load(std::memory_order_relaxed);
+    const int64_t lag_abs_us = (offset_ns - best) / 1000;
+
+    const uint64_t              win_no = static_cast<uint64_t>(distance / ABS_WINDOW_SLOTS);
+    std::lock_guard<std::mutex> lock(st.abs_mutex);
+    ++st.abs_n;
+    if (lag_abs_us < static_cast<int64_t>(ABS_BUCKETS)) {
+      ++st.abs_buckets[lag_abs_us < 0 ? 0 : static_cast<unsigned>(lag_abs_us)];
+    } else {
+      ++st.abs_over;
+    }
+    const unsigned win = static_cast<unsigned>(win_no % ABS_WINDOWS);
+    if (win_no != st.abs_win_no.load(std::memory_order_relaxed)) {
+      st.abs_win_no.store(win_no, std::memory_order_relaxed);
+      st.abs_win_min[win] = offset_ns;
+    } else if (offset_ns < st.abs_win_min[win]) {
+      st.abs_win_min[win] = offset_ns;
+    }
+  }
   if (anchor >= 0) {
     const int64_t predicted = lane_grid_target_ns(anchor_h,
                                                   distance - anchor,

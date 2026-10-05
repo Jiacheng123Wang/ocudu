@@ -1595,9 +1595,19 @@ void lower_phy_baseband_processor::ul_process()
   {
     const uint64_t nof_slots_per_sfn_cycle =
         (nof_samples_in_all_hyper_frames / NOF_HYPER_SFNS) / nof_samples_per_slot;
-    ul_pipeline_probe::get().record_start(
+    const uint64_t slot_now =
         (apply_timestamp_sfn0_ref(last_rx_timestamp.load(std::memory_order_acquire)) / nof_samples_per_slot) %
-        nof_slots_per_sfn_cycle);
+        nof_slots_per_sfn_cycle;
+    ul_pipeline_probe::get().record_start(slot_now);
+
+    // The receive thread's OWN CPU, per slot (dev doc 11.70). Until this line the [ul_thread_cpu] report only
+    // ever covered the threads that touch the PUSCH landmark - the pool - while the thread that carries the
+    // front end (and, in the merged profile, the whole uplink processing) was invisible, and it is the one a
+    // declaration has to be written for. Filed ONCE PER SLOT: see thread_cpu_slot.
+    if (slot_now != thread_cpu_slot) {
+      thread_cpu_slot = slot_now;
+      ul_pipeline_probe::get().record_thread_cpu_boundary(slot_now);
+    }
   }
 
   baseband_gateway_buffer_writer_view rx_writer(rx_buffer->get_writer(), rx_offset, nof_samples);
