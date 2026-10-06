@@ -77,36 +77,65 @@ bash doc_chinese/phy_pipeline_gpu/wip/ab_replay_bins.sh /tmp/replay_before \
 
 ---
 
-## 2. M1：融合 **均衡 + 解调**（2 dispatch → 1，去两份中间缓冲）
+## 2. M1：融合 **均衡 + 解调** —— 落地设计（2026-10-06 定稿，按 M0 的结论 ✓）
 
-### 2.1 为什么先做这一步
+> **M0 的结论决定了 M1 的目标怎么写** ✓（实施文档 memo · M0 结项 ✓）：
+> 一跳 480 µs 里**内核本体不到 5 µs** ✗、dispatch 只 ~15 µs ✗、CB 数/栅栏不是缺项 ✗、前端搬设备更差 ✗
+> ⇒ **M1 的验收不能是"dispatch 4→1"或"CB 2→1"** ✗，只能是 **`busy` 与 `[ul_pipeline]` 的改善** ✓
+> —— 也就是说，融合 kernel 必须**真的把计算与访存重排得更省** ✓，否则它会像 dispatch 计数一样"结构达标、性能无感" ✗。
 
-* 它占设备时间的 **92 %** ✓（`merged_hop` 383 µs vs `ch_wt` 31 µs ✓）；
-* **几何天然一致** ✓✓：两个引擎都是"一 RE 一线程"、256/组、`(nof_re, nof_symbols)` ✓
-  ⇒ 同一个线程里顺序做两段，**不需要 barrier、不需要 threadgroup memory** ✓；
-* 收益确定（H1+H2+H3 ✓），风险最低 ✓。
+### 2.1 形状：一个 kernel、一 RE 一线程、x̂ 只活在寄存器里
 
-### 2.2 具体改动（预计落点，动手时校正 ✓）
+今天两段各自成立（几何**完全一致** ✓：`dispatchThreads:(nof_re, nof_symbols,1)`、256/组 ✓）：
+
+```
+均衡:  读网格 y（EQ_DIRECT_GRID ✓）+ 权重 + 噪声  →  写 x̂（中间缓冲，全局内存）
+解调:  读 x̂ + 噪声                                →  写 LLR（llr_direct ✓，直写调用者缓冲 ✓）
+```
+融合后 ✓：
+```
+lane_grid_to_llr:  读 y + 权重 + 噪声  →  [寄存器内：均衡 → 解调]  →  写 LLR
+                   ↑ 无中间缓冲 ✗、无 barrier ✓、无额外 dispatch ✓
+```
+**每线程的计算顺序**（照抄两段内核的数学 ✓，先求"同数学、只合结构" ✓）：
+`y[re]` → 按 `(rb, symbol)` 取权重/噪声 ✓ → `x̂ = w · y` ✓ → 按 `mod` 取每 RE 的比特数 `Qm` ✓ →
+逐比特算 LLR ✓ → 写 `llr[re*Qm + b]` ✓。
+
+### 2.2 具体改动（文件级落点）
 
 | 文件 | 改动 |
 |---|---|
-| **新** `lib/phy/channel_processors/metal/ocudu_lane_fused.metal`（或放在 equalizer 的 metal 目录，动手时定 ✓）| 新 kernel `lane_grid_to_llr`：入参 = 网格、权重、噪声方差、参数结构；出参 = LLR ✓ |
-| `ocudu_equalizer_metal_engine.mm` / `ocudu_demod_metal_engine.mm` | 抽出一个"两段共用"的编码路径：融合开着时，把权重/噪声绑好、**只编一次 dispatch** ✓ |
-| 引擎的 pipeline 加载 | 新 kernel 的 `newComputePipelineStateWithFunction` ✓ |
-| 开关 | **`OCUDU_LANE_FUSE_EQDEMOD`**（env，默认 **关** ✓，关着逐字节走今天两条 dispatch ✓）|
-| 探针 | `[metal_stats] burst dispatches` 应降到 **2/跳** ✓（M1）→ **1/跳** ✓（M2）；可加一个"融合了几跳"的计数便于自证 ✓ |
+| **新增** `lib/phy/upper/channel_processors/metal/ocudu_lane_fused.metal` | `kernel void lane_grid_to_llr(...)` ✓：把均衡与解调两段内核的**数学逐行搬进来** ✓，中间量留在寄存器 ✓ |
+| `ocudu_equalizer_metal_engine.{h,mm}` | 新增 `enqueue_fused(...)`：绑网格 / 权重 / 噪声 / **LLR** 四个缓冲 + **两个现有 parameter struct**（各占一个 buffer index ✓ ⇒ **不改任何 struct 定义** ✓）+ `mod` 与 `Qm` ✓，然后**只编一次 dispatch** ✓ |
+| `ocudu_demod_metal_engine.{h,mm}` | 不改 ✓（融合路线上它不被调用 ✓）；在文件头注明"融合路线下由 lane_grid_to_llr 取代" ✓ |
+| **调用方**（PUSCH 的 metal 处理路径，今天先调 eq 再调 demod ✓）| 加**路线选择**：`OCUDU_LANE_FUSE_EQDEMOD` 开着 ⇒ 调 `enqueue_fused` ✓；关着 ⇒ 走今天两步 ✓（**逐字节不变** ✓）|
+| CMake | 新 `.metal` 加进 equalizer 的 `ocudu_add_metallib` ✓（M3 再谈把三个库并成一个 ✓）|
+| 探针 | `[metal_stats] burst … dispatches` 应从 **4 → 3**/跳 ✓（**这只是"融合生效"的结构证据** ✓，不是收益指标 ✗）|
 
-### 2.3 M1 的判据（预登记）
+**开关**：`OCUDU_LANE_FUSE_EQDEMOD`（env ✓，默认**关** ✓）。两把钥匙 ✓：编译期不需要新开关（kernel 编进既有 metallib ✓），
+运行时 env 控制路线 ✓ ⇒ 关着时二进制与今天逐字节同路 ✓。
 
-| 项 | 出口 |
-|---|---|
-| G1 | `dispatches`/跳 = **2**（M1）/ **1**（M2）✓ |
-| G4 | `[ul_gpu_lane] busy` 的 `merged_hop` —— **记录并报告** ✓（目标：不升；小幅上升可接受 ✓）|
-| G5 | `[ul_gpu_pipeline]`/`[ul_pipeline]` median/p95/p99 —— **记录并报告** ✓（目标：改善；回退要写进 memo 并说明是否值得 ✓）|
-| 硬判据 | **CRC-OK 与对照腿同一档** ✓、**`gaps=0`** ✓、G1（2→1 ✓）✓ |
-| 记录项 | G4/G5 的融合前后对照 ✓（**允许持平或小幅回退** ✓）；出问题时用 §1.4 的两二进制对拍定位 ✓ |
+### 2.3 M1 的判据（按 M0 重写 ✓，预登记）
 
----
+| 类别 | 判据 | 说明 |
+|---|---|---|
+| **结构证据（必然产物 ✓）** | `[metal_stats] burst dispatches`/跳 **4 → 3** ✓ | 证明融合真的生效 ✓（不达标 = 没接上 ✗）|
+| ★ **主判据（性能，报告制 ✓）** | `[ul_gpu_lane] busy` median **< 479.6 µs** ✓ 与 `[ul_pipeline]`/`[ul_gpu_pipeline]` median **< 1321 / 1242.8 µs** ✓ | **允许持平或小幅回退** ✓（用户裁决 ✓），但回退必须写进 memo 并说明是否值得 ✓；**这是判断融合价值的唯一口径** ✓ |
+| **辅助** | lane `residency` / `gap` / `host: entry→commit` ✓、`[ul_tail]` 计数 ✓ | 用来解释 busy 的走向（是省了访存还是被 occupancy 吃掉 ✗）|
+| **红线** | CRC-OK 与对照腿**同档** ✓、`gaps=0` ✓ | 功能性 ✓（77.8 % 那类退化要立刻停下查 ✗）|
+| ✗ **不要求的** | LLR 逐位一致 ✗（只作为出问题时的定位工具 ✓）、dispatch 计数本身 ✗、CB 数 ✗ | 用户裁决 + M0 结论 ✓ |
+
+### 2.4 M1 的执行顺序（每步可停 ✓）
+
+1. **M1.0 读代码**（不飞腿 ✓）：把均衡与解调两段内核的**数学与绑定点逐条抄下来**（含 `mod` 的每种取值、
+   `Qm`、权重的索引方式 ✓），写成一张对照表 ⇒ 这是融合 kernel 的规格说明 ✓；
+2. **M1.1 写 kernel**：逐行搬数学、x̂ 留寄存器 ✓；**先在单元测试/离线对拍上跑**（`ul_chain_replay` ✓），
+   不是为了逐位一致 ✗，而是为了**确认它算的是同一件事** ✓；
+3. **M1.2 接路线 + 开关** ✓：跑一条腿确认 `dispatches` 4→3 ✓（结构证据 ✓）；
+4. **M1.3 判据腿**：`mkf010-…`（对照 = 今天 ✓）与 `mkf011-…`（臂 = 融合 ✓），iperf3、同配置 ✓；
+5. **M1.4 若 busy 不降** ✗：按序试三件（每件一个变量 ✓）——① 每线程处理 2 个 RE（提高 ILP ✓）；
+   ② 权重/噪声放 threadgroup memory（同组共享 ✓）；③ LLR 写回分块（避免 uncoalesced ✗）——
+   每件都沿用同一套判据 ✓。
 
 ## 3. M2：把 **CE 的权重**折进同一 kernel（**判据驱动，可以不做** ✓）
 
