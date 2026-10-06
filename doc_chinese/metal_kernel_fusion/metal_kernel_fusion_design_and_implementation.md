@@ -317,48 +317,55 @@ strides 块是**按字节原样传的** ⇒ 表长不同 ⇒ **`y_starts` 从错
 `system_error: mutex lock failed` 中止 ✓ —— 实测**对照臂也有** ✓（A 4/10、B 0/10 ✓，dump 已写完 ✓）
 ⇒ **是既有的收尾竞态** ✗，不是融合引入的 ✓；`ab_dumps.sh` 的 `missing-dumps=0` 判据不受影响 ✓。
 
-### 2.11 ★ 下一步（待飞，2026-10-06 第 2 次末）：`mkf010` / `mkf011` 一对
+### 2.11 ★★ 下一步：先让腿的调制落进 kernel 的范围，再飞一对（2026-10-06 第 2 次末，**已按 mkf010/011 的结论重写** ✓）
 
-**前置** ✓（改代码后才需要重做 ✓，现在都已就绪 ✓）：`gnb` 已重编 ✓、metallib 已重生成且含 `lane_grid_to_llr` ✓、
-`build/hashes.h` 的指纹与 HEAD 一致且**在二进制里** ✓（`run_leg.sh` 会自己拒绝不一致的二进制 ✓）。
+**`mkf010`/`mkf011` 已经飞过** ✓（结论见 memo ✓）：**接线正确** ✓（10 个融合 dispatch 与 10 个 16QAM 跳一一对应 ✓、
+账目闭合 ✓、那 10 跳全 `crc=OK` ✓），**但那两条腿跑的是 64QAM** ✗
+⇒ 融合只覆盖 **0.009 %** 的跳 ⇒ **判不了融合** ✗。**别按老计划再飞同样的两条** ✗。
 
-用 `fly_leg.sh`（**它自带 protocol driver** ✓ —— 只跑 `run_leg.sh` 会丢 `.protocol.txt` ✗，`mkf-m0-base` 就是这么丢的 ✗）：
+**两条路（用户裁决 ✓ —— 见下方问题 ✓）**：
+
+| | **A. 把 UL 钉成 16QAM**（零新代码 ✓）| **B. 把融合 kernel 扩到 64QAM**（新代码 ✓）|
+|---|---|---|
+| 做法 | 一份**本工作流自己的** config 副本 + **`cell_cfg.pusch.mcs_table: qam64`** ✓（表 1 的 index 13 = 16QAM ✓，正是配置注释本来的意思 ✓）；两条腿都带它 ✓ | 照抄 demapper 的 64QAM 分支进 `ocudu_lane_fused.metal` ✓（3 张 8 项表 + `interval_l` ✓ + 一个 `mod` 分支 ✓），scope 从"16QAM"改成"16QAM + 64QAM" ✓ |
+| 代价 | **2 条腿** ✓；负载与 M0 基线不同（16QAM R=490/1024 vs 64QAM R=567/1024 ✓ ⇒ 每 RE 载荷 ≈ −42 % ✗）⇒ **对基线的绝对值不可直接比** ✓，但**对内可比** ✓ | 内核改动 + **重跑离线对拍（64QAM 标注语料 ✓）与单元测试** ✓ + 2 条腿 ✓ |
+| 好处 | 最快拿到 **M1 的判决** ✓（融合到底值不值 ✓）| 判决是在**交付形状真正的负载**上做的 ✓（64QAM 才是调度器实际给的 ✓），与 M0 基线同负载 ⇒ 可直接比 ✓ |
+| 风险 | 判决是在一个"非交付负载"上做的 ✗；且 kernel 仍服务不了实际流量 ✗ | 范围扩大 ✗（M1.0 的 scope 决议要按新事实改 ✓）；仍要一次飞行 ✓ |
+
+**建议顺序** ✓：**先 A 拿判决**（最便宜、是"要不要继续"的证据 ✓），**若融合兑现收益再做 B** ✓
+（B 也是 M1.5 / M2 之前必须做的 ✓ —— 否则融合路线在真实配置下覆盖率≈0 ✓）。**两条路的 code/config 都已就绪 ✓**：
+A 的 config = `wip/gnb_mcs16qam.yml` ✓，B 只需改 kernel ✓。
+
+**A 的命令** ✓（config 只换 `LEG_CFG` ✓，其余与已飞的两条腿一致 ✓）：
 
 ```bash
 cd /Users/jiachengwang/dev/ocudu
-export LEG_CFG=$PWD/doc_chinese/macos_thread_priority/wip/gnb_pinned_mcs13.yml
+export LEG_CFG=$PWD/doc_chinese/metal_kernel_fusion/wip/gnb_mcs16qam.yml
 export LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs
 
-# 对照腿（默认形状 ✓，不带任何 EXTRA_KNOBS ✓）
-sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh mkf010-m1-fused-off dual quiet gpu
-
-# 臂腿（**一个变量** ✓：融合开 ✓）★ EXTRA_KNOBS 必须在 sudo -E 之后传入（env_reset 会抹掉前面的赋值 ✗）
+# 对照腿（`mcs_table: qam64` + MCS 13 = 16QAM ✓，融合关 ✓）
+sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh mkf012-m1-16qam-fused-off dual quiet gpu
+# 臂腿（**一个变量** ✓）
 EXTRA_KNOBS="OCUDU_LANE_FUSE_EQDEMOD=1" \
-sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh mkf011-m1-fused-on dual quiet gpu
+sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh mkf013-m1-16qam-fused-on dual quiet gpu
 
-# 判读（功能/结构为主 ✓；时延数字要引用时才过闸门 ✓）
-bash doc_chinese/macos_thread_priority/wip/ul_health.sh  mkf010-m1-fused-off
-bash doc_chinese/macos_thread_priority/wip/ul_health.sh  mkf011-m1-fused-on
-bash doc_chinese/macos_thread_priority/wip/dl_gate.sh    mkf011-m1-fused-on     # 参考项 ✓
-bash doc_chinese/macos_thread_priority/wip/pair_check.sh mkf010-m1-fused-off mkf011-m1-fused-on
+# 判读（注意 pair_check 要显式给 LEG_LOGDIR ✓，它没有泛搜 ✓）
+bash doc_chinese/macos_thread_priority/wip/ul_health.sh  mkf012-m1-16qam-fused-off
+bash doc_chinese/macos_thread_priority/wip/ul_health.sh  mkf013-m1-16qam-fused-on
+bash doc_chinese/macos_thread_priority/wip/dl_gate.sh    mkf013-m1-16qam-fused-on
+LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs \
+  bash doc_chinese/macos_thread_priority/wip/pair_check.sh mkf012-m1-16qam-fused-off mkf013-m1-16qam-fused-on
 ```
 
-**这对比 M0 基线多带了什么** ✓（**两条腿完全一样** ✓ ⇒ 仍是"一个变量" ✓）：
-`fly_leg.sh` 的标准仪表集（`OCUDU_SCHED_VERBOSE` 等 9 个 ✓）+ cell config **`gnb_pinned_mcs13.yml`** ✓
-—— **MCS 13 = 16QAM** ✓，正是融合 kernel 的范围 ✓（`mkf008/009` 用的也是它 ✓，且 `*.driver.log` 的命名证明
-前几条腿就是 `fly_leg.sh` 飞的 ✓）。业务：cue 时在 **CORE 侧**起
-`ping -i 0.1 -c 1800 <UE-IP>` ✓，腿末用 **Ctrl-C** 停 ✓。
-
-**判读要点** ✓（先看"路线真的生效了" ✓，再看数字 ✓）：
-1. 臂腿日志里应有 `PUSCH: FUSED equalization + demapping chain enabled (… 16QAM)` ✓
-   与 `[eq_impl] fused equalizer+demapper (lane_grid_to_llr): available` ✓
-   （metallib 是**运行时**从源码树加载的 ✓ ⇒ 后者是"这个库有没有融合 kernel"的唯一出处 ✓）；
-2. `[metal_stats] burst … dispatches` 应**每跳 3** ✓ 且 `(equalizer=… demapper=0 …)` ✓、
-   `eq_batch … sites(… y_fused=… y_batch=0)` ✓；
-3. 然后才是 `[ul_gpu_lane] busy` ✓ / `[ul_pipeline]` ✓ / CRC ✓（§2.3 的判据 ✓）。
+**判读要点** ✓（先确认**覆盖率** ✓，再看数字 ✓）：
+1. 臂腿日志里必须有 `PUSCH: FUSED equalization + demapping chain enabled (… 16QAM)` ✓
+   与 `[eq_impl] fused equalizer+demapper (lane_grid_to_llr): available` ✓；
+2. `PUSCH: rnti` 行的 `mod=` 应**几乎全是 16QAM** ✓（这就是 A 是否奏效的判据 ✓）；
+3. `[metal_stats] burst … dispatches` 应**每跳 3** ✓（`demapper=0` ✓）、
+   `eq_batch … sites(y_fused≈跳数 y_batch=0)` ✓；
+4. 然后才是 §2.3 的判据 ✓（`busy` ✓ / `[ul_pipeline]` ✓ / CRC 同档 ✓ / `gaps=0` ✓）。
 **若出现** `PUSCH: OCUDU_LANE_FUSE_EQDEMOD is set but the fused route is NOT taken (…)` ✓
-⇒ **括号里就是原因** ✓（多半是调制不是 16QAM ✗ ⇒ 说明 MCS 没按 MCS 13 跑 ✓）
-—— **不要**把它读成"融合无收益" ✗。
+⇒ 括号里就是原因 ✓（调制不对 ⇒ A 没生效 ✓），**不要**读成"融合无收益" ✗。
 
 ### 2.12 未决项与重开条件（M1 期间 ✓）
 
@@ -654,6 +661,66 @@ leg_protocol_driver: REFUSING: no leg 'mkf-m0-base' started within 120 s
 2. **环境不是起飞条件** ✗ —— **抗干扰能力本身就是健壮性** ✓；
    `preflight_quiet.sh` 与 `dl_gate.sh` 都只是**参考项** ✓：结构/功能判据不受停顿影响，照用 ✓；
    只有**引用时延数字**时才需要闸门 PASS，否则照记并**标注"含停顿、不引用"** ✓。
+
+### 2026-10-06 · ★★★ mkf010/mkf011 飞完：**接线正确 ✓，但腿的调制不是 16QAM ✗ ⇒ 这一对判不了融合**（§2.11 已按此重写 ✓）
+
+**腿** ✓：`mkf010-m1-fused-off`（23:42）与 `mkf011-m1-fused-on`（23:46）✓，都是 `dual / quiet / gpu` ✓、
+`gnb_pinned_mcs13.yml` ✓、臂带 `OCUDU_LANE_FUSE_EQDEMOD=1` ✓（stderr 里 `knob : OCUDU_LANE_FUSE_EQDEMOD=1` ✓）。
+
+**★ 好的一面（接线在空口上被证明 ✓✓）**：
+```
+控制: [metal_stats] burst … dispatches=433572 (equalizer=108393 demapper=108393 channel_estimator=216786)  ⇒ 4.0000/跳 ✓
+      eq_batch … sites(y_batch=108393 y_fused=0)
+臂  : [metal_stats] burst … dispatches=433252 (equalizer=108316 demapper=108306 channel_estimator=216630)
+      eq_batch … sites(y_batch=108306 y_fused=10)          ⇒ demapper 恰好少 10 次 ✓ = y_fused ✓
+```
+⇒ **每一个融合 dispatch 恰好替换一个 demapper dispatch** ✓（10 = 10 ✓，账目闭合 ✓）；
+那 10 跳**全部 `crc=OK`** ✓（两条腿里 16QAM 的 PUSCH 都是 10 跳、都 OK ✓）
+⇒ 融合 kernel 在空口上产出的软比特**可解** ✓。
+
+**★ 坏的一面（M1 的前提被证否 ✗）**：PUSCH 的调制分布（按 `PUSCH: rnti` 行统计 ✓）：
+
+| 腿 | 64QAM | 16QAM | QPSK |
+|---|---|---|---|
+| mkf010（对照）| **108 380** | 10 | 3 |
+| mkf011（臂）| **108 303** | 10 | 3 |
+
+⇒ **腿跑的是 64QAM，不是 16QAM** ✗ ⇒ 融合路线只覆盖 **10 / 108 316 ≈ 0.009 %** 的跳 ✗
+⇒ 这一对**不能判融合** ✗（`busy` 478.9 vs 479.9 µs 的差就是噪声 ✓：两条腿 99.99 % 的跳走同一条路 ✓）。
+
+**根因** ✓（读代码得到 ✓，不是猜 ✓）：cell config 把 `min_ue_mcs = max_ue_mcs = 13` ✓，
+配置注释写"MCS 13 = 16QAM ✓" —— 那是 **MCS 表 1（qam64）** 的映射 ✓
+（`lib/ran/pdsch/pdsch_mcs.cpp` 的 `MCS_INDEX_TABLE_1`：10–16 = 16QAM ✓、17+ = 64QAM ✓）；
+**而 PUSCH 的表默认是表 2（qam256）** ✗（`du_high_config.h:286`：`pusch_mcs_table mcs_table = pusch_mcs_table::qam256;` ✓），
+表 2 的 index 13 = **64QAM** ✓（`MCS_INDEX_TABLE_2`：5–10 = 16QAM、11–19 = 64QAM ✓）
+⇒ **同一个"MCS 13"在两条表里是两个调制** ✗✓。
+**证据链** ✓：① 观察到的调制就是 64QAM ✓；② MCS **确实被钉住** ✓（同一 grant 宽度的 TBS 完全确定 ✓：
+51 PRB → 3072 / 1505 / 2754 / 2562 / 3009 分别对应不同的 PRB 起止与 RV ✓，没有链路自适应的散布 ✓）
+⇒ 只能是"表 2 + index 13" ✓（表 1 会给 16QAM ✗、表 3 会给 QPSK ✗，都与观察不符 ✗）。
+★ 这条**不是本工作流引入的** ✗：M0 的腿（mkf001–mkf009）与上一工作流的腿**同样是 64QAM** ✓
+—— 也就是说 **M1.0 决议里那句"本工作流的判据腿全部是 MCS 13 = 16QAM"从一开始就不成立** ✗✗。
+
+**其余读数** ✓（都正常，且与 M0 基线逐项吻合 ✓ —— 因为两条腿 99.99 % 同路 ✓）：
+
+| 读数 | M0 基线 ✓ | mkf010（对照）| mkf011（臂）|
+|---|---|---|---|
+| `[ul_gpu_lane] busy` median | 479.6 µs | **478.9** | **479.9** |
+| split `merged_hop` / `ch_wt` | 465.6 / 36.9 | 464.2 / 36.6 | 465.7 / 36.8 |
+| `cbs/lane` | 2.00 | 2.00 | 2.00 |
+| `[ul_pipeline]` median | 1321 | 1323.0 | 1319.0 |
+| `[ul_gpu_pipeline]` median | 1242.8 | 1240.5 | 1241.3 |
+| `stale` | 0 | 0 | 0 |
+| CRC steady | 99.1 % | 98.7 %（marginal ✗）| **99.2 %（CLEAN ✓）** |
+
+`pair_check` ✓：同一对 **PASS** ✓（0 gaps ✓、B/hop 2638 vs 2692 ✓、defer99 888.4 vs 888.7 µs ✓）；
+`dl_gate`（臂）✓：**CLEAN / PASS** ✓。
+⇒ **新二进制的默认路线与 M0 基线一致** ✓（作为"接线没有碰坏默认路径"的回归证据有效 ✓），
+**但它不是融合的判决** ✗ —— 按本工作流的纪律，**不许把它读成"融合无收益"** ✗。
+
+**工具坑（顺手记 ✓）**：`pair_check.sh` 只认 `LEG_LOGDIR`（默认它自己的 `logs/` ✗），
+**没有**上一会话给 `ul_health`/`dl_gate`/驱动做的"泛搜 `doc_chinese/*/wip/logs`" ✓
+⇒ 本工作流的腿要 `LEG_LOGDIR=…/metal_kernel_fusion/wip/logs bash pair_check.sh …` ✓
+（已写进 §2.11 的命令 ✓；要不要给它补上泛搜，等有空统一做 ✓）。
 
 ### 2026-10-06 · ★★ M1.1 接线完成 + 离线对拍（详细规格见 §2.10 ✓）
 
