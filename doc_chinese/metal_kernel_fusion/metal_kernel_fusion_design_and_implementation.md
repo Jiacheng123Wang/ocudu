@@ -203,6 +203,39 @@ kernel void equalize_mxn_batch(device const ushort2* h [[buffer(0)]],  // cbf16 
 4. **离线先对拍**（`ul_chain_replay` ✓）：确认"同一件事" ✓（不是逐位 ✗）；
 5. 再飞 **`mkf010`（对照）** 与 **`mkf011`（臂）** ✓，判据见 §2.3 ✓。
 
+### 2.8 ★ M1.1 实现清单（2026-10-06 定，含一个**范围决定** ✓）
+
+**范围决定 ✓**：**M1 只覆盖 `MOD_QAM16`** ✓（本工作流的判据腿全部是 MCS 13 = 16QAM ✓）；
+**其它调制留在今天的两步路线** ✓ —— 调用方在选路线时检查 `mod == MOD_QAM16` ✓。
+理由 ✓：把 kernel 从"四种调制的全量合并"缩到"只合并会被飞的那一种" ✓，让第一版**每一行都被腿覆盖** ✓
+（用户裁决允许"简单算法/实现调整换取融合收益" ✓，这里是它的保守版 ✓）。后续要扩调制，按同一套加 ✓。
+
+**要逐字搬进 `ocudu_lane_fused.metal` 的符号**（**复制，不改原文件** ✓ —— 抽取到共享头是后续动作 ✓，
+因为那会改动在交付形状里的两个 kernel ✗，按纪律需要单独一次 A/B ✓）：
+
+| 来源 | 符号 |
+|---|---|
+| `ocudu_demod.metal` | 常量 `LLR_MAX_F` / `GAIN_FIRST_16` / `THR_16` / `CONST_0_8` / `NEAR_ZERO` ✓；`quantize_llr` ✓ / `rcp_noise_safe` ✓ / `qam16_01` ✓ / `qam16_23` ✓ |
+| `ocudu_equalizer.metal` | `equalize_params` ✓ / `equalize_strides` ✓ / `MAX_PORTS` ✓；`bf16_to_f` ✓；网格与权重的**索引方式**（`st.h_starts[]`/`st.y_starts[]` ✓ + `p.h_offset` ✓ + `gid.y` ✓）；单层 SIMO 合并的**那一整段**（`L==1` 分支 ✓，含 `tx_scaling`、`sigma2[port]`、`d > 0` 守卫与 `eq=0 / nv=INFINITY` 的退化分支 ✓）|
+
+**逐行合并的骨架**（M1.0 §2.6 的表 ✓）：
+```
+h  += st.h_starts[min(sym, eq_max_run_symbols-1)] - p.h_offset;     // 照抄 batch
+y  += st.y_starts[min(sym, eq_max_run_symbols-1)];
+// 单层 SIMO 合并（照抄 L==1 分支）→ x_hat（寄存器）、nvar（寄存器）
+const float rcp = rcp_noise_safe(nvar);
+device char* llrs = llrs_base + sym * llr_stride;                    // 照抄 demod
+llrs[4*re+0] = quantize_llr(qam16_01(x_hat.x, rcp), 20.0f);          // 四比特照抄
+llrs[4*re+1] = quantize_llr(qam16_01(x_hat.y, rcp), 20.0f);
+llrs[4*re+2] = quantize_llr(qam16_23(x_hat.x, rcp), 20.0f);
+llrs[4*re+3] = quantize_llr(qam16_23(x_hat.y, rcp), 20.0f);
+```
+**CMake**：`ocudu_lane_fused.metal` 加进 equalizer 的 `ocudu_add_metallib` ✓（M3 再合并三个库 ✓）。
+**编译自检** ✓（不需要电台、不需要飞腿 ✓）：`xcrun -sdk macosx metal -c` 编一次 ✓ —— 与
+`probes_off_syntax_check.sh` 同一类"先证明它能编"的动作 ✓。
+**接线（这一步之后做 ✓）**：均衡引擎加 `enqueue_fused` ✓ → 调用方（`pusch_demodulator_impl` ✓）
+按 `OCUDU_LANE_FUSE_EQDEMOD && mod==QAM16` 选路线 ✓ → 关着时逐字节走今天两步 ✓。
+
 ### 2.4 M1 的执行顺序（每步可停 ✓）
 
 1. **M1.0 读代码**（不飞腿 ✓）：把均衡与解调两段内核的**数学与绑定点逐条抄下来**（含 `mod` 的每种取值、
