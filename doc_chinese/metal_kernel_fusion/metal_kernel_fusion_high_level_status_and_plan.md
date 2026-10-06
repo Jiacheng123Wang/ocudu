@@ -1,0 +1,196 @@
+# GPU 融合 lane 的 Metal kernel 融合 —— 高层现状与规划
+
+> **状态**：2026-10-06 立项（用户），本文**可重写**（活文档）。**实施细节与 memo** 在
+> `metal_kernel_fusion_design_and_implementation.md`（追加式）；会话快照在 `session_handoff_*.md`。
+>
+> **上游依据**：`../macos_thread_priority/workstream_summary_and_lessons.md`（上一工作流的结账，
+> **本文的所有"功课"都出自它**）、`../apple_silicon_heterogeneous_gnb_plan.md`（高层架构）、
+> `../phy_pipeline_gpu/`（融合 lane 本身的开发记录）。
+
+---
+
+## 0. 一句话
+
+把 gpu 融合 lane 里 **DFT 网格 → LLR** 这一段的 **4 次 dispatch / 2 个中间缓冲 / 3 个 metallib**
+收敛为 **1 个 kernel / 1 条命令 / 1 个库** ✓ —— 这是上一工作流"**减少边界比加快边界有效**"那一条功课的直接应用 ✓。
+
+---
+
+## 1. 现状调研（全部来自代码与实测，不是估计）
+
+### 1.1 这一段今天由谁完成
+
+| 阶段 | 引擎 | 输入 | 输出 |
+|---|---|---|---|
+| 信道估计（CE，MMSE）| `channel_estimator/metal/ocudu_metal_mmse_engine.mm`（**12 个 `.metal` 文件**）| 网格 + 导频 | **每（RB/子载波组 × 符号）的权重 + 噪声方差** ✓ |
+| 均衡 | `channel_processors/metal/ocudu_equalizer_metal_engine.mm` | 网格 + 权重 | **均衡后符号** ✓ |
+| 解调 | `channel_modulation/metal/ocudu_demod_metal_engine.mm` | 均衡后符号 + 噪声 | **LLR** ✓ |
+
+（`dft` 与 `ldpc` 的 metal 实现在本工作流**之外** ✓。）
+
+### 1.2 一跳的结构（实测）
+
+```
+[metal_stats] burst commits=108378 waits=108378 max_in_flight=1 dispatches=433510
+              (equalizer=108378 demapper=108378 channel_estimator=216754)
+[metal_stats] mmse_ce  commits=108378 waits=4        ← CE 是 fire-and-forget ✓
+[ul_gpu_lane] busy split: ch_wt=31.1us/lane (8%)  merged_hop=382.8us/lane (92%)
+```
+
+* **一跳 = 1 条命令缓冲**（CB 级融合**已经做完** ✓，靠 `OCUDU_EQ_DEFER_ENCODE` / `OCUDU_DEMOD_DEFER_ENCODE`
+  把各自的 dispatch 编进同一个 burst ✓）+ **4 次 dispatch**（eq 1、demap 1、ce 2）✗；
+* **设备时间**：`merged_hop`（eq+demap）**377–384 µs（92–93 %）**、`ch_wt`（CE 权重）**28–31 µs（7–8 %）** ✓
+  （`[ul_gpu_lane] busy split`，ping 腿 p302/p303/p304 ✓；iperf3 腿 p305 是 469/37 µs ✓ —— 同一比例 ✓）；
+* 对照：`[ul_pipeline]` median **1319 µs（iperf3）/ 1425–1464 µs（ping）** ✗ vs
+  **cpu + inline 交付形状 551–557 µs** ✓ ⇒ gpu 形状在时延上落后 **2.4–2.6 倍** ✗。
+
+### 1.3 ★ 让融合天然可行的两条事实
+
+1. **几何完全一致** ✓✓：均衡与解调**都是"一个 RE 一个线程"**、`threadsPerThreadgroup = 256`、
+   网格同为 `MTLSizeMake(nof_re, nof_symbols, 1)`
+   （`ocudu_equalizer_metal_engine.mm:1441`、`ocudu_demod_metal_engine.mm:183` ✓）
+   ⇒ 两步可以**在同一个线程里顺序做完**，不需要 barrier、不需要中间缓冲 ✓；
+2. **中间数据量很小** ✓：一跳（20 MHz、51 RB、14 符号、1T1R；8568 个 RE ✓）的网格 ≈ 8568×8 B ≈ **67 KB**，
+   LLR（Qm=4，1–2 B/LLR）≈ **33–67 KB** ⇒ **不是带宽问题** ✗ ⇒ 融合要省的是**dispatch / launch / barrier 与往返**，
+   不是 DRAM 流量 ✓（这一点决定了判据应落在**设备时间与尾部分布**上，而不是"带宽"上 ✓）。
+
+### 1.4 已经做过的边界削减（本次要更进一步）
+
+| 已有的边界削减 | 旋钮 | 效果 |
+|---|---|---|
+| CB 级融合（eq/demap 编进同一 burst）| `OCUDU_EQ_DEFER_ENCODE`、`OCUDU_DEMOD_DEFER_ENCODE`（默认 ON ✓）| 一跳 1 条命令 ✓ |
+| 均衡直读网格（去掉 `y_gather`）| `OCUDU_EQ_DIRECT_GRID`（默认 ON ✓）| 派发 10→6/跳 ✓ |
+| CE 直读 y / 搭车道共享 cb | `OCUDU_CE_Y_DIRECT`、`OCUDU_CE_LANE_ORDER=merged`（默认 ✓）| 去掉一次 gather + 一次 cb ✓ |
+| 消去法（判断某个 kernel 是否在关键路径上 ）| `OCUDU_LANE_ABLATE` / `_EVERY` / `_STAGE` ✓ | **本次可复用的实验手段** ✓ |
+
+⇒ **CB 级已经合完了 ✓，剩下的是 kernel 级** —— 本工作流就是这一层 ✓。
+
+### 1.5 metallib 现状（"整合"的对象）
+
+今天**每类引擎各自一个库**，各自 `dlopen`/`newLibraryWithURL` 并在初始化时建 pipeline ✓：
+`ocudu_demod.metallib`、`ocudu_mmse.metallib`、`ocudu_equalizer.metallib`（+ 不在范围内的 `ocudu_dft.metallib`、
+LDPC 的四个 ✓）。每个库的路径由编译期宏注入（`OCUDU_*_METALLIB_PATH` ✓）。
+
+---
+
+## 2. 目标与判据（**预登记**，判读前不得更改）
+
+### 2.1 目标（可判的硬指标）
+
+| # | 指标 | 今天 | 目标 |
+|---|---|---|---|
+| G1 | `[metal_stats] burst … dispatches` / 跳 | **4** | **1** ✓（把 CE 也折进来则含其在内 ✓）|
+| G2 | 一跳的命令缓冲数 | 1 ✓ | 1（保持 ✓）|
+| G3 | 段内 metallib 数 | **3** | **1** ✓ |
+| G4 | `[ul_gpu_lane] busy`（设备时间）| `merged_hop` 383 + `ch_wt` 31 µs | **不升** ✓（先求不升，再求降）|
+| G5 | `[ul_gpu_pipeline]` / `[ul_pipeline]` 的 median、p95、p99 与 `[ul_tail]` **计数** | median 1236–1464 µs ✗ | **至少不低于今天** ✓，并给出融合后的新基线 ✓ |
+
+### 2.2 红线（任何一步都必须满足）
+
+1. **数值等价**：LLR 与今天**逐位一致** ✓（或给出明确的容差与理由 ✓）；CRC-OK 率不降 ✓；
+2. **健康 CLEAN**（`ul_health.sh` ≥99 %）、**`gaps=0`**、`dl_gate.sh` PASS ✓；
+3. **Linux / Ubuntu 行为一字不变** ✓（全部改动在平台守卫内 ✓）；
+4. **关着开关时逐字节不变** ✓（两把钥匙：编译开关 + env ✓）；
+5. **默认构建（probes-OFF）必须能编** ✓（`probes_off_syntax_check.sh` ✓）。
+
+### 2.3 判读纪律（继承 ✓）
+
+**一条腿一个变量** ✓；**先过 `dl_gate.sh` 再读数字** ✓；**带停顿的腿作废重飞** ✓；
+**`max` 是单样本 ⇒ 只信 `[ul_tail]` 的计数与可复现性** ✓；**先说几何与口径** ✓。
+
+---
+
+## 3. 收益从哪里来（假设 + 各自的验证方式）
+
+| # | 假设 | 机制 | 怎么验证 |
+|---|---|---|---|
+| H1 | **dispatch / launch / barrier 开销**：4 次 dispatch 变 1 次 | 每次 dispatch 有 GPU 侧栅栏、调度与依赖等待 ✓ | **M0 先量**：用 `[metal_stats]`、`[ul_gpu_lane]` 与消去法把"每 dispatch 的固定成本"分离出来 ✓（**不许拿上一工作流的 300–400 µs 提交窗口来许诺** ✗ —— 那是 host→queue 的成本，今天已经是 1 次/跳 ✓）|
+| H2 | **中间缓冲往返**：均衡后符号 + 噪声方差不再落显存 | 今天两段之间必经全局内存 ✓ | 融合后 `[metal_stats]` 对应计数归零 ✓ + 设备时间变化 ✓ |
+| H3 | **寄存器/threadgroup 复用**：grid 的 y、权重、噪声在同一线程内复用 | 减少重复读 ✓ | 设备时间 + 吞吐（`[ul_gpu_lane]`）✓ |
+| H4 | **库整合**：一次加载、一套 pipeline | 3 个库 → 1 个 ✓ | G3 ✓；初始化时间（启动期 ✓，不在数据路径上 ✓）|
+| H5 | ⚠ **占用率**：一个 kernel 每线程做更多事 | 可能更好（更少启动）也可能更差（寄存器压力 ✗）| `[ul_gpu_lane] busy` + 设备时间 ✓；**允许结论是"没有收益"** ✓ |
+
+★ **明确不承诺的**：融合**不会**让 gpu 形状在 UL 时延上超过 cpu+inline ✗（上一工作流已证：
+gpu 的代价是"每跳一次设备往返"本身 ✓）。本工作流的目标是**把 offload 路径的天花板压低** ✓，
+让它在中继/吞吐/多用户场景里更划算 ✓ —— 这也是 `../apple_silicon_heterogeneous_gnb_plan.md` §1 的定位 ✓。
+
+---
+
+## 4. 高层架构设计
+
+### 4.1 形状：一个 kernel，一条命令，一个库
+
+```
+（今天）  grid ──▶[CE: 2 dispatch]──▶ weights/noise ──▶[EQ: 1]──▶ x̂ ──▶[DEMOD: 1]──▶ LLR
+                        └──────────── 1 个 command buffer, 4 dispatches, 3 个 metallib ───────────┘
+
+（目标）  grid ──▶[ lane_grid_to_llr : 1 dispatch ]──▶ LLR
+                        └──────────── 1 个 command buffer, 1 dispatch, 1 个 metallib ─────────────┘
+```
+**分两步走**（每步都是可独立验收的一条腿 ✓）：
+
+* **M1（先做，收益最确定 ✓）**：**融合 eq + demap** ⇒ `merged_hop` 内部 2 → 1 个 dispatch ✓，
+  去掉"均衡后符号 + 噪声方差"两个中间缓冲 ✓。几何不变（一 RE 一线程 ✓），
+  每线程：读 y（含 `EQ_DIRECT_GRID` ✓）→ 读权重/噪声 → 均衡 → 解调 → 写 LLR ✓ **全在寄存器** ✓。
+* **M2（再做，收益待测 ✓）**：把 **CE 的权重计算**折进同一 kernel ✓。它需要**跨线程协作**
+  （每 RB/组的自相关与求逆 ✓）⇒ 线程组内协作（threadgroup memory + `threadgroup_barrier` ✓）
+  或"一个线程组负责一个 RB 组 × 若干符号"的映射 ✓。**若 M0/M1 的测量显示 CE 只占 8 % 设备时间，
+  M2 的优先级可以降** ✗✓（判据驱动，不为了"全融合"而融合 ✓）。
+
+### 4.2 关键设计选择（待 M0 用测量确认，写在这里备查）
+
+| 选择 | 倾向 | 理由 |
+|---|---|---|
+| 线程映射 | **沿用"一 RE 一线程"** ✓ | 与今天逐位等价最容易做对 ✓；寄存器压力可控 ✓ |
+| LLR 写回 | 直接写调用者的 LLR 缓冲 ✓（今天 `llr_direct` 已如此 ✓）| 不引入 staging ✓ |
+| 权重存放 | threadgroup memory（每组一份 ✓）| 同组内多符号共享 ✓ |
+| CE 折叠 | 先不折 ✓（M2 再议 ✓）| CE 占设备时间 8 % ✓，复杂度/风险大 ✗ |
+| LDPC / FFT | **不碰** ✓ | 用户已划定范围 ✓ |
+| 多跳批量 | **不做** ✗ | 会牺牲单跳时延 ✗（与判据 G5 冲突 ✓）；吞吐另开话题 ✓ |
+
+### 4.3 与"库整合"的关系
+
+融合后的 kernel 天然属于**一个**新库（建议 `ocudu_lane.metallib` ✓，把 CE/EQ/DEMOD 的 `.metal` 一并编译进去 ✓）。
+**库整合可以独立于 kernel 融合先行** ✓（M3 ✓）：它是**打包/初始化**的简化 ✓，
+风险低（启动期 ✓、不在数据路径 ✓），且能顺手把"三个引擎各自建 device/queue/library"的重复收掉 ✓
+—— 但**它本身不改变数据路径的时延** ✗，所以不进判据 G5 ✓，只算工程整洁 ✓。
+
+---
+
+## 5. 范围边界（**不做**的事）
+
+| 不做 | 理由 |
+|---|---|
+| Metal LDPC | 用户划定：以后单开 ✗（且上一工作流已证：每次 3.5 ms、~100× CPU ✗）|
+| Metal FFT / DFT | 上一工作流已证：可 CPU 可 GPU、可 per-symbol 可 per-slot ⇒ 保持灵活 ✓，不进本工作流 ✗ |
+| 多跳/多用户批量 | 与单跳时延判据冲突 ✗（吞吐是另一个指标 ✓）|
+| 改 PHY 算法（MMSE → 别的估计器、不同的解调度量）| 会污染"融合"这个变量 ✗；要改另开工作流 ✓ |
+| 改线程/调度结构（时间约束等）| 上一工作流的结论是"offload 形状下没有可声明且有用的线程" ✓ ⇒ 本工作流不碰调度 ✓ |
+
+---
+
+## 6. 风险与对策
+
+| 风险 | 对策 |
+|---|---|
+| **正确性风险**：融合后 LLR 与今天不一致 ✗ | **逐位对拍**为红线 ✓；先做"同数学、同几何、只合 dispatch"的版本 ✓；用 `OCUDU_LANE_ABLATE*` 与既有探针定位差异 ✓ |
+| **寄存器压力/occupancy**：大 kernel 反而更慢 ✗ | M0 量基线、M1 量增量 ✓；**允许结论是"没有收益"** ✓（H5 ✓）|
+| GPU 编译器对共享内存/屏障的限制 ✗ | M2 才是真障碍 ✓；M1 不需要 barrier ✓ ⇒ 先摘低垂的果子 ✓ |
+| 三个引擎的**初始化/内存共享**耦合 ✗ | M3 独立推进 ✓；接口按"一个库 + 一个共享 device/queue"设计 ✓ |
+| 台面环境（7–21 ms 停顿 ✗）污染判读 | `preflight_quiet.sh` + `dl_gate.sh` 闸门 ✓；脏腿重飞 ✓ |
+| 把"gpu 形状本来就慢"记成"融合失败" ✗ | 判据只做**同形状内的前后对比** ✓；跨形状对比只作背景 ✓ |
+
+---
+
+## 7. 里程碑与工作方式
+
+| 里程碑 | 内容 | 出口判据 |
+|---|---|---|
+| **M0 基线与成本分解** | 量清"4 次 dispatch 各自的固定成本"和两份中间缓冲的代价；登记判据 | 一条**对照腿**（今天形状）的可引用基线 ✓ |
+| **M1 融合 eq+demap** | 新 kernel，一 RE 一线程，寄存器内完成两段 ✓ | G1（2→1 ✓）、G4/G5 不劣化 ✓、LLR 逐位一致 ✓ |
+| **M2 折叠 CE** | 线程组协作算权重 ✓（若 M0 显示值得 ✓）| G1（→1 ✓）、G4 不升 ✓ |
+| **M3 metallib 整合** | `ocudu_lane.metallib` + 共享加载 ✓ | G3 ✓、启动无回退 ✓ |
+| **M4 验收** | 交付形状默认值不变 ✓；Linux 不变 ✓；探针 OFF 可编 ✓ | §2.2 全部红线 ✓ |
+
+**飞行与判读**：见 `README.md`（腿日志进 `wip/logs/` ✓；先 `preflight_quiet.sh`，再 `dl_gate.sh` ✓）。
+**每次飞行的目的、变量、读数与结论**写进实施文档的 memo 区 ✓；**结构性调整**回写本文 ✓。
