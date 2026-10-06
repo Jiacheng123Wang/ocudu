@@ -877,9 +877,12 @@ struct eq_pending_t {
   void*       eq        = nullptr;
   void*       nv        = nullptr;
   /// \brief LLR destination of this symbol when it was submitted through the FUSED route, else
-  /// nullptr. 4 soft bits per resource element (16QAM), and the run's byte step between two
-  /// consecutive destinations is what the kernel is told as \c llr_stride.
+  /// nullptr. Its soft bits per resource element come from \c mod, and the run's byte step between
+  /// two consecutive destinations is what the kernel is told as \c llr_stride.
   void*       llrs      = nullptr;
+  /// Modulation of a fused symbol, in the demapper engine's own numbering (MOD_QAM16 / MOD_QAM64 -
+  /// the kernel branches on it). Zero on the two-stage route, which has no demapping to do.
+  unsigned    mod       = 0;
   /// True when this symbol goes through the fused kernel: \c llrs and \c nv are then its outputs and
   /// \c eq stays null (metal_kernel_fusion M1 keeps the equalized symbol in registers). Kept as its
   /// own field rather than inferred from \c llrs so that a run can never mix the two encodings - they
@@ -1049,12 +1052,16 @@ static id<MTLComputePipelineState> eq_encode_batch_dispatch(id<MTLComputeCommand
   return pipeline;
 }
 
-/// \brief Bytes of LLR per resource element on the fused route.
+/// \brief Soft bits one resource element produces, i.e. the modulation order of a fused symbol.
 ///
-/// 16QAM is the only modulation the fused kernel implements (metal_kernel_fusion M1 scope decision),
-/// so a resource element produces exactly four soft bits. Named here rather than spelled as a 4 so
-/// the run-bound check in the flush hook and the span the encoder maps cannot drift apart.
-static constexpr size_t nof_llr_bytes_per_re = 4;
+/// The fused kernel implements 16QAM and 64QAM (see ocudu_lane_fused.metal), and the two differ in
+/// exactly this: how many bytes of the caller's LLR slot one resource element fills. Named in ONE
+/// place so the run-bound check in the flush hook, the span the encoder maps and the kernel's own
+/// branch cannot drift apart.
+static unsigned llr_bytes_per_re(unsigned mod)
+{
+  return (mod == 2u) ? 6u : 4u; // MOD_QAM64 : MOD_QAM16
+}
 
 /// \brief Encodes the FUSED dispatch (metal_kernel_fusion M1): the same run, the same grid and the
 /// same per-symbol tables as the batch encoder above, with the LLRs in place of the equalized symbols.
@@ -1075,6 +1082,7 @@ static id<MTLComputePipelineState> eq_encode_fused_dispatch(id<MTLComputeCommand
                                                            const equalize_params_t&      params,
                                                            const eq_strides_t&           strides,
                                                            uint32_t                      llr_stride,
+                                                           uint32_t                      mod,
                                                            unsigned                      nof_re,
                                                            unsigned                      n_run)
 {
@@ -1097,6 +1105,7 @@ static id<MTLComputePipelineState> eq_encode_fused_dispatch(id<MTLComputeCommand
   [enc setBytes:&strides length:sizeof(strides) atIndex:5];
   [enc setBytes:&llr_stride length:sizeof(llr_stride) atIndex:6];
   [enc setBuffer:b_nv.buffer offset:b_nv.offset atIndex:7];
+  [enc setBytes:&mod length:sizeof(mod) atIndex:8];
   [enc dispatchThreads:MTLSizeMake(nof_re, n_run, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   // The dispatch carries BOTH stages' work, and it is counted as the equalizer's because that is the
   // engine that encodes it here. What the probe's split is read for - how many dispatches a hop takes -
@@ -1676,8 +1685,9 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
                  (next.eq != nullptr) && (next.nv != nullptr));
       ///@}
       // A run is either entirely fused or entirely two-stage: the same inputs produce different
-      // outputs on the two routes, so a mixed run would leave half of them unwritten.
-      const bool same_route = (next.fused == head.fused);
+      // outputs on the two routes, so a mixed run would leave half of them unwritten. A fused run
+      // carries ONE modulation, because the kernel branches on it once for the whole dispatch.
+      const bool same_route = (next.fused == head.fused) && (next.mod == head.mod);
       const bool same_sigma = (std::memcmp(next.sigma2, head.sigma2, head.nof_ports * sizeof(float)) == 0);
       // The received symbols of the run must come from the same place: either every symbol was staged by the
       // caller, or every one of them is read off the device grid through the same plan. A GATHERED run must
@@ -1717,7 +1727,7 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
       // demapper's flush hook documents the same trap, measured offline).
       if (head.fused && (head.llrs != nullptr)) {
         const size_t run_llr = (static_cast<size_t>(n_run) * static_cast<size_t>(llr_step_head)) +
-                               (static_cast<size_t>(head.nof_re) * nof_llr_bytes_per_re);
+                               (static_cast<size_t>(head.nof_re) * llr_bytes_per_re(head.mod));
         if (run_llr > allocation_bytes_left(head.llrs)) {
           eq_batch_note_break("llr span");
           break;
@@ -1998,7 +2008,7 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
                                                     static_cast<const char*>(head.llrs))
                                               : 0u;
       const size_t llr_bytes =
-          (static_cast<size_t>(n_run) - 1) * llr_stride + static_cast<size_t>(head.nof_re) * nof_llr_bytes_per_re;
+          (static_cast<size_t>(n_run) - 1) * llr_stride + static_cast<size_t>(head.nof_re) * llr_bytes_per_re(head.mod);
       // The mapping covers the ALLOCATION of the first destination, not the run: the length only has to
       // be re-requested when a different buffer comes along (see wrap_length).
       wrapped_buffer b_llrs = wrap_buffer(engine, head.llrs, wrap_length(head.llrs, llr_bytes));
@@ -2011,7 +2021,7 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
       }
       eq_site_diag().y_fused.fetch_add(1, std::memory_order_relaxed);
       used_pipeline = eq_encode_fused_dispatch(
-          enc, b_h, b_y, b_s, b_llrs, b_nv, params, strides, llr_stride, head.nof_re, n_run);
+          enc, b_h, b_y, b_s, b_llrs, b_nv, params, strides, llr_stride, head.mod, head.nof_re, n_run);
       if (used_pipeline == nil) {
         return nil;
       }
@@ -2127,6 +2137,7 @@ bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
                                   eq,
                                   nv,
                                   nullptr, // llrs: the two-stage route writes eq/nv, not LLRs
+                                  0,       // mod: no demapping on this route
                                   false,   // fused
                                   nof_re,
                                   nof_ports,
@@ -2190,6 +2201,7 @@ bool equalizer_metal_engine::enqueue_fused(const ch_est_binding& h,
                                            const void*           sigma2,
                                            void*                 llrs,
                                            void*                 nv,
+                                           unsigned              mod,
                                            unsigned              nof_re,
                                            unsigned              nof_ports,
                                            unsigned              nof_layers,
@@ -2202,9 +2214,14 @@ bool equalizer_metal_engine::enqueue_fused(const ch_est_binding& h,
   }
   // The fused kernel is the single-layer 1 x P combiner (see ocudu_lane_fused.metal): its L == 1
   // branch is what the equalizer's own kernel documents as algorithm-independent, which is why no
-  // mmse/noise_var is carried here. The caller is the one that checks the modulation (16QAM) - the
-  // engine has no modulation argument to check it against.
+  // mmse/noise_var is carried here.
   if ((nof_layers != 1) || (nof_ports == 0) || (nof_ports > equalizer_metal_engine::max_ports)) {
+    return false;
+  }
+  // The kernel implements 16QAM and 64QAM (the demapper engine's ids: 1 and 2). The caller's
+  // predicate already refused everything else; this is the cheap second gate, because the run's
+  // bits-per-RE accounting and the kernel's own branch have to agree on the modulation.
+  if ((mod != 1u) && (mod != 2u)) {
     return false;
   }
   // A thread can accumulate for several engines over its lifetime; hand the previous engine's work
@@ -2221,6 +2238,7 @@ bool equalizer_metal_engine::enqueue_fused(const ch_est_binding& h,
                                 nullptr, // eq: the fused kernel keeps the equalized symbol in registers
                                 nv,
                                 llrs,
+                                mod,
                                 true,    // fused
                                 nof_re,
                                 nof_ports,

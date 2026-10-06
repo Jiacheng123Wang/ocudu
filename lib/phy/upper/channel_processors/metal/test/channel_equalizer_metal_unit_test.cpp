@@ -24,6 +24,7 @@
 #include <limits>
 #include <cstdio>
 #include <random>
+#include <string>
 #include <vector>
 
 using namespace ocudu;
@@ -727,7 +728,10 @@ int main()
     const unsigned nof_sym = 4;
     const unsigned ports   = 1;
     const unsigned layers  = 1;
-    const unsigned bits    = get_bits_per_symbol(modulation_scheme::QAM16);
+    // The two modulations the fused kernel has branches for. 64QAM is not decoration: the first air
+    // pair measured that the PUSCH carries 64QAM (MCS table 2, index 13), so it is the one the legs
+    // judge - see the implementation doc's memo.
+    const modulation_scheme mods[2] = {modulation_scheme::QAM16, modulation_scheme::QAM64};
 
     std::normal_distribution<float>   dist(0.0F, 0.01F);
     std::vector<std::vector<cbf16_t>> y_sym(nof_sym, std::vector<cbf16_t>(ports * nof_re));
@@ -749,9 +753,11 @@ int main()
     std::unique_ptr<demodulation_mapper>         demapper         = demapper_factory->create();
 
     const bool route_ok = composite->supports_fused_demapping(modulation_scheme::QAM16, ports, layers) &&
+                          composite->supports_fused_demapping(modulation_scheme::QAM64, ports, layers) &&
                           !composite->supports_fused_demapping(modulation_scheme::QPSK, ports, layers) &&
+                          !composite->supports_fused_demapping(modulation_scheme::QAM256, ports, layers) &&
                           !composite->supports_fused_demapping(modulation_scheme::QAM16, ports, layers + 1);
-    std::printf("[fused] composite factory offers the fused route for 16QAM / 1 layer only: %s\n",
+    std::printf("[fused] composite factory offers the fused route for 16QAM/64QAM at 1 layer only: %s\n",
                 route_ok ? "OK" : "NO");
     if (!route_ok) {
       std::fprintf(stderr, "FAIL: the composite equalizer factory hides the fused route\n");
@@ -760,91 +766,92 @@ int main()
 
     // One page-aligned slot per symbol - the layout the PUSCH demodulator's deferred chain hands over,
     // and the layout the fused kernel's own per-symbol strides are derived from.
-    const size_t eq_stride  = ((nof_re * layers * sizeof(cf_t)) + compat::page_size() - 1) / compat::page_size() *
+    const size_t eq_stride = ((nof_re * layers * sizeof(cf_t)) + compat::page_size() - 1) / compat::page_size() *
                              compat::page_size();
-    const size_t nv_stride  = ((nof_re * layers * sizeof(float)) + compat::page_size() - 1) / compat::page_size() *
+    const size_t nv_stride = ((nof_re * layers * sizeof(float)) + compat::page_size() - 1) / compat::page_size() *
                              compat::page_size();
-    const size_t llr_stride = ((nof_re * bits) + compat::page_size() - 1) / compat::page_size() * compat::page_size();
-    aligned_region eq_ref(nof_sym * eq_stride);
-    aligned_region nv_ref(nof_sym * nv_stride);
-    aligned_region llr_ref(nof_sym * llr_stride);
-    aligned_region eq_fused(nof_sym * eq_stride);
-    aligned_region nv_fused(nof_sym * nv_stride);
-    aligned_region llr_fused(nof_sym * llr_stride);
-    std::memset(eq_fused.ptr, 0, nof_sym * eq_stride);
-    std::memset(nv_fused.ptr, 0, nof_sym * nv_stride);
-    std::memset(llr_fused.ptr, 0, nof_sym * llr_stride);
 
-    for (unsigned s = 0; s != nof_sym; ++s) {
-      modular_re_buffer_reader<cbf16_t, 8> ch_symbols(ports, nof_re);
-      ch_symbols.set_slice(0, y_sym[s]);
-      modular_ch_est_list<8 * 4> ch_est(nof_re, ports, layers);
-      ch_est.set_channel(h_sym[s], 0, 0);
+    for (modulation_scheme mod : mods) {
+      const unsigned bits     = get_bits_per_symbol(mod);
+      const size_t   llr_stride = ((nof_re * bits) + compat::page_size() - 1) / compat::page_size() * compat::page_size();
+      aligned_region eq_ref(nof_sym * eq_stride);
+      aligned_region nv_ref(nof_sym * nv_stride);
+      aligned_region llr_ref(nof_sym * llr_stride);
+      aligned_region eq_fused(nof_sym * eq_stride);
+      aligned_region nv_fused(nof_sym * nv_stride);
+      aligned_region llr_fused(nof_sym * llr_stride);
+      std::memset(eq_fused.ptr, 0, nof_sym * eq_stride);
+      std::memset(nv_fused.ptr, 0, nof_sym * nv_stride);
+      std::memset(llr_fused.ptr, 0, nof_sym * llr_stride);
 
-      auto*              eq_ref_sym  = reinterpret_cast<cf_t*>(static_cast<char*>(eq_ref.ptr) + s * eq_stride);
-      auto*              nv_ref_sym  = reinterpret_cast<float*>(static_cast<char*>(nv_ref.ptr) + s * nv_stride);
-      auto*              llr_ref_sym = reinterpret_cast<log_likelihood_ratio*>(static_cast<char*>(llr_ref.ptr) +
-                                                                  s * llr_stride);
-      auto*              eq_f_sym    = reinterpret_cast<cf_t*>(static_cast<char*>(eq_fused.ptr) + s * eq_stride);
-      auto*              nv_f_sym    = reinterpret_cast<float*>(static_cast<char*>(nv_fused.ptr) + s * nv_stride);
-      auto*              llr_f_sym   = reinterpret_cast<log_likelihood_ratio*>(static_cast<char*>(llr_fused.ptr) +
+      for (unsigned s = 0; s != nof_sym; ++s) {
+        modular_re_buffer_reader<cbf16_t, 8> ch_symbols(ports, nof_re);
+        ch_symbols.set_slice(0, y_sym[s]);
+        modular_ch_est_list<8 * 4> ch_est(nof_re, ports, layers);
+        ch_est.set_channel(h_sym[s], 0, 0);
+
+        auto*              eq_ref_sym  = reinterpret_cast<cf_t*>(static_cast<char*>(eq_ref.ptr) + s * eq_stride);
+        auto*              nv_ref_sym  = reinterpret_cast<float*>(static_cast<char*>(nv_ref.ptr) + s * nv_stride);
+        auto*              llr_ref_sym = reinterpret_cast<log_likelihood_ratio*>(static_cast<char*>(llr_ref.ptr) +
                                                                     s * llr_stride);
-      span<cf_t>         eq_ref_span(eq_ref_sym, nof_re * layers);
-      span<float>        nv_ref_span(nv_ref_sym, nof_re * layers);
-      span<cf_t>         eq_f_span(eq_f_sym, nof_re * layers);
-      span<float>        nv_f_span(nv_f_sym, nof_re * layers);
-      span<log_likelihood_ratio> llr_ref_span(llr_ref_sym, nof_re * bits);
-      span<log_likelihood_ratio> llr_f_span(llr_f_sym, nof_re * bits);
+        auto*              eq_f_sym    = reinterpret_cast<cf_t*>(static_cast<char*>(eq_fused.ptr) + s * eq_stride);
+        auto*              nv_f_sym    = reinterpret_cast<float*>(static_cast<char*>(nv_fused.ptr) + s * nv_stride);
+        auto*              llr_f_sym   = reinterpret_cast<log_likelihood_ratio*>(static_cast<char*>(llr_fused.ptr) +
+                                                                      s * llr_stride);
+        span<cf_t>         eq_ref_span(eq_ref_sym, nof_re * layers);
+        span<float>        nv_ref_span(nv_ref_sym, nof_re * layers);
+        span<cf_t>         eq_f_span(eq_f_sym, nof_re * layers);
+        span<float>        nv_f_span(nv_f_sym, nof_re * layers);
+        span<log_likelihood_ratio> llr_ref_span(llr_ref_sym, nof_re * bits);
+        span<log_likelihood_ratio> llr_f_span(llr_f_sym, nof_re * bits);
 
-      // Reference: the two-stage route of the deferred chain - equalize, then demap what it wrote.
-      composite->equalize(eq_ref_span, nv_ref_span, ch_symbols, ch_est, nv_est, 1.0F);
-      demapper->demodulate_soft(llr_ref_span, eq_ref_span, nv_ref_span, modulation_scheme::QAM16);
+        // Reference: the two-stage route of the deferred chain - equalize, then demap what it wrote.
+        composite->equalize(eq_ref_span, nv_ref_span, ch_symbols, ch_est, nv_est, 1.0F);
+        demapper->demodulate_soft(llr_ref_span, eq_ref_span, nv_ref_span, mod);
 
-      // Arm: one dispatch, the equalized symbol never leaving the kernel.
-      composite->submit_fused(llr_f_span,
-                              eq_f_span,
-                              nv_f_span,
-                              ch_symbols,
-                              ch_est,
-                              nv_est,
-                              1.0F,
-                              modulation_scheme::QAM16);
-      composite->wait();
-    }
+        // Arm: one dispatch, the equalized symbol never leaving the kernel.
+        composite->submit_fused(llr_f_span, eq_f_span, nv_f_span, ch_symbols, ch_est, nv_est, 1.0F, mod);
+        composite->wait();
+      }
 
-    // Compare the ELEMENTS each route writes, slot by slot. The page-aligned slots are the layout the
-    // lane uses, and their padding is written by neither route - comparing it would compare heap, which
-    // is what the first version of this check did (and reported as a MISMATCH).
-    bool llr_same = true;
-    bool nv_same  = true;
-    for (unsigned s = 0; s != nof_sym; ++s) {
-      const auto* llr_a = static_cast<const char*>(llr_ref.ptr) + s * llr_stride;
-      const auto* llr_b = static_cast<const char*>(llr_fused.ptr) + s * llr_stride;
-      llr_same          = llr_same && (std::memcmp(llr_a, llr_b, nof_re * bits) == 0);
-      const auto* nv_a = static_cast<const char*>(nv_ref.ptr) + s * nv_stride;
-      const auto* nv_b = static_cast<const char*>(nv_fused.ptr) + s * nv_stride;
-      nv_same          = nv_same && (std::memcmp(nv_a, nv_b, nof_re * layers * sizeof(float)) == 0);
-    }
-    std::printf("[fused] %u symbols, one dispatch each, soft bits bit-identical to equalize+demap: %s\n",
-                nof_sym,
-                llr_same ? "OK" : "MISMATCH");
-    std::printf("[fused] noise variances bit-identical (the post-eq SINR reduction reads them): %s\n",
-                nv_same ? "OK" : "MISMATCH");
-    if (!llr_same || !nv_same) {
-      std::fprintf(stderr, "FAIL: the fused route differs from the two-stage route\n");
-      ok = false;
-    }
-    // The equalized symbols are NOT written by the fused dispatch, and the route's contract says so:
-    // checked rather than assumed, because a caller that reads them would otherwise read zeros.
-    bool eq_untouched = true;
-    for (size_t i = 0; i != nof_sym * eq_stride; ++i) {
-      eq_untouched = eq_untouched && (static_cast<const char*>(eq_fused.ptr)[i] == 0);
-    }
-    std::printf("[fused] equalized symbols left untouched as documented: %s\n", eq_untouched ? "OK" : "NO");
-    if (!eq_untouched) {
-      std::fprintf(stderr, "FAIL: the fused route wrote the equalized symbols it does not own\n");
-      ok = false;
-    }
+      // Compare the ELEMENTS each route writes, slot by slot. The page-aligned slots are the layout the
+      // lane uses, and their padding is written by neither route - comparing it would compare heap, which
+      // is what the first version of this check did (and reported as a MISMATCH).
+      bool llr_same = true;
+      bool nv_same  = true;
+      for (unsigned s = 0; s != nof_sym; ++s) {
+        const auto* llr_a = static_cast<const char*>(llr_ref.ptr) + s * llr_stride;
+        const auto* llr_b = static_cast<const char*>(llr_fused.ptr) + s * llr_stride;
+        llr_same          = llr_same && (std::memcmp(llr_a, llr_b, nof_re * bits) == 0);
+        const auto* nv_a = static_cast<const char*>(nv_ref.ptr) + s * nv_stride;
+        const auto* nv_b = static_cast<const char*>(nv_fused.ptr) + s * nv_stride;
+        nv_same          = nv_same && (std::memcmp(nv_a, nv_b, nof_re * layers * sizeof(float)) == 0);
+      }
+      std::printf("[fused] %s: %u symbols, one dispatch each, soft bits bit-identical to equalize+demap: %s\n",
+                  to_string(mod).c_str(),
+                  nof_sym,
+                  llr_same ? "OK" : "MISMATCH");
+      std::printf("[fused] %s: noise variances bit-identical (the post-eq SINR reduction reads them): %s\n",
+                  to_string(mod).c_str(),
+                  nv_same ? "OK" : "MISMATCH");
+      if (!llr_same || !nv_same) {
+        std::fprintf(stderr, "FAIL: the fused route differs from the two-stage route\n");
+        ok = false;
+      }
+      // The equalized symbols are NOT written by the fused dispatch, and the route's contract says so:
+      // checked rather than assumed, because a caller that reads them would otherwise read zeros.
+      bool eq_untouched = true;
+      for (size_t i = 0; i != nof_sym * eq_stride; ++i) {
+        eq_untouched = eq_untouched && (static_cast<const char*>(eq_fused.ptr)[i] == 0);
+      }
+      std::printf("[fused] %s: equalized symbols left untouched as documented: %s\n",
+                  to_string(mod).c_str(),
+                  eq_untouched ? "OK" : "NO");
+      if (!eq_untouched) {
+        std::fprintf(stderr, "FAIL: the fused route wrote the equalized symbols it does not own\n");
+        ok = false;
+      }
+    } // for (modulation_scheme mod : mods)
   }
 
   // Steady-state latency (audit data): 100 calls per backend at 4x4.

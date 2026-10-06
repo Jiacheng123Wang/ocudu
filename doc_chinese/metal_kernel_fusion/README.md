@@ -28,13 +28,13 @@
 
 ## 现在进展到哪（2026-10-06 末，第 2 次）
 
-**M0 已结项** ✓（基线 + 消去三条腿 + 微基准 + M0b/M0c 两对 → 结论在架构文档 §2.0ter ✓）；
-**M1.1 全部完成** ✓ —— kernel ✓、**接线** ✓（引擎 `enqueue_fused` ✓ + 接口 ✓ + **复合工厂转发** ✓ + 调用方路线 ✓）、
-**离线证据** ✓（27 capture 四个 dump **逐字节一致** ✓；一跳 dispatch **4 → 3** 且 demapper 归 0 ✓；
-单元测试 `[fused]` 回归 ✓）。**运行时默认关** ✓ ⇒ 默认二进制行为不变 ✓。
-★ **下一件事（待飞）写在实施文档 §2.11 ✓**：`mkf010`（对照）/ `mkf011`（臂）一对，
-命令、携带的旋钮与判读要点都在那一节 ✓（取号 `bash wip/next_leg_label.sh` ✓）。
-开关：`OCUDU_LANE_FUSE_EQDEMOD`（env ✓，非空即开 ✓）。全部细节在实施文档 §2.10 ✓。
+**M0 已结项** ✓；**M1.1 接线完成** ✓（§2.10 ✓）；**M1.3 判决：融合有价值** ✓✓ ——
+`mkf012`/`mkf013`（UL 钉成 16QAM ✓）：dispatch/跳 **4.0000 → 3.0000** ✓、融合覆盖 **99.997 %** ✓、
+`busy` **478.9 → 469.6 µs** ✓、`ul_pipeline` **1280 → 1259** ✓、`ul_gpu_pipeline` **1237 → 1214** ✓、
+CRC **100.0 % vs 99.9 %** ✓、`pair_check` PASS ✓（保留项见 memo ✓：两条腿都是环境性 STALL ✓、臂 `stale=4/5` ✓）。
+**M1.5（B 路，把 kernel 扩到 64QAM ✓）代码与离线证据已就绪** ✓（§2.13 ✓）
+⇒ ★ **下一件事（待飞）在 §2.13 ✓**：`mkf014`（对照）/ `mkf015`（臂），用**原来的** `gnb_pinned_mcs13.yml` ✓。
+开关：`OCUDU_LANE_FUSE_EQDEMOD`（env ✓，非空即开 ✓）。
 
 ## 腿的命名约定（用户 2026-10-06）：**单调递增序号 + 阶段 + 臂**
 
@@ -58,8 +58,10 @@ mkf<NNN>-<阶段><臂>            例如  mkf008-m0c-cpu / mkf009-m0c-metal
 | mkf007 | `mkf-m0c-dftmetal` | `--pusch_dft_type=metal`（腿作废 ✗）|
 | mkf008 | `mkf008-m0c-cpu` | `--pusch_dft_type=cpu`（对照）|
 | mkf009 | `mkf009-m0c-metal` | `--pusch_dft_type=metal`（臂）|
-| mkf010 | （待飞）| **M1.2 对照**：默认形状（融合关 ✓）|
-| mkf011 | （待飞）| **M1.2 臂**：`OCUDU_LANE_FUSE_EQDEMOD=1` ✓ |
+| mkf010 | `mkf010-m1-fused-off` | **M1.2 对照**：默认形状（融合关 ✓）—— 飞完但**腿是 64QAM** ✗ ⇒ 判不了融合 ✗ |
+| mkf011 | `mkf011-m1-fused-on` | **M1.2 臂**：`OCUDU_LANE_FUSE_EQDEMOD=1` ✓ —— 同上（融合只覆盖 10 跳 ✗）|
+| mkf012 | `mkf012-m1-16qam-fused-off` | **M1.3 对照**：`wip/gnb_mcs16qam.yml`（UL 表换成 qam64 ⇒ MCS 13 = 16QAM ✓），融合关 ✓ |
+| mkf013 | `mkf013-m1-16qam-fused-on` | **M1.3 臂**：同一 config ✓ + `OCUDU_LANE_FUSE_EQDEMOD=1` ✓ |
 
 **下一个序号不用记** ✓：`bash wip/next_leg_label.sh <后缀>` ⇒ 直接给出完整标签 ✓
 （它从各工作流日志根里的腿日志自己数出来 ✓；只给数字就 `bash wip/next_leg_label.sh` ✓）。

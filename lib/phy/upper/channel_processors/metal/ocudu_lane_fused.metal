@@ -13,10 +13,13 @@
 // `p.h_offset`) and the demapper's output addressing (`llr_stride`), and the per-element math is copied verbatim
 // from the two originals.
 //
-// SCOPE (M1.1 decision, plan doc §2.8): MOD_QAM16 ONLY. Every judging leg runs MCS 13 (16QAM), so the first
-// version covers exactly the modulation the flights exercise and every line of it is covered by a leg; the other
-// modulations stay on the existing two-stage route, which the caller selects. Extending it means adding branches
-// the same way the demapper has them.
+// SCOPE (M1.1 decision, plan doc §2.8, extended by the mkf010/mkf011 finding): the modulations the
+// flights actually carry. 16QAM was the first version's scope because the judging legs were believed
+// to be MCS 13 = 16QAM; the first pair measured that they are 64QAM (the PUSCH runs MCS table 2,
+// where index 13 is 64QAM - see the implementation doc's memo), which left the fused route covering
+// 0.009% of the traffic. 64QAM is therefore added, and the two branches below are the demapper's own
+// branches copied verbatim. Other modulations stay on the existing two-stage route, which the caller
+// selects.
 //
 // WHY THE HELPERS BELOW ARE COPIES. Factoring them into a shared header would rewrite the two kernels that are
 // part of the shipped delivery shape, and this workstream's rules require its own A/B for that. A copy inside a
@@ -28,12 +31,30 @@
 using namespace metal;
 
 // ---- verbatim from ocudu_demod.metal ---------------------------------------------------------------
+// Modulation ids: the SAME numbering the demapper engine passes to demod_soft (see its run_demodulate).
+constant uint MOD_QAM16 = 1;
+constant uint MOD_QAM64 = 2;
+
 constant float LLR_MAX_F = 120.0f;
 constant float NEAR_ZERO = 1e-9f;
 
 constant float GAIN_FIRST_16 = 1.26491106f;  // 4 * M_SQRT1_10
 constant float THR_16        = 0.632455528f; // 2 * M_SQRT1_10
 constant float CONST_0_8     = 0.8f;
+
+constant float SLOPE_01_64[8] = {2.46885371f, 1.85164022f, 1.23442686f, 0.617213428f,
+                                 0.617213428f, 1.23442686f, 1.85164022f, 2.46885371f};
+constant float INTERCEPT_01_64[8] = {1.14285719f, 0.571428597f, 0.190476194f, 0.0f,
+                                     0.0f, -0.190476194f, -0.571428597f, -1.14285719f};
+constant float SLOPE_23_64[8] = {1.23442686f, 0.617213428f, 0.617213428f, 1.23442686f,
+                                 -1.23442686f, -0.617213428f, -0.617213428f, -1.23442686f};
+constant float INTERCEPT_23_64[8] = {0.952380955f, 0.380952388f, 0.380952388f, 0.571428597f,
+                                     0.571428597f, 0.380952388f, 0.380952388f, 0.952380955f};
+constant float SLOPE_45_64[8]     = {0.617213428f, -0.617213428f, 0.617213428f, -0.617213428f, 0.0f, 0.0f, 0.0f, 0.0f};
+constant float INTERCEPT_45_64[8] = {0.571428597f, -0.190476194f, -0.190476194f,
+                                     0.571428597f, 0.0f, 0.0f, 0.0f, 0.0f};
+constant float INV_W_2_64 = 3.24037027f; // 1 / (2 * M_SQRT1_42)
+constant float INV_W_4_64 = 1.62018514f; // 1 / (4 * M_SQRT1_42)
 
 static inline char quantize_llr(float value, float range_limit)
 {
@@ -50,6 +71,19 @@ static inline char quantize_llr(float value, float range_limit)
 static inline float rcp_noise_safe(float noise_var)
 {
     return (noise_var > 0.0f) ? precise::divide(1.0f, noise_var) : 0.0f;
+}
+
+// Piecewise-linear interval function (CPU interval_function, NEON flavour: index computed
+// as floor(value * precomputed_inv_width) + n/2, clamped; result zeroed near zero).
+static inline float interval_l(float value, float rcp_noise, float inv_width, uint n, constant float* slope,
+                               constant float* intercept)
+{
+    float idx_f = floor(value * inv_width) + (float)(n / 2u);
+    int   idx   = isnan(idx_f) ? 0 : (int)idx_f;
+    idx         = clamp(idx, 0, (int)n - 1);
+    float l     = slope[idx] * value + intercept[idx];
+    l *= rcp_noise;
+    return (fabs(value) >= NEAR_ZERO) ? l : 0.0f;
 }
 
 static inline float qam16_01(float x, float rcp_noise)
@@ -127,6 +161,7 @@ kernel void lane_grid_to_llr(device const ushort2* h [[buffer(0)]],  // cbf16 [s
                              constant equalize_strides& st [[buffer(5)]],
                              constant uint&      llr_stride [[buffer(6)]], // bytes between two OFDM symbols
                              device float*       nv [[buffer(7)]], // [symbol][re] (single layer)
+                             constant uint&      mod [[buffer(8)]], // MOD_QAM16 / MOD_QAM64
                              uint2               gid [[thread_position_in_grid]])
 {
     const uint re  = gid.x;
@@ -168,14 +203,6 @@ kernel void lane_grid_to_llr(device const ushort2* h [[buffer(0)]],  // cbf16 [s
         nvar  = INFINITY;
     }
 
-    // ---- 16QAM soft demodulation (copied from demod_soft's MOD_QAM16 branch) ------------------------
-    const float  rcp  = rcp_noise_safe(nvar);
-    device char* llrs = llrs_base + sym * llr_stride;
-    llrs[4 * re + 0] = quantize_llr(qam16_01(x_hat.x, rcp), 20.0f);
-    llrs[4 * re + 1] = quantize_llr(qam16_01(x_hat.y, rcp), 20.0f);
-    llrs[4 * re + 2] = quantize_llr(qam16_23(x_hat.x, rcp), 20.0f);
-    llrs[4 * re + 3] = quantize_llr(qam16_23(x_hat.y, rcp), 20.0f);
-
     // The post-equalization noise variance of this resource element, written where the equalizer would
     // have written it (nv[symbol * nv_stride + re], the single-layer layout of the batch kernel).
     //
@@ -188,4 +215,36 @@ kernel void lane_grid_to_llr(device const ushort2* h [[buffer(0)]],  // cbf16 [s
     // symbol's write AND read, the noise variance's read, plus the second dispatch), so what the
     // fusion is being judged on is untouched; an arm that drops it is a follow-up A/B, not a default.
     nv[sym * st.nv_stride + re] = nvar;
+
+    // ---- soft demodulation (copied from demod_soft's branches) --------------------------------------
+    const float  rcp  = rcp_noise_safe(nvar);
+    device char* llrs = llrs_base + sym * llr_stride;
+
+    if (mod == MOD_QAM16) {
+        llrs[4 * re + 0] = quantize_llr(qam16_01(x_hat.x, rcp), 20.0f);
+        llrs[4 * re + 1] = quantize_llr(qam16_01(x_hat.y, rcp), 20.0f);
+        llrs[4 * re + 2] = quantize_llr(qam16_23(x_hat.x, rcp), 20.0f);
+        llrs[4 * re + 3] = quantize_llr(qam16_23(x_hat.y, rcp), 20.0f);
+        return;
+    }
+    if (mod == MOD_QAM64) {
+        llrs[6 * re + 0] =
+            quantize_llr(interval_l(x_hat.x, rcp, INV_W_2_64, 8, SLOPE_01_64, INTERCEPT_01_64), 20.0f);
+        llrs[6 * re + 1] =
+            quantize_llr(interval_l(x_hat.y, rcp, INV_W_2_64, 8, SLOPE_01_64, INTERCEPT_01_64), 20.0f);
+        llrs[6 * re + 2] =
+            quantize_llr(interval_l(x_hat.x, rcp, INV_W_2_64, 8, SLOPE_23_64, INTERCEPT_23_64), 20.0f);
+        llrs[6 * re + 3] =
+            quantize_llr(interval_l(x_hat.y, rcp, INV_W_2_64, 8, SLOPE_23_64, INTERCEPT_23_64), 20.0f);
+        llrs[6 * re + 4] =
+            quantize_llr(interval_l(x_hat.x, rcp, INV_W_4_64, 4, SLOPE_45_64, INTERCEPT_45_64), 20.0f);
+        llrs[6 * re + 5] =
+            quantize_llr(interval_l(x_hat.y, rcp, INV_W_4_64, 4, SLOPE_45_64, INTERCEPT_45_64), 20.0f);
+        return;
+    }
+    // No other modulation reaches this kernel: the host refuses the route for them (see
+    // channel_equalizer::supports_fused_demapping()) and the demapper is not called for these symbols.
+    // The fall-through is therefore unreachable, and it is left explicit rather than silent for the
+    // same reason demod_soft's own if-chain is: whoever adds a modulation has to add its branch, and
+    // the host side (the predicate AND the run's bits-per-RE accounting) has to learn it too.
 }

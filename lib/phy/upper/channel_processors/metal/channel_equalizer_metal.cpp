@@ -291,19 +291,35 @@ void channel_equalizer_metal::submit_batch_run(span<const group_symbol> run, con
   impl_->pending.push_back(std::move(entry));
 }
 
+/// \brief The fused kernel's modulation id for \p mod, in the DEMAPPER ENGINE's numbering.
+///
+/// The two kernels branch on the same ids (ocudu_demod.metal's MOD_QAM16 / MOD_QAM64 and the copies in
+/// ocudu_lane_fused.metal), and the demapper engine derives them the same way in run_demodulate().
+/// Only the modulations supports_fused_demapping() accepts ever reach this call.
+static unsigned mod_id_of(modulation_scheme mod)
+{
+  return (mod == modulation_scheme::QAM64) ? 2u : 1u;
+}
+
 bool channel_equalizer_metal::supports_fused_demapping(modulation_scheme mod,
                                                        unsigned         nof_ports,
                                                        unsigned         nof_layers) const
 {
-  // 16QAM and one layer are the fused kernel's scope (see ocudu_lane_fused.metal) and the kernel has
-  // to be in the shader library the engine loaded. Nothing else is a property of the symbol, so the
-  // answer is final: the caller uses it to decide whether the demapper is called at all.
+  // 16QAM, 64QAM and one layer are the fused kernel's scope (see ocudu_lane_fused.metal) and the
+  // kernel has to be in the shader library the engine loaded. Nothing else is a property of the
+  // symbol, so the answer is final: the caller uses it to decide whether the demapper is called.
+  //
+  // WHY 64QAM IS IN SCOPE (it was not in M1.1's): the first air pair measured that the PUSCH runs
+  // MCS table 2, where the pinned "MCS 13" is 64QAM - so the 16QAM-only kernel covered 0.009% of the
+  // traffic and could not be judged at all. The demapper's own 64QAM branch is now copied into the
+  // fused kernel, which is the same "copy verbatim" rule the 16QAM one follows.
   //
   // The TOPOLOGY is deliberately not checked here (is_supported() is not a const interface member):
   // this backend is reached through the composite factory, which ANDs this answer with its own
   // routing decision - and run_fused() asserts is_supported() on the plan it resolves anyway.
   (void)nof_ports;
-  return (mod == modulation_scheme::QAM16) && (nof_layers == 1) && metal::equalizer_metal_engine::supports_fused();
+  const bool mod_ok = (mod == modulation_scheme::QAM16) || (mod == modulation_scheme::QAM64);
+  return mod_ok && (nof_layers == 1) && metal::equalizer_metal_engine::supports_fused();
 }
 
 void channel_equalizer_metal::submit_fused(span<log_likelihood_ratio>       llrs,
@@ -318,13 +334,16 @@ void channel_equalizer_metal::submit_fused(span<log_likelihood_ratio>       llrs
   ocudu_assert(supports_fused_demapping(
                    mod, ch_estimates.get_nof_rx_ports(), ch_estimates.get_nof_tx_layers()),
                "The fused route was submitted for a shape or a modulation it does not cover.");
+  // The kernel's modulation id (the demapper engine's numbering, which mod_id_of() below mirrors).
+  const unsigned mod_id = mod_id_of(mod);
   // Deferred like submit(): the dispatches of the group go into the shared command buffer that
   // wait() closes. The entry exists for the same reason it does there - the staging it owns and the
   // one-shot wrap diagnostic - and it records no output to copy back, because the fused kernel writes
   // the caller's LLRs in place and nothing else.
   std::unique_ptr<pending_entry> entry = impl_->acquire();
   entry->fused                         = true;
-  if (!run_fused(llrs, eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling, *entry)) {
+  if (!run_fused(
+          llrs, eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling, mod_id, *entry)) {
     // Engine failure, or a kernel that is not there: the LLRs of this symbol would stay stale and the
     // demapper is NOT going to produce them (the caller took the fused route), so an undefined
     // destination is zeroed - the CPU's ill-formed-input semantics, and the only value that cannot be
@@ -341,6 +360,7 @@ bool channel_equalizer_metal::run_fused(span<log_likelihood_ratio>       llrs,
                                         const ch_est_list&               ch_estimates,
                                         span<const float>                noise_var_estimates,
                                         float                            tx_scaling,
+                                        unsigned                         mod_id,
                                         pending_entry&                   entry)
 {
   const unsigned nof_re       = ch_estimates.get_nof_re();
@@ -353,8 +373,10 @@ bool channel_equalizer_metal::run_fused(span<log_likelihood_ratio>       llrs,
   ocudu_assert(eq_symbols.size() == nof_re * nof_layers, "Invalid equalized symbols size.");
   ocudu_assert(eq_noise_vars.size() == nof_re * nof_layers, "Invalid equalized noise variances size.");
   ocudu_assert(tx_scaling > 0, "Tx scaling factor must be positive.");
-  ocudu_assert(llrs.size() == nof_re * get_bits_per_symbol(modulation_scheme::QAM16),
-               "Invalid soft bit destination size.");
+  // The destination must hold exactly what the kernel will write: one modulation order per resource
+  // element (4 bits for 16QAM, 6 for 64QAM - see llr_bytes_per_re() in the engine).
+  const unsigned bits_per_re = (mod_id == 2u) ? 6u : 4u;
+  ocudu_assert(llrs.size() == nof_re * bits_per_re, "Invalid soft bit destination size.");
 
   // The device slice of the estimates, exactly as run_equalize() picks it: the fused kernel reads the
   // channel where the estimator produced it, which is what keeps the estimates off the host.
@@ -439,6 +461,7 @@ bool channel_equalizer_metal::run_fused(span<log_likelihood_ratio>       llrs,
                                               s_binding,
                                               static_cast<void*>(llrs.data()),
                                               static_cast<void*>(eq_noise_vars.data()),
+                                              mod_id,
                                               nof_re,
                                               nof_used_ports,
                                               nof_layers,

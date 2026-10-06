@@ -59,13 +59,15 @@ public:
   void submit_group(span<const group_symbol> group) override;
 
   // See interface for documentation.
-  /// \brief The fused route (metal_kernel_fusion M1): the 1 x P combiner and the 16QAM soft demapper
-  /// in ONE dispatch, the equalized symbol and its noise kept in registers.
+  /// \brief The fused route (metal_kernel_fusion M1): the 1 x P combiner and the soft demapper in ONE
+  /// dispatch, the equalized symbol in registers.
   ///
   /// Offered for exactly the shape the fused kernel implements - one transmission layer (the single
-  /// layer path is the only one it has) and 16QAM - and only while the kernel is actually in the
-  /// loaded shader library (see equalizer_metal_engine::supports_fused()). Both halves matter: the
-  /// route is all-or-nothing, so the answer has to be final before the caller commits a group to it.
+  /// layer path is the only one it has) and the modulations it has branches for, 16QAM and 64QAM (see
+  /// ocudu_lane_fused.metal; 64QAM joined after the first air pair measured that the PUSCH carries
+  /// it, not 16QAM) - and only while the kernel is actually in the loaded shader library (see
+  /// equalizer_metal_engine::supports_fused()). Both halves matter: the route is all-or-nothing, so
+  /// the answer has to be final before the caller commits a group to it.
   bool supports_fused_demapping(modulation_scheme mod, unsigned nof_ports, unsigned nof_layers) const override;
 
   // See interface for documentation.
@@ -216,6 +218,8 @@ private:
   /// \brief The fused counterpart of run_equalize(): resolves the same plan, stages the same inputs
   /// and accumulates ONE fused symbol - whose outputs are the soft bits and the noise variances.
   ///
+  /// \param mod_id Modulation id the KERNEL branches on (1 = 16QAM, 2 = 64QAM; the demapper engine's
+  ///               own numbering). It decides how many soft bits the symbol's resource elements fill.
   /// \return False when the engine refused the symbol (no fused kernel, an unsupported topology or a
   /// no-copy wrap failure). The caller zeroes the LLRs then: with the demapper not being called for
   /// this symbol, a stale destination would be decoded as if it were a measurement.
@@ -226,6 +230,7 @@ private:
                  const ch_est_list&               ch_estimates,
                  span<const float>                noise_var_estimates,
                  float                            tx_scaling,
+                 unsigned                         mod_id,
                  pending_entry&                   entry);
 
   /// \brief Copies the staged outputs of \c entry back to the caller after its command buffer

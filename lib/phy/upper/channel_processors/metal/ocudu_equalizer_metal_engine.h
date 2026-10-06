@@ -214,9 +214,14 @@ public:
   ///                  same reason. \c eq has no counterpart here: the equalized symbol lives in
   ///                  registers and is never written (see ocudu_lane_fused.metal for why the noise
   ///                  variance, unlike it, is kept as an output).
-  /// \note The route is only for one transmission layer and 16QAM: the caller selects it (see
-  ///       channel_equalizer::supports_fused_demapping()) and the engine asserts the shape rather
-  ///       than falling back, because the demapper is not being called for these symbols.
+  /// \param[in]  mod  Modulation of the symbol, in the DEMAPPER ENGINE's numbering (1 = 16QAM,
+  ///                  2 = 64QAM): the kernel branches on it and one resource element fills 4 or 6
+  ///                  soft bits accordingly, so the whole run has to share it. Other modulations are
+  ///                  refused here and by the caller's predicate (see
+  ///                  channel_equalizer::supports_fused_demapping()).
+  /// \note The route is only for one transmission layer: the caller selects it and the engine
+  ///       asserts the shape rather than falling back, because the demapper is not being called for
+  ///       these symbols.
   /// \return True when the dispatch was accumulated.
   bool enqueue_fused(const ch_est_binding& h,
                      bool                  h_on_device,
@@ -224,6 +229,7 @@ public:
                      const void*           sigma2,
                      void*                 llrs,
                      void*                 nv,
+                     unsigned              mod,
                      unsigned              nof_re,
                      unsigned              nof_ports,
                      unsigned              nof_layers,
