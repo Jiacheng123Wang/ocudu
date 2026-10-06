@@ -125,6 +125,40 @@ lane_grid_to_llr:  读 y + 权重 + 噪声  →  [寄存器内：均衡 → 解�
 | **红线** | CRC-OK 与对照腿**同档** ✓、`gaps=0` ✓ | 功能性 ✓（77.8 % 那类退化要立刻停下查 ✗）|
 | ✗ **不要求的** | LLR 逐位一致 ✗（只作为出问题时的定位工具 ✓）、dispatch 计数本身 ✗、CB 数 ✗ | 用户裁决 + M0 结论 ✓ |
 
+### 2.5 ★ M1.0 规格（读代码所得 ✓，2026-10-06）
+
+**两段内核的签名与绑定点**（照抄 ✓）：
+
+| | 均衡 `equalize_mxn`（`ocudu_equalizer.metal:118`）| 解调 `demod_soft`（`ocudu_demod.metal:137`）|
+|---|---|---|
+| b0 | `ushort2* h` cbf16 **权重** `[port][layer][re]` | `float2* symbols` **均衡后符号** `[symbol][mod symbol]` |
+| b1 | `ushort2* y` cbf16 **网格** `[port][re]` | `float* noise_var` `[symbol][mod symbol]` |
+| b2 | `float2* eq` **输出** `[re][layer]` | `char* llrs_base` **输出** `[symbol][mod symbol][bit]` |
+| b3 | `float* nv` **输出** 噪声 `[re][layer]` | `constant demod_params& p` |
+| b4 | `constant equalize_params& p` | — |
+| b5 | `float* sigma2`（单层路线 ✓）| — |
+| 网格 | 1-D `uint re`（2-D 派发 ✓，带 `re >= p.nof_re` 守卫 ✓）| 2-D `uint2 pos`（x=符号内序号 ✓，y=OFDM 符号 ✓）|
+| 步长 | 由 `p` 携带 ✓ | `sym_stride` / `nv_stride` / `llr_stride` ✓ |
+
+**逐线程数学（骨架 ✓）**：
+* 均衡：加载 `H[port][layer]` ✓ → **单层 SIMO 合并**（`L == 1` ✓ = 我们的 1T1R ✓，CPU 侧对应 `equalize_zf_1xn` ✓）
+  ⇒ 得 `x̂`（`eq`）与噪声（`nv`）✓；
+* 解调：`z = symbols[...]` ✓ → `rcp = rcp_noise_safe(noise_var[...])` ✓ → 按 `p.mod` 分支（QPSK/16QAM/… ✓）
+  算 LLR ✓ → **`quantize_llr(x, 24.0f)`** ✓ → 写 `char` LLR ✓。
+
+**★ 融合映射（M1 的设计结论 ✓）**：用**解调那套 2-D 网格**（x=re ✓、y=OFDM 符号 ✓），
+把均衡的 b0/b1/b2/b3 按**同一套 stride** 索引 ✓ ⇒ 一个线程做完 `y → x̂ → LLR` ✓，
+`eq`/`nv` **不落全局内存** ✓（解调需要的噪声就是均衡算出的那个 ✓，天然衔接 ✓）。
+
+**⇒ 待确认（下一个动作，仍是读代码 ✓）**：
+1. **均衡的"符号轴"语义** ✗：它用 2-D 派发（`MTLSizeMake(nof_re, n_sym, 1)` ✓）但 kernel 只取 1-D `re` ✓
+   并有 `re >= p.nof_re` 守卫 ⇒ **符号是怎么进到每个线程的**？读 `equalize_params` 与主机侧绑定即可定 ✓
+   （这决定融合 kernel 里网格/权重按哪个 stride 索引 ✗）；
+2. **`nv` 与 `noise_var` 的排布差异** ✗：前者 `[re][layer]` ✓、后者 `[symbol][mod symbol]` ✓
+   ⇒ 融合 kernel 里把 `nv` 直接算在寄存器里 ✓ 就绕过了这个差异 ✓（但若要走"半融合"退路，需写明换算 ✓）；
+3. **`quantize_llr` 的语义** ✓：逐位一致**不要求** ✗（用户裁决 ✓），但**必须一致到"同一件事"** ✓ ⇒
+   融合版照抄 ✓，不做"顺便优化"✗。
+
 ### 2.4 M1 的执行顺序（每步可停 ✓）
 
 1. **M1.0 读代码**（不飞腿 ✓）：把均衡与解调两段内核的**数学与绑定点逐条抄下来**（含 `mod` 的每种取值、
