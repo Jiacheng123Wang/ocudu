@@ -30,8 +30,11 @@ using ocudu::metal::mmse_refusals;
 #include <mutex>
 #include <unordered_map>
 
-#if !defined(OCUDU_MMSE_METALLIB_PATH)
-#define OCUDU_MMSE_METALLIB_PATH "ocudu_mmse.metallib"
+// The LANE's shader library (metal_kernel_fusion M3): the estimator's twelve kernels travel in
+// ocudu_lane.metallib together with the equalizer's and the demapper's, so the three engines of the
+// DFT-grid -> LLR segment load ONE file - the one the build keeps in sync with all of their sources.
+#if !defined(OCUDU_LANE_METALLIB_PATH)
+#define OCUDU_LANE_METALLIB_PATH "ocudu_lane.metallib"
 #endif
 
 using namespace ocudu;
@@ -888,9 +891,9 @@ struct mmse_engine_impl {
   bool load_library(const char* path)
   {
     NSError* err = nil;
-    // The baked-in absolute source-tree path (OCUDU_MMSE_METALLIB_PATH) is the authoritative
+    // The baked-in absolute source-tree path (OCUDU_LANE_METALLIB_PATH) is the authoritative
     // load source; the NSBundle / cwd lookups below are only fallbacks (e.g. relocated builds).
-    const char* primary = (path != nullptr && path[0] != '\0') ? path : OCUDU_MMSE_METALLIB_PATH;
+    const char* primary = (path != nullptr && path[0] != '\0') ? path : OCUDU_LANE_METALLIB_PATH;
     const char* loaded  = nullptr;
     {
       NSURL* url = [NSURL fileURLWithPath:@(primary)];
@@ -907,7 +910,7 @@ struct mmse_engine_impl {
     }
     if (library == nil) {
       // Fall back to a copy next to the executable or in the working directory.
-      NSString* name = @"ocudu_mmse.metallib";
+      NSString* name = @"ocudu_lane.metallib";
       NSURL*    res  = [[NSBundle mainBundle] URLForResource:name withExtension:nil];
       if (res != nil) {
         library = [device newLibraryWithURL:res error:&err];
@@ -916,9 +919,9 @@ struct mmse_engine_impl {
         }
       }
       if (library == nil) {
-        library = [device newLibraryWithFile:@"ocudu_mmse.metallib" error:&err];
+        library = [device newLibraryWithFile:@"ocudu_lane.metallib" error:&err];
         if (library != nil) {
-          loaded = "ocudu_mmse.metallib (cwd)";
+          loaded = "ocudu_lane.metallib (cwd)";
         }
       }
     }

@@ -2011,7 +2011,7 @@ int main()
     auto legacy = make_est(false);
     auto nn     = make_est(true);
     if (!nn->matrix_accel_ready()) {
-      std::printf("Test 8 FAIL: simdgroup 8x8 pipelines not ready (stale ocudu_mmse.metallib?)\n");
+      std::printf("Test 8 FAIL: simdgroup 8x8 pipelines not ready (stale ocudu_lane.metallib?)\n");
       return -1;
     }
 

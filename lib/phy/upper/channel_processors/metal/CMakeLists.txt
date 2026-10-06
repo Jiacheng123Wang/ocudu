@@ -2,16 +2,15 @@
 
 include(ocudu_metal)
 
-# ---- Shader library: generated in the source tree ----
-set(METALLIB_OUT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-# ocudu_lane_fused.metal joined 2026-10-06 (metal_kernel_fusion M1): the fused equalizer+demapper kernel
-# (grid -> LLR in one dispatch, intermediates in registers). It ships in the SAME library as the two kernels it
-# replaces so the route can be switched at run time without a second library load; M3 of that workstream merges
-# the equalizer/demodulator/estimator libraries into one, at which point this file simply moves with them.
-ocudu_add_metallib(
-    TARGET ocudu_metallib_equalizer
-    OUTPUT ${METALLIB_OUT_DIR}/ocudu_equalizer.metallib
-    SOURCES ocudu_equalizer.metal ocudu_lane_fused.metal)
+# ---- Shader library: ONE for the whole lane (metal_kernel_fusion M3) ----
+#
+# This engine used to build `ocudu_equalizer.metallib` from its own two sources; it now loads
+# `ocudu_lane.metallib`, which carries the estimator's, the equalizer's (including the fused
+# equalizer + demapper of M1) and the demapper's kernels. The target is defined in lib/phy/metal,
+# which the build enters first, and it publishes OCUDU_LANE_METALLIB_PATH - the absolute path the
+# engine has baked in, exactly like the three paths it replaces. One file to keep in sync, one load,
+# and no way for a kernel to be missing from the library an engine happens to load.
+include(ocudu_metal)
 
 # ---- Static library: engine driver (ARC) + adapters + factory ----
 enable_language(OBJCXX)
@@ -24,8 +23,8 @@ set_property(TARGET ocudu_channel_processors_metal PROPERTY OBJCXX_STANDARD 17)
 target_compile_options(ocudu_channel_processors_metal PRIVATE -Wno-deprecated-declarations)
 target_include_directories(ocudu_channel_processors_metal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(ocudu_channel_processors_metal PRIVATE
-    OCUDU_EQUALIZER_METALLIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ocudu_equalizer.metallib")
-add_dependencies(ocudu_channel_processors_metal ocudu_metallib_equalizer)
+    OCUDU_LANE_METALLIB_PATH="${OCUDU_LANE_METALLIB_PATH}")
+add_dependencies(ocudu_channel_processors_metal ocudu_metallib_lane)
 target_link_libraries(ocudu_channel_processors_metal
     PUBLIC ocudulog ocudu_macos_compat ocudu_support ocudu_metal_queue
     PRIVATE "-framework Metal" "-framework Foundation")

@@ -259,8 +259,9 @@ llrs[4*re+3] = quantize_llr(qam16_23(x_hat.y, rcp), 20.0f);
 **离线对拍** ✓（`ab_dumps.sh`，27 个 capture，QAM16 标注语料 ✓）：**四个 dump 全部逐字节相同** ✓
 （`_llr.bin` / `_h.bin` / `.bin` / `_ce.txt` 差异字节数 **0/0/0/0** ✓）⇒ **"算的是同一件事"成立到逐位** ✓。
 
-**当前状态** ✓（本节的出口 ✓）：融合路线**已接完并验证** ✓，**默认关** ✓ ⇒ 默认二进制与 M0 基线**逐字节同路** ✓；
-开关 = `OCUDU_LANE_FUSE_EQDEMOD`（env ✓，**非空即开** ✓，值不被读 ✓ ⇒ `=0` 也是臂 ✓，这是腿协议的形状 ✓）；
+**当前状态** ✓（本节的出口 ✓）：融合路线**已接完并验证** ✓；
+开关 = `OCUDU_LANE_FUSE_EQDEMOD`（env ✓）—— **2026-10-07 用户裁决改为默认开** ✓（判决见 memo ✓），
+**`=0` 是回退开关** ✓（旧形状"非空即开、默认关"是 A/B 期间的约定 ✓，已随判决作废 ✓）；
 **适用形状** ✓ = **16QAM ✓ + 1 层 ✓ + `evm_calc == nullptr` ✓**（`channel_equalizer::supports_fused_demapping()` ✓）；
 腿号 ✓：已飞到 **mkf009** ✓，下一对 = **mkf010（对照）/ mkf011（臂）** ✓（§2.11 ✓，取号 `bash wip/next_leg_label.sh` ✓）；
 判据仍是 §2.3 ✓（结构证据 = dispatch 4→3 ✓；主判据报告制 ✓；红线 = CRC 同档 + `gaps=0` ✓）。
@@ -382,7 +383,7 @@ LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs \
 | 唯一变差的项：B 路 `ul_gpu_pipeline` p99.9 +36 µs ✗ | **记账** ✓ | 若后续要引用 p99.9 ⇒ 先弄清是否与那次 2.3 ms busy 离群同源 ✓ |
 | 其它调制（QPSK 等）| **M1 不做** ✗（QPSK 只在开局 3 跳 ✓）| 若某条腿的 PUSCH 主体变成 QPSK/256QAM ⇒ 按同一套加 ✓ |
 | ★ **lane 内那 ~380 µs 的归属** | **未归属** ✗（本轮只拿到"主体在等待里"的旁证 ✓）| 给 Q9-B 补中位数 ✓ ⇒ 下次飞行即可读到 ✓；再据此决定 M2 ✓（§2.14 ✓）|
-| **融合路线是否翻成默认开** | **未决** ✗（现为默认关 ✓）| **用户裁决** ✓（两对腿已证明严格改善 ✓；M4 的"交付默认值不变"是另一条路 ✓）|
+| **融合路线是否翻成默认开** | ★ **已裁决 ✓：默认开** ✓（用户 2026-10-07 ✓，两对腿为据 ✓；`=0` 为回退 ✓）| — |
 | lane 外那 ~760 µs（host FFT + 网格打包）| **范围外** ✗（用户已排除 Metal FFT ✓；M0c 证明搬设备更差 ✗）| 用户重开范围时 ✓，且要换一条路（不是 M0c 那条 ✗）|
 | "不要 `nv` 输出"的 A/B（省 4 B/RE ✓）| 未做 ✗ | 融合收益兑现之后 ✓；它要**同时**换 SINR 方法（`--pusch_sinr_calc_method=channel_estimator` ✓），所以是**两条腿一对** ✓ |
 | **EVM 与融合不兼容** ✓ | 已明确 ✗（EVM 读 `eq` ✗，腿里默认关 ✓）| 若要 `pusch_sinr_calc_method=evm` + 融合 ⇒ kernel 需再写 `eq`（8 B/RE ✗），届时按同一套加 ✓ |
@@ -446,9 +447,9 @@ LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs \
    —— `commit -> start (Q9-B, the queue)` 与 `start -> end (Q9-B, the device)` ✓
    （原来只有"最慢 8 个"的表 ✗）⇒ **下一次飞行就能读出中位 CB 的时间去向** ✓；
    **不改交付行为** ✓（只加报告 ✓）、`probes_off_syntax_check.sh` 仍要过 ✓（已过 ✓）。
-2. **★ 决策点（用户 ✓）**：融合路线**默认关** ✓（§2.3 的预登记 ✓、M4 的"交付默认值不变" ✓）。
-   现在它已被两对腿证明是**严格改善** ✓（−1.5～−1.9 % + 长尾 ✓，功能零代价 ✓）
-   ⇒ 是否**翻成默认开** ✓、还是留到 M4 验收 ✓，是用户的裁决 ✓；
+2. **★ 决策点（用户 ✓，已裁决 ✓）**：**翻成默认开** ✓（2026-10-07 ✓）——
+   两对腿已证明它是**严格改善** ✓（−1.5～−1.9 % + 长尾 ✓，功能零代价 ✓）；
+   `OCUDU_LANE_FUSE_EQDEMOD=0` 为回退 ✓，M4 的"交付默认值不变"由这次裁决取代 ✓（见 memo ✓）；
 3. **M3（metallib 整合，3 → 1 ✓）**：与上述独立 ✓、便宜 ✓、不动时间 ✓（G3 ✓）⇒ 可以**并行或先做** ✓；
 4. **M2（折 CE）**：**前提要按 M0 的结论重写** ✓ —— 不是"`ch_wt` 那 36.8 µs 值不值" ✗，
    而是"**去掉 CE↔lane 的边界能不能动那 ~380 µs**" ✓；M2 的试点仍应是
@@ -479,13 +480,42 @@ LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs \
 
 ---
 
-## 4. M3：metallib 整合（**独立于 kernel 融合，可先做** ✓）
+## 4. M3：metallib 整合 —— **已完成** ✓（2026-10-07）
 
-* 目标：CE / EQ / DEMOD 三个库 → **一个** `ocudu_lane.metallib` ✓；
-* 落点：三个 metal 目录的 `CMakeLists.txt`（`ocudu_add_metallib` ✓）合并为一个 target ✓，
-  三个 `OCUDU_*_METALLIB_PATH` 收敛为一个 ✓，引擎侧**共享一次加载**（device/queue/library ✓）；
-* **它不改数据路径** ✗ ⇒ 不进 G5 ✓，只算工程整洁（G3 ✓）与初始化简化 ✓；
-* 出口：G3 ✓、启动横幅与探针无回退 ✓、Linux 不变 ✓、probes-OFF 可编 ✓。
+**结果** ✓：**3 个库 → 1 个** ✓ —— `lib/phy/metal/ocudu_lane.metallib`（**200 892 B** ✓），
+由 **15 个 `.metal`** 编成 ✓（CE 12 + EQ 2 + DEMOD 1 ✓），**34 个 kernel 入口点全部在内** ✓
+（逐名核对 ✓：`equalize_mxn`/`equalize_mxn_batch`/`gather_ch_re`/`eq_build_gather`/`lane_grid_to_llr`/
+`demod_soft`/`mmse_*` ✓）。三个引擎各自加载它 ✓（**加载次数 3 → 1** ✓、**要同步的文件 3 → 1** ✓）。
+
+**落点** ✓（都在 `CMakeLists.txt` + 三个 resolver ✓，数据路径一行没改 ✓）：
+
+| 文件 | 改动 |
+|---|---|
+| `lib/phy/metal/CMakeLists.txt` ✓ | **新增** `ocudu_add_metallib(TARGET ocudu_metallib_lane OUTPUT …/ocudu_lane.metallib SOURCES <15>)` ✓；`IEEE_MATH_SOURCES` 照抄 CE 那三个 ✓（`mmse_corr` / `mmse_pilots_power` / `mmse_apply_lse` ✓ —— **严格 IEEE 的契约必须跟着文件走** ✓）|
+| 三个引擎的 `CMakeLists.txt` ✓ | 各自删掉自己的 `ocudu_add_metallib` ✓、`OCUDU_*_METALLIB_PATH` → **`OCUDU_LANE_METALLIB_PATH`**（由 `lib/phy/metal` 发布 ✓，该目录在 `upper` **之前**进入 ✓ ⇒ 三个引擎都能读到 ✓）、依赖改为 `ocudu_metallib_lane` ✓ |
+| 三个引擎的 resolver ✓ | 首选与回退都指向 `ocudu_lane.metallib` ✓；CE 的 `load_library()` 默认路径同样 ✓ |
+| ★ `lib/phy/metal/ocudu_metal_burst.mm` ✓ | **ablation 臂自己的 loader 也换了** ✓ —— 见下 ✓ |
+
+**★ 差点漏掉的一处（读代码才发现的 ✓）**：`ocudu_metal_burst.mm` 里 **ablation 臂**（`OCUDU_LANE_ABLATE` ✓）
+**自带一个 metallib resolver** ✗，它按名字找 `ocudu_demod.metallib` ✓ —— 库一合并、旧文件一删，
+该臂就会**只打印一句 warning 然后静默失效** ✗（**只在该旋钮打开时才走到** ⇒ 默认路线与腿都看不出来 ✗）。
+已指向 `ocudu_lane.metallib` ✓，并**离线验证**：`OCUDU_LANE_ABLATE=1` 下打印 `ABLATION ON` ✓、
+覆盖表出现 ✓、不再有 `not found` ✓。
+
+**★ 验证时踩到的坑（写下来 ✓）**：改完库路径后，**只重编 `gnb` 不够** ✗ ——
+`demodulation_mapper_metal_unit_test` / `port_channel_estimator_metal_mmse_unit_test*` **仍是旧二进制** ✓
+（里面烘的是**已被删掉的** `ocudu_demod.metallib` / `ocudu_mmse.metallib` 路径 ✗）
+⇒ 三个测试**假失败**（SEGFAULT / Failed ✓），**重编测试目标后 5/5 PASS** ✓。
+**教训** ✓：换库路径 = 换**所有链接引擎的二进制**里的字符串 ⇒ 用**全量 `cmake --build`** 验证 ✓，
+不要只编你想到的那个目标 ✓（本工作流的"每个数字都要能说出它的口径"在这里变成"每个二进制都要重链"✓）。
+
+**离线验证** ✓（M3 的出口 ✓，全部通过 ✓）：
+1. `ocudu_metallib_lane` 编成 ✓、34 个 kernel 全在 ✓（`strings` 逐名 ✓）；
+2. `ctest -R "demodulation_mapper_metal_unit_test|channel_equalizer_metal|port_channel_estimator_metal_mmse"` **5/5 PASS** ✓；
+3. **全链路对拍** ✓（CE + EQ + DEMAP 全部走同一个库 ✓）：16QAM 与 64QAM 两份语料 × 27 capture
+   ⇒ 四个 dump **0/0/0/0** ✓✓（`ab_dumps.sh` ✓）；
+4. `probes_off_syntax_check.sh` **34 TU 全过** ✓；
+5. **全量 `cmake --build` 绿** ✓、旧路径字符串在 build 树里**已清零** ✓（`grep -rl` 于 `*.o` ✓）。
 
 ---
 
@@ -959,6 +989,29 @@ metallib **35 479 B 且含 `lane_grid_to_llr`** ✓。
 判据见 §2.3 ✓（**结构证据 4→3 是必然产物** ✓，`busy` 与 `[ul_pipeline]` 是报告制 ✓，红线 = CRC 同档 + `gaps=0` ✓）。
 
 ---
+
+### 2026-10-07 · ★★ 用户裁决：融合路线**翻成默认开** ✓；★ M3（metallib 整合）**完成** ✓
+
+**① 翻默认开** ✓（用户 2026-10-07 ✓，依据 = 两对腿的判决 ✓）：
+`OCUDU_LANE_FUSE_EQDEMOD` 从"非空即开、默认关"改为**"未设或非零 = 开、`=0` = 关"** ✓
+（与 `OCUDU_EQ_DEFER_ENCODE` / `OCUDU_EQ_DIRECT_GRID` 同一形状 ✓）。
+**为什么可以翻** ✓：两对腿在 16QAM 与 **64QAM（交付配置）** 上都测到严格改善 ✓
+（dispatch/跳 **4.0000 → 3.0000** ✓、`busy` −1.5～−1.9 % ✓、长尾 −15～−28 % ✓、CRC 同档 ✓、`gaps=0` ✓）；
+**要一起记住的前提** ✓：路线只在 **1 层 + (16QAM|64QAM) + 无 EVM** 时生效 ✓，
+其余形状**自动**走两步路线 ✓ 并在日志里点名 ✓。
+**离线验证** ✓（不用电台 ✓）：默认（不带 env）在 16QAM 与 64QAM 语料上都是 `y_fused=1` ✓；
+`OCUDU_LANE_FUSE_EQDEMOD=0` 回到 `y_batch=1, y_fused=0` ✓。
+★ **M4 的"交付默认值不变"由此被用户裁决取代** ✓ —— 记在架构文档 §7 与 §0 ✓，不是被遗忘 ✗。
+
+**② M3 完成** ✓（3 个 metallib → 1 个 `ocudu_lane.metallib` ✓，详细规格见 §4 ✓）：
+15 个 `.metal` → 1 个库（**200 892 B** ✓）、**34 个 kernel 入口点全在** ✓、三个引擎各加载它 ✓
+（**加载 3 → 1** ✓）、`IEEE_MATH_SOURCES` 那三个严格文件照旧 ✓。
+**两处只有读代码才看得见的坑** ✓：① `ocudu_metal_burst.mm` 的 **ablation 臂自带 resolver** ✗
+（只在 `OCUDU_LANE_ABLATE` 打开时走到 ⇒ 会静默失效 ✗，已改 ✓ 并离线验证 `ABLATION ON` ✓）；
+② 改库路径后**只重编 gnb 不够** ✗ —— 三个引擎的**单测二进制**里烘着**已删掉的**旧路径 ✓
+⇒ 假失败（SEGFAULT/Failed ✗），**全量重编后 5/5 PASS** ✓（教训写进 §4 ✓）。
+**离线验证** ✓：`ctest` 5/5 ✓、**全链路对拍（CE+EQ+DEMAP 同一个库 ✓）两份语料 × 27 capture = 0/0/0/0** ✓、
+probes-off 34 TU ✓、全量 `cmake --build` 绿 ✓、build 树里旧路径字符串清零 ✓。
 
 ## 6. 会话交接（**只在准备开新会话时**新建 ✗ 不是每段工作结束时）
 

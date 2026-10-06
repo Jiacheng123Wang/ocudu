@@ -21,8 +21,8 @@
 #include <unordered_map>
 #include <vector>
 
-#ifndef OCUDU_DEMOD_METALLIB_PATH
-#define OCUDU_DEMOD_METALLIB_PATH "ocudu_demod.metallib"
+#ifndef OCUDU_LANE_METALLIB_PATH
+#define OCUDU_LANE_METALLIB_PATH "ocudu_lane.metallib"
 #endif
 
 using namespace ocudu;
@@ -117,17 +117,18 @@ static std::mutex& demod_resources_mutex()
   return m;
 }
 
+/// \brief The LANE's shader library, shared with the estimator and the equalizer (metal_kernel_fusion M3).
 NSString* resolve_demod_metallib_path()
 {
   NSMutableArray<NSString*>* candidates = [NSMutableArray arrayWithCapacity:3];
-  [candidates addObject:[NSString stringWithUTF8String:OCUDU_DEMOD_METALLIB_PATH]];
+  [candidates addObject:[NSString stringWithUTF8String:OCUDU_LANE_METALLIB_PATH]];
   NSArray<NSString*>* args = [[NSProcessInfo processInfo] arguments];
   if (args.count > 0) {
     [candidates addObject:[[args[0] stringByDeletingLastPathComponent]
-                              stringByAppendingPathComponent:@"ocudu_demod.metallib"]];
+                              stringByAppendingPathComponent:@"ocudu_lane.metallib"]];
   }
   [candidates addObject:[[[NSFileManager defaultManager] currentDirectoryPath]
-                            stringByAppendingPathComponent:@"ocudu_demod.metallib"]];
+                            stringByAppendingPathComponent:@"ocudu_lane.metallib"]];
   NSFileManager* fm = [NSFileManager defaultManager];
   for (NSString* path in candidates) {
     if ([fm fileExistsAtPath:path]) {
@@ -511,7 +512,7 @@ bool demod_metal_engine::init()
     NSString* lib_path = resolve_demod_metallib_path();
     if (lib_path == nil) {
       ocudulog::fetch_basic_logger("PHY").error(
-          "Metal demapper: pre-compiled shader library 'ocudu_demod.metallib' not found");
+          "Metal demapper: pre-compiled shader library 'ocudu_lane.metallib' not found");
       return false;
     }
     NSError*       error   = nil;

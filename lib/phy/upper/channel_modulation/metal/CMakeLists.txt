@@ -2,12 +2,11 @@
 
 include(ocudu_metal)
 
-# ---- Shader library: generated in the source tree ----
-set(METALLIB_OUT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-ocudu_add_metallib(
-    TARGET ocudu_metallib_demod
-    OUTPUT ${METALLIB_OUT_DIR}/ocudu_demod.metallib
-    SOURCES ocudu_demod.metal)
+# ---- Shader library: the LANE's, shared with the estimator and the equalizer (metal_kernel_fusion M3) ----
+#
+# The demapper used to build `ocudu_demod.metallib`; it now loads `ocudu_lane.metallib` (defined in
+# lib/phy/metal, which the build enters first - see the note there). Same kernels, one library.
+include(ocudu_metal)
 
 # ---- Static library: engine driver (ARC) + adapter + factory ----
 enable_language(OBJCXX)
@@ -20,8 +19,8 @@ set_property(TARGET ocudu_channel_modulation_metal PROPERTY OBJCXX_STANDARD 17)
 target_compile_options(ocudu_channel_modulation_metal PRIVATE -Wno-deprecated-declarations)
 target_include_directories(ocudu_channel_modulation_metal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(ocudu_channel_modulation_metal PRIVATE
-    OCUDU_DEMOD_METALLIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ocudu_demod.metallib")
-add_dependencies(ocudu_channel_modulation_metal ocudu_metallib_demod)
+    OCUDU_LANE_METALLIB_PATH="${OCUDU_LANE_METALLIB_PATH}")
+add_dependencies(ocudu_channel_modulation_metal ocudu_metallib_lane)
 target_link_libraries(ocudu_channel_modulation_metal
     PUBLIC ocudulog ocudu_macos_compat ocudu_support ocudu_metal_queue
     PRIVATE "-framework Metal" "-framework Foundation")

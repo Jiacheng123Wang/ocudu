@@ -317,7 +317,12 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
   /// never reach memory. That makes the route's preconditions stricter than the deferred chain's, and
   /// every one of them is a way the two stages are wired together here:
   ///
-  ///  * OFF BY DEFAULT, and env-only: the knob is the A/B between this route and the shipped one;
+  ///  * ON BY DEFAULT since 2026-10-07 (user ruling), with `OCUDU_LANE_FUSE_EQDEMOD=0` as the
+  ///    escape hatch. It was off while the route was being judged - two air pairs, 16QAM and 64QAM,
+  ///    measured it a strict improvement (dispatches per hop 4.0000 -> 3.0000, lane busy -1.5..-1.9%,
+  ///    the long tail 15..28% shorter, CRC the same tier, zero functional cost), so the delivery
+  ///    default follows the evidence rather than the A/B convention. Every precondition below still
+  ///    holds: where one fails, the two-stage route is what runs, and the log says which one failed;
   ///  * the modulation and the layer count are the fused kernel's scope (16QAM, one layer - see
   ///    channel_equalizer::supports_fused_demapping()), and the backend has to have the kernel;
   ///  * the EVM calculation reads the EQUALIZED SYMBOLS on the host in pass 3, and a fused dispatch
@@ -329,11 +334,12 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
   ///    adaptation a value nothing measured.
   ///@{
   static const bool fuse_eq_demod = []() {
-    // Non-null means ON, which is the shape the workstream's leg protocol uses: the arm exports the
-    // variable, the control leg leaves it unset. The value is not read, so `=0` is still the arm -
-    // the knob's documentation says "set", and a knob whose meaning depends on its value is one more
-    // thing a leg can get wrong.
-    return std::getenv("OCUDU_LANE_FUSE_EQDEMOD") != nullptr;
+    // Default ON (see the note above): the environment variable is the ESCAPE HATCH, and the leg
+    // protocol's control arm is `OCUDU_LANE_FUSE_EQDEMOD=0`. Same shape as the other route knobs of
+    // this lane (OCUDU_EQ_DEFER_ENCODE, OCUDU_EQ_DIRECT_GRID): unset or non-zero means on, an
+    // explicit 0 means off.
+    const char* env = std::getenv("OCUDU_LANE_FUSE_EQDEMOD");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
   }();
   const bool fused_chain = deferred_chain && fuse_eq_demod && (evm_calc == nullptr) &&
                            equalizer->supports_fused_demapping(config.modulation, nof_rx_ports, config.nof_tx_layers);

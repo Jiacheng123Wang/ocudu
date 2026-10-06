@@ -37,8 +37,8 @@ struct equalizer_crossing_declaration {
 } // namespace
 #include <vector>
 
-#ifndef OCUDU_EQUALIZER_METALLIB_PATH
-#define OCUDU_EQUALIZER_METALLIB_PATH "ocudu_equalizer.metallib"
+#ifndef OCUDU_LANE_METALLIB_PATH
+#define OCUDU_LANE_METALLIB_PATH "ocudu_lane.metallib"
 #endif
 
 using namespace ocudu;
@@ -316,17 +316,22 @@ static std::mutex& eq_resources_mutex()
   return m;
 }
 
+/// \brief The LANE's shader library, which this engine shares with the estimator and the demapper.
+///
+/// One library for the whole DFT-grid -> LLR segment (metal_kernel_fusion M3): the kernels of all
+/// three engines travel in ocudu_lane.metallib, so there is one file to keep in sync, one load, and
+/// no way for a kernel to be missing from the library one engine happens to open.
 NSString* resolve_eq_metallib_path()
 {
   NSMutableArray<NSString*>* candidates = [NSMutableArray arrayWithCapacity:3];
-  [candidates addObject:[NSString stringWithUTF8String:OCUDU_EQUALIZER_METALLIB_PATH]];
+  [candidates addObject:[NSString stringWithUTF8String:OCUDU_LANE_METALLIB_PATH]];
   NSArray<NSString*>* args = [[NSProcessInfo processInfo] arguments];
   if (args.count > 0) {
     [candidates addObject:[[args[0] stringByDeletingLastPathComponent]
-                              stringByAppendingPathComponent:@"ocudu_equalizer.metallib"]];
+                              stringByAppendingPathComponent:@"ocudu_lane.metallib"]];
   }
   [candidates addObject:[[[NSFileManager defaultManager] currentDirectoryPath]
-                            stringByAppendingPathComponent:@"ocudu_equalizer.metallib"]];
+                            stringByAppendingPathComponent:@"ocudu_lane.metallib"]];
   NSFileManager* fm = [NSFileManager defaultManager];
   for (NSString* path in candidates) {
     if ([fm fileExistsAtPath:path]) {
@@ -698,7 +703,7 @@ bool equalizer_metal_engine::init()
     NSString* lib_path = resolve_eq_metallib_path();
     if (lib_path == nil) {
       ocudulog::fetch_basic_logger("PHY").error(
-          "Metal equalizer: pre-compiled shader library 'ocudu_equalizer.metallib' not found");
+          "Metal equalizer: pre-compiled shader library 'ocudu_lane.metallib' not found");
       return false;
     }
     NSError*       error   = nil;

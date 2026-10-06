@@ -1,0 +1,3 @@
+# The lane's single shader library is regenerated IN PLACE here (metal_kernel_fusion M3): see the
+# ocudu_add_metallib call in CMakeLists.txt. Build artifact, never committed.
+*.metallib

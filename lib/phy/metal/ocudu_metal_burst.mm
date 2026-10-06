@@ -626,23 +626,27 @@ id<MTLComputePipelineState> ablation_pipeline_lazy()
     if (device == nil) {
       return;
     }
-    NSMutableArray<NSString*>* candidates = [NSMutableArray arrayWithCapacity:3];
-    [candidates addObject:@"ocudu_demod.metallib"];
+    // The no-op lives in the LANE's library (metal_kernel_fusion M3): the ablation arm is a DIAGNOSTIC
+    // of the lane's stages, so it loads the same single library every lane engine loads. It used to
+    // name the demapper's own library here, which stopped existing when the three were merged - and
+    // because this resolver is only reached when OCUDU_LANE_ABLATE is set, the arm would have gone
+    // quiet (a printed warning and no ablation) rather than fail loudly.
+    NSMutableArray<NSString*>* candidates = [NSMutableArray arrayWithCapacity:4];
+    [candidates addObject:@"ocudu_lane.metallib"];
     NSArray<NSString*>* args = [[NSProcessInfo processInfo] arguments];
     if (args.count > 0) {
       [candidates addObject:[[args[0] stringByDeletingLastPathComponent]
-                                stringByAppendingPathComponent:@"ocudu_demod.metallib"]];
+                                stringByAppendingPathComponent:@"ocudu_lane.metallib"]];
     }
     [candidates addObject:[[[NSFileManager defaultManager] currentDirectoryPath]
-                              stringByAppendingPathComponent:@"ocudu_demod.metallib"]];
+                              stringByAppendingPathComponent:@"ocudu_lane.metallib"]];
     // Walk UP from the working directory as well: a leg runs from the repository root (where the
     // generated metallib sits next to its .metal source), while a unit test runs from its own build
     // directory - and the first version of this resolver only checked the former, which is exactly how
     // the offline verification below found the plumbing was never reaching the pipeline.
     NSString* up = [[NSFileManager defaultManager] currentDirectoryPath];
     for (unsigned i = 0; i != 8; ++i) {
-      [candidates addObject:[up stringByAppendingPathComponent:
-                                   @"lib/phy/upper/channel_modulation/metal/ocudu_demod.metallib"]];
+      [candidates addObject:[up stringByAppendingPathComponent:@"lib/phy/metal/ocudu_lane.metallib"]];
       NSString* parent = [up stringByDeletingLastPathComponent];
       if ([parent isEqualToString:up]) {
         break;
@@ -657,7 +661,7 @@ id<MTLComputePipelineState> ablation_pipeline_lazy()
       }
     }
     if (found == nil) {
-      std::fprintf(stderr, "[metal_ablate] OCUDU_LANE_ABLATE=1 but ocudu_demod.metallib was not found - "
+      std::fprintf(stderr, "[metal_ablate] OCUDU_LANE_ABLATE=1 but ocudu_lane.metallib was not found - "
                            "the ablation is NOT in effect\n");
       return;
     }

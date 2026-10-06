@@ -4,11 +4,11 @@
 #
 # The library is only built when ENABLE_METAL_CHEST is ON (default ON for Apple Silicon,
 # OFF elsewhere - Linux keeps the upstream byte-for-byte). The MSL shaders are compiled
-# into ocudu_mmse.metallib as part of the build by ocudu_add_metallib (cmake/modules/
-# ocudu_metal.cmake): `xcrun metal` -> `xcrun metallib`, generated IN PLACE at the
-# source-tree location the engine loads (the absolute path baked in as
-# OCUDU_MMSE_METALLIB_PATH at configure time points here, so the runtime code is
-# untouched). CMake tracks the shader sources (DEPENDS) and their user-header includes
+# into the LANE's library (ocudu_lane.metallib, lib/phy/metal) as part of the build by
+# ocudu_add_metallib (cmake/modules/ocudu_metal.cmake): `xcrun metal` -> `xcrun metallib`,
+# generated IN PLACE at the source-tree location the engine loads (the absolute path baked
+# in as OCUDU_LANE_METALLIB_PATH at configure time points there, so the runtime code only
+# names one library - metal_kernel_fusion M3). CMake tracks the shader sources (DEPENDS) and their user-header includes
 # (DEPFILE via `metal -MMD`), so editing a .metal file recompiles the .metallib
 # incrementally - no manual xcrun steps and no re-run of cmake needed. Only the
 # .air/.air.d intermediates live in the build directory; the generated .metallib is
@@ -20,41 +20,32 @@ enable_language(OBJCXX)
 
 include(ocudu_metal)
 
-# ---- Shader library: generated in the source tree, authoritative for the runtime load ----
-set(MMSE_METALLIB ${CMAKE_CURRENT_SOURCE_DIR}/ocudu_mmse.metallib)
-ocudu_add_metallib(
-    TARGET ocudu_mmse_metallib
-    OUTPUT ${MMSE_METALLIB}
-    SOURCES ocudu_mmse_inv.metal ocudu_mmse_apply.metal ocudu_mmse_weights.metal ocudu_mmse_rsrp.metal ocudu_mmse_ta.metal
-            ocudu_mmse_weights_matrix.metal ocudu_mmse_apply_matrix.metal ocudu_mmse_reformat.metal
-            ocudu_mmse_corr.metal ocudu_mmse_pilots.metal ocudu_mmse_pilots_power.metal
-            ocudu_mmse_apply_lse.metal
-    # The correlation kernels are the one place with a BIT-EXACTNESS contract against a host float
-    # expression (build_correlation_matrices()): K0-d is only a drop-in for the host staging if A and
-    # R_hp come out identical, and a 1-ulp difference is amplified by cond_2(A) ~ 2e4 into ~1% of W
-    # and h (measured 0.4-0.9% on a 256QAM capture, which the LLR byte comparison sees). Metal's
-    # default fast math is free to contract `1 + x * x` into an fma and to reassociate the products,
-    # and that is exactly the 1 ulp - so this file is compiled with strict IEEE semantics.
-    #
-    # ocudu_mmse_pilots_power.metal (K0-a) is strict for the same reason, and it is a file of its own
-    # to keep the strictness to ONE kernel (S-7g-20): its sigma2_rel = out[0] / out[1] is the diagonal
-    # loading of A, so it carries the same cond_2(A) ~ 2e4 amplification as the correlation kernels -
-    # and under the default fast math that divide comes out DIFFERENTLY ROUNDED from the host's in
-    # 28.4% of 2^20 random (sigma2-like, power-like) pairs (298151 differences, both directions),
-    # which flipped LLR decisions on 27 of 27 corpus captures (32613 soft bits). Recompiled with
-    # -fno-fast-math the same sweep is 0 of 2^20: on this GPU the flag is the whole difference, not
-    # the hardware. The flag is per FILE, and ocudu_mmse_pilots.metal's other kernels have no such
-    # contract (the pilots enter h = W . y linearly) - putting them under it as well changed the LSE's
-    # last bits for no benefit, so the mean-power kernel was split out instead.
-    #   - ocudu_mmse_apply_lse.metal (K2 over the LSE, lever C of dev doc 6.61) is strict for a
-    #     third reason: its `lse * inv_beta` product must be ROUNDED where the pilot scatter rounded
-    #     it, i.e. before the weight multiply. Under fast math the compiler reassociated the chain into
-    #     round(round(w * inv_beta) * lse), which is a different float - measured: _h.bin, _llr.bin and
-    #     the grid stayed byte-identical over the 27-capture corpus while the float32 reductions over
-    #     h (noise_variance in K4, rsrp in K5) moved on 13 of them (40 bytes of _ce.txt). It is a file
-    #     of its own so that ocudu_mmse_apply.metal keeps the default fast math and mmse_apply()'s code
-    #     generation stays untouched by this route.
-    IEEE_MATH_SOURCES ocudu_mmse_corr.metal ocudu_mmse_pilots_power.metal ocudu_mmse_apply_lse.metal)
+# ---- Shader library: the LANE's, shared with the equalizer and the demapper (metal_kernel_fusion M3) ----
+#
+# This engine used to build `ocudu_mmse.metallib` from its own twelve sources; it now loads
+# `ocudu_lane.metallib`, which carries the estimator's, the equalizer's (including the fused
+# equalizer + demapper of M1) and the demapper's kernels. The target is defined in lib/phy/metal,
+# which the build enters first - see the note there, which also carries the per-source IEEE-math
+# contract that used to be documented here (the three strict sources are still strict: the merged
+# target names them in IEEE_MATH_SOURCES).
+#
+# The rationale below is kept in this file because it is about THESE kernels, and it is the reason
+# the merged target takes a per-source flag at all:
+#
+# The correlation kernels are the one place with a BIT-EXACTNESS contract against a host float
+# expression (build_correlation_matrices()): K0-d is only a drop-in for the host staging if A and
+# R_hp come out identical, and a 1-ulp difference is amplified by cond_2(A) ~ 2e4 into ~1% of W
+# and h (measured 0.4-0.9% on a 256QAM capture, which the LLR byte comparison sees). Metal's
+# default fast math is free to contract `1 + x * x` into an fma and to reassociate the products,
+# and that is exactly the 1 ulp - so ocudu_mmse_corr.metal is compiled with strict IEEE semantics.
+# ocudu_mmse_pilots_power.metal (K0-a) is strict for the same reason (its sigma2_rel = out[0] /
+# out[1] is the diagonal loading of A: under fast math the divide was differently rounded from the
+# host's in 28.4% of 2^20 pairs, 298151 differences, which flipped LLR decisions on 27 of 27
+# captures; with -fno-fast-math the same sweep is 0 of 2^20), and ocudu_mmse_apply_lse.metal (K2
+# over the LSE) is strict because its `lse * inv_beta` product must be ROUNDED where the pilot
+# scatter rounded it (fast math reassociated it into round(round(w * inv_beta) * lse), and 13 of 27
+# captures moved 40 bytes of _ce.txt). The flag is per FILE, which is why those three are files of
+# their own and why ocudu_add_metallib takes IEEE_MATH_SOURCES rather than a target-wide option.
 
 # ---- Compiled Core ML model (AI channel estimator; see the training memo) ----
 set(HELENA_MODELC ${CMAKE_CURRENT_SOURCE_DIR}/ai_assets/helena_pusch_ml.mlmodelc)
@@ -76,14 +67,14 @@ target_include_directories(ocudu_channel_estimator_metal PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/..)   # port_channel_estimator_average_impl.h
 target_compile_definitions(ocudu_channel_estimator_metal PUBLIC
     OCUDU_METAL_CHEST
-    OCUDU_MMSE_METALLIB_PATH="${MMSE_METALLIB}"
+    OCUDU_LANE_METALLIB_PATH="${OCUDU_LANE_METALLIB_PATH}"
     # The batch 5b time-alignment port encodes the DFT kernel into the estimator's own command
     # buffer, so the estimator loads that metallib too (see load_ta_pipelines()).
     OCUDU_DFT_METALLIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../../../generic_functions/metal/ocudu_dft.metallib"
     OCUDU_HELENA_MODEL_PATH="${HELENA_MODELC}"
     OCUDU_HELENA_MODEL_PATH_52="${HELENA_MODELC_52}"
     OCUDU_HELENA_MODEL_PATH_106="${HELENA_MODELC_106}")
-add_dependencies(ocudu_channel_estimator_metal ocudu_mmse_metallib ocudu_metallib_dft)
+add_dependencies(ocudu_channel_estimator_metal ocudu_metallib_lane ocudu_metallib_dft)
 target_link_libraries(ocudu_channel_estimator_metal PUBLIC ocuduvec ocudu_phy_support ocudulog ocudu_metal_queue)
 target_link_libraries(ocudu_channel_estimator_metal PRIVATE "-framework Metal" "-framework Foundation" "-framework CoreML")
 
