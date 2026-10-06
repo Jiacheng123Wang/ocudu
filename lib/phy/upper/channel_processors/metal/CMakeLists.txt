@@ -4,10 +4,14 @@ include(ocudu_metal)
 
 # ---- Shader library: generated in the source tree ----
 set(METALLIB_OUT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+# ocudu_lane_fused.metal joined 2026-10-06 (metal_kernel_fusion M1): the fused equalizer+demapper kernel
+# (grid -> LLR in one dispatch, intermediates in registers). It ships in the SAME library as the two kernels it
+# replaces so the route can be switched at run time without a second library load; M3 of that workstream merges
+# the equalizer/demodulator/estimator libraries into one, at which point this file simply moves with them.
 ocudu_add_metallib(
     TARGET ocudu_metallib_equalizer
     OUTPUT ${METALLIB_OUT_DIR}/ocudu_equalizer.metallib
-    SOURCES ocudu_equalizer.metal)
+    SOURCES ocudu_equalizer.metal ocudu_lane_fused.metal)
 
 # ---- Static library: engine driver (ARC) + adapters + factory ----
 enable_language(OBJCXX)

@@ -236,6 +236,22 @@ llrs[4*re+3] = quantize_llr(qam16_23(x_hat.y, rcp), 20.0f);
 **接线（这一步之后做 ✓）**：均衡引擎加 `enqueue_fused` ✓ → 调用方（`pusch_demodulator_impl` ✓）
 按 `OCUDU_LANE_FUSE_EQDEMOD && mod==QAM16` 选路线 ✓ → 关着时逐字节走今天两步 ✓。
 
+### 2.9 M1.1 进展（2026-10-06）：**kernel 已写并已证明能编/能打包** ✓（接线未完）
+
+| 步骤 | 状态 |
+|---|---|
+| 写 `ocudu_lane_fused.metal`（16QAM 融合 ✓，§2.8 骨架 ✓）| **完成 ✓**（新文件 ✓，**不改动两个现有 kernel** ✓）|
+| 加进 `ocudu_metallib_equalizer` ✓ | **完成 ✓**（CMake 已改 ✓，与两个原 kernel 同库 ⇒ 运行时切换不需要第二个库 ✓）|
+| 编译自检（不需要电台 ✓）| **完成 ✓**：`xcrun metal -c -std=metal3.0 ocudu_lane_fused.metal` **exit 0**（6576 B AIR ✓）|
+| 打包自检 ✓ | **完成 ✓**：`metal -c` 两个源 + `metallib` ⇒ 35 143 B 合并库 ✓，`lane_grid_to_llr` **确实在里面** ✓ |
+| **接线（下一步 ✓）** | 未做 ✗：均衡引擎 `enqueue_fused` ✓ → 调用方（`pusch_demodulator_impl` ✓）按 `OCUDU_LANE_FUSE_EQDEMOD && mod==QAM16` 选路线 ✓ |
+
+**实现时的三个细节决定**（都写进了 kernel 的注释 ✓）：
+1. `quantize_llr` 的**取整**照抄原实现（`rint` 后钳位再转 `char` ✓）—— 逐位一致不要求 ✗，但"同一件事"是硬要求 ✓；
+2. 均衡的**退化分支**（`d <= 0` ⇒ `eq=0, nv=INFINITY` ✓）在融合版里显式保留 ✓
+   ⇒ `rcp = rcp_noise_safe(INFINITY) = 0` ✓ ⇒ 四个 LLR 走 `NEAR_ZERO` 守卫后为 0 ✓ = 与两步路线同结果 ✓；
+3. `eq_max_run_symbols = 32` 的常量在融合文件里**独立声明** ✓（复制而非引用 ✓，与原文件保持一致 ✓）。
+
 ### 2.4 M1 的执行顺序（每步可停 ✓）
 
 1. **M1.0 读代码**（不飞腿 ✓）：把均衡与解调两段内核的**数学与绑定点逐条抄下来**（含 `mod` 的每种取值、
