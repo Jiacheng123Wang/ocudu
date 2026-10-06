@@ -159,6 +159,50 @@ lane_grid_to_llr:  读 y + 权重 + 噪声  →  [寄存器内：均衡 → 解�
 3. **`quantize_llr` 的语义** ✓：逐位一致**不要求** ✗（用户裁决 ✓），但**必须一致到"同一件事"** ✓ ⇒
    融合版照抄 ✓，不做"顺便优化"✗。
 
+### 2.6 ★★ M1.0 结论（待确认点已关闭 ✓）：融合对象是 **`equalize_mxn_batch` + `demod_soft`**
+
+**待确认点 1（符号轴怎么进线程）已答 ✓**：车道/延迟编码路线用的**不是** 1-D 的 `equalize_mxn` ✗，
+而是 **`equalize_mxn_batch`** ✓（引擎原话："One dispatch for a whole group of symbols, same arithmetic" ✓）：
+
+```metal
+kernel void equalize_mxn_batch(device const ushort2* h [[buffer(0)]],  // cbf16 [symbol][port][layer][re]
+                               device const ushort2* y [[buffer(1)]],  // cbf16 [symbol][port][re]
+                               device float2*       eq [[buffer(2)]], // [symbol][re][layer]
+                               device float*        nv [[buffer(3)]], // [symbol][re][layer]
+                               constant equalize_params&  p [[buffer(4)]],
+                               device const float* sigma2 [[buffer(5)]],
+                               constant equalize_strides& st [[buffer(6)]],
+                               uint2 gid [[thread_position_in_grid]])   // gid.x = re, gid.y = symbol ✓
+```
+⇒ **符号轴由 `gid.y` + `equalize_strides`（`h_starts[]` / `y_starts[]` / `eq_stride` / `nv_stride` / `nof_symbols` ✓）携带** ✓
+—— 与 `demod_soft` 的 `sym_stride` / `nv_stride` / `llr_stride` **是同一套"整段符号按常量 stride 排布"的约定** ✓✓
+（两者的理由也一样：延迟链的均衡符号放在**按页对齐的每符号槽**里 ✓）。
+
+**⇒ 于是融合的形状完全确定** ✓✓（两个 kernel 的网格语义**逐字对齐** ✓）：
+
+| | 均衡 `equalize_mxn_batch` | 解调 `demod_soft` | 融合 `lane_grid_to_llr` |
+|---|---|---|---|
+| 网格 | `uint2 gid`（re, symbol）✓ | `uint2 pos`（re, symbol）✓ | **`uint2 gid`（同一套 ✓）** |
+| 权重/输入 | `h`、`y`、`sigma2` ✓ | `symbols`（= 均衡的输出 ✗）| `h`、`y`、`sigma2` ✓（**不再读 symbols** ✓）|
+| 噪声 | 算出来写 `nv` ✗ | 读 `noise_var` ✗ | **寄存器内传递 ✓✓**（两个 stride 约定随之消失 ✓）|
+| 输出 | `eq`、`nv` ✗ | `llrs` ✓ | **只写 `llrs`** ✓ |
+| 参数 | `p` + `st` ✓ | `p`（demod）✓ | **两个 struct 各占一个 index ✓**（不改定义 ✓）+ LLR 的 `llr_stride` ✓ |
+
+**待确认点 2（`nv` vs `noise_var` 排布差异）自动消失** ✓：融合版把噪声留在寄存器 ✓（上面的表 ✓）。
+
+**待确认点 3（`quantize_llr` 语义）** ✓：**照抄** ✓（`quantize_llr(x, 24.0f)` ✓）；逐位一致不要求 ✗，但"算的是同一件事"是硬要求 ✓。
+
+### 2.7 M1.1 的具体产出（下一步动手 ✓）
+
+1. `ocudu_lane_fused.metal`：`kernel void lane_grid_to_llr(… gid)` ✓ ——
+   **上表两列逐行合并**：取 `h`/`y`/`sigma2` 的索引方式照抄 `equalize_mxn_batch` 的 `gid.y`+`st` 段 ✓，
+   单层 SIMO 合并（`L==1` ✓）算出 `x̂` 与噪声**留在寄存器** ✓，
+   再照抄 `demod_soft` 的 `p.mod` 分支与 `quantize_llr` ✓ 写 `llrs_base + gid.y * llr_stride + …` ✓；
+2. 均衡引擎加 `enqueue_fused`（绑 `h`/`y`/`sigma2`/`llrs` + `p`/`st`/`demod_params` ✓，**一次 dispatch** ✓）；
+3. 调用方按 `OCUDU_LANE_FUSE_EQDEMOD` 选路线 ✓（关着 = 今天两步 ✓ 逐字节不变 ✓）；
+4. **离线先对拍**（`ul_chain_replay` ✓）：确认"同一件事" ✓（不是逐位 ✗）；
+5. 再飞 **`mkf010`（对照）** 与 **`mkf011`（臂）** ✓，判据见 §2.3 ✓。
+
 ### 2.4 M1 的执行顺序（每步可停 ✓）
 
 1. **M1.0 读代码**（不飞腿 ✓）：把均衡与解调两段内核的**数学与绑定点逐条抄下来**（含 `mod` 的每种取值、
