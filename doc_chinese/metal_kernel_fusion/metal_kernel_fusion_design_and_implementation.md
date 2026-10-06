@@ -172,6 +172,48 @@ split = `merged_hop` **465.6 µs（93 %）** + `ch_wt` **36.9 µs（7 %）** ✓
 相对一跳 480 µs 是 **几 %** ✗ ⇒ **M1 的收益主要应来自中间缓冲与 kernel 内部复用，而不是 dispatch 计数本身** ⚠
 （这条判断若被微基准推翻，M1 的优先级要重排 ✓）。
 
+### 2026-10-06 · ★★★ M0 第二半：消去三条腿 + 微基准 = **H1 被推翻，靶子改成命令缓冲/栅栏** ✓✓
+
+**消去三条腿**（各一条，`OCUDU_LANE_ABLATE=1 OCUDU_LANE_ABLATE_STAGE=<stage> OCUDU_LANE_ABLATE_EVERY=8` ✓）：
+
+| 腿 | CRC steady | `[ul_gpu_lane] busy` median | merged_hop | ch_wt |
+|---|---|---|---|---|
+| `mkf-m0-base`（基线）| 99.1 % ✓ | **479.6 µs** | 465.6 | 36.9 |
+| `mkf-m0-abl-eq` | **92.7 %** ✗ | **477.4** | 457.6 | 37.4 |
+| `mkf-m0-abl-demap` | 98.6 % | **479.7** | 465.7 | 37.0 |
+| `mkf-m0-abl-ce` | 97.8 % | **480.0** | 466.8 | 37.2 |
+
+★ **消去确实生效** ✓（三条腿的 CRC 都掉了 ✓，busy split 里被消去的族读数变成 `0.0us/lane (0%)` ✓）
+—— 但 **busy 一条都没掉** ✗✓ ⇒ **一跳的内核工作量 < 1 %** ✗✓✓。
+
+**微基准**（`wip/dispatch_cost_probe/` ✓，独立 Metal 程序、不占电台 ✓）：每次 dispatch 边际 **~3.7 µs** ✓
+（⇒ 4→1 只值 ~11 µs ✗）；一次 dispatch 做 16 倍活只 **+2 µs** ✓；宿主成本由**命令缓冲数**决定（1 CB 恒定 ~88–106 µs ✓
+vs N CB 84→256 µs ✗）；网格 8.5k→1M 线程只从 6.6 到 14.5 µs ✓。
+
+**一跳 480 µs 的账**（M0 基线，全部实测 ✓）：
+```
+busy 479.6 µs  =  host 编码 83.2 µs  +  dispatch 4×3.7 ≈ 15 µs  +  内核本体 <5 µs  +  ~380 µs ✗ 未解释
+                 未解释的那部分 = 2 条命令缓冲 + 二者之间的 stage fence + 提交/完成信封
+                 （证据：commit order commits/跳 = 2.00 ✗；lane fence signals=217956 waits=108978 ✗；
+                   而设备几乎闲着 ✓ —— 微基准里一次 trivial CB 只要 2–7 µs ✓）
+```
+⇒ **靶子改写** ✓：不是 dispatch 计数 ✗，而是 **`cbs/跳` 2 → 1 并去掉跨 CB 的 fence** ✓✓
+（内核融合的真正价值就在这里 ✓：依赖变成 kernel 内部的数据依赖 ✓）；
+⚠ 代价是失去"估计器与 host 编码重叠" ✗（代码注释记的历史值 ~125 µs 延迟债 ✗，但那对有混淆 ✗，
+且登记过的"同负载背靠背一对"从未飞 ✓）。
+
+**下一对（M0b，一个变量，两个现成值）** ✓：
+```bash
+# 对照 = 今天实际走的路线（由 cbs/跳=2.00 与 fence 计数证明 ✓）
+EXTRA_KNOBS="OCUDU_CE_LANE_ORDER=event"   →  label mkf-m0b-event
+# 臂 = 单命令缓冲（估计器派发搭车道的共享 CB）
+EXTRA_KNOBS="OCUDU_CE_LANE_ORDER=burst"   →  label mkf-m0b-burst
+```
+**预登记**：臂的 `commit order commits/跳` 应 = **1.00** ✓、`lane fence … signals` 应 ≈ **0–1/跳** ✓；
+`busy` 与 `[ul_pipeline]` 的走向**就是"第二条 CB + 栅栏"的价格** ✓（正负都算答案 ✓：
+若 busy 降 ⇒ 信封是主要成本 ✓ ⇒ M1 按"单 CB 单 kernel"推进 ✓；若 busy 升 ⇒ 重叠被牺牲 ✗ ⇒
+M1 要保留两段重叠、只把 eq+demap 融合 ✓）。
+
 ### 2026-10-06 · 工具坑（已修 ✓）：新工作流的日志根对旧读者不可见
 
 `mkf-m0-base` 飞完后驱动报：
