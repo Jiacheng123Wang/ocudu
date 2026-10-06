@@ -219,6 +219,17 @@ struct lane_stats_t {
   slow_cb slow_cbs[nof_slow_cbs] = {};
   /// Every resolved command buffer's commit -> completion, for the distribution behind the table above.
   std::vector<double> commit_to_end_us;
+  /// \brief The SAME samples split in two, for the whole population instead of the eight slowest.
+  ///
+  /// WHY (metal_kernel_fusion, 2026-10-06). The table above prints only the WORST command buffers, and
+  /// every one of them is dominated by its queue wait - but the lane's ~480 us busy window is a MEDIAN,
+  /// so "the worst are queue-bound" does not say what the typical buffer waits for. Those two series do,
+  /// and they decide where the next optimisation goes: if the median commit->start dominates, the target
+  /// is the number of command buffers per hop and the serialisation between them (the ~380 us the M0
+  /// ablation legs could not attribute to kernels, dispatches or fences); if start->end does, it is the
+  /// device's own execution. Report-only: nothing here influences the delivery path.
+  std::vector<double> commit_to_start_us;
+  std::vector<double> start_to_end_us;
   ///@}
 
   uint64_t lanes        = 0;
@@ -776,6 +787,8 @@ void gpu_lane_probe::close_lane()
     const double commit_s = commit_seconds_of(r.entry);
     const double to_end   = (r.end - commit_s) * 1e6;
     s.commit_to_end_us.push_back(to_end);
+    s.commit_to_start_us.push_back((r.start - commit_s) * 1e6);
+    s.start_to_end_us.push_back((r.end - r.start) * 1e6);
     lane_stats_t::slow_cb* worst = nullptr;
     for (lane_stats_t::slow_cb& candidate : s.slow_cbs) {
       if ((worst == nullptr) || (candidate.commit_to_end_us < worst->commit_to_end_us)) {
@@ -1394,6 +1407,10 @@ void gpu_lane_probe::report()
   // be: the queue not having started the buffer, and the device holding it - and the table names the worst
   // ones with their slot, so a leg's answer is a row and not an average.
   print_series("commit -> completion (Q9-B, all stages)", s.commit_to_end_us);
+  // The same window split for the WHOLE population (see the series' comment): the queue's share and the
+  // device's share of the median command buffer, which is what the lane's busy window is made of.
+  print_series("commit -> start (Q9-B, the queue)", s.commit_to_start_us);
+  print_series("start -> end (Q9-B, the device)", s.start_to_end_us);
   {
     bool printed_header = false;
     for (const lane_stats_t::slow_cb& slow : s.slow_cbs) {
