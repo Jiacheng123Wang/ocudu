@@ -17,6 +17,11 @@ HERE=os.path.dirname(os.path.abspath(__file__))
 # where legs are written: this workstream first, then the older one (legs flown before 2026-10-05 live there)
 DIRS=[os.environ.get('LEG_LOGDIR',os.path.join(HERE,'logs')),
       os.path.join(HERE,'..','..','phy_pipeline_gpu','wip','logs')]
+# ... and every other workstream's root, discovered (2026-10-06): a hardcoded list goes stale as soon as one opens
+# its own wip/logs, and the reader then reports "no leg found" for a leg that exists.
+import glob as _glob
+for _d in sorted(_glob.glob(os.path.join(HERE,'..','..','*','wip','logs'))):
+    if _d not in DIRS: DIRS.append(_d)
 
 def parse(f):
     pat=re.compile(r'^\S+T(\d{2}):(\d{2}):(\d{2})\.(\d+) \[GTPU\s*\] \[I\] lif=NG-U ue=0 (DL teid=0x[0-9a-f]+: RX SDU\. sdu_len=(\d+)|UL teid=0x[0-9a-f]+: TX PDU\. pdu_len=(\d+))')

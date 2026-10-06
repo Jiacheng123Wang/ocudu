@@ -20,7 +20,11 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export ROOT="$(cd "$HERE/../../.." && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
-DIRS="${LEG_LOG_DIRS:-$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs $ROOT/doc_chinese/macos_thread_priority/wip/logs}"
+# Every workstream's log root, globbed (2026-10-06): a hardcoded pair goes stale the moment a workstream opens its
+# own wip/logs - the metal_kernel_fusion legs live in a third root and were invisible to this reader.
+_default_dirs=""
+for _d in "$ROOT"/doc_chinese/*/wip/logs; do [ -d "$_d" ] && _default_dirs="$_default_dirs $_d"; done
+DIRS="${LEG_LOG_DIRS:-$_default_dirs}"
 [ $# -ge 1 ] || { echo "usage: bash ul_health.sh <leg-label> [leg-label...]" >&2; exit 2; }
 
 # The scan is a single pass in python3 (the first version sorted in awk, which is O(n^2) and timed out on a
@@ -32,6 +36,11 @@ root = os.environ.get('ROOT', '.')
 dirs = os.environ.get('LEG_LOG_DIRS', '').split() or [
     os.path.join(root, 'doc_chinese/phy_pipeline_gpu/wip/logs'),
     os.path.join(root, 'doc_chinese/macos_thread_priority/wip/logs')]
+# ... plus every other workstream's, discovered the same way the shell side does (2026-10-06).
+import glob as _glob
+for _d in sorted(_glob.glob(os.path.join(root, 'doc_chinese', '*', 'wip', 'logs'))):
+    if _d not in dirs:
+        dirs.append(_d)
 print('%-14s %9s %7s %8s %9s %9s %9s  %s' % ('leg','new-tx','retx','CRC all','CRC steady','TBS p50','TBS mean','verdict'))
 for leg in sys.argv[1:]:
     # A leg LABEL is searched for in the two log directories; a PATH is used as given (that is how a

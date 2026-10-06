@@ -28,7 +28,32 @@
 
 （`dft` 与 `ldpc` 的 metal 实现在本工作流**之外** ✓。）
 
-### 1.2 一跳的结构（实测）
+### 1.2 一跳的结构（实测）—— **M0 基线：腿 `mkf-m0-base`（2026-10-06，gpu + dual + n78 + iperf3）** ✓
+
+**这条基线是可引用的** ✓：`ul_health.sh` **CLEAN**（CRC steady **99.1 %**、retx 1698/107280 ✓）、
+`dl_gate.sh` **PASS**（frontier max **1333 µs** = 无投递停顿 ✓、DL 迟到 3 ✓）、`gaps=0` ✓。
+（★ 起飞时 `preflight_quiet.sh` 是 **NO-GO** ✗（`photoanalysisd` 11.3 %、4 个卷仍在索引）——
+但腿照样 PASS ✓ ⇒ **再次印证"环境不是起飞条件"** ✓，这正是 §2.3 的取向 ✓。）
+
+| 量 | M0 基线值 | 与上一工作流 p305 的对照 |
+|---|---|---|
+| 一跳命令缓冲 | **1** ✓ | 1 ✓ |
+| **一跳 dispatch** | **4**（eq 1 + demap 1 + ce 2）✗ | 4 ✓（`435912/108978 = 4.00` ✓）|
+| metallib | **3**（demod / mmse / equalizer）✗ | 3 ✓ |
+| `[ul_gpu_lane] busy` | median **479.6 µs**（mean 502.5、p95 634.4、p99 696.3、max 2796.2 ✓）| 480.7/506.2 ✓ |
+| busy split | `merged_hop` **465.6 µs（93 %）** + `ch_wt` **36.9 µs（7 %）** ✓ | 469/37 ✓ |
+| `[ul_pipeline]` | median **1321 µs**、p95 1557、p99 1633、max 4463（n=107191 ✓）| 1319 ✓ |
+| `[ul_gpu_pipeline]` | median **1242.8 µs**、p95 1464.6、p99 1532.2（n=107472 ✓）| 1242.4 ✓ |
+| `[ul_tail] ul_pipeline` | p99.9 **1925 µs**；≥1500 µs **10099**、≥2000 µs **73**、≥4000 µs 1 ✓ | — |
+| `[ul_handoff] ul_to_lane` | p50 **22 µs**、p99 61、max 726 ✓ | 14–15 µs ✓ |
+| rx 线程 duty | **19.2 %**（cpu mean 96.2 µs/slot ✓）| 16–17 % ✓ |
+| `[ul_ldpc_decode]` | median **74 µs**（CPU 解码器 ✓，TBS p50 3072 B ✓）| 73 µs ✓ |
+| `[ul_rx_pool]` | `held_end=0` ✓、`held_max=2`、无饥饿、无丢弃 ✓ | ✓（**池计数修复现场复验** ✓）|
+
+★ 新基线（M0）与上一工作流的 p305 **逐项吻合** ✓✓ ⇒ 既确认了本工作流的起点，也说明**跨工作流的数字可以直接复用** ✓
+（同样的几何与业务 ✓）。**融合的靶子由此定下**：一跳 4 次 dispatch（93 % 的时间在 `merged_hop` 里 ✓）→ **1 次** ✓。
+
+### 1.2bis 一跳的结构（背景：上一工作流的 p305 读数，与上表一致 ✓）
 
 ```
 [metal_stats] burst commits=108378 waits=108378 max_in_flight=1 dispatches=433510

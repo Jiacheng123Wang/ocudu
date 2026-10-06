@@ -68,7 +68,17 @@ ROOT="$(cd "$HERE/../../.." && pwd)"
 # the phy_pipeline_gpu one, the macos workstream keeps its own. Both are searched, and the newest match wins.
 # The search path is overridable so this script can be smoke-tested WITHOUT writing a fake leg into an evidence
 # directory (LEG_LOG_DIRS=/tmp/...); a flight never sets it, so a flight always searches the two real ones.
-LEG_LOG_DIRS="${LEG_LOG_DIRS:-$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs:$ROOT/doc_chinese/macos_thread_priority/wip/logs}"
+# ALL workstream log roots, discovered rather than hardcoded (2026-10-06). This list used to be the two roots that
+# existed when the driver was written, and the metal_kernel_fusion workstream's FIRST leg (mkf-m0-base, flown into
+# doc_chinese/metal_kernel_fusion/wip/logs) made the driver answer "REFUSING: no leg 'mkf-m0-base' started within
+# 120 s" - it was watching two directories while the leg was written into a third, so no cue was ever recorded and
+# the wrapper could only report "!! PROTOCOL MISSING" with no way to tell a missing protocol from a missing leg.
+# A glob over doc_chinese/*/wip/logs cannot go stale when the next workstream opens its own directory.
+_default_log_dirs=""
+for _d in "$ROOT"/doc_chinese/*/wip/logs; do
+  [ -d "$_d" ] && _default_log_dirs="${_default_log_dirs:+$_default_log_dirs:}$_d"
+done
+LEG_LOG_DIRS="${LEG_LOG_DIRS:-$_default_log_dirs}"
 
 find_leg() {
   local dir f

@@ -28,7 +28,10 @@
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DIRS=("$HERE/logs" "$HERE/../../phy_pipeline_gpu/wip/logs")
+# Every workstream's log root (2026-10-06): the pair that was hardcoded here went stale when the
+# metal_kernel_fusion workstream opened its own wip/logs. Glob, because the next one will too.
+DIRS=("$HERE/logs")
+for _d in "$HERE"/../../*/wip/logs; do [ -d "$_d" ] && DIRS+=("$_d"); done
 LATE_BOUND=${LATE_BOUND:-5}   # [dl_tx_slack] AT/BELOW 0 tolerated before a leg is called stalled
 STALL_BOUND=${STALL_BOUND:-5000}  # frontier/rx_wait max (us) that separates a stalled leg from a readable one
 

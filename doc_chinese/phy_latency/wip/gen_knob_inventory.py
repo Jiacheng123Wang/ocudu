@@ -48,7 +48,14 @@ LOGDIR = os.path.join(ROOT, "doc_chinese", "phy_pipeline_gpu", "wip", "logs")
 # other workstream flew as "never flown" - and the flight column is the one column this file exists for (the
 # source cannot tell a new instrument from a retired one). Both readers of the whitelist (leg_gate.sh,
 # milestone_audit.sh) were pointed at both roots for the same reason on the same day.
+# ... plus EVERY workstream's (2026-10-06): the pair above was written when there were two, and the
+# metal_kernel_fusion workstream opened a third - a leg flown into it was invisible to the "legs flown" column,
+# which is the one column this file exists for. Discovered, so the next workstream needs no edit here.
 LOGDIRS = [LOGDIR, os.path.join(ROOT, "doc_chinese", "macos_thread_priority", "wip", "logs")]
+import glob as _glob
+for _d in sorted(_glob.glob(os.path.join(ROOT, "doc_chinese", "*", "wip", "logs"))):
+    if _d not in LOGDIRS:
+        LOGDIRS.append(_d)
 SELF = os.path.join(ROOT, "doc_chinese", "ocudu_env_knobs_inventory_and_leg_whitelist.md")  # own output
 SRC_EXT = (".cpp", ".h", ".mm", ".metal")
 
