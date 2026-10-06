@@ -4899,3 +4899,49 @@ p310 = 同样的四个模块 + **解码器 `metal_persistent`** ✓ ⇒ 两者�
 3. `[ul_ldpc_decode]`（median/p95/p99/max ✓）与 `[ul_pipeline]`/`[ul_tail]` ✓；
 4. `[metal_stats]`（burst / mmse_ce / 解码器计数 ✓）；
 5. `dl_gate.sh` ✓ + 健康 ✓ + 0 gaps ✓。
+
+### §11.109 ★★ p310（全 Metal：LDPC 也上 GPU）：**能接入、能跑完** ✓ —— 但代价与机理被它自己的探针量得清清楚楚 ✗
+
+命令用**显式模块表** ✓（`LEG_CG_MODULES=dft+ce+eq+grid` ✓ ⇒ runner 不再注入解码器 ✓，
+调用者的 `--expert_phy.pusch_ldpc_decoder_type=metal_persistent` 是唯一那个 ✓ —— §11.106 的坑不再 ✓）。
+**结论先行**：✓ **全 Metal 形状可以起飞、可以接入、可以跑完**（1120 个 CRC-OK TB、new-tx 1462 ✓）
+⇒ 历史上"Metal 解码器接不进去"**不是绝对的** ✗，它是一条**代价**故事 ✓。
+
+#### (1) ★★ `[ldpc_time_sum]`：**99.8 % 的耗时是"提交等待"** ✓✓（用户说的 overhead，账目正是这个）
+
+```
+calls=2733 ok=1152 ko=1581   ← 58 % 的解码调用失败 ✗
+mean wall=3923.8us  =  pack 2.2  +  submit 3916.0  +  unpack 5.6      ← 打包/回读几乎为零 ✓
+        gpu=3491.8us  gap=432.0us   iters mean=3.94  cap mean=6.00     max wall=12842.6us  max gap=8541.3us
+iters hist: 1=1038  6=1586 (cap hist: 6=2733)                          ← 失败的全都撞到迭代上限 ✗
+```
+`[ldpc_time_shape]` 按几何分档 ✓：`bg1 z=208` 2464 µs（iters 1.36 ✓ 成功档）vs `bg1 z=128` **6213 µs**（iters 5.97 ✗）……
+⇒ **代价随"撞上限的迭代数"增长** ✓。
+
+#### (2) 流水线代价：**median 3912 µs = 交付形状的 7 倍** ✗
+
+| 形状 | `[ul_pipeline]` median | `[ul_ldpc_decode]` median |
+|---|---|---|
+| **cpu + inline（交付 ✓）** | **552–555 µs** ✓ | 26–34 µs ✓ |
+| gpu 融合 lane | 1430 µs ✗ | — |
+| cpu_gpu + **CPU 解码器**（p309 ✓）| **1901 µs** ✗ | 34 µs ✓ |
+| **全 Metal（p310 ✓）** | **3912 µs** ✗✗ | **2044 µs**（p99 4009、**max 11435**）✗✗ |
+
+线程：rx duty 19.1 % ✓、池线程 duty 5.4 % ✓（window median 134 ms ✗ —— 它们被解码提交占住 ✓）。
+
+#### (3) 4407 次 DL 迟到是**本臂造成的**，不是 preflight 的 NO-GO ✗✓
+
+`frontier max 84684 µs` ✗、`AT/BELOW 0 = 4407` ✗、健康 **83.4 %**（retx 431 ✗）—— **但 watchdog late max 只有 1792.9 µs** ✓
+⇒ **宿主没有被挂起** ✓ ⇒ 这些迟到是**进程内**的：池线程阻塞在 4–12 ms 的解码提交上 ✗✓
+（⇒ 本条腿的坏数字**归因于臂** ✓，与 preflight 警告的宿主扰动**无关** ✓）。
+
+#### (4) 两个待办/发现 ✓
+
+1. ✗ **混淆项：迭代上限**。我们配置里 `pusch_dec_max_iterations: 6`（为 CPU 解码器设的 ✓），
+   而 Metal 解码器的**定标用的是 cap 25** ✓ ⇒ 58 % 的失败可能是**我们的上限**、而不是解码器的能力 ✗。
+   单变量后续臂（可选 ✓）：`--pusch_dec_max_iterations=25`（CLI 选项存在 ✓）。
+   ★ 但**时延结论不会因此改变** ✗：即便成功档，Metal 的地板也是 ~1.4 ms/次（§11.106 ✓），
+   且 99.8 % 的耗时是提交等待 ✓（提交是**每次调用**的固定开销 ✓）；
+2. ✗ **发现一个 bug（记录不修 ✓）**：`[ul_rx_pool]` 在 gpu-pipeline 模式下计数下溢 ——
+   `taken=7715361 returned=7715378`（多返回 17 ✓）⇒ `held_end=-17`、`held_max=18446744073709551615` ✗。
+   不影响本次读数 ✓，但这是**真实的账目 bug**（gpu 形状的 ring 路径 ✓），值得单独一次改动 ✓。
