@@ -152,7 +152,108 @@ OCUDU_SCHED_TIME_CONSTRAINT=lower_phy_rx#0=1000/300/500
 
 ---
 
+## 4bis. GPU / cpu_gpu 模式：完整结论（本线这部分工作的结账）
+
+> 本线的绝大部分腿是 **cpu 模式** ✓，但 offload 两条形状（**gpu 融合 lane** 与 **cpu_gpu 模块级**）
+> 也做了完整的拓扑、机理与判决工作 ✓。它们**没有**赢下时延指标 ✗，但产出的正是 §7 orchestration 论**最硬的证据** ✓。
+> 判决表见 §4；本节写"为什么"与"代价是多少" ✓。
+
+### 4bis.1 两条 offload 形状的拓扑（实测，不是推断）
+
+| | **gpu（融合 lane）** | **cpu_gpu（模块级）** |
+|---|---|---|
+| 一跳的工作在哪 | 前端（receive+FFT+grid）在 `lower_phy_rx#0` ✓；**融合 lane 作为 `pusch_executor` 任务跑在 `main_pool#0..#4`** ✓ | 同样是 rx 线程做前端 ✓，但**每个模块各自一次 host↔device 往返** ✓ |
+| 证据 | gpu 模式下 `[ul_thread_cpu]` 的**账户全在池线程**上（rx 线程**没有**账户 ✗）✓ | `[ul_equalization_demod]` 819 µs ✗（CPU 上同活 ~20 µs ✓）、`[ul_dft_wait]` 506.6 µs ✗ |
+| 线程 duty | 池线程各 **5.1–8.3 %** ✓（窗口 ~8.4 ms 或 ~536 ms 取决于形状 ✓）、rx **16.4–17.0 %** ✓ | rx **19.7 %** ✓、池各 **5.5–5.6 %** ✓ |
+| 一跳的提交次数 | **1 次**（合并成一条命令缓冲 ✓）| **4 次**（t2f / ce / eq+demap / grid ✓，解码器默认 CPU ✓）|
+
+**`LEG_CG_MODULES` 的语义（两条都要记住）** ✓：
+① **gNB 自身**在 cpu_gpu 下的默认是 **CPU** ✓（runner 的注释原文：`"auto" resolves to CPU in this mode` ✓）；
+② **但我们的 runner 默认 `LEG_CG_MODULES=all`** ✓ ⇒ 它会给 cpu_gpu **注入整套 offload** ✓
+（`pusch_dft_type metal`、`pusch_channel_estimator_algo metal_mmse`、`pusch_channel_equalizer_backend metal`、
+`device_resource_grid on`；**只有解码器是 `auto`** ✓）。
+⇒ **"不带任何 expert_phy 参数 = cpu 模式"这个判断，对 gNB 的默认成立 ✓、对我们的 runner 不成立** ✓
+（§11.105 的更正）✓。
+
+### 4bis.2 两条 offload 形状的时延（同业务、同小区）
+
+| 形状 | 业务 | `[ul_pipeline]` median | 出处 |
+|---|---|---|---|
+| **cpu + 合并 + 全内联 + 声明（交付 ✓）** | ping | **551–557 µs** ✓ | p296/p297 ✓ |
+| gpu 融合 lane | ping | **1425–1464 µs** ✗（2.6×）| p302/p303/p304 ✓ |
+| gpu 融合 lane | **iperf3（密集）** | **1319 µs** ✗ | p305 ✓ |
+| cpu_gpu 模块级 | ping | **1901 µs** ✗✗（3.4×）| p309 ✓ |
+| cpu_gpu 模块级（历史基线 2026-09-21）| — | **2450 µs** ✗✗ | `s27-d1-base` ✓ |
+| cpu_gpu + **LDPC 也上 Metal**（cap 25）| ping | **3932 µs** ✗✗✗（7×）| p311 ✓ |
+
+### 4bis.3 ★★ 机理三件套（本线的原创测量，是 orchestration 论的直接证据）
+
+1. **每次提交要等驱动的"提交窗口" 300–400 µs** ✗（诊断腿 p304，`OCUDU_METAL_GPU_TIME=1` ✓ 有扰动、数字不引用 ✗）：
+   `ce_weights` 的**队列等待 p50 402.6 µs vs 设备执行 27.6 µs** ✗（**等待是执行的 15 倍** ✓）；
+   `merged_hop` 等待 308.4 vs 执行 371.4 ✓；
+   **设备占用仅 413.6 ms / 141.2 s = 0.29 %** ✓✓；**2114 次提交里有 1060 次落在空队列上** ✓
+   （最大空洞 19.3 s 出现在业务开始之前 = 启动空闲 ✓，不是停顿 ✓）。
+   ⇒ 慢的不是算，是"**把设备叫起来**" ✓。
+2. **密集业务把中位从 1460 拉到 1319 µs** ✓（p305）：那条腿**干的活更多**
+   （解码 73 vs 29 µs、lane busy 480.7 vs 398 µs ✓）却更快 ⇒ **每跳省下 ~268 µs 的提交/排队开销** ✓✓
+   —— 因为队列不再空（108378 次提交 vs ping 腿的 ~1055 ✓）。**这是"空队列的提交窗口"机理的定量确认** ✓。
+3. **每跨一次模块边界 ~340 µs** ✗（cpu_gpu）：多出来的 ~1.35 ms ≈ **4 个边界 × ~340 µs** ✓，
+   而**派发本身只有 15 µs** ✓（`[ul_handoff] ul_to_lane` p50 ✓）⇒ **代价在往返，不在派发、更不在算力** ✓✓。
+   ⇒ 融合 lane（**一条**命令缓冲）之所以比 cpu_gpu（**四次**往返）快，正是这个原因 ✓。
+
+### 4bis.4 ★★ 调度杠杆在 offload 路径上**失效**（本线关于 Mach 时间约束最有价值的边界）
+
+| 声明对象 | offload 形状下的判决 | 机理 |
+|---|---|---|
+| `lower_phy_rx#0` | **中性** ✓（无收益、也无害）| 前端很轻（duty 16–17 %），它本来就不是瓶颈 ✓ |
+| `main_pool#0..#4`（**= gpu 下的 lane 本人**）| **零收益 + 有代价** ✗✗ | 池线程**大部分时间阻塞在 `[cb waitUntilCompleted]` 里** ✓ ⇒ **预留保护的是"可运行工作被抢占"，对"阻塞等设备"的线程毫无作用** ✓✓；代价照旧（`[dl_tx_slack]` `below1ms/1k` **7.73 → 18.33** ✗）|
+| `radio` | **不可声明** ✓（旋钮按设计只作用于 worker）| 投递路径不在调度杠杆射程内 ✗（§3.4）|
+
+⇒ **结论**：offload 形状下**没有**一条可声明、且声明有用的线程 ✓ ——
+这不是"参数没调好" ✗，而是**机制边界** ✓：**预留治的是可运行工作的争用，不治设备等待** ✓。
+
+### 4bis.5 Metal LDPC 解码器：把"能不能"与"多贵"分开 ✓
+
+| 问题 | 答案 |
+|---|---|
+| **能不能接入**？| **能** ✓（cap 25：1145 次调用里 1070 成功（**6.5 % 失败**）、CRC steady **100.0 %** ✓、retx 47 ✓）|
+| cap 6 时的 58 % 失败（p310 ✗）是什么？| **是我们配置的迭代上限** ✗（Metal 解码器定标用的是 **cap 25** ✓）—— 混淆项已解开 ✓ |
+| **多贵**？| **每次 ~3.5 ms** ✗（`wall 3477.5 = submit 3471.5 + pack 2.0 + unpack 4.0` ✓）⇒ 相对 CPU 解码器 **34 µs** 是 **~100 倍** ✗ |
+| 贵在哪？| **`submit ≈ gpu`（3471.5 vs 3360.7 µs）** ✓ ⇒ **等待就是设备执行本身**（不是驱动排队 ✗）|
+| 代价落到哪 | `[ul_pipeline]` median **3932 µs**（= 交付形状的 **7 倍** ✗）；**484 次 DL 迟到** ✗ 且是**进程内**（watchdog late max 仅 1343 µs ✓ = 宿主没被挂起 ✓）|
+| 分几何 | `bg1 z=208` 2416 µs（成功档，iters 1–2 ✓）vs 撞上限的 `bg1 z=128` **6213 µs** ✗ ⇒ 代价随"撞上限的迭代数"增长 ✓ |
+
+⇒ **解码器留在 CPU 是正确且长期的结论** ✓，但理由要写准 ✓：
+**不是"接不进去"** ✗（能接入、能 100 % CRC ✓），**而是"每次解码阻塞 ~3.5 ms"** ✓（§11.106 的旧表述已在本线修正 ✓）。
+
+### 4bis.6 gpu / cpu_gpu 专属的仪器、坑与护栏
+
+| 项 | 内容 |
+|---|---|
+| **仪器** | `[ul_gpu_lane]`（busy/residency/gap + busy split ✓）、`[metal_stats]`（burst commits/waits/**max_in_flight** ✓、queue occupancy Q9-F3 ✓、lane fence/commit order ✓）、`[ldpc_time_sum]`/`[ldpc_time_shape]`（**始终编译、atexit 自动打印** ✓，无需旋钮）、`[ul_gpu_pipeline]` 与它的 `stale=`（span > 8 ms = HARQ RTT ✓）|
+| **rx 池** | gpu 形状用**整时隙缓冲**（32 × 11520 样本 ✓）而不是按块 ✓；ring 的持有量 `held_max 3/32` ✓ |
+| **坑（已修 ✓）** | `[ul_rx_pool]` 计数下溢**只在 Metal 解码器腿出现**（p310：`returned − taken = 17`、`held_max=UINT64_MAX` ✗）⇒ 根因是 take **记在缓冲交出去之后** ✓；已搬到"离开池那一刻"，并让违规**读起来像违规** ✓ |
+| **坑（护栏 ✓）** | `INLINE_PUSCH` 在 **gpu/融合 lane** 下会把 **Metal 提交+等待一起搬到 rx 线程** ✗（680 µs 塞 500 µs 时隙 ⇒ 必然落后 ✓）⇒ 那里它是**诊断臂**、不是交付形状 ✓；横幅**明说**这一句 ✓（拒绝会拒绝掉有意义的读数 ✓）|
+| **坑（探针）** | `OCUDU_METAL_GPU_TIME=1` **有扰动** ✗（每条命令缓冲一个 completion handler，落在实时提交路径上）⇒ 只用于诊断腿、数字不引用 ✓ |
+| **坑（业务/配置）** | N1 5 MHz + **MCS 13 pin** + **96 MB 上行** ⇒ 链路被打爆 ✗（retx 106655 > new-tx 76859、CRC 38 % ✗）—— 是**配置与业务**的教训 ✓（5 MHz 上行峰值仅 ~5–6 Mbit/s ✓），不是模式问题 ✓；派生配置：B210 必须 **15.36 Msps** ✓、**不设任何 `pucch` 键** ✓（否则 5 MHz 小区被拒 ✗）|
+
+### 4bis.7 offload 这部分工作的**净收获**（虽然输掉了时延指标 ✓）
+
+1. **拿到了 orchestration 论的定量证据** ✓：设备占用 0.29 % ✓、每次提交 300–400 µs ✗、
+   每个模块边界 ~340 µs ✗、每次 Metal 解码 3.5 ms ✗、而 CPU 上同一件活儿 20–34 µs ✓（§7.1）；
+2. **划出了调度杠杆的边界** ✓：预留治"可运行工作的争用"，**不治设备等待** ✓（§4bis.4）；
+3. **给出了选形状的规则** ✓：**先把工作合到一条线程上，再谈给它预留** ✓；
+   offload 只在**批量/吞吐**场景划算 ✓；**减少边界**比**加快边界**有效得多 ✓（1430 vs 1901 µs ✓）；
+4. **验证了框架的可移植性** ✓：`dual`（合并）+ 声明的框架在**三种模式**下都成立 ✓，
+   只是每种的判决不同 ✓ —— 这正是"依葫芦画瓢"要的结果 ✓；
+5. **留了两条未决的技术线** ✓：gpu 尾的 **in-flight > 1**（唯一有机制支撑的改动 ✓）；
+   `metal_async` 等解码器变体（本线判定**不再投入** ✗：地板已是 ~1.4 ms，且 99.8 % 是提交等待 ✓）。
+
+---
+
 ## 5. 踩过的坑（按类，每条一句教训）
+
+> （节次沿用插入 §4bis 之前的编号 ✓，便于既有引用不失效。）
 
 ### 5.1 方法论坑（**仪器与判据**）
 
@@ -272,6 +373,8 @@ OCUDU_SCHED_TIME_CONSTRAINT=lower_phy_rx#0=1000/300/500
 | **投递路径停顿**（7–21 ms ✗）| 非 worker 问题 ✓，本线的杠杆射程之外 ✗ | 广播/驱动/USB 侧的工作线 |
 | `computation = period` 的**100 % duty 冲突** ⚠ | 微基准 03 说灾难 ✗、README C 说无害 ✓，未解 ✗ | 有人需要在 100 % 附近工作时，先做一轮专门的微基准 |
 | `[ul_rx_pool]` 计数竞态 | **已修** ✓（take 记在离开池那一刻）| 若再出现 underflow，报告会直接标注 ✓ |
+| **gpu 融合 lane（密集业务）** | 只测过一条（p305：median **1319 µs** ✓ 机理成立）| 若要把 offload 用于吞吐，值得在 iperf3 下重测一对（`[ul_tail]` 计数 + `[metal_stats] max_in_flight`）|
+| **Metal 解码器的其它变体**（`metal_async` 等）| **不再投入** ✗ | 仅当"提交等待"能被重叠（in-flight > 1）时才重开 ✓；否则地板仍是 ~1.4 ms ✗ |
 
 ---
 
@@ -295,3 +398,19 @@ bash doc_chinese/macos_thread_priority/wip/ul_health.sh pXXX-dual
 ```
 **关键读数**：`[ul_pipeline]` 的 median/p95/p99 + `[ul_tail]` 的**计数**（不是 `max` ✗）；
 `[ul_thread_cpu]` 的 duty（对声明余量）；`[ul_handoff]`（交接是否廉价）；健康 CLEAN + `gaps=0` ✓。
+
+### 9.1 要飞 offload 形状时（gpu / cpu_gpu）
+
+```bash
+# gpu 融合 lane（⚠ 不要在这些腿上用 INLINE_*：在融合 lane 下它是诊断臂 ✗）
+sudo -E env EXTRA_KNOBS="OCUDU_SCHED_TIME_CONSTRAINT=lower_phy_rx#0=1000/300/500" \
+  bash doc_chinese/macos_thread_priority/wip/fly_leg.sh pXXX-gpu dual quiet gpu
+# cpu_gpu：runner 默认 LEG_CG_MODULES=all（= dft+ce+eq+grid 上 Metal + 解码器 CPU ✓）
+sudo -E env EXTRA_KNOBS="OCUDU_SCHED_TIME_CONSTRAINT=lower_phy_rx#0=1000/300/500" \
+  bash doc_chinese/macos_thread_priority/wip/fly_leg.sh pXXX-cg dual quiet cpu_gpu
+# ✗ 想自己指定解码器时，必须同时把模块表写全，否则选项会重复（gNB 会在任何横幅之前退出 ✗）
+#    正确：LEG_CG_MODULES=dft+ce+eq+grid  +  EXTRA_KNOBS="… --expert_phy.pusch_ldpc_decoder_type=metal_persistent"
+```
+**offload 形状的额外读数**：`[metal_stats] burst … max_in_flight`（是否有重叠 ✓）、
+`[ul_gpu_lane] busy/residency` ✓、`[ldpc_time_sum]`（若解码器在 Metal 上 ✓，**无需旋钮**）、
+`[ul_rx_pool] … held_end`（应为非负 ✓）。**诊断腿**才用 `OCUDU_METAL_GPU_TIME=1`（有扰动 ✗，数字不引用 ✓）。
