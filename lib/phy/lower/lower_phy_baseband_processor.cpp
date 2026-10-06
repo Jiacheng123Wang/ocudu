@@ -437,12 +437,18 @@ void rx_pool_report()
   }
   const uint64_t back     = a.returned.load(std::memory_order_relaxed);
   const size_t   free_min = a.free_min.load(std::memory_order_relaxed);
+  // A negative `held` is not a measurement, it is an accounting violation - say so where the reader is, rather
+  // than printing the unsigned difference as a huge positive number.
+  const bool      underflow = (back > taken);
+  const long long held_end =
+      underflow ? -static_cast<long long>(back - taken) : static_cast<long long>(taken - back);
   std::fprintf(stderr,
-               "[ul_rx_pool] taken=%llu returned=%llu held_end=%lld held_max=%llu pool=%zu free_min=%lld "
+               "[ul_rx_pool] taken=%llu returned=%llu held_end=%lld%s held_max=%llu pool=%zu free_min=%lld "
                "starved_takes=%llu starved_events=%llu dropped=%llu drop_park_max=%lluus\n",
                static_cast<unsigned long long>(taken),
                static_cast<unsigned long long>(back),
-               static_cast<long long>(taken - back),
+               held_end,
+               underflow ? "  <- ACCOUNTING UNDERFLOW: returned > taken, the counters are not a reading" : "",
                static_cast<unsigned long long>(a.held_max.load(std::memory_order_relaxed)),
                a.pool_size.load(std::memory_order_relaxed),
                (free_min == std::numeric_limits<size_t>::max()) ? -1LL : static_cast<long long>(free_min),
@@ -596,7 +602,11 @@ void lower_phy_baseband_processor::rx_pool_note_taken(size_t free_buffers, size_
     a.was_starved.store(false, std::memory_order_relaxed);
   }
   a.pool_size.store(pool_size, std::memory_order_relaxed);
-  if (held > a.held_max.load(std::memory_order_relaxed)) {
+  // `held` is unsigned arithmetic on two counters that the pipeline races, so it is only meaningful while
+  // `taken >= returned`; an underflowed value (UINT64_MAX) must never become `held_max`. With the counting
+  // ordering fixed above this cannot happen, and this guard is what makes a future violation READ as one
+  // (the report prints it as an underflow) instead of as a nonsense maximum.
+  if ((took >= back) && (held > a.held_max.load(std::memory_order_relaxed))) {
     a.held_max.store(held, std::memory_order_relaxed);
   }
   if (free_buffers < a.free_min.load(std::memory_order_relaxed)) {
@@ -1320,6 +1330,14 @@ std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> lower_phy_baseband_proc
       rx_last_sweep = now;
       handover_reap_hook::reap(handover_reap_hook::reap_reason::take);
     }
+    // COUNTED HERE, WHERE THE BUFFER LEAVES THE POOL - not in ul_process() after this function returns.
+    // The order is the fix (2026-10-06): the pipeline can hold the buffer, release it and run the pool's deleter
+    // BEFORE the caller gets around to counting the take, so `returned` could pass `taken` and `held = taken -
+    // returned` underflowed. Measured on p310 (cpu_gpu + the Metal LDPC decoder, the most congested leg flown):
+    // taken=7715361 returned=7715378, held_end=-17, held_max=18446744073709551615 - while the five legs before it
+    // (same counters, same pool) all balanced exactly. Counting before the reference escapes makes the invariant
+    // true by construction rather than by timing.
+    rx_pool_note_taken(rx_pool->buffers.size(), rx_pool->buffers.max_size());
     return buffer;
   }
   // The pool is DRY, which is the only state in which the hand-over has something to give back - and the
@@ -1400,6 +1418,8 @@ std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> lower_phy_baseband_proc
       const blocking_queue<std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>>::result ret =
           pop_rx_buffer();
       if (ret == decltype(ret)::success) {
+        // Same counting point and same reason as the try_pop() branch above.
+        rx_pool_note_taken(rx_pool->buffers.size(), rx_pool->buffers.max_size());
         return buffer;
       }
       if (ret == decltype(ret)::failed) {
@@ -1450,7 +1470,9 @@ void lower_phy_baseband_processor::ul_process()
   }
   rx_pool_note_wait(
       std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - rx_take_t0).count());
-  rx_pool_note_taken(rx_pool->buffers.size(), rx_pool->buffers.max_size());
+  // NOTE: the TAKE is counted inside pop_rx_buffer_or_reserve(), at the instant the buffer leaves the pool - see
+  // the comment there. It used to be counted here, after the buffer had already been handed to the pipeline, and
+  // that ordering let a fast release outrun the count (p310: held_end=-17).
 
   // \brief Samples to receive in this call.
   ///
