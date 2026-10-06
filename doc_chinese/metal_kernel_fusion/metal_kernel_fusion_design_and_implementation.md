@@ -214,6 +214,52 @@ EXTRA_KNOBS="OCUDU_CE_LANE_ORDER=burst"   →  label mkf-m0b-burst
 若 busy 降 ⇒ 信封是主要成本 ✓ ⇒ M1 按"单 CB 单 kernel"推进 ✓；若 busy 升 ⇒ 重叠被牺牲 ✗ ⇒
 M1 要保留两段重叠、只把 eq+demap 融合 ✓）。
 
+### 2026-10-06 · ★★ M0b（`event` vs `burst`）：**假设被否定** ✗ —— 而"缺的那 760 µs"被找到了 ✓✓
+
+**两条腿**（背靠背 ✓、同配置同业务 ✓）：`mkf-m0b-event`（CRC 98.2 % **marginal** ✗，且 `rx_wait` max **13.9 ms** ✗
+⇒ 它的时延**不可引用** ✗）与 `mkf-m0b-burst`（**CLEAN 99.3 % ✓、闸门 PASS ✓**）。
+
+| 腿 | `cbs/lane` | commits/跳 | fence signals/waits | busy median | busy p95 | `[ul_pipeline]` median |
+|---|---|---|---|---|---|---|
+| base（**无旋钮 = 默认**）| 2.00 | 2.00 | 217956 / 108978 | 479.6 | 634.4 | **1321** ✓ |
+| `event` | 3.00 ✗ | 3.00 ✗ | 216892 / 216893 | 445.8 | 482.2 | 1509 ✗（腿带停顿 ✗）|
+| `burst` | 3.00 ✗ | 3.00 ✗ | 108173 / 216344 | 441.9 | 482.6 | **1627** ✗✗（腿干净 ✓）|
+
+**三条结论，都是否定的** ✗：
+1. **预登记的结构预测失败** ✗：代码注释说 `event` = 2.00 submissions、`burst` = 1 —— 实测两条**都是 3.00** ✗
+   ⇒ 这个旋钮在**本构建里没有把 CB 数分开** ✗（我据此立的 **G0「CB 2→1」随之撤回** ✗）；
+2. `event` 与 `burst` 的 busy **无法区分** ✓（445.8 vs 441.9、p95 482.2 vs 482.6 ✓）
+   ⇒ **"第二条 CB + 那条栅栏"不是那 ~380 µs** ✗✓；
+3. ★ **单 CB 路线反而更慢** ✗✓：`burst` 干净通过闸门 ✓，`[ul_pipeline]` median **1627 vs 默认 1321（+306 µs）** ✗
+   —— 代码注释自己记过这条路线的代价（"估计器要等整组编码完才能开始"，历史值 ~125 µs 延迟债 ✗），
+   **登记过但从未飞的那一对，现在飞了，方向与它警告的一致，幅度更大** ✓✓。
+   机制也清楚 ✓：`burst` 的**设备 busy 更小**（441.9 < 479.6 ✓）但**端到端更慢** ✗
+   ⇒ **设备侧窗口与端到端时延方向相反** ✓ —— 因为牺牲掉的是"估计器 GPU 工作 ↔ host 编码"的重叠 ✓✓。
+
+⇒ **M1 的形状据此收紧** ✓：**保留 CE 的独立 CB 与 fence** ✓（不许为了"单 CB"而合并它 ✗），
+**只把 eq+demap 融进同一条 CB / 同一个 kernel** ✓ —— 即"减少边界"要减在**不牺牲重叠**的地方 ✓。
+
+### ★★ 缺的那部分时间找到了（不需要再飞腿 ✓）
+
+M0 基线（`gpu` 模式，`mode options: <none>` ✓）：
+
+```
+[ul_gpu_pipeline]（IQ→LLR）median  1242.8 µs
+  ├─ lane residency（grid 入口→LLR）median  481.9 µs   ← 只占 39 % ✓（本工作流全部工作的对象 ✓）
+  └─ 其余 ~760 µs（61 %）✗                 ← 在 lane 之外
+```
+而 **DFT/grid 在这个模式下的默认后端是 CPU** ✓ —— 代码原话（`apps/units/flexible_o_du/o_du_low/du_low_phy_pipeline.h:236-239` ✓）：
+> "THE DFT IS NOT ONE OF THEM ANY MORE (flipped 2026-09-30). Its DEFAULT in this mode is the **CPU**:
+> the grid is written by the **HOST** and the lane keeps the estimator, the equalizer and the demapper on the device."
+
+⇒ **本工作流瞄准的"DFT 网格 → LLR"里，61 % 是 lane 之外的 host FFT + 网格打包** ✗✓✓
+（与腿上的旁证一致 ✓：`dft radio inputs: 0 transforms …`、`[ul_dft_wait] no samples` ✓ = 那些计数器属于 Metal/handover 路线 ✓，
+本模式走的是 CPU 路线 ✓）。
+⇒ **它比融合的目标本身还大（760 vs 480 µs ✗）**，但**在用户划定的范围之外** ✓（用户明确排除 Metal FFT ✓，
+理由是 FFT 可 CPU 可 GPU、可 per-symbol 可 per-slot，要保留灵活性 ✓）
+⇒ **这是一个需要用户裁决的范围问题** ✓，不是技术未知 ✓：验证它只需**一条腿**（`--pusch_dft_type metal` ✓，
+一个变量 ✓，直接量这 760 µs 的归属 ✓）。
+
 ### 2026-10-06 · 工具坑（已修 ✓）：新工作流的日志根对旧读者不可见
 
 `mkf-m0-base` 飞完后驱动报：
