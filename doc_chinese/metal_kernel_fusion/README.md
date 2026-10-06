@@ -39,8 +39,12 @@
   `observe_threads.sh`（LIGHT）、`preflight_quiet.sh`、`probes_off_syntax_check.sh`、
   `../phy_latency/wip/gen_knob_inventory.py`（旋钮清单 + 白名单生成器）。
 * **微基准直接用** ✓：`../macos_thread_priority/wip/sched_microbench/`。
-* **纪律遗产**（比工具重要）：**一条腿一个变量** ✓、**先过闸门再判读** ✓、**不干净的腿重飞而不是解释** ✓、
-  **每个数字都要能说出它的几何与口径** ✓、**默认构建（probes-OFF）也是被测对象** ✓。
+* **纪律遗产**（比工具重要）：**一条腿一个变量** ✓、**每个数字都要能说出它的几何与口径** ✓、
+  **默认构建（probes-OFF）也是被测对象** ✓。
+* ★ **本工作流的判据取向（用户 2026-10-06 裁决）**：**功能性（CRC-OK 同一档）+ 结构性（dispatch/库的收敛）为主** ✓；
+  **性能只报告、不设闸** ✓（允许持平甚至小幅回退 ✓ —— 本工作流是为 Apple Silicon 异构 gNB 打基础 ✓）；
+  **LLR 逐位一致不要求** ✗（只作为出问题时的定位工具 ✓）；
+  **环境不是起飞条件** ✗（抗干扰本身是健壮性 ✓；`preflight_quiet.sh` 与 `dl_gate.sh` 都只是判读参考 ✓）。
 
 ## 本工作流的腿怎么飞（与上一工作流同一套）
 
@@ -49,9 +53,9 @@ cd /Users/jiachengwang/dev/ocudu
 sudo -E env LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs \
      EXTRA_KNOBS="<本工作流的开关>" \
   bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu <label> --regime=default
-# 判读（先闸门，后数字）
-bash doc_chinese/macos_thread_priority/wip/dl_gate.sh <label>
+# 判读：功能（CRC）与结构（dispatch/库）为主 ✓；时延数字要引用时才过闸门 ✓
 bash doc_chinese/macos_thread_priority/wip/ul_health.sh <label>
+bash doc_chinese/macos_thread_priority/wip/dl_gate.sh <label>   # 参考项：只在引用时延数字时需要 PASS
 ```
 （或沿用 `../macos_thread_priority/wip/fly_leg.sh` 的包装 + `LEG_CFG`/`LEG_LOGDIR` ✓，
 但**它默认的 KNOBS 集是上一工作流的** ⇒ 用它的腿要在文档里写清携带了哪些旋钮 ✓。）

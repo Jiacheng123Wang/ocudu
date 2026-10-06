@@ -11,8 +11,10 @@
 
 ## 0. 不变式（每一步都要满足，抄自架构文档 §2.2）
 
-1. **数值等价**：LLR 与今天**逐位一致** ✓（方法见 §1.4 —— **必须用两二进制对拍，不能用环境对拍** ✗）；
-2. 健康 CLEAN ✓、`gaps=0` ✓、`dl_gate.sh` PASS ✓；
+1. ★ **链路仍然工作** ✓：CRC-OK 率与对照腿**同一档** ✓（PHY 口径）；`ping`/`iperf3` 表现**记录**在案 ✓
+   （应用层口径，**不做硬性要求** ✓）—— **不要求 LLR 逐位一致** ✗（用户 2026-10-06 裁决：允许计算顺序变化、
+   浮点舍入差异，甚至为融合收益做简单算法微调 ✓；**也允许一定程度的性能回退** ✓，只要对最终目标有益 ✓）；
+2. `gaps=0` ✓（腿的有效性 ✓ —— 电台样本流必须连续 ✓）；
 3. **Linux 行为一字不变** ✓（平台守卫内 ✓）；
 4. **关着开关逐字节不变** ✓（两把钥匙：编译开关 + env ✓）；
 5. **默认构建（probes-OFF）能编** ✓ ⇒ 动了探针就重跑 `probes_off_syntax_check.sh` ✓。
@@ -33,11 +35,13 @@
 
 ```bash
 cd /Users/jiachengwang/dev/ocudu
-# 先看宿主是否安静（上一工作流：最近 5 条腿 4 条撞环境停顿 ✗）
-bash doc_chinese/macos_thread_priority/wip/preflight_quiet.sh
-sudo -E env LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs \
-     EXTRA_KNOBS="OCUDU_METAL_GPU_TIME=0" \
-  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu mkf-m0-base --regime=default
+# （可选参考，不是起飞条件 ✗）宿主扰动风险：bash doc_chinese/macos_thread_priority/wip/preflight_quiet.sh
+sudo -E env LEG_CFG=$PWD/doc_chinese/macos_thread_priority/wip/gnb_pinned_mcs13.yml \
+     LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs \
+  bash doc_chinese/macos_thread_priority/wip/fly_leg.sh mkf-m0-base dual quiet gpu
+# 业务：在 TRAFFIC NOW 提示时，在 CORE 侧跑标准的 iperf3（密集 ⇒ 跳数多 ⇒ 设备时间统计有效 ✓）：
+#       iperf3 -u -b 30M -l 1400 -R -P 4 -t 180 -c <server>
+# ping 尾巴可留到需要引用时延时再测 ✓
 ```
 **登记读数**（写进 §5 memo ✓）：`[ul_pipeline]` / `[ul_gpu_pipeline]` 的 median/p95/p99 + `[ul_tail]` 计数 ✓、
 `[ul_gpu_lane] busy` 与 busy split ✓、`[metal_stats] burst`（commits/dispatches ✓）、
@@ -50,7 +54,12 @@ sudo -E env LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs \
 * 一张"**成本分解表**"：`merged_hop` = 383 µs 里，dispatch 固定成本 / 读 y / 均衡 / 解调 / 写 LLR 各占多少 ✓；
 * 结论：**M1 的理论上限**（若上限 < 5 % ⇒ 诚实收工 ✗✓，这也是允许的结论 ✓）。
 
-### 1.4 ★ 数值等价的正确做法（上一工作流的教训，直接用 ✓）
+### 1.4 （可选）逐位对拍：**定位差异的工具**，不是验收红线 ✓
+
+> ★ 用户 2026-10-06 裁决：**不要求 LLR 与今天逐位一致** ✗ —— 融合可能改变计算顺序、引入浮点舍入差异，
+> 也可能为融合收益做简单算法微调 ✓；判据是 **CRC-OK 同一档 + `gaps=0`** ✓（架构文档 §2.1bis ✓）。
+> 下面这套工具因此**只在出问题时用来定位** ✓（"差异出现在哪一段"），**不是每一步都要跑** ✓。
+
 
 融合是**替换实现**（不是加一条可选路径 ✓）⇒ **必须用两个二进制的对拍** ✓：
 
@@ -92,9 +101,10 @@ bash doc_chinese/phy_pipeline_gpu/wip/ab_replay_bins.sh /tmp/replay_before \
 | 项 | 出口 |
 |---|---|
 | G1 | `dispatches`/跳 = **2**（M1）/ **1**（M2）✓ |
-| G4 | `[ul_gpu_lane] busy` 的 `merged_hop` **不升** ✓ |
-| G5 | `[ul_gpu_pipeline]`/`[ul_pipeline]` median/p95/p99 **不劣化** ✓（目标：降）|
-| 红线 | LLR 逐位一致 ✓（§1.4）、健康 CLEAN ✓、`gaps=0` ✓、`dl_gate.sh` PASS ✓ |
+| G4 | `[ul_gpu_lane] busy` 的 `merged_hop` —— **记录并报告** ✓（目标：不升；小幅上升可接受 ✓）|
+| G5 | `[ul_gpu_pipeline]`/`[ul_pipeline]` median/p95/p99 —— **记录并报告** ✓（目标：改善；回退要写进 memo 并说明是否值得 ✓）|
+| 硬判据 | **CRC-OK 与对照腿同一档** ✓、**`gaps=0`** ✓、G1（2→1 ✓）✓ |
+| 记录项 | G4/G5 的融合前后对照 ✓（**允许持平或小幅回退** ✓）；出问题时用 §1.4 的两二进制对拍定位 ✓ |
 
 ---
 
@@ -105,7 +115,7 @@ bash doc_chinese/phy_pipeline_gpu/wip/ab_replay_bins.sh /tmp/replay_before \
   或"一个线程组负责一个 RB 组 × 若干符号"的映射 ✓；
 * 风险：寄存器/共享内存压力可能让 occupancy 变差 ✗ ⇒ **先做一版只折权重计算的 kernel 试点** ✓，
   与 M1 的形状**分开关**（`OCUDU_LANE_FUSE_CE` ✓），这样能单独判它 ✓；
-* 出口：`dispatches`/跳 = **1** ✓，且 G4/G5 不劣化 ✓、LLR 逐位一致 ✓。
+* 出口：`dispatches`/跳 = **1** ✓、CRC-OK 同一档 ✓、`gaps=0` ✓；G4/G5 记录在案 ✓。
 
 ---
 
@@ -131,6 +141,16 @@ bash doc_chinese/phy_pipeline_gpu/wip/ab_replay_bins.sh /tmp/replay_before \
   设备时间 `merged_hop` 383 µs（92 %）+ `ch_wt` 31 µs（8 %）✓，**两段几何完全一致** ✓；
 * 判据预登记：G1–G5 与红线（架构文档 §2 ✓）；
 * 下一步：**M0 基线 + 成本分解**（§1 ✓），出口是一条可引用基线与一张成本分解表 ✓。
+
+### 2026-10-06 · ★ 用户两点调整（判据重瞄；已回写架构文档 §2.1bis/§2.2/§2.3 与本文 §0/§1.2/§1.4/§2.3）
+
+1. **不要求 LLR 逐位一致** ✗ —— 融合可能改计算顺序、有浮点舍入差异，甚至为融合收益做简单算法微调 ✓；
+   判据以 **CRC-OK 同一档**（PHY 口径）为准，应用层看 `ping`/`iperf3` 表现但**不做硬性要求** ✓；
+   **允许一定程度的性能回退** ✓ —— 本工作流是为 high level（Apple Silicon 异构 gNB）**打基础** ✓。
+   ⇒ 逐位对拍（§1.4）**降级为出问题时的定位工具** ✓，不再每步验收 ✓。
+2. **环境不是起飞条件** ✗ —— **抗干扰能力本身就是健壮性** ✓；
+   `preflight_quiet.sh` 与 `dl_gate.sh` 都只是**参考项** ✓：结构/功能判据不受停顿影响，照用 ✓；
+   只有**引用时延数字**时才需要闸门 PASS，否则照记并**标注"含停顿、不引用"** ✓。
 
 ---
 
