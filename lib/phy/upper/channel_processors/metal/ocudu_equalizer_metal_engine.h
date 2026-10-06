@@ -193,6 +193,48 @@ public:
                            float       tx_scaling,
                            float       h_scaling);
 
+  /// \brief Accumulates one symbol whose equalization and LLRs are ONE dispatch (M1).
+  ///
+  /// The fused kernel (see ocudu_lane_fused.metal) is the single-layer 1 x P combiner and the 16QAM
+  /// soft demapper in one dispatch, with the equalized symbol and its post-equalization noise kept in
+  /// REGISTERS: neither \c eq nor \c nv is written, and the LLRs are the only output. The deferred
+  /// accumulator is the same one enqueue_burst() feeds, so the run predicate, the per-symbol estimate
+  /// starts, the device gather and the direct-grid route all behave exactly as they do on the
+  /// two-stage route; the encoder is what differs, and the flush encodes a whole run of these symbols
+  /// as one fused dispatch.
+  ///
+  /// \param[in] h     Channel estimates; the binding of enqueue_burst().
+  /// \param[in] llrs  LLR destination of this symbol: 4 soft bits per resource element (16QAM),
+  ///                  addressed as \c llrs[4*re + b]. The run reaches the later symbols of the same
+  ///                  group through the byte step between two consecutive destinations, exactly like
+  ///                  the demapper's \c llr_stride - which is why the caller's per-symbol slots must
+  ///                  be uniformly strided and page-aligned (the PUSCH demodulator's are).
+  /// \param[out] nv   Post-equalization noise variances of the symbol, the layout the two-stage
+  ///                  route writes ([re] for one layer), page-aligned and uniformly strided for the
+  ///                  same reason. \c eq has no counterpart here: the equalized symbol lives in
+  ///                  registers and is never written (see ocudu_lane_fused.metal for why the noise
+  ///                  variance, unlike it, is kept as an output).
+  /// \note The route is only for one transmission layer and 16QAM: the caller selects it (see
+  ///       channel_equalizer::supports_fused_demapping()) and the engine asserts the shape rather
+  ///       than falling back, because the demapper is not being called for these symbols.
+  /// \return True when the dispatch was accumulated.
+  bool enqueue_fused(const ch_est_binding& h,
+                     bool                  h_on_device,
+                     const void*           y,
+                     const void*           sigma2,
+                     void*                 llrs,
+                     void*                 nv,
+                     unsigned              nof_re,
+                     unsigned              nof_ports,
+                     unsigned              nof_layers,
+                     float                 tx_scaling,
+                     const gather_binding& gather = {});
+
+  /// True when the fused kernel is available in the loaded shader library. A caller must ask this
+  /// BEFORE it commits a group to the fused route (it has no second chance: the demapper will not be
+  /// called for symbols the equalizer was asked to demap).
+  static bool supports_fused();
+
   /// \brief Same as enqueue_burst_batch(), with the channel estimates of each symbol at an
   /// explicit start and, optionally, the received symbols gathered off the device grid.
   /// \p h_starts holds \c nof_symbols entries *inside* \p h's buffer (the same space \c h.offset

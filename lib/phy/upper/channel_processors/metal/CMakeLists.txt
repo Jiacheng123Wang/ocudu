@@ -73,8 +73,11 @@ set_tests_properties(channel_equalizer_metal_unit_test_defer_encode PROPERTIES
 add_executable(channel_equalizer_metal_unit_test test/channel_equalizer_metal_unit_test.cpp)
 target_include_directories(channel_equalizer_metal_unit_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../equalization)
+# The Metal demapper is the reference the FUSED route is compared against: the fused dispatch has to
+# produce exactly what equalize()+demod_soft() produce, which is the route it replaces on the lane.
 target_link_libraries(channel_equalizer_metal_unit_test PRIVATE
-    ocudu_channel_processors_metal ocudu_channel_equalizer ocudu_support)
+    ocudu_channel_processors_metal ocudu_channel_modulation_metal ocudu_channel_equalizer
+    ocudu_channel_modulation ocudu_support)
 
 # ---- Offline replay of a recorded PUSCH reception (A/B/C of one test vector) ----
 add_executable(ul_chain_replay test/ul_chain_replay.cpp)

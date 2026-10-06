@@ -11,6 +11,8 @@
 #include "ocudu/adt/span.h"
 #include "ocudu/phy/support/re_buffer.h"
 #include "ocudu/phy/upper/equalization/channel_equalizer_device_grid.h"
+#include "ocudu/phy/upper/log_likelihood_ratio.h"
+#include "ocudu/ran/sch/modulation_scheme.h"
 
 #include <cstddef>
 #include <optional>
@@ -159,6 +161,72 @@ public:
     span<const float>                noise_var_estimates;
     float                            tx_scaling;
   };
+
+  /// \name Fused equalization and demapping (one dispatch, the intermediates never reach memory).
+  ///
+  /// The consumer of the equalization is the demapper, and the two stages are one dispatch apart: a
+  /// backend that already keeps both on the device can compute the LLRs where the equalized symbol is
+  /// produced, which removes the intermediate buffers, the second dispatch AND the second stage's
+  /// read of them. The pair below is that route: a caller asks supports_fused_demapping() and, when
+  /// the answer is yes, submits the symbol through submit_fused() instead of equalizing it and
+  /// demapping it separately.
+  ///
+  /// \note The two are an ALL-OR-NOTHING pair. A caller that took the fused route must not demap that
+  ///       symbol again - the LLRs are already in its destination - so the predicate is the contract,
+  ///       and it must be a property of the backend and of the shape, never of the values.
+  ///@{
+
+  /// \brief True when submit_fused() produces the LLRs of \p mod for a topology of \p nof_ports
+  /// receive ports and \p nof_layers transmission layers.
+  ///
+  /// The topology is part of the question because a backend may route different shapes to different
+  /// engines (the Metal equalizer is a composite over the CPU one): the fused route needs the engine
+  /// that owns the fused kernel to be the one this shape is served by.
+  ///
+  /// The default reports "no", so every existing backend keeps the two-stage route and a caller that
+  /// asks is never handed a fused route it cannot serve.
+  virtual bool supports_fused_demapping(modulation_scheme mod, unsigned nof_ports, unsigned nof_layers) const
+  {
+    (void)mod;
+    (void)nof_ports;
+    (void)nof_layers;
+    return false;
+  }
+
+  /// \brief Submits the equalization of one symbol AND the soft bits of \p mod, in one dispatch.
+  ///
+  /// \param[out] llrs               Soft bits of the symbol: \c nof_re * Qm of them, laid out
+  ///                                RE-major (the \c Qm bits of resource element \c re at
+  ///                                <tt>llrs[re * Qm + b]</tt>), exactly as the demapper would write
+  ///                                them there. The backend reaches the later symbols of the same
+  ///                                group through the distance between two consecutive destinations,
+  ///                                so the caller's per-symbol slots must be uniformly strided.
+  /// \param[out] eq_noise_vars      Post-equalization noise variances, the layout equalize()
+  ///                                documents. A fused backend writes them: they are the input of the
+  ///                                caller's post-equalization SINR reduction, which is a reported
+  ///                                statistic of the receiving chain and not something a fused route
+  ///                                may silently stop producing.
+  /// \param[in]  eq_symbols         Equalized symbols, the layout equalize() documents. A backend that
+  ///                                fuses the demapping does NOT write them (it produces the soft bits
+  ///                                where the equalized symbol is computed), so the caller must not
+  ///                                read them after a fused submit.
+  /// \note Everything else matches submit().
+  virtual void submit_fused(span<log_likelihood_ratio>       llrs,
+                            span<cf_t>                       eq_symbols,
+                            span<float>                      eq_noise_vars,
+                            const re_buffer_reader<cbf16_t>& ch_symbols,
+                            const ch_est_list&               ch_estimates,
+                            span<const float>                noise_var_estimates,
+                            float                            tx_scaling,
+                            modulation_scheme                mod)
+  {
+    // Benign default: the two-stage shape. A backend that reports false is never asked, and this
+    // keeps the classic route's behaviour (the equalization) rather than leaving the outputs blank.
+    (void)llrs;
+    (void)mod;
+    submit(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling);
+  }
+  ///@}
 
   /// \brief Submits the equalization of a whole group of symbols without waiting.
   ///

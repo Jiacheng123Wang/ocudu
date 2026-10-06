@@ -59,6 +59,26 @@ public:
   void submit_group(span<const group_symbol> group) override;
 
   // See interface for documentation.
+  /// \brief The fused route (metal_kernel_fusion M1): the 1 x P combiner and the 16QAM soft demapper
+  /// in ONE dispatch, the equalized symbol and its noise kept in registers.
+  ///
+  /// Offered for exactly the shape the fused kernel implements - one transmission layer (the single
+  /// layer path is the only one it has) and 16QAM - and only while the kernel is actually in the
+  /// loaded shader library (see equalizer_metal_engine::supports_fused()). Both halves matter: the
+  /// route is all-or-nothing, so the answer has to be final before the caller commits a group to it.
+  bool supports_fused_demapping(modulation_scheme mod, unsigned nof_ports, unsigned nof_layers) const override;
+
+  // See interface for documentation.
+  void submit_fused(span<log_likelihood_ratio>       llrs,
+                    span<cf_t>                       eq_symbols,
+                    span<float>                      eq_noise_vars,
+                    const re_buffer_reader<cbf16_t>& ch_symbols,
+                    const ch_est_list&               ch_estimates,
+                    span<const float>                noise_var_estimates,
+                    float                            tx_scaling,
+                    modulation_scheme                mod) override;
+
+  // See interface for documentation.
   void wait() override;
 
   // See interface for documentation.
@@ -139,6 +159,9 @@ private:
     void*       nv_ptr    = nullptr;
     bool        eq_direct = false;
     bool        nv_direct = false;
+    /// True when the dispatch of this entry was the FUSED one: it writes the caller's LLRs and
+    /// noise variances IN PLACE and never touches eq, so there is nothing to copy back.
+    bool        fused     = false;
     staging     h;
     staging     y;
     staging     s;
@@ -189,6 +212,21 @@ private:
                     float                            tx_scaling,
                     pending_entry&                   entry,
                     bool                             defer);
+
+  /// \brief The fused counterpart of run_equalize(): resolves the same plan, stages the same inputs
+  /// and accumulates ONE fused symbol - whose outputs are the soft bits and the noise variances.
+  ///
+  /// \return False when the engine refused the symbol (no fused kernel, an unsupported topology or a
+  /// no-copy wrap failure). The caller zeroes the LLRs then: with the demapper not being called for
+  /// this symbol, a stale destination would be decoded as if it were a measurement.
+  bool run_fused(span<log_likelihood_ratio>       llrs,
+                 span<cf_t>                       eq_symbols,
+                 span<float>                      eq_noise_vars,
+                 const re_buffer_reader<cbf16_t>& ch_symbols,
+                 const ch_est_list&               ch_estimates,
+                 span<const float>                noise_var_estimates,
+                 float                            tx_scaling,
+                 pending_entry&                   entry);
 
   /// \brief Copies the staged outputs of \c entry back to the caller after its command buffer
   /// completed (no-op for the in-place path).

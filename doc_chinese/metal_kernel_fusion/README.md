@@ -13,8 +13,12 @@
 | 想知道 | 读 |
 |---|---|
 | 为什么做、现状什么样、目标与判据、总体架构 | **`metal_kernel_fusion_high_level_status_and_plan.md`**（活文档，**先读这个**）|
-| 具体怎么改、改哪些文件、每一步的判据、memo | **`metal_kernel_fusion_design_and_implementation.md`**（追加式，**活文档**）|
-| 上一个会话干了什么、下一个会话怎么接手 | `session_handoff_<日期>-<序号>.md`（快照）|
+| 具体怎么改、改哪些文件、每一步的判据、**下一步待飞什么**、未决项、memo | **`metal_kernel_fusion_design_and_implementation.md`**（追加式，**活文档**）|
+| 上一个会话干了什么、怎么接手 | `session_handoff_<日期>-<序号>.md`（快照）|
+
+★ **`session_handoff_*.md` 只在"准备开新会话"时写** ✓（用户 2026-10-06 明确 ✓）：
+同一条对话里继续干活时，结论/现状/下一步/未决项**都写进上面两份活文档** ✓（下一步见实施文档 §2.11 ✓、未决项见 §2.12 ✓）
+—— 快照是**一次性**的 ✓，写早了既会过时、又会让同一件事有两个出处 ✗。
 
 ## 一句话结论（**从上一工作流继承的最重要一条功课**）
 
@@ -22,12 +26,15 @@
 > 而**每跨一次模块边界 ~340 µs** ✗、融合 lane 的一次提交 host 要站 ~680 µs ✗、Metal 解码每次 3.5 ms ✗、
 > 设备占用率只有 **0.29 %** ✗。⇒ **减少边界比加快边界有效得多**，而"**融合成一条命令/一个 kernel**"就是这条功课的直接应用。
 
-## 现在进展到哪（2026-10-06 末）
+## 现在进展到哪（2026-10-06 末，第 2 次）
 
 **M0 已结项** ✓（基线 + 消去三条腿 + 微基准 + M0b/M0c 两对 → 结论在架构文档 §2.0ter ✓）；
-**M1.1 的 kernel 已完成并可编可打包** ✓，**主机侧接线未做** ✗ ⇒ 运行时还走不到它，
-当前二进制与 M0 基线逐字节相同 ✓。
-★ **接着开工就读 `session_handoff_2026-10-06-1.md`** ✓（含"第一件事"的两处落点与命令 ✓）。
+**M1.1 全部完成** ✓ —— kernel ✓、**接线** ✓（引擎 `enqueue_fused` ✓ + 接口 ✓ + **复合工厂转发** ✓ + 调用方路线 ✓）、
+**离线证据** ✓（27 capture 四个 dump **逐字节一致** ✓；一跳 dispatch **4 → 3** 且 demapper 归 0 ✓；
+单元测试 `[fused]` 回归 ✓）。**运行时默认关** ✓ ⇒ 默认二进制行为不变 ✓。
+★ **下一件事（待飞）写在实施文档 §2.11 ✓**：`mkf010`（对照）/ `mkf011`（臂）一对，
+命令、携带的旋钮与判读要点都在那一节 ✓（取号 `bash wip/next_leg_label.sh` ✓）。
+开关：`OCUDU_LANE_FUSE_EQDEMOD`（env ✓，非空即开 ✓）。全部细节在实施文档 §2.10 ✓。
 
 ## 腿的命名约定（用户 2026-10-06）：**单调递增序号 + 阶段 + 臂**
 
@@ -49,8 +56,10 @@ mkf<NNN>-<阶段><臂>            例如  mkf008-m0c-cpu / mkf009-m0c-metal
 | mkf005 | `mkf-m0b-event` | `OCUDU_CE_LANE_ORDER=event` |
 | mkf006 | `mkf-m0b-burst` | `OCUDU_CE_LANE_ORDER=burst` |
 | mkf007 | `mkf-m0c-dftmetal` | `--pusch_dft_type=metal`（腿作废 ✗）|
-| mkf008 | （待飞）| `--pusch_dft_type=cpu`（对照）|
-| mkf009 | （待飞）| `--pusch_dft_type=metal`（臂）|
+| mkf008 | `mkf008-m0c-cpu` | `--pusch_dft_type=cpu`（对照）|
+| mkf009 | `mkf009-m0c-metal` | `--pusch_dft_type=metal`（臂）|
+| mkf010 | （待飞）| **M1.2 对照**：默认形状（融合关 ✓）|
+| mkf011 | （待飞）| **M1.2 臂**：`OCUDU_LANE_FUSE_EQDEMOD=1` ✓ |
 
 **下一个序号不用记** ✓：`bash wip/next_leg_label.sh <后缀>` ⇒ 直接给出完整标签 ✓
 （它从各工作流日志根里的腿日志自己数出来 ✓；只给数字就 `bash wip/next_leg_label.sh` ✓）。

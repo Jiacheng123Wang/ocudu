@@ -291,6 +291,166 @@ void channel_equalizer_metal::submit_batch_run(span<const group_symbol> run, con
   impl_->pending.push_back(std::move(entry));
 }
 
+bool channel_equalizer_metal::supports_fused_demapping(modulation_scheme mod,
+                                                       unsigned         nof_ports,
+                                                       unsigned         nof_layers) const
+{
+  // 16QAM and one layer are the fused kernel's scope (see ocudu_lane_fused.metal) and the kernel has
+  // to be in the shader library the engine loaded. Nothing else is a property of the symbol, so the
+  // answer is final: the caller uses it to decide whether the demapper is called at all.
+  //
+  // The TOPOLOGY is deliberately not checked here (is_supported() is not a const interface member):
+  // this backend is reached through the composite factory, which ANDs this answer with its own
+  // routing decision - and run_fused() asserts is_supported() on the plan it resolves anyway.
+  (void)nof_ports;
+  return (mod == modulation_scheme::QAM16) && (nof_layers == 1) && metal::equalizer_metal_engine::supports_fused();
+}
+
+void channel_equalizer_metal::submit_fused(span<log_likelihood_ratio>       llrs,
+                                           span<cf_t>                       eq_symbols,
+                                           span<float>                      eq_noise_vars,
+                                           const re_buffer_reader<cbf16_t>& ch_symbols,
+                                           const ch_est_list&               ch_estimates,
+                                           span<const float>                noise_var_estimates,
+                                           float                            tx_scaling,
+                                           modulation_scheme                mod)
+{
+  ocudu_assert(supports_fused_demapping(
+                   mod, ch_estimates.get_nof_rx_ports(), ch_estimates.get_nof_tx_layers()),
+               "The fused route was submitted for a shape or a modulation it does not cover.");
+  // Deferred like submit(): the dispatches of the group go into the shared command buffer that
+  // wait() closes. The entry exists for the same reason it does there - the staging it owns and the
+  // one-shot wrap diagnostic - and it records no output to copy back, because the fused kernel writes
+  // the caller's LLRs in place and nothing else.
+  std::unique_ptr<pending_entry> entry = impl_->acquire();
+  entry->fused                         = true;
+  if (!run_fused(llrs, eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling, *entry)) {
+    // Engine failure, or a kernel that is not there: the LLRs of this symbol would stay stale and the
+    // demapper is NOT going to produce them (the caller took the fused route), so an undefined
+    // destination is zeroed - the CPU's ill-formed-input semantics, and the only value that cannot be
+    // mistaken for a measurement.
+    std::fill(llrs.begin(), llrs.end(), log_likelihood_ratio(0));
+  }
+  impl_->pending.push_back(std::move(entry));
+}
+
+bool channel_equalizer_metal::run_fused(span<log_likelihood_ratio>       llrs,
+                                        span<cf_t>                       eq_symbols,
+                                        span<float>                      eq_noise_vars,
+                                        const re_buffer_reader<cbf16_t>& ch_symbols,
+                                        const ch_est_list&               ch_estimates,
+                                        span<const float>                noise_var_estimates,
+                                        float                            tx_scaling,
+                                        pending_entry&                   entry)
+{
+  const unsigned nof_re       = ch_estimates.get_nof_re();
+  const unsigned nof_rx_ports = ch_estimates.get_nof_rx_ports();
+  const unsigned nof_layers   = ch_estimates.get_nof_tx_layers();
+
+  ocudu_assert(ch_symbols.get_nof_re() == nof_re, "Invalid channel symbols size.");
+  ocudu_assert(ch_symbols.get_nof_slices() == nof_rx_ports, "Invalid channel symbols ports.");
+  ocudu_assert(noise_var_estimates.size() == nof_rx_ports, "Invalid noise variance estimates size.");
+  ocudu_assert(eq_symbols.size() == nof_re * nof_layers, "Invalid equalized symbols size.");
+  ocudu_assert(eq_noise_vars.size() == nof_re * nof_layers, "Invalid equalized noise variances size.");
+  ocudu_assert(tx_scaling > 0, "Tx scaling factor must be positive.");
+  ocudu_assert(llrs.size() == nof_re * get_bits_per_symbol(modulation_scheme::QAM16),
+               "Invalid soft bit destination size.");
+
+  // The device slice of the estimates, exactly as run_equalize() picks it: the fused kernel reads the
+  // channel where the estimator produced it, which is what keeps the estimates off the host.
+  std::optional<ch_est_list::device_slice> device_slice;
+  if ((nof_rx_ports == 1) && (nof_layers == 1)) {
+    std::optional<ch_est_list::device_slice> slice = ch_estimates.get_device_slice(0);
+    if (slice.has_value() && (slice->nof_layers == 1) && (slice->base != nullptr)) {
+      device_slice = slice;
+    }
+  }
+  const bool device_noise_variance = device_slice.has_value() && (device_slice->noise_var != nullptr);
+
+  const symbol_plan plan = resolve_plan(ch_symbols, ch_estimates, noise_var_estimates, device_noise_variance);
+  if (plan.invalid_input) {
+    // The same ill-formed-input semantics the two-stage route produces: the equalizer writes
+    // eq = 0 / nv = infinity and the demapper then turns that into all-zero soft bits (the zero
+    // reciprocal zeroes every LLR through its near-zero guard). Zeroing the destination IS that
+    // result - and here it has to be written, because no demapper will run.
+    return false;
+  }
+  const bool     single_layer   = plan.single_layer;
+  const unsigned nof_used_ports = plan.nof_used_ports;
+
+  const size_t h_bytes = static_cast<size_t>(nof_used_ports) * nof_layers * nof_re * sizeof(cbf16_t);
+  const size_t y_bytes = static_cast<size_t>(nof_used_ports) * nof_re * sizeof(cbf16_t);
+  const size_t s_bytes = static_cast<size_t>(nof_used_ports) * sizeof(float);
+
+  metal::equalizer_metal_engine::ch_est_binding h_binding;
+  bool                                         h_device = false;
+  if (device_slice.has_value() && (nof_used_ports == 1) && single_layer) {
+    h_binding = metal::equalizer_metal_engine::ch_est_binding(device_slice->base,
+                                                              static_cast<unsigned>(device_slice->offset),
+                                                              device_slice->layer_stride);
+    h_device  = true;
+  }
+
+  auto*        h_ptr = h_device ? nullptr : static_cast<cbf16_t*>(entry.h.ensure(h_bytes));
+  auto*        y_ptr = static_cast<cbf16_t*>(entry.y.ensure(y_bytes));
+  const float* s_dev = device_noise_variance ? device_slice->noise_var : nullptr;
+  auto*        s_ptr = (s_dev != nullptr) ? nullptr : static_cast<float*>(entry.s.ensure(s_bytes));
+
+  // The received symbols: a plan the caller announced (set_device_grid) is used here exactly as it is
+  // on the two-stage route - the fused kernel reads the same bytes the batch kernel would have.
+  const auto gather_plan = [&]() -> const ch_gather_desc* {
+    if ((impl_->device_grid == nullptr) || (nof_used_ports != nof_rx_ports) ||
+        (impl_->device_grid->nof_ports != nof_rx_ports)) {
+      return nullptr;
+    }
+    return impl_->device_grid;
+  }();
+  if (gather_plan == nullptr) {
+    ch_re_source().host.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  for (unsigned i_used = 0; i_used != nof_used_ports; ++i_used) {
+    const unsigned i_port = plan.port_map[i_used];
+    if (gather_plan == nullptr) {
+      std::memcpy(y_ptr + static_cast<size_t>(i_used) * nof_re,
+                  ch_symbols.get_slice(i_port).data(),
+                  static_cast<size_t>(nof_re) * sizeof(cbf16_t));
+    }
+    if (!h_device) {
+      for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+        std::memcpy(h_ptr + (static_cast<size_t>(i_used) * nof_layers + i_layer) * nof_re,
+                    ch_estimates.get_channel(i_port, i_layer).data(),
+                    static_cast<size_t>(nof_re) * sizeof(cbf16_t));
+      }
+    }
+    if (single_layer && (s_ptr != nullptr)) {
+      s_ptr[i_used] = noise_var_estimates[i_port];
+    }
+  }
+  if (!h_device) {
+    h_binding = metal::equalizer_metal_engine::ch_est_binding(h_ptr);
+  }
+  (h_device ? ch_est_source().device : ch_est_source().staged).fetch_add(1, std::memory_order_relaxed);
+  const void* s_binding = (s_dev != nullptr) ? static_cast<const void*>(s_dev) : static_cast<const void*>(s_ptr);
+
+  const bool ok = impl_->engine.enqueue_fused(h_binding,
+                                              h_device,
+                                              y_ptr,
+                                              s_binding,
+                                              static_cast<void*>(llrs.data()),
+                                              static_cast<void*>(eq_noise_vars.data()),
+                                              nof_re,
+                                              nof_used_ports,
+                                              nof_layers,
+                                              tx_scaling,
+                                              metal::equalizer_metal_engine::gather_binding(
+                                                  gather_plan, impl_->device_grid_symbol));
+  if (ok && (gather_plan != nullptr)) {
+    ch_re_source().device.fetch_add(1, std::memory_order_relaxed);
+  }
+  return ok;
+}
+
 void channel_equalizer_metal::submit_group(span<const group_symbol> group)
 {
   // The group is split into maximal runs sharing a geometry (nof_re), a port reduction / noise
@@ -679,10 +839,17 @@ void channel_equalizer_metal::finish_symbol(pending_entry& entry)
   // path). The one-shot routing diagnostic is emitted here, once the wrap outcome is known.
   if (!impl_->path_logged) {
     impl_->path_logged = true;
-    ocudulog::fetch_basic_logger("PHY").info("Metal equalizer: outputs {}, engine no-copy wrap {}",
-                                             entry.eq_direct && entry.nv_direct ? "written in place"
-                                                                                : "written to staging and copied back",
-                                             impl_->engine.last_call_used_no_copy() ? "OK" : "FELL BACK TO COPY");
+    ocudulog::fetch_basic_logger("PHY").info(
+        "Metal equalizer: outputs {}, engine no-copy wrap {}",
+        entry.fused ? "the fused dispatch (LLRs in place, no equalized symbols)"
+                    : (entry.eq_direct && entry.nv_direct ? "written in place"
+                                                          : "written to staging and copied back"),
+        impl_->engine.last_call_used_no_copy() ? "OK" : "FELL BACK TO COPY");
+  }
+  if (entry.fused) {
+    // The fused kernel's only output is the caller's LLR buffer, which it writes in place: eq and nv
+    // were never bound to it (their spans here are empty).
+    return;
   }
   if (!entry.eq_direct) {
     std::memcpy(entry.eq.data(), entry.eq_ptr, entry.eq.size() * sizeof(cf_t));

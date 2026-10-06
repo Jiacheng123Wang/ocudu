@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -108,6 +109,10 @@ struct eq_site_diag_t {
   std::atomic<uint64_t> y_gather{0};    // eq_encode_gather_dispatch: the received-symbol gather
   std::atomic<uint64_t> y_direct{0};    // eq_flush_hook: the received symbols are READ IN THE GRID (no gather)
   std::atomic<uint64_t> y_batch{0};     // eq_encode_batch_dispatch: the batched received-symbol path
+  /// eq_encode_fused_dispatch (metal_kernel_fusion M1): the fused equalizer + demapper dispatches. The
+  /// count that says the fused route is the one a leg actually ran - a group it never reached would
+  /// otherwise look exactly like a group whose knobs did nothing.
+  std::atomic<uint64_t> y_fused{0};     // eq_encode_fused_dispatch: equalization AND soft bits, one dispatch
   std::atomic<uint64_t> run{0};         // enqueue_burst_batch_at: ONE dispatch per run of symbols
   std::atomic<uint64_t> single{0};      // enqueue_burst: one dispatch for one symbol (the sync path)
 };
@@ -233,7 +238,7 @@ const bool eq_batch_diag_registered = []() {
     const char*            brk = d.first_break.load(std::memory_order_relaxed);
     std::fprintf(stderr,
                  "[metal_stats] eq_batch flushes=%llu symbols=%llu runs=%llu batched=%llu max_run=%u "
-                 "first_break=%s sites(ch_gather=%llu y_gather=%llu y_batch=%llu run=%llu single=%llu)\n",
+                 "first_break=%s sites(ch_gather=%llu y_gather=%llu y_batch=%llu y_fused=%llu run=%llu single=%llu)\n",
                  static_cast<unsigned long long>(d.flushes.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(d.symbols.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(d.runs.load(std::memory_order_relaxed)),
@@ -243,6 +248,7 @@ const bool eq_batch_diag_registered = []() {
                  static_cast<unsigned long long>(eq_site_diag().ch_gather.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(eq_site_diag().y_gather.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(eq_site_diag().y_batch.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(eq_site_diag().y_fused.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(eq_site_diag().run.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(eq_site_diag().single.load(std::memory_order_relaxed)));
     // The direct-grid split of the received-symbol path (dev doc 6.47 variant A): how many runs read
@@ -273,6 +279,14 @@ struct eq_resources_t {
   id<MTLComputePipelineState> pipeline_gather = nil;
   /// Builds the gather tables on the device (batch 5e: eq_build_gather).
   id<MTLComputePipelineState> pipeline_build_gather = nil;
+  /// \brief The FUSED equalizer + demapper (metal_kernel_fusion M1): grid and weights in, LLRs out, one
+  /// dispatch, the equalized symbol and its noise never leaving the registers.
+  ///
+  /// Loaded OPTIONALLY, and what makes the fused route offerable at all: a metallib that predates the
+  /// kernel simply keeps every caller on the two-stage route (see supports_fused()), which is a
+  /// property the route predicate can read BEFORE a group is committed to it. That matters because
+  /// the fused route has no second chance - the demapper is not called for its symbols.
+  id<MTLComputePipelineState> pipeline_fused = nil;
 };
 
 /// Per-symbol element strides handed to equalize_mxn_batch(); must match struct equalize_strides in
@@ -552,6 +566,55 @@ void eq_pending_release(void* engine);
 /// Compares the device-built gather tables against the host's (OCUDU_EQ_TABLE_CHECK).
 void eq_dbg_dump_tables();
 
+/// \brief Bytes from \p ptr to the end of the allocation that contains it (see the demapper's twin).
+///
+/// Returns SIZE_MAX when the process-wide registry does not describe the pointer, in which case the
+/// caller has no bound to apply. The fused route is the one place in this engine that needs it: it
+/// reaches a run's later symbols through a byte STRIDE into the caller's LLR buffer, and a stride that
+/// walks out of that buffer would be mapped past its end and written silently.
+size_t allocation_bytes_left(const void* ptr)
+{
+  void*  base = nullptr;
+  size_t size = 0;
+  if (!compat::describe_aligned_allocation(ptr, &base, &size)) {
+    return std::numeric_limits<size_t>::max();
+  }
+  const size_t offset = static_cast<size_t>(static_cast<const char*>(ptr) - static_cast<const char*>(base));
+  return (size > offset) ? (size - offset) : 0;
+}
+
+/// \brief Length the no-copy mapping of \p ptr must cover for a run whose array reaches \p span bytes.
+///
+/// The allocation, not the run: the mapping cache only hands a buffer back when the request is
+/// covered, so a length that follows one run's geometry re-maps the caller's buffer on the host's
+/// hottest cell (the demapper's wrap_length documents the same rule). \p span is the fallback for a
+/// pointer the registry does not describe, and a span that does not fit in its own allocation is
+/// named once instead of being mapped past the end of the buffer.
+size_t wrap_length(const void* ptr, size_t span)
+{
+  void*  base = nullptr;
+  size_t size = 0;
+  if (!compat::describe_aligned_allocation(ptr, &base, &size)) {
+    return span;
+  }
+  const size_t offset    = static_cast<size_t>(static_cast<const char*>(ptr) - static_cast<const char*>(base));
+  const size_t remaining = (size > offset) ? (size - offset) : 0;
+  if (span > remaining) {
+    static std::atomic<bool> warned{false};
+    bool                     expected = false;
+    if (warned.compare_exchange_strong(expected, true)) {
+      ocudulog::fetch_basic_logger("PHY").error(
+          "Metal equalizer: a fused run reaches {} bytes but only {} bytes are left in the allocation at {}; "
+          "the LLR destination of one of its symbols is overstated and the mapping overshoots the buffer",
+          span,
+          remaining,
+          ptr);
+    }
+    return span;
+  }
+  return remaining;
+}
+
 wrapped_buffer wrap_buffer(eq_engine_impl* engine, const void* ptr, size_t length)
 {
   // One buffer object per address for every engine: the stages of the chain write and read the same
@@ -667,6 +730,25 @@ bool equalizer_metal_engine::init()
       return false;
     }
     res.pipeline_gather = [res.device newComputePipelineStateWithFunction:fn_gather error:&error];
+    // metal_kernel_fusion M1: the fused equalizer + demapper. Optional on purpose (see
+    // pipeline_fused): a metallib that predates it keeps the two-stage route instead of failing the
+    // whole equalizer, and supports_fused() is what tells the caller which of the two it got.
+    //
+    // Reported on stderr next to the gather provenance below, for the same reason: the .metallib is
+    // loaded from the source tree at RUN time, so "does this build have the fused kernel" is not a
+    // property of the binary and cannot be read from its commit stamp. A leg whose knob is set and
+    // whose route is not taken because the library is stale is otherwise indistinguishable from a
+    // knob that never reached the process.
+    id<MTLFunction> fn_fused = [library newFunctionWithName:@"lane_grid_to_llr"];
+    if (fn_fused != nil) {
+      res.pipeline_fused = [res.device newComputePipelineStateWithFunction:fn_fused error:&error];
+    }
+    std::fprintf(stderr,
+                 "[eq_impl] fused equalizer+demapper (lane_grid_to_llr): %s\n",
+                 (res.pipeline_fused != nil)
+                     ? "available"
+                     : ((fn_fused == nil) ? "NOT IN THE LOADED METALLIB (the two-stage route only)"
+                                          : "pipeline creation FAILED (the two-stage route only)"));
     // Batch 5e: the gather tables built where they are read. Optional like every other stage: a
     // metallib without it keeps the host-built tables (see eq_gather_tables).
     id<MTLFunction> fn_build_gather = [library newFunctionWithName:@"eq_build_gather"];
@@ -794,6 +876,15 @@ struct eq_pending_t {
   const void* sigma2    = nullptr;
   void*       eq        = nullptr;
   void*       nv        = nullptr;
+  /// \brief LLR destination of this symbol when it was submitted through the FUSED route, else
+  /// nullptr. 4 soft bits per resource element (16QAM), and the run's byte step between two
+  /// consecutive destinations is what the kernel is told as \c llr_stride.
+  void*       llrs      = nullptr;
+  /// True when this symbol goes through the fused kernel: \c llrs and \c nv are then its outputs and
+  /// \c eq stays null (metal_kernel_fusion M1 keeps the equalized symbol in registers). Kept as its
+  /// own field rather than inferred from \c llrs so that a run can never mix the two encodings - they
+  /// write different outputs from the same inputs.
+  bool        fused     = false;
   unsigned    nof_re    = 0;
   unsigned    nof_ports = 0;
   unsigned    nof_layers = 0;
@@ -955,6 +1046,62 @@ static id<MTLComputePipelineState> eq_encode_batch_dispatch(id<MTLComputeCommand
   [enc dispatchThreads:MTLSizeMake(nof_re, n_run, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
     eq_site_diag().y_batch.fetch_add(1, std::memory_order_relaxed);
+  return pipeline;
+}
+
+/// \brief Bytes of LLR per resource element on the fused route.
+///
+/// 16QAM is the only modulation the fused kernel implements (metal_kernel_fusion M1 scope decision),
+/// so a resource element produces exactly four soft bits. Named here rather than spelled as a 4 so
+/// the run-bound check in the flush hook and the span the encoder maps cannot drift apart.
+static constexpr size_t nof_llr_bytes_per_re = 4;
+
+/// \brief Encodes the FUSED dispatch (metal_kernel_fusion M1): the same run, the same grid and the
+/// same per-symbol tables as the batch encoder above, with the LLRs in place of the equalized symbols.
+///
+/// The binding order is the one ocudu_lane_fused.metal declares: b0 h, b1 y, b2 sigma2, b3 llrs,
+/// b4 the equalizer's params, b5 its per-symbol strides, b6 the LLR byte step, b7 the post-equalization
+/// noise variances. \c eq is not bound at all - the kernel computes the equalized symbol in registers
+/// and only its soft bits and its noise variance leave - so this encoder cannot be reached by accident
+/// from the two-stage route.
+///
+/// \param llr_stride Bytes between two OFDM symbols of \p b_llrs (0 for a single-symbol run).
+static id<MTLComputePipelineState> eq_encode_fused_dispatch(id<MTLComputeCommandEncoder> enc,
+                                                           const wrapped_buffer&         b_h,
+                                                           const wrapped_buffer&         b_y,
+                                                           const wrapped_buffer&         b_s,
+                                                           const wrapped_buffer&         b_llrs,
+                                                           const wrapped_buffer&         b_nv,
+                                                           const equalize_params_t&      params,
+                                                           const eq_strides_t&           strides,
+                                                           uint32_t                      llr_stride,
+                                                           unsigned                      nof_re,
+                                                           unsigned                      n_run)
+{
+  if ((enc == nil) || (b_h.buffer == nil) || (b_y.buffer == nil) || (b_s.buffer == nil) ||
+      (b_llrs.buffer == nil) || (b_nv.buffer == nil)) {
+    return nil;
+  }
+  // The fused kernel is its own pipeline: it must not be bound through eq_resources().pipeline(_batch),
+  // whose signature takes eq/nv at indices 2 and 3.
+  id<MTLComputePipelineState> pipeline = eq_resources().pipeline_fused;
+  if (pipeline == nil) {
+    return nil;
+  }
+  [enc setComputePipelineState:pipeline];
+  [enc setBuffer:b_h.buffer offset:b_h.offset atIndex:0];
+  [enc setBuffer:b_y.buffer offset:b_y.offset atIndex:1];
+  [enc setBuffer:b_s.buffer offset:b_s.offset atIndex:2];
+  [enc setBuffer:b_llrs.buffer offset:b_llrs.offset atIndex:3];
+  [enc setBytes:&params length:sizeof(params) atIndex:4];
+  [enc setBytes:&strides length:sizeof(strides) atIndex:5];
+  [enc setBytes:&llr_stride length:sizeof(llr_stride) atIndex:6];
+  [enc setBuffer:b_nv.buffer offset:b_nv.offset atIndex:7];
+  [enc dispatchThreads:MTLSizeMake(nof_re, n_run, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  // The dispatch carries BOTH stages' work, and it is counted as the equalizer's because that is the
+  // engine that encodes it here. What the probe's split is read for - how many dispatches a hop takes -
+  // is unaffected: the fused hop simply has one fewer.
+  metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
   return pipeline;
 }
 
@@ -1502,12 +1649,35 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
                           (next.h_on_device == head.h_on_device) &&
                           (!next.h_on_device ||
                            ((next.h.buffer == head.h.buffer) && (next.h.offset >= prev.h.offset)));
+      // \name The run's output stride, which depends on WHICH outputs the run writes.
+      ///
+      /// The two-stage route writes the equalized symbols and their noise, so what has to stay uniform
+      /// is their per-symbol step (\c same_strides below). The FUSED route writes the caller's LLRs and
+      /// its post-equalization noise variances, so BOTH of those steps have to be uniform - and the
+      /// equalized symbols are not written at all.
+      ///@{
+      const ptrdiff_t llr_step_prev = head.fused ? (static_cast<const char*>(next.llrs) - static_cast<const char*>(prev.llrs)) : 0;
+      const ptrdiff_t llr_step_head =
+          head.fused ? (static_cast<const char*>(pending[first + 1].llrs) - static_cast<const char*>(head.llrs)) : 0;
+      const bool same_llr_stride = (next.llrs != nullptr) && (prev.llrs != nullptr) && (llr_step_prev > 0) &&
+                                   (llr_step_prev == llr_step_head);
+      const ptrdiff_t nv_step_prev = head.fused ? (static_cast<const char*>(next.nv) - static_cast<const char*>(prev.nv)) : 0;
+      const ptrdiff_t nv_step_head =
+          head.fused ? (static_cast<const char*>(pending[first + 1].nv) - static_cast<const char*>(head.nv)) : 0;
+      const bool same_nv_stride = (next.nv != nullptr) && (prev.nv != nullptr) && (nv_step_prev > 0) &&
+                                  (nv_step_prev == nv_step_head);
       const bool same_strides =
-          (static_cast<const char*>(next.eq) - static_cast<const char*>(prev.eq)) ==
-              (static_cast<const char*>(pending[first + 1].eq) - static_cast<const char*>(head.eq)) &&
-          (static_cast<const char*>(next.nv) - static_cast<const char*>(prev.nv)) ==
-              (static_cast<const char*>(pending[first + 1].nv) - static_cast<const char*>(head.nv)) &&
-          (next.eq != nullptr) && (next.nv != nullptr);
+          head.fused
+              ? (same_llr_stride && same_nv_stride)
+              : ((static_cast<const char*>(next.eq) - static_cast<const char*>(prev.eq)) ==
+                     (static_cast<const char*>(pending[first + 1].eq) - static_cast<const char*>(head.eq)) &&
+                 (static_cast<const char*>(next.nv) - static_cast<const char*>(prev.nv)) ==
+                     (static_cast<const char*>(pending[first + 1].nv) - static_cast<const char*>(head.nv)) &&
+                 (next.eq != nullptr) && (next.nv != nullptr));
+      ///@}
+      // A run is either entirely fused or entirely two-stage: the same inputs produce different
+      // outputs on the two routes, so a mixed run would leave half of them unwritten.
+      const bool same_route = (next.fused == head.fused);
       const bool same_sigma = (std::memcmp(next.sigma2, head.sigma2, head.nof_ports * sizeof(float)) == 0);
       // The received symbols of the run must come from the same place: either every symbol was staged by the
       // caller, or every one of them is read off the device grid through the same plan. A GATHERED run must
@@ -1531,13 +1701,27 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
           next.gather.is_valid() == head.gather.is_valid() &&
           (!head.gather.is_valid() ||
            ((next.gather.desc == head.gather.desc) && (consecutive_sym || (run_direct_ok && next_direct_ok))));
-      if (!same_geom || !same_h || !same_strides || !same_sigma || !same_gather) {
+      if (!same_geom || !same_h || !same_strides || !same_sigma || !same_gather || !same_route) {
         eq_batch_note_break(!same_geom  ? "geometry"
                             : !same_h   ? "estimates"
                             : !same_strides ? "strides"
                             : !same_sigma   ? "sigma2"
-                                            : "gather");
+                            : !same_gather  ? "gather"
+                                            : "route");
         break;
+      }
+      // A fused run reaches its later symbols through one byte stride into the caller's LLR buffer, so
+      // the whole run has to stay inside the allocation of its first symbol: symbols that happen to sit
+      // at a uniform distance in DIFFERENT allocations would pass the stride test and then be written
+      // past the end of the buffer object that backs the first one, which the GPU does silently (the
+      // demapper's flush hook documents the same trap, measured offline).
+      if (head.fused && (head.llrs != nullptr)) {
+        const size_t run_llr = (static_cast<size_t>(n_run) * static_cast<size_t>(llr_step_head)) +
+                               (static_cast<size_t>(head.nof_re) * nof_llr_bytes_per_re);
+        if (run_llr > allocation_bytes_left(head.llrs)) {
+          eq_batch_note_break("llr span");
+          break;
+        }
       }
       run_direct_ok = run_direct_ok && next_direct_ok;
       ++n_run;
@@ -1549,13 +1733,16 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     eq_batch_note_run(n_run);
 
     // Group staging: h [symbol][port][layer][re], y [symbol][port][re], one sigma2 array per run.
+    // The eq stride belongs to the TWO-STAGE route alone (a fused run writes no equalized symbols);
+    // the nv stride is needed by both, because the fused kernel keeps the post-equalization noise
+    // variance as an output too (see ocudu_lane_fused.metal).
     const size_t h_stride = static_cast<size_t>(head.nof_ports) * head.nof_layers * head.nof_re;
     const size_t y_stride = static_cast<size_t>(head.nof_ports) * head.nof_re;
     const unsigned eq_stride_elems =
-        (n_run > 1) ? static_cast<unsigned>((static_cast<const char*>(pending[first + 1].eq) -
-                                             static_cast<const char*>(head.eq)) /
-                                            2 / sizeof(float))
-                    : 0;
+        (!head.fused && (n_run > 1)) ? static_cast<unsigned>((static_cast<const char*>(pending[first + 1].eq) -
+                                                              static_cast<const char*>(head.eq)) /
+                                                             2 / sizeof(float))
+                                     : 0;
     const unsigned nv_stride_elems =
         (n_run > 1) ? static_cast<unsigned>((static_cast<const char*>(pending[first + 1].nv) -
                                              static_cast<const char*>(head.nv)) /
@@ -1720,10 +1907,17 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
       b_y = wrap_buffer(engine, y_alloc, y_bytes);
     }
     wrapped_buffer b_s = wrap_buffer(engine, s_alloc, s_bytes);
-    wrapped_buffer b_eq = wrap_buffer(engine, head.eq, eq_bytes);
+    // The outputs. The post-equalization noise variances are written on BOTH routes (the two-stage
+    // kernel and the fused one - see ocudu_lane_fused.metal), the equalized symbols only on the
+    // two-stage one: binding a null destination would fail the no-copy wrap for a buffer that is not
+    // written at all.
     wrapped_buffer b_nv = wrap_buffer(engine, head.nv, nv_bytes);
+    wrapped_buffer b_eq;
+    if (!head.fused) {
+      b_eq = wrap_buffer(engine, head.eq, eq_bytes);
+    }
     if (y_grid_wrap_failed || (b_h.buffer == nil) || (b_y.buffer == nil) || (b_s.buffer == nil) ||
-        (b_eq.buffer == nil) || (b_nv.buffer == nil)) {
+        (b_nv.buffer == nil) || (!head.fused && (b_eq.buffer == nil))) {
       engine->last_call_no_copy = false;
       compat::aligned_free(h_alloc);
       compat::aligned_free(y_alloc);
@@ -1778,6 +1972,61 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     // demapper's dispatches read as ablated while the equalizer read none).
     metal::shared_burst::set_stage(metal::shared_burst::stage::equalizer);
     id<MTLComputePipelineState> run_pipeline = (n_run > 1) ? eq_resources().pipeline_batch : eq_resources().pipeline;
+    if (head.fused) {
+      // ---- the FUSED route (metal_kernel_fusion M1) -----------------------------------------------
+      //
+      // One dispatch does what equalize_mxn_batch + demod_soft did in two, and the LLRs and the noise
+      // variances are its outputs (the equalized symbol stays in registers). Everything above this
+      // point is shared with the two-stage route on purpose: the
+      // per-symbol estimate starts (h_starts), the y binding (staged, gathered or the grid itself) and
+      // the per-port noise variances are exactly the ones the batch kernel would have read, so the
+      // fused run computes the same thing on the same bytes and the only difference a leg can measure
+      // is the structure it removes.
+      //
+      // The LLR byte step is the caller's own per-symbol slot pitch: the PUSCH demodulator's LLR
+      // staging is page-aligned per symbol, which is what makes one dispatch able to write the whole
+      // group (the same layout fact the demapper's own batched encoding rests on).
+      if (head.nof_layers != 1) {
+        // The caller gates on supports_fused_demapping(); if a layer count ever reached here the
+        // demapper is NOT going to be called for these symbols, so failing loudly beats writing
+        // half the soft bits.
+        ocudu_assert(false, "The fused equalization route only covers one transmission layer.");
+        return nil;
+      }
+      const uint32_t llr_stride = (n_run > 1) ? static_cast<uint32_t>(
+                                                    static_cast<const char*>(pending[first + 1].llrs) -
+                                                    static_cast<const char*>(head.llrs))
+                                              : 0u;
+      const size_t llr_bytes =
+          (static_cast<size_t>(n_run) - 1) * llr_stride + static_cast<size_t>(head.nof_re) * nof_llr_bytes_per_re;
+      // The mapping covers the ALLOCATION of the first destination, not the run: the length only has to
+      // be re-requested when a different buffer comes along (see wrap_length).
+      wrapped_buffer b_llrs = wrap_buffer(engine, head.llrs, wrap_length(head.llrs, llr_bytes));
+      if (b_llrs.buffer == nil) {
+        engine->last_call_no_copy = false;
+        compat::aligned_free(h_alloc);
+        compat::aligned_free(y_alloc);
+        compat::aligned_free(s_alloc);
+        return nil;
+      }
+      eq_site_diag().y_fused.fetch_add(1, std::memory_order_relaxed);
+      used_pipeline = eq_encode_fused_dispatch(
+          enc, b_h, b_y, b_s, b_llrs, b_nv, params, strides, llr_stride, head.nof_re, n_run);
+      if (used_pipeline == nil) {
+        return nil;
+      }
+      if (n_run > 1) {
+        ++engine->batch_dispatches;
+      }
+      eq_flush_state().inflight.push_back(h_alloc);
+      if (y_alloc != nullptr) {
+        eq_flush_state().inflight.push_back(y_alloc);
+      }
+      eq_flush_state().inflight.push_back(s_alloc);
+      any_batch = true;
+      first += n_run;
+      continue;
+    }
     // The estimates are bound at the buffer base and p.h_offset carries the run's first estimate:
     // the starts in the strides block are absolute within h_run_binding.buffer, and the kernel
     // subtracts p.h_offset from each. Binding h_run_binding.offset HERE as well applied that base
@@ -1877,6 +2126,8 @@ bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
                                   sigma2,
                                   eq,
                                   nv,
+                                  nullptr, // llrs: the two-stage route writes eq/nv, not LLRs
+                                  false,   // fused
                                   nof_re,
                                   nof_ports,
                                   nof_layers,
@@ -1922,6 +2173,64 @@ bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
     return true;
   }
   ///@}
+}
+
+bool equalizer_metal_engine::supports_fused()
+{
+  // The pipeline is created once, under the resource mutex, by whichever engine initialises first.
+  // A caller asks this BEFORE it commits a group to the fused route, so the answer has to be read the
+  // same way the encoder will read it - and it is: both look at the same loaded pipeline.
+  std::lock_guard<std::mutex> lock(eq_resources_mutex());
+  return eq_resources().pipeline_fused != nil;
+}
+
+bool equalizer_metal_engine::enqueue_fused(const ch_est_binding& h,
+                                           bool                  h_on_device,
+                                           const void*           y,
+                                           const void*           sigma2,
+                                           void*                 llrs,
+                                           void*                 nv,
+                                           unsigned              nof_re,
+                                           unsigned              nof_ports,
+                                           unsigned              nof_layers,
+                                           float                 tx_scaling,
+                                           const gather_binding& gather)
+{
+  eq_engine_impl* engine = static_cast<eq_engine_impl*>(impl);
+  if ((engine == nullptr) || (llrs == nullptr) || (nv == nullptr) || !supports_fused()) {
+    return false;
+  }
+  // The fused kernel is the single-layer 1 x P combiner (see ocudu_lane_fused.metal): its L == 1
+  // branch is what the equalizer's own kernel documents as algorithm-independent, which is why no
+  // mmse/noise_var is carried here. The caller is the one that checks the modulation (16QAM) - the
+  // engine has no modulation argument to check it against.
+  if ((nof_layers != 1) || (nof_ports == 0) || (nof_ports > equalizer_metal_engine::max_ports)) {
+    return false;
+  }
+  // A thread can accumulate for several engines over its lifetime; hand the previous engine's work
+  // over before this one installs its own hook (see enqueue_burst).
+  if ((metal::shared_burst::flush_hook_context() != nullptr) &&
+      (metal::shared_burst::flush_hook_context() != engine)) {
+    (void)metal::shared_burst::flush_pending();
+  }
+  eq_pending(engine).push_back({h,
+                                h_on_device,
+                                gather,
+                                y,
+                                sigma2,
+                                nullptr, // eq: the fused kernel keeps the equalized symbol in registers
+                                nv,
+                                llrs,
+                                true,    // fused
+                                nof_re,
+                                nof_ports,
+                                nof_layers,
+                                false, // mmse: the single-layer path does not branch on the algorithm
+                                0.0F,  // noise_var: not read by either stage of the fused kernel
+                                tx_scaling,
+                                1.0F});
+  metal::shared_burst::set_flush_hook(engine, &eq_flush_hook);
+  return true;
 }
 
 bool equalizer_metal_engine::enqueue_burst_batch(const ch_est_binding& h,

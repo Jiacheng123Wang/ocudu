@@ -77,6 +77,41 @@ public:
     }
   }
 
+  /// \name Fused equalization and demapping (metal_kernel_fusion M1).
+  ///
+  /// WHY THIS WRAPPER HAS TO CARRY THEM TOO, and why it is not obvious. It re-declares the interface
+  /// methods it wants to forward, and an interface method it does NOT re-declare answers with the
+  /// base class default - which for the fused pair is "no" and "equalize only". So an equalizer built
+  /// through this factory looked like a backend without the fused route even while the Metal engine
+  /// behind it had it, and the knob's whole effect was to change nothing (measured: the offline A/B
+  /// ran with `y_fused=0` and the demapper still called).
+  ///
+  /// The predicate is the Metal backend's answer ANDed with the routing decision, because the two
+  /// halves of the question live in different places: the modulation and the fused SHAPE belong to
+  /// the Metal backend, the topology to select().
+  ///@{
+  bool supports_fused_demapping(modulation_scheme mod, unsigned nof_ports, unsigned nof_layers) const override
+  {
+    return metal_->is_supported(nof_ports, nof_layers) && metal_->supports_fused_demapping(mod, nof_ports, nof_layers);
+  }
+
+  void submit_fused(span<log_likelihood_ratio>       llrs,
+                    span<cf_t>                       eq_symbols,
+                    span<float>                      eq_noise_vars,
+                    const re_buffer_reader<cbf16_t>& ch_symbols,
+                    const ch_est_list&               ch_estimates,
+                    span<const float>                noise_var_estimates,
+                    float                            tx_scaling,
+                    modulation_scheme                mod) override
+  {
+    // select() is what supports_fused_demapping() agrees with: for a shape it accepts, this IS the
+    // Metal backend. For a shape it does not, the caller was told "no" and must not be here - and the
+    // generic backend's default keeps the classic two-stage path rather than dropping the soft bits.
+    select(ch_estimates).submit_fused(
+        llrs, eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling, mod);
+  }
+  ///@}
+
   bool consumes_gathered_symbols(unsigned nof_ports, unsigned nof_layers) const override
   {
     // Same rule as consumes_device_estimates(): only the topologies this composite routes to Metal

@@ -310,6 +310,35 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
   const bool deferred_chain = !force_serial && equalizer->supports_deferred_chain() &&
                               demapper->supports_deferred_chain() && !config.enable_transform_precoding;
 
+  // \name FUSED equalization and demapping (metal_kernel_fusion M1, OCUDU_LANE_FUSE_EQDEMOD).
+  ///
+  /// On this route the equalizer's kernel computes the soft bits of the group itself and the demapper
+  /// is not called for those symbols at all - one dispatch instead of two, and the equalized symbols
+  /// never reach memory. That makes the route's preconditions stricter than the deferred chain's, and
+  /// every one of them is a way the two stages are wired together here:
+  ///
+  ///  * OFF BY DEFAULT, and env-only: the knob is the A/B between this route and the shipped one;
+  ///  * the modulation and the layer count are the fused kernel's scope (16QAM, one layer - see
+  ///    channel_equalizer::supports_fused_demapping()), and the backend has to have the kernel;
+  ///  * the EVM calculation reads the EQUALIZED SYMBOLS on the host in pass 3, and a fused dispatch
+  ///    does not write them - so a configuration that asks for EVM stays on the two-stage route.
+  ///    NOTHING ELSE DOES: the post-equalization SINR reduction reads the NOISE VARIANCES, and the
+  ///    fused kernel keeps producing those. That is not a detail - it is the DEFAULT PUSCH SINR
+  ///    method in this tree, so a route that dropped them would never run in the shipped
+  ///    configuration, and one that ran and reported an infinite SINR would feed the uplink link
+  ///    adaptation a value nothing measured.
+  ///@{
+  static const bool fuse_eq_demod = []() {
+    // Non-null means ON, which is the shape the workstream's leg protocol uses: the arm exports the
+    // variable, the control leg leaves it unset. The value is not read, so `=0` is still the arm -
+    // the knob's documentation says "set", and a knob whose meaning depends on its value is one more
+    // thing a leg can get wrong.
+    return std::getenv("OCUDU_LANE_FUSE_EQDEMOD") != nullptr;
+  }();
+  const bool fused_chain = deferred_chain && fuse_eq_demod && (evm_calc == nullptr) &&
+                           equalizer->supports_fused_demapping(config.modulation, nof_rx_ports, config.nof_tx_layers);
+  ///@}
+
   // ONE definition, shared with serves_hop_in_place(): a strict caller asks the demodulator whether the
   // host would do the work, and the answer has to be what this function actually does.
   const bool estimates_read_in_place  = serves_hop_in_place(est_results, nof_rx_ports, config.nof_tx_layers);
@@ -419,7 +448,13 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
   // condition disabled it. It makes every run self-describing instead of relying on the shape of
   // the Metal commit/wait counters.
   static const bool routing_logged = [&]() {
-    if (deferred_chain) {
+    if (fused_chain) {
+      ocudulog::fetch_basic_logger("PHY").info(
+          "PUSCH: FUSED equalization + demapping chain enabled (OCUDU_LANE_FUSE_EQDEMOD, group of {} OFDM "
+          "symbols, {}): the equalizer's kernel writes the soft bits and the demapper is not called",
+          group_size,
+          to_string(config.modulation));
+    } else if (deferred_chain) {
       ocudulog::fetch_basic_logger("PHY").info("PUSCH: deferred chain enabled (group of {} OFDM symbols)", group_size);
     } else {
       ocudulog::fetch_basic_logger("PHY").info(
@@ -428,6 +463,19 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
           equalizer->supports_deferred_chain(),
           demapper->supports_deferred_chain(),
           config.enable_transform_precoding);
+    }
+    if (fuse_eq_demod && !fused_chain) {
+      // The knob was set and the route was not taken: name the condition, because the run is then
+      // indistinguishable from a control leg whose env assignment never reached the process - which
+      // is exactly the mistake this workstream's leg protocol documents.
+      ocudulog::fetch_basic_logger("PHY").info(
+          "PUSCH: OCUDU_LANE_FUSE_EQDEMOD is set but the fused route is NOT taken (deferred chain {}, evm {}, "
+          "backend supports {} for {} / {} layer(s))",
+          deferred_chain,
+          evm_calc != nullptr,
+          equalizer->supports_fused_demapping(config.modulation, nof_rx_ports, config.nof_tx_layers),
+          to_string(config.modulation),
+          config.nof_tx_layers);
     }
     return true;
   }();
@@ -538,7 +586,22 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
       if (!device_gather) {
         ch_re = &get_ch_data_re(grid, i_symbol, symbol_re_mask, config.rx_ports);
       }
-      if (deferred_chain) {
+      if (fused_chain) {
+        // Fused route: the equalizer's dispatch writes the soft bits of THIS symbol directly into its
+        // page-aligned slot of the group's LLR staging - the very slot pass 2 would have handed the
+        // demapper, and the very slot pass 3 splay the codeword blocks out of. So pass 2 has nothing
+        // left to do for this symbol and the demapper is not called at all (see the routing log).
+        equalizer->set_device_grid(device_gather ? *device_gather_plan : no_gather_plan, i_symbol);
+        equalizer->submit_fused(span<log_likelihood_ratio>(temp_llr).subspan(state.llr_offset,
+                                                                            state.nof_re * nof_bits_per_re),
+                                state.eq,
+                                state.nv,
+                                *ch_re,
+                                ch_estimates,
+                                span<float>(noise_var_estimates).first(nof_rx_ports),
+                                1.0F,
+                                config.modulation);
+      } else if (deferred_chain) {
         // Offer the backend the grid itself for this symbol. An empty plan is announced when this
         // symbol was gathered on the host, so a backend never keeps the plan of the previous one.
         equalizer->set_device_grid(device_gather ? *device_gather_plan : no_gather_plan, i_symbol);
@@ -579,12 +642,15 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
       // Pass 2: demap every symbol of the group. A whole OFDM symbol is dispatched as one command
       // buffer into its page-aligned staging region: how the codeword buffer splits a symbol into
       // blocks only materializes once its cursor advances, so that split is replayed by the
-      // consumption pass below.
-      for (unsigned i_group = 0; i_group != nof_group_symbols; ++i_group) {
-        const symbol_state&        state = symbols[i_group];
-        span<log_likelihood_ratio> llrs =
-            span<log_likelihood_ratio>(temp_llr).subspan(state.llr_offset, state.nof_re * nof_bits_per_re);
-        demapper->submit(llrs, state.eq, state.nv, config.modulation);
+      // consumption pass below. On the FUSED route there is nothing to do here: the equalizer's own
+      // dispatch already wrote every symbol's soft bits into the staging pass 3 reads.
+      if (!fused_chain) {
+        for (unsigned i_group = 0; i_group != nof_group_symbols; ++i_group) {
+          const symbol_state&        state = symbols[i_group];
+          span<log_likelihood_ratio> llrs =
+              span<log_likelihood_ratio>(temp_llr).subspan(state.llr_offset, state.nof_re * nof_bits_per_re);
+          demapper->submit(llrs, state.eq, state.nv, config.modulation);
+        }
       }
 
       // Single synchronization point of the group. The demapper's wait also covers the

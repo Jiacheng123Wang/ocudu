@@ -252,14 +252,138 @@ llrs[4*re+3] = quantize_llr(qam16_23(x_hat.y, rcp), 20.0f);
    ⇒ `rcp = rcp_noise_safe(INFINITY) = 0` ✓ ⇒ 四个 LLR 走 `NEAR_ZERO` 守卫后为 0 ✓ = 与两步路线同结果 ✓；
 3. `eq_max_run_symbols = 32` 的常量在融合文件里**独立声明** ✓（复制而非引用 ✓，与原文件保持一致 ✓）。
 
+### 2.10 ★★ M1.1 接线完成（2026-10-06，本会话）：融合路线**已能跑到**，离线判据**逐字节一致** ✓✓
+
+**结论** ✓：`OCUDU_LANE_FUSE_EQDEMOD` 现在**真的切路线** ✓ —— 一跳 `[metal_stats] burst dispatches` **4 → 3** ✓、
+**demapper 的 dispatch 归 0** ✓（`demap batch flushes=0`）、`sites(... y_fused=1 y_batch=0)` ✓。
+**离线对拍** ✓（`ab_dumps.sh`，27 个 capture，QAM16 标注语料 ✓）：**四个 dump 全部逐字节相同** ✓
+（`_llr.bin` / `_h.bin` / `.bin` / `_ce.txt` 差异字节数 **0/0/0/0** ✓）⇒ **"算的是同一件事"成立到逐位** ✓。
+
+**当前状态** ✓（本节的出口 ✓）：融合路线**已接完并验证** ✓，**默认关** ✓ ⇒ 默认二进制与 M0 基线**逐字节同路** ✓；
+开关 = `OCUDU_LANE_FUSE_EQDEMOD`（env ✓，**非空即开** ✓，值不被读 ✓ ⇒ `=0` 也是臂 ✓，这是腿协议的形状 ✓）；
+**适用形状** ✓ = **16QAM ✓ + 1 层 ✓ + `evm_calc == nullptr` ✓**（`channel_equalizer::supports_fused_demapping()` ✓）；
+腿号 ✓：已飞到 **mkf009** ✓，下一对 = **mkf010（对照）/ mkf011（臂）** ✓（§2.11 ✓，取号 `bash wip/next_leg_label.sh` ✓）；
+判据仍是 §2.3 ✓（结构证据 = dispatch 4→3 ✓；主判据报告制 ✓；红线 = CRC 同档 + `gaps=0` ✓）。
+
+**落点（与 §2.2 的设想不同，因为读代码后事实不同 ✗）**：
+
+| 层 | 文件 | 做了什么 |
+|---|---|---|
+| kernel | `ocudu_lane_fused.metal` ✓ | 新增 **b7 = nv** 输出（见下"必须记一笔的决定" ✓）；`eq_max_run_symbols` **32 → 14**（**原值是错的** ✗，见下"发现的缺陷" ✓）|
+| 引擎 | `ocudu_equalizer_metal_engine.{h,mm}` ✓ | `pipeline_fused`（**可选加载** ✓，metallib 里没有就保持两步路线 ✓，并在 stderr 打出 `[eq_impl] … available/…` ✓ 作为出处 ✓）；`eq_pending_t` 加 `llrs`/`fused` ✓；flush 钩子的 run 谓词加**融合分支的输出步长**（LLR 字节步 + nv 步长 ✓）与 `route` 断点 ✓；`eq_encode_fused_dispatch` ✓（b0 h / b1 y / b2 sigma2 / b3 llrs / b4 p / b5 st / b6 llr_stride / b7 nv ✓）；`supports_fused()` ✓；`enqueue_fused()` ✓ |
+| 接口 | `channel_equalizer.h` ✓ | `supports_fused_demapping(mod, **nof_ports**, nof_layers)` + `submit_fused(...)` ✓（都有**默认实现** ✓ ⇒ 老后端不受影响 ✓）|
+| 后端 | `channel_equalizer_metal.{h,cpp}` ✓ | 两个 override ✓；`run_fused()` ✓（与 `run_equalize()` 同一套 plan/device-slice/gather 逻辑 ✓，只少写 eq ✓）|
+| ★ **复合工厂** | `channel_equalizer_metal_factory.cpp` ✓ | **这一步是接线的真正落点** ✓ —— 见下 ✓ |
+| 调用方 | `pusch_demodulator_impl.cpp` ✓ | `fused_chain` 路线选择 ✓ + 一行 self-describing 日志 ✓（设了却没生效时**说出是哪一条不满足** ✓）|
+
+**★★ 发现的第一个坑（接线层的答案 ✓）**：调用方拿到的**不是** `channel_equalizer_metal` ✗，
+而是工厂里的**复合包装** `channel_equalizer_metal_or_generic` ✓（它按拓扑在 Metal 与 CPU 之间选 ✓）。
+该包装**只转发它自己重新声明过的方法** ✗ ⇒ 没转发的接口方法落到**基类默认实现** ✗
+⇒ `supports_fused_demapping()` 永远回答 **false** ✓、`submit_fused()` 永远走老路 ✗
+⇒ **旋钮的唯一效果是"什么都没发生"** ✗（实测：`fused=0 y_fused=0` ✓，而引擎里 kernel **available** ✓）。
+**修法** ✓：在该包装里补 `supports_fused_demapping()`（= Metal 后端的答案 **AND** 它自己的路由决定 ✓，
+因为"调制+形状"属于后端、"拓扑"属于 select() ✓）与 `submit_fused()`（转发 ✓）。
+**教训** ✓：**加接口方法时，要顺着"调用方真正持有的对象"一路查转发层** ✓
+（这条与上一工作流"接口默认实现是良性回退、也是静默失效点"是同一个形状 ✓）。
+**单元测试已加回归** ✓：`[fused] composite factory offers the fused route for 16QAM / 1 layer only` ✓。
+
+**★★ 必须记一笔的决定（`nv` 仍是输出 ✓，与 §2.1 的"只写 LLR"不同 ✗）**：
+读调用方发现 —— **本树 PUSCH 的默认 SINR 方法就是 `post_equalization`** ✓
+（`du_low_config.h` 默认值 ✓，腿的 cell config 也没改 ✓），
+而它**在 host 上归约 `state.nv`** ✓，结果进 `stats.sinr_dB` ✓ ⇒ 上行链路自适应 ✓。
+⇒ 融合版若**只写 LLR** ✓，则要么**在默认配置下永远跑不到** ✗，要么**报出 inf 的 SINR** ✗（比慢更糟 ✓）。
+**决定** ✓：融合 kernel **写 `nv`**（4 B/RE ✓），**不写 `eq`**（8 B/RE ✗）。
+融合省下的 24 B/RE（eq 写 8 + eq 读 8 + nv 读 4 + 第二次 dispatch ✓）里留下 4 B/RE ✓
+—— **判据要考的"重排计算/访存"部分没被削弱** ✓；"不要 nv"是一个**后续 A/B** ✓（要连 SINR 方法一起改 ✓）。
+**EVM 仍与融合不兼容** ✓（它读 `eq` 8 B/RE ✗）：EVM 只在 `pusch_sinr_calc_method: evm` 或 debug 日志级别下开 ✓，
+**腿里是关的** ✓ ⇒ 调用方以 `evm_calc == nullptr` 为门 ✓，并在日志里点名 ✓。
+
+**★★ 发现的第二个缺陷（上一会话留下的 ✗，靠读出来 ✓）**：
+`ocudu_lane_fused.metal` 里 `eq_max_run_symbols = 32` ✗，而 `ocudu_equalizer.metal` 与 C++ 侧都是 **14** ✓。
+strides 块是**按字节原样传的** ⇒ 表长不同 ⇒ **`y_starts` 从错的偏移读** ✗
+—— **不是编译错误，是静默的错 RE** ✗（正是本工作流反复记录的那类形状 ✓）。**已修** ✓ 并在 kernel 里写明"必须一致" ✓。
+
+**离线怎么跑的（语料是 QPSK ✗ ⇒ 需要一步显式操作 ✓）**：
+1. `ul_chain_replay` 的 27 个 capture **全是 QPSK** ✗（`grep modulation= doc_chinese/work_tmp/corpus/*.txt` ✓），
+   而融合 kernel 只做 16QAM ✓ ⇒ 直接跑时**路线被正确地拒绝** ✓（好证据：门是有效的 ✓）；
+2. 因此造一份**同网格、标注为 16QAM** 的语料 ✓（`/tmp/q16c/`，`sed 's/^modulation=QPSK$/modulation=16QAM/'` ✓）
+   —— 判据是**两条路线在同一输入上是否同一件事** ✓，**不是** CRC/解调正确性 ✓（那由腿判 ✓）；
+3. 工具默认**开 EVM** ✗（`ul_chain_replay.cpp` 里一直传 `create_evm_calculator_factory()` ✓）
+   ⇒ 加了 `OCUDU_UL_REPLAY_NO_EVM` ✓（**两侧都要带** ✓，它决定"哪条路线可达" ✓，不改任何一侧的算术 ✓）；
+4. `bash doc_chinese/phy_pipeline_gpu/wip/ab_dumps.sh "OCUDU_UL_REPLAY_NO_EVM=1" \
+   "OCUDU_UL_REPLAY_NO_EVM=1 OCUDU_LANE_FUSE_EQDEMOD=1" --metal "/tmp/q16c/*.bin"` ✓。
+
+**注意（不属本工作流、但会被看到 ✓）**：该工具在**退出时**偶发
+`system_error: mutex lock failed` 中止 ✓ —— 实测**对照臂也有** ✓（A 4/10、B 0/10 ✓，dump 已写完 ✓）
+⇒ **是既有的收尾竞态** ✗，不是融合引入的 ✓；`ab_dumps.sh` 的 `missing-dumps=0` 判据不受影响 ✓。
+
+### 2.11 ★ 下一步（待飞，2026-10-06 第 2 次末）：`mkf010` / `mkf011` 一对
+
+**前置** ✓（改代码后才需要重做 ✓，现在都已就绪 ✓）：`gnb` 已重编 ✓、metallib 已重生成且含 `lane_grid_to_llr` ✓、
+`build/hashes.h` 的指纹与 HEAD 一致且**在二进制里** ✓（`run_leg.sh` 会自己拒绝不一致的二进制 ✓）。
+
+用 `fly_leg.sh`（**它自带 protocol driver** ✓ —— 只跑 `run_leg.sh` 会丢 `.protocol.txt` ✗，`mkf-m0-base` 就是这么丢的 ✗）：
+
+```bash
+cd /Users/jiachengwang/dev/ocudu
+export LEG_CFG=$PWD/doc_chinese/macos_thread_priority/wip/gnb_pinned_mcs13.yml
+export LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs
+
+# 对照腿（默认形状 ✓，不带任何 EXTRA_KNOBS ✓）
+sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh mkf010-m1-fused-off dual quiet gpu
+
+# 臂腿（**一个变量** ✓：融合开 ✓）★ EXTRA_KNOBS 必须在 sudo -E 之后传入（env_reset 会抹掉前面的赋值 ✗）
+EXTRA_KNOBS="OCUDU_LANE_FUSE_EQDEMOD=1" \
+sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh mkf011-m1-fused-on dual quiet gpu
+
+# 判读（功能/结构为主 ✓；时延数字要引用时才过闸门 ✓）
+bash doc_chinese/macos_thread_priority/wip/ul_health.sh  mkf010-m1-fused-off
+bash doc_chinese/macos_thread_priority/wip/ul_health.sh  mkf011-m1-fused-on
+bash doc_chinese/macos_thread_priority/wip/dl_gate.sh    mkf011-m1-fused-on     # 参考项 ✓
+bash doc_chinese/macos_thread_priority/wip/pair_check.sh mkf010-m1-fused-off mkf011-m1-fused-on
+```
+
+**这对比 M0 基线多带了什么** ✓（**两条腿完全一样** ✓ ⇒ 仍是"一个变量" ✓）：
+`fly_leg.sh` 的标准仪表集（`OCUDU_SCHED_VERBOSE` 等 9 个 ✓）+ cell config **`gnb_pinned_mcs13.yml`** ✓
+—— **MCS 13 = 16QAM** ✓，正是融合 kernel 的范围 ✓（`mkf008/009` 用的也是它 ✓，且 `*.driver.log` 的命名证明
+前几条腿就是 `fly_leg.sh` 飞的 ✓）。业务：cue 时在 **CORE 侧**起
+`ping -i 0.1 -c 1800 <UE-IP>` ✓，腿末用 **Ctrl-C** 停 ✓。
+
+**判读要点** ✓（先看"路线真的生效了" ✓，再看数字 ✓）：
+1. 臂腿日志里应有 `PUSCH: FUSED equalization + demapping chain enabled (… 16QAM)` ✓
+   与 `[eq_impl] fused equalizer+demapper (lane_grid_to_llr): available` ✓
+   （metallib 是**运行时**从源码树加载的 ✓ ⇒ 后者是"这个库有没有融合 kernel"的唯一出处 ✓）；
+2. `[metal_stats] burst … dispatches` 应**每跳 3** ✓ 且 `(equalizer=… demapper=0 …)` ✓、
+   `eq_batch … sites(… y_fused=… y_batch=0)` ✓；
+3. 然后才是 `[ul_gpu_lane] busy` ✓ / `[ul_pipeline]` ✓ / CRC ✓（§2.3 的判据 ✓）。
+**若出现** `PUSCH: OCUDU_LANE_FUSE_EQDEMOD is set but the fused route is NOT taken (…)` ✓
+⇒ **括号里就是原因** ✓（多半是调制不是 16QAM ✗ ⇒ 说明 MCS 没按 MCS 13 跑 ✓）
+—— **不要**把它读成"融合无收益" ✗。
+
+### 2.12 未决项与重开条件（M1 期间 ✓）
+
+| 项 | 状态 | 重开条件 |
+|---|---|---|
+| **融合路线的收益判决** | **未判** ✗ | `mkf010`/`mkf011` 飞完 ✓ ⇒ 按 §2.3 写 memo ✓ |
+| "不要 `nv` 输出"的 A/B（省 4 B/RE ✓）| 未做 ✗ | 融合收益兑现之后 ✓；它要**同时**换 SINR 方法（`--pusch_sinr_calc_method=channel_estimator` ✓），所以是**两条腿一对** ✓ |
+| **EVM 与融合不兼容** ✓ | 已明确 ✗（EVM 读 `eq` ✗，腿里默认关 ✓）| 若要 `pusch_sinr_calc_method=evm` + 融合 ⇒ kernel 需再写 `eq`（8 B/RE ✗），届时按同一套加 ✓ |
+| 其它调制（QPSK/64QAM/256QAM）| **M1 不做** ✗ | 融合在 16QAM 上兑现收益之后 ✓（加分支照抄 demapper ✓）|
+| 多层的融合（2/4 层）| **M1 不做** ✗ | 同上 ✓（kernel 目前只有 `L==1` 分支 ✓）|
+| helper 抽取为共享头 ✓ | 未做 ✗（当前是**复制** ✓）| 融合被证明有价值之后 ✓（抽取会改写交付形状里的两个 kernel ⇒ 需要自己的 A/B ✓）|
+| M2（折 CE）/ M3（metallib 整合）| 未开始 ✓ | M1 出结论之后 ✓ |
+| 离线工具收尾竞态 ✗ | **既有** ✗（`ul_chain_replay` 退出时偶发 `mutex lock failed` ✓，**对照臂也有** ✓，dump 已写完 ✓）| 若它开始影响判读（`missing-dumps>0` ✗）⇒ 单开一条线查 ✓ |
+| 语料只有 QPSK ✗ | 已绕过 ✓（造了标注 16QAM 的同网格语料 ✓）| 若要有**真实** 16QAM 离线语料 ⇒ 需要一次空中 capture（`OCUDU_UL_DUMP` ✓ + MCS 13 ✓）✓ |
+
 ### 2.4 M1 的执行顺序（每步可停 ✓）
 
 1. **M1.0 读代码**（不飞腿 ✓）：把均衡与解调两段内核的**数学与绑定点逐条抄下来**（含 `mod` 的每种取值、
    `Qm`、权重的索引方式 ✓），写成一张对照表 ⇒ 这是融合 kernel 的规格说明 ✓；
 2. **M1.1 写 kernel**：逐行搬数学、x̂ 留寄存器 ✓；**先在单元测试/离线对拍上跑**（`ul_chain_replay` ✓），
    不是为了逐位一致 ✗，而是为了**确认它算的是同一件事** ✓；
-3. **M1.2 接路线 + 开关** ✓：跑一条腿确认 `dispatches` 4→3 ✓（结构证据 ✓）；
-4. **M1.3 判据腿**：`mkf010-…`（对照 = 今天 ✓）与 `mkf011-…`（臂 = 融合 ✓），iperf3、同配置 ✓；
+3. **M1.2 接路线 + 开关** ✓ **已完成**（2026-10-06 第 2 次 ✓，规格见 §2.10 ✓）：离线已确认 `dispatches` 4→3 ✓
+   （结构证据 ✓）与四个 dump 逐字节一致 ✓；
+4. **M1.3 判据腿**：`mkf010-…`（对照 = 今天 ✓）与 `mkf011-…`（臂 = 融合 ✓），同配置、一个变量 ✓
+   —— **命令与判读要点见 §2.11 ✓**；
 5. **M1.4 若 busy 不降** ✗：按序试三件（每件一个变量 ✓）——① 每线程处理 2 个 RE（提高 ILP ✓）；
    ② 权重/噪声放 threadgroup memory（同组共享 ✓）；③ LLR 写回分块（避免 uncoalesced ✗）——
    每件都沿用同一套判据 ✓。
@@ -531,9 +655,42 @@ leg_protocol_driver: REFUSING: no leg 'mkf-m0-base' started within 120 s
    `preflight_quiet.sh` 与 `dl_gate.sh` 都只是**参考项** ✓：结构/功能判据不受停顿影响，照用 ✓；
    只有**引用时延数字**时才需要闸门 PASS，否则照记并**标注"含停顿、不引用"** ✓。
 
+### 2026-10-06 · ★★ M1.1 接线完成 + 离线对拍（详细规格见 §2.10 ✓）
+
+**做了什么** ✓：`enqueue_fused`（引擎）+ `supports_fused_demapping`/`submit_fused`（接口与 Metal 后端）
++ **复合工厂转发** ✓ + 调用方路线选择 ✓；单元测试加 `[fused]` 回归 ✓；离线 A/B 跑通 ✓。
+
+**数字** ✓（都在本机离线复现 ✓，不是腿）：
+
+| 读数 | 对照（两步 ✓） | 融合（✓） |
+|---|---|---|
+| `[metal_stats] burst dispatches`/hop ✓ | **4**（eq 1 + demap 1 + ce 2 ✓）| **3**（ce 2 + 融合 1 ✓）|
+| `demod_batch dispatches` ✓ | 1 ✓ | **0** ✓（demapper 不被调用 ✓）|
+| `eq_batch sites(y_batch/y_fused)` ✓ | 1 / 0 ✓ | **0 / 1** ✓ |
+| 27 capture 的四个 dump ✓ | — | **逐字节相同 ✓**（0/0/0/0 ✓）|
+| 单元测试 `[fused]` ✓ | — | **LLR 与 nv 与两步路线逐位一致 ✓** |
+
+**三个"读出来"的结论** ✓（都不是跑出来的，跑了也只会看到"旋钮没效果" ✗）：
+1. **接线层是复合工厂** ✓（`channel_equalizer_metal_or_generic`）—— 接口方法不转发就落基类默认 ✗；
+2. **默认 SINR 方法 `post_equalization` 在 host 上读 `nv`** ✓ ⇒ 融合 kernel **保留 nv 输出** ✓（§2.10 ✓）；
+3. **上一会话的 kernel 里 strides 表长写错**（32 vs 14 ✗）⇒ 静默错 RE ✗，已修 ✓。
+
+**收敛的动作** ✓：`gnb` 全量重编 ✓、`ctest -R channel_equalizer_metal` **2/2 PASS** ✓、
+`probes_off_syntax_check.sh` **34 TU 全过** ✓、`xcrun metal -c` 融合 kernel **exit 0** ✓、
+metallib **35 479 B 且含 `lane_grid_to_llr`** ✓。
+
+**下一步** ✓：飞 **`mkf010`（对照）/ `mkf011`（臂）** ✓ —— 两条腿都是 MCS 13 = 16QAM ✓、
+`--regime=default` ✓、臂带 `OCUDU_LANE_FUSE_EQDEMOD=1` ✓（**一个变量** ✓），
+判据见 §2.3 ✓（**结构证据 4→3 是必然产物** ✓，`busy` 与 `[ul_pipeline]` 是报告制 ✓，红线 = CRC 同档 + `gaps=0` ✓）。
+
 ---
 
-## 6. 会话交接（需要时新建）
+## 6. 会话交接（**只在准备开新会话时**新建 ✗ 不是每段工作结束时）
+
+★ **时机**（用户 2026-10-06 明确 ✓）：`session_handoff_*.md` **只用于新会话交接时的现状快照** ✓；
+**同一条对话里继续干活时不要写它** ✗ —— 那一轮的结论、现状、下一步与未决项**全部写进本文** ✓
+（实作与数字进 §2.x 与 memo ✓、下一步进 §2.11 这类小节 ✓、未决项进 §2.12 这类表 ✓）。
+快照是**一次性**的 ✓：新会话开始后它会过时 ✓，所以它只承载"接手需要的最小充分集" ✓，不与活文档争内容 ✓。
 
 命名与结构照抄上一工作流 ✓：`session_handoff_<日期>-<序号>.md`，内容包含：
 ① 本会话做了什么（引用 memo 条目 ✓）；② **当前状态**（代码/开关/腿号/判据 ✓）；

@@ -1044,12 +1044,33 @@ int main(int argc, char** argv)
   check(demapper_factory, "demapper_factory");
   report("created demapper_factory");
 
+  // \name The EVM calculator, which this harness asks for by default.
+  ///
+  /// It is a HOST consumer of the equalizer's EQUALIZED SYMBOLS, so it is also the one thing that
+  /// decides whether the fused equalizer+demapper route (metal_kernel_fusion M1) is reachable here:
+  /// that route produces the soft bits where the equalized symbol is computed and never writes it
+  /// (see channel_equalizer::submit_fused()). The air legs do not run with EVM - it is off unless
+  /// `pusch_sinr_calc_method: evm` or the log level is debug - so a harness that always enabled it
+  /// could not A/B a route the radio does take, and would report "the knob did nothing" instead.
+  ///
+  /// OCUDU_UL_REPLAY_NO_EVM=1 drops the calculator. Both sides of an A/B must carry it: it changes
+  /// which route is REACHABLE, not the arithmetic of either one.
+  ///@{
+  static const bool replay_no_evm = (std::getenv("OCUDU_UL_REPLAY_NO_EVM") != nullptr);
+  std::shared_ptr<evm_calculator_factory> evm_factory = replay_no_evm ? nullptr : create_evm_calculator_factory();
+  if (!replay_no_evm) {
+    check(evm_factory, "evm_calculator_factory");
+  }
+  report(replay_no_evm ? "evm calculator DISABLED (OCUDU_UL_REPLAY_NO_EVM): the fused route is reachable"
+                       : "created evm_calculator_factory");
+  ///@}
+
   std::shared_ptr<pusch_demodulator_factory> demodulator_factory =
       create_pusch_demodulator_factory_sw(equalizer_factory,
                                           create_dft_transform_precoder_factory(create_dft_processor_factory_generic(),
                                                                                 MAX_NOF_PRBS),
                                           demapper_factory,
-                                          create_evm_calculator_factory(),
+                                          evm_factory,
                                           prg_factory,
                                           MAX_NOF_PRBS,
                                           true);

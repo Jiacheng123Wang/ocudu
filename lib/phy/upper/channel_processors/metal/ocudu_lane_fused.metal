@@ -70,7 +70,10 @@ static inline float qam16_23(float x, float rcp_noise)
 // ---- verbatim from ocudu_equalizer.metal -----------------------------------------------------------
 #define MAX_PORTS 8
 
-constant uint eq_max_run_symbols = 32; // must match the equalizer's table size
+// MUST match ocudu_equalizer.metal: the strides block is passed as raw bytes and its size is part of
+// its layout, so a different table length here reads y_starts from the wrong offset - not a compile
+// error, a silently wrong resource element. The C++ side asserts the same number (eq_strides_t).
+constant uint eq_max_run_symbols = 14; // MAX_NSYMB_PER_SLOT
 
 struct equalize_params {
     uint  nof_re;
@@ -123,6 +126,7 @@ kernel void lane_grid_to_llr(device const ushort2* h [[buffer(0)]],  // cbf16 [s
                              constant equalize_params&  p [[buffer(4)]],
                              constant equalize_strides& st [[buffer(5)]],
                              constant uint&      llr_stride [[buffer(6)]], // bytes between two OFDM symbols
+                             device float*       nv [[buffer(7)]], // [symbol][re] (single layer)
                              uint2               gid [[thread_position_in_grid]])
 {
     const uint re  = gid.x;
@@ -171,4 +175,17 @@ kernel void lane_grid_to_llr(device const ushort2* h [[buffer(0)]],  // cbf16 [s
     llrs[4 * re + 1] = quantize_llr(qam16_01(x_hat.y, rcp), 20.0f);
     llrs[4 * re + 2] = quantize_llr(qam16_23(x_hat.x, rcp), 20.0f);
     llrs[4 * re + 3] = quantize_llr(qam16_23(x_hat.y, rcp), 20.0f);
+
+    // The post-equalization noise variance of this resource element, written where the equalizer would
+    // have written it (nv[symbol * nv_stride + re], the single-layer layout of the batch kernel).
+    //
+    // WHY IT IS WRITTEN AT ALL, given that keeping it in registers is the point of the fusion: the
+    // PUSCH demodulator's DEFAULT SINR method (`pusch_sinr_calc_method: post_equalization`) reduces
+    // this array on the host after the group wait, and the value it reports feeds the uplink link
+    // adaptation. A route that only produced LLRs would have to either refuse that configuration -
+    // i.e. never run in the shipped one - or report an infinite SINR, which is worse than a slower
+    // hop. The store is 4 of the 24 bytes per resource element the fusion removes (the equalized
+    // symbol's write AND read, the noise variance's read, plus the second dispatch), so what the
+    // fusion is being judged on is untouched; an arm that drops it is a follow-up A/B, not a default.
+    nv[sym * st.nv_stride + re] = nvar;
 }
