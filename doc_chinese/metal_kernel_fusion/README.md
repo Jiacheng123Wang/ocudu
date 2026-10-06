@@ -22,6 +22,32 @@
 > 而**每跨一次模块边界 ~340 µs** ✗、融合 lane 的一次提交 host 要站 ~680 µs ✗、Metal 解码每次 3.5 ms ✗、
 > 设备占用率只有 **0.29 %** ✗。⇒ **减少边界比加快边界有效得多**，而"**融合成一条命令/一个 kernel**"就是这条功课的直接应用。
 
+## 腿的命名约定（用户 2026-10-06）：**单调递增序号 + 阶段 + 臂**
+
+```
+mkf<NNN>-<阶段><臂>            例如  mkf008-m0c-cpu / mkf009-m0c-metal
+     │      └ m0/m0b/m0c = 里程碑；cpu/metal/… = 这一跳动的变量
+     └ 本工作流的第 N 条腿（三位、从 001 起、只增不减 ✓）
+```
+**为什么**：腿是靠标签在几周后找回来的 ✓，而"阶段+臂"说不清**哪一条先飞** ✗ ⇒ 序号让标签同时是**记录里的位置** ✓。
+
+**已飞的 7 条沿用旧标签（不改名 —— 飞过的标签是证据 ✓），但计入序号** ✓：
+
+| 序号 | 标签 | 里程碑 / 变量 |
+|---|---|---|
+| mkf001 | `mkf-m0-base` | M0 基线（默认形状）|
+| mkf002 | `mkf-m0-abl-eq` | 消去 eq 内核本体 |
+| mkf003 | `mkf-m0-abl-demap` | 消去 demap 内核本体 |
+| mkf004 | `mkf-m0-abl-ce` | 消去 ce 内核本体 |
+| mkf005 | `mkf-m0b-event` | `OCUDU_CE_LANE_ORDER=event` |
+| mkf006 | `mkf-m0b-burst` | `OCUDU_CE_LANE_ORDER=burst` |
+| mkf007 | `mkf-m0c-dftmetal` | `--pusch_dft_type=metal`（腿作废 ✗）|
+| mkf008 | （待飞）| `--pusch_dft_type=cpu`（对照）|
+| mkf009 | （待飞）| `--pusch_dft_type=metal`（臂）|
+
+**下一个序号不用记** ✓：`bash wip/next_leg_label.sh <后缀>` ⇒ 直接给出完整标签 ✓
+（它从各工作流日志根里的腿日志自己数出来 ✓；只给数字就 `bash wip/next_leg_label.sh` ✓）。
+
 ## 目录约定（沿用前两条工作流 ✓）
 
 | 路径 | 放什么 |
