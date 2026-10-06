@@ -260,6 +260,48 @@ M0 基线（`gpu` 模式，`mode options: <none>` ✓）：
 ⇒ **这是一个需要用户裁决的范围问题** ✓，不是技术未知 ✓：验证它只需**一条腿**（`--pusch_dft_type metal` ✓，
 一个变量 ✓，直接量这 760 µs 的归属 ✓）。
 
+### 2026-10-06 · M0c（`--pusch_dft_type=metal`，一个变量）：**路线生效 ✓，但腿作废 ✗ ⇒ 跨度问题未答**
+
+**结构证据（唯一确凿的一件事 ✓✓）**：Metal DFT 路线**真的跑了** ✓
+```
+[phy_pipeline] dft radio inputs: 1773952 transform(s) went through the two submit routes:
+                the hand-over route carried 1525972 (86.0%), the plain route 247980; 0 wrap(s) staged a host copy
+```
+对照 base 腿是 **0 transforms** ✓ ⇒ 这个计数器就是**路线是否生效的判据** ✓（新工具，记入工具清单 ✓）。
+
+**✗ 腿作废**：健康 **DEGRADED**（CRC steady **72.8 %** ✗、retx **27222** ✗）、闸门 **STALL**（frontier 10.8 ms ✗、
+rx_wait max 9.98 ms ✗）⇒ 时延**不可引用** ✗。
+
+**指示性读数（含停顿，**不可引用** ✗）**：
+
+| | base（CPU DFT ✓）| M0c（Metal DFT）|
+|---|---|---|
+| `[ul_gpu_pipeline]` median | **1242.8** | **1446** ✗（+203）|
+| lane residency | 481.9 | **723.7** ✗（+242）|
+| lane busy | 479.6 | 539.3 ✗ |
+| lane gap | 29.7 | **182.4** ✗（+153）|
+| host: entry→commit | 83.2 | 100.8 ✗ |
+
+⇒ 方向与"Metal DFT 会把前端 760 µs 收回来"**相反** ✗（residency 反而涨 ✓ —— 因为 hand-over 路线把 DFT 的块
+**交给 lane**，于是它的工作进了 lane 的窗口 ✓）—— **但这**不能定论 ✗：停顿与退化本身就会抬高一切读数 ✗✓。
+
+**✗ 两个候选原因，一条腿分不开**：
+(a) **Metal DFT 路线的数值/行为让链路退化** ✗（它曾是 2026-09-30 之前的**默认** ✓ ⇒ 本来能用 ✓，
+但此后一直没被使用 ✗ ⇒ 回归是可能的 ✓）；
+(b) **恰好赶上坏链路** ✗（本环境的腿近来普遍不干净 ✓）。
+★ 注意 CRC 是 **steady 72.8 %**（中段 80 % 窗口 ✓）⇒ **不是单次停顿的产物** ✗✓，但**是"路线"还是"链路"仍分不开** ✗。
+
+**⇒ 下一对（M0c-pair，背靠背、一个变量）** ✓：
+```bash
+# 对照：CPU DFT（= 今天的默认）
+EXTRA_KNOBS="--expert_phy.pusch_dft_type=cpu"   →  mkf-m0c-cpu
+# 臂：Metal DFT
+EXTRA_KNOBS="--expert_phy.pusch_dft_type=metal" →  mkf-m0c-metal
+```
+**预登记**：① 若 Metal 腿**再次**稳态 CRC 明显低于对照 ⇒ **是路线** ✗ ⇒ 停止把 DFT 纳入视野 ✓
+（并把它作为一条"Metal DFT 回归"的发现交给上游 ✓）；② 若两腿 CRC 同档 ⇒ 这次是**链路** ✗ ⇒
+再看跨度（`[ul_gpu_pipeline]` 是否 < 1242 ✓）来回答"那 760 µs 归谁" ✓。
+
 ### 2026-10-06 · 工具坑（已修 ✓）：新工作流的日志根对旧读者不可见
 
 `mkf-m0-base` 飞完后驱动报：
