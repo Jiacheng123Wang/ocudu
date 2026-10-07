@@ -60,57 +60,117 @@ huggingface.co 及多数厂商域名均不可达，全部返回 "resolves to a n
 
 ---
 
-## 2. ★ 路线 D（dApp）在 Apple Silicon 上不可用 ⇒ 内联是唯一路线
+## 2. ★★ dApp 前作：必须分清"预算"与"实测"（v1.0 勘误）
 
-| 事实 | 结论 |
-|---|---|
-| OCUDU dApp 平台声明后端为 **"CPU (x86, ARM) 或 CUDA"**——**没有 Metal / ANE / CoreML 后端** | 路线 D **今天在 Apple Silicon 上不存在** |
-| dApp 接缝**不在本 checkout**（没有 `lib/phy/upper/dapp`）；平台是独立预览仓库 `gitlab.com/ocudu/work_groups/wg2_ai_ran` | 若要走 dApp，**Metal 后端是我们自己要拥有的扩展**，不是现成能力 |
+> ⚠ **勘误**：本备忘 v0.9（中期版）把 dApp 论文里的 **"≤500 µs 占用"** 当成了"某个
+> neural-receiver dApp 的实测占用"。**这是错的。** 获得 `curl` 直读原文的能力后
+> （`web_fetch` 被封，但 shell 的 `curl` 可用）已核对：**500 µs 是该用例的"预算/截止期"**，
+> 实测值是另一组数字。以下全部为**直读原文**【已核实原文】。
 
-⇒ 主规划 §1.2 的结论**由"偏好"升级为"被迫"**：**走内联 `submit_fused`**。
-这反而是好消息——它避免了把每槽 1.47 MB 进 / 4.4 MB 出的搬运重新加回一条以
-"零主机↔设备数据穿越"为核心成就的 lane（`phy_pipeline_crossings.h`）。
+### 2.1 他们具体建了什么、测了什么
 
-### 2.1 ★ 采纳它的三个时序契约（Class A / B / C）作为我们的规格
+论文 *The OCUDU dApp Platform*（arXiv 2609.07843，O'Shea / Pennybacker / Kharchenko，2026-09-07）：
 
-| 类 | 定义 | 预算 | 我们适用吗 |
-|---|---|---|---|
-| **Class A** | **驻留在 GPU 接收链上**（零拷贝设备张量） | **估计 100 µs / 完成 150 µs** | ★ **这就是我们的目标类**：AI detector 必须驻留在接收链上、零拷贝 |
-| Class B | 在调度器准入的 100 µs 截止期内 | 直接调用 **0.29 µs P50 / 5.2 µs P99.9**（空口在跑） | 若走 dApp 才是这一类 |
-| Class C | 永不阻塞的观察者 | — | 不适用 |
+- 平台 + SDK + 零硬件 quickstart，**BSD-3-Clause-Clear**，是 **OCUDU AI-RAN Working Group 2 的
+  preview release**；原文写明是 *"ahead of **upstreaming into** the OCUDU mainline"*。
+- **后端声明**：*"a package declares a **CPU (x86, ARM) or CUDA** backend … the SDK ships every
+  reference in both variants"* ⇒ **没有 Metal / ANE / CoreML 后端**。
+- **Class A（驻留内联 L1）契约**——神经接收机是旗舰应用：
 
-★ 把 "Class A" 写进 G5 的判据，等于直接采用一个**已被行业实测过的口径**，
-而不是自己另立一套（本仓库吃过"自创口径导致数字不可比"的亏）。
+  | 项 | 原文 |
+  |---|---|
+  | 输入 | *"GPU-resident slot grid (**complex BF16**), DM-RS pilot tensor, compact data-RE indices, typed PUSCH and DM-RS metadata"* |
+  | 输出 | *"channel estimates plus noise; equalized symbols plus post-equalization noise; **FP16 soft bits before descrambling**"* |
+  | 预算 | *"**100 µs for estimation, 150 µs to completion** for the deeper two"* |
+  | 执行 | *"in the DU process, enqueued on the PUSCH lane's own **CUDA stream**"* |
+  | 失败处理 | *"the **conventional stage runs in the same invocation**. Late completion: the result is used, an incident is recorded, and **eight in a row open the lane breaker** so later grants take the conventional path"* |
+  | 权重管理 | 两个预分配设备权重 bank + 单次原子交换切换，"no allocation on the hot path" |
+
+  ★★ **这张契约表独立验证了我们的接口设计**：输入是 **BF16 网格 + DM-RS 导频张量**，
+  输出是 **解扰前的软比特**——与 `memo_01` §3 冻结的"**模型输出加扰域 LLR、解扰保持经典**"
+  **完全一致**。两个独立团队在同一接缝上收敛到同一契约，可当作我们契约的外部背书。
+  ★ 同时它给 **R9（逐槽信任/回滚）一个具体工程范例**：经典路径在同一次调用里兜底、
+  **连续 8 次迟到才打开 lane breaker**、权重双 bank 原子切换。
+
+- **实测部署**：*"On a GB10 gNB with attached handsets, dApps of all three classes,
+  **including an out-of-tree neural equalizer, ran together on a live cell without a single fallback**"*。
+  且该神经均衡器**不在 SDK 里**：*"a package built out of source tree, against the public SDK alone,
+  **by a separate team**"*。
+
+论文 *Real-Time dApps for AI-RAN*（arXiv 2609.07805，同作者）：
+
+| 行 | "字节 / 预算"（**预算，非实测**） | 驻留/有界（in-process ABI）列的**实测** |
+|---|---|---|
+| **A-03 neural receiver to LLRs** | *"**1.47 MB in, up to 4.4 MB out per slot; 500 µs occupancy**"* | ★ *"Feasible at the live shape: **81.6 µs / 112 µs P50 / P99.9 (meas.)**, 92.5 / 105.1 µs runtime checkpoint; **273-PRB kernels not yet qualified**"* |
+| **A-02 neural equalizer** | *"68.5 KB in (live); same-invocation consumption"* | ★ *"Feasible: **45–52 µs P50**; **260,000+ invocations on air, 0 fallbacks**"* |
+| B-01 scheduler intents | *"4.2 KB in, 2.3 KB out; 100 µs to commit"* | *"direct call **0.288 µs P99.9 quiet, 5.22 µs with the DU on the air**, 20,000 validated calls (meas.)"* |
+
+### 2.2 修正后的四条关键认识
+
+1. ★ **"live shape" = 51 PRB、两个接收端口**（原文：*"the released testbed shape (**51 PRB, two
+   receive ports**)"*）——**几乎就是我们的形态**（我们实测 25–51 PRB、1 端口，`memo_04` §2）。
+   所以 **81.6 µs P50 / 112 µs P99.9** 是**可直接与我们的 667.4 µs eqdem 对比的实测数字**，
+   远比"500 µs 预算"有用。
+2. **273 PRB 的 kernel "尚未 qualified"** ⇒ 更大的包络还没验，**不能假设线性外推**。
+3. **0.288 / 5.22 µs 是 Class B 的调度器直接调用**，**不是**神经接收机的接口开销——
+   引用时不要张冠李戴（v0.9 中期版正是这么写的，已改）。
+4. ★★ **外部 dApp 框架对神经接收机是 "Inexpressible"（不可表达）**，理由与速度无关：
+   *"an indication carries data outward, and **nothing brings a channel estimate, an equalized tensor,
+   or an LLR tensor back into the PUSCH chain of the same slot**"*——39 个用例里 **13 个 Class A 行中
+   有 11 个**在两种外部框架下都不可表达。D2H 导出 1.47 MB **仅传输就 73.5 µs**（"before inference"）。
 
 ---
 
-## 3. G5 的实测对标基线（全部为**已核实片段**）
+## 3. 路线决策与 G5 基线（修正后）
 
-| 指标 | 数值 | 出处 |
+### 3.1 内联是唯一正确路线（论据升级）
+
+| 事实 | 后果 |
+|---|---|
+| dApp 后端只有 **CPU (x86, ARM) 或 CUDA**，无 Metal/ANE/CoreML | 路线 D **今天在 Apple Silicon 上不存在** |
+| 接缝**不在本 checkout**（无 `lib/phy/upper/dapp`），是独立预览仓库 | 走 dApp 需要我们自己拥有一个 Metal 后端 |
+| ★ **更根本**：外部 dApp 对神经接收机 **Inexpressible**——没有把 LLR 张量送回同一槽的回路 | **即使有 Metal 后端，外部 dApp 路线在结构上也是错的** |
+
+⇒ 结论不变（**走内联 `submit_fused`**），但论据从"CUDA 专有"升级为"**结构上不可表达**"。
+这同时避免了把每槽 MB 级搬运重新加回一条以"零主机↔设备数据穿越"为核心成就的 lane。
+★ 并且现在有了**同类实现的实测对照**：同一个接缝上，别人做到 **81.6/112 µs**（51 PRB/2 端口）。
+
+### 3.2 G5 的对标基线（修正后，全部为实测或预算且已标明）
+
+| 基线 | 数值 | 性质 |
 |---|---|---|
-| neural-receiver→LLR 的**槽占用** | **≤ 500 µs** | arXiv [2609.07805](https://arxiv.org/pdf/2609.07805v1.pdf) |
-| 每槽数据体量 | **1.47 MB 进 / 最多 4.4 MB 出** | 同上 |
-| 接口（Class B 直接调用） | **0.29 µs P99.9（静默）/ 5.2 µs（空口在跑）** | arXiv [2609.07843](https://arxiv.org/pdf/2609.07843v1.pdf) |
-| 接收机 kernels（NVIDIA GB10） | **82 µs P50 / 112 µs P99.9** | 同上 |
-| 网格拷贝（273 PRB 4 端口） | **50–100 µs / 槽** | 同上 |
+| 我们的现网 eqdem | **667.4 µs**（mkf033 中位） | 实测（本仓库） |
+| ★ 同类内联神经接收机→LLR | **81.6 µs P50 / 112 µs P99.9**（51 PRB / 2 端口） | 实测（GB10） |
+| 同类内联**神经均衡器** | **45–52 µs P50**，26 万+ 次空口调用、**0 fallback** | 实测（GB10） |
+| Class A 生产预算 | 估计 **100 µs** / 完成 **150 µs** | 契约（非实测） |
+| A-03 用例预算 | 1.47 MB 进 / ≤4.4 MB 出 / 槽；**500 µs 占用** | **预算（非实测）** |
+| Class B 调度器直接调用 | 0.288 µs P99.9 静默 / 5.22 µs 空口 | 实测（GB10），**与本工作流无关** |
+| 现网 SCF FAPI 类接口 | *见 2609.07805 §V* | — |
 
-★ 两个对照点：
-1. 我们的现网 eqdem 是 **667.4 µs**（mkf033 中位）——比前作的 500 µs 占用**还高 33%**。
-2. 前作的 273 PRB / 4 端口是**我们（51 PRB / 1 端口）的 ~21 倍体量**，
-   它的 82 µs kernel 时间不能直接当我们的预算——**必须实测**。
+★ 三条纪律：① **不要把预算当实测引用**；② **不要把 Class B 调度器的数字当成神经接收机的数字**；
+③ 81.6/112 µs 是**别家硬件 + 别家包络**，对我们**只能是目标，不是预期**。
 
-### 3.1 最接近的合规性前作
+### 3.3 最接近的合规性前作
 
 *Design of a Standard-Compliant Real-Time Neural Receiver for 5G NR*（IEEE Xplore 11140048；
-[NVIDIA Research](https://research.nvidia.com/publication/2024-09_design-standard-compliant-real-time-neural-receiver-5g-nr)）
-——把学习型接收机塞进**符合 NR 规范**的链条，是"合规性"轴上最接近的前作。
+[NVIDIA Research](https://research.nvidia.com/publication/2024-09_design-standard-compliant-real-time-neural-receiver-5g-nr)）。
 
 空口神经接收机试验台（USRP + OAI）：[NI/Ettus gNB 侧](https://github.com/EttusResearch/ni-5g-oai-neural-receiver-testbed-ran)、
 [UE 侧](https://github.com/EttusResearch/ni-5g-oai-neural-receiver-testbed-ran-ue)、
-[Ettus KB](https://kb.ettus.com/index.php?title=5G_OAI_Neural_Receiver_Testbed_with_USRP_X410&oldid=6235)
-——与本工作流的形态最接近的公开试验台。
+[Ettus KB](https://kb.ettus.com/index.php?title=5G_OAI_Neural_Receiver_Testbed_with_USRP_X410&oldid=6235)。
 
----
+### 3.4 "是否 upstream 已有此项工作"（回答用户提问）
+
+| 问题 | 事实 |
+|---|---|
+| 我们的 checkout 里有 dApp 代码吗？ | **没有**（全仓 `find` 无 `*dapp*`；本仓库 remote 是用户自己的 GitHub/GitLab fork） |
+| dApp 平台在哪？ | **OCUDU 的独立预览仓库**（AI-RAN WG2）：平台 + SDK + quickstart |
+| 进 OCUDU mainline 了吗？ | **没有**——原文 "ahead of **upstreaming into** the OCUDU mainline" |
+| 我们能直接用吗？ | **不能**：① 不在我们的树里；② 后端只有 CPU(x86/ARM) 与 CUDA，**Apple Silicon 无路径**；③ 绑在 NVIDIA 的接收链与 **CUDA stream** 上 |
+
+⇒ 一句话：**OCUDU 生态里确实已经有"内联神经接收机 → LLR"的真实工作与实测数据，
+但它在主线之外、独立仓库、且 CUDA 专有。** 对我们而言它是
+**前作 + 对标基线 + 契约背书**，不是可复用的代码。
 
 ## 4. ★ LLR 专属结论（直接决定主规划 §1 的契约与 §3.3 的校准）
 
@@ -190,12 +250,127 @@ huggingface.co 及多数厂商域名均不可达，全部返回 "resolves to a n
 带真实 LDPC 译码器在环、并给出诚实的校准与错误平台数字**。
 **贡献在于这个组合，而不是模型架构本身。**
 
-## 7. 仍未能核实（引用前必须复核）
+## 7. 核实状态（v1.0 更新：多数已从原文直读）
 
-- ANE 两篇论文的 PDF 原文（只有索引片段 + 独立新闻源佐证）；M5 Pro 的 70 µs 地板尤其要复核。
-- dApp 论文的完整正文（GB10 的 82 µs/112 µs 等数字来自并行调研线的转述，与已核实片段自洽但未直接读到）。
-- SoftBank "+30% 5G 吞吐"、R&S+Nokia、T-Mobile/Ericsson 等**厂商数字的测量条件**（只核实了标题存在）。
-- LINE A/B 各论文的具体损失函数与数字（`survey/` 中已逐条标注【未核实原文】）。
+调研代理发现 **`web_fetch` 被 DNS 封锁、但 shell 的 `curl` 可用**，随后**大部分结论改为直读原文**
+（arXiv HTML/PDF、Apple DocC JSON API、coremltools 文档、3GPP/ETSI PDF）。
+因此 v0.9 中期版里"未能核实"的条目，绝大多数**已经升级为【已核实原文】**——
+包括 ANE 的两篇论文、dApp 两篇论文、DEFINED 的图注数字。
+
+**仍然只能标为未核实/需注意的**：
+
+| 条目 | 状态 |
+|---|---|
+| ANE 的 **M5 Pro ≈70 µs 地板** | 论文为直读，但该数字本身带条件（固定形状、预热）；**我们自己的 M4 Pro 上必须实测** |
+| **NVIDIA GB10 的 81.6/112 µs、45–52 µs** | 直读原文；但**是别家硬件 + 别家包络**（51 PRB/2 端口），对我们**只能是目标** |
+| 厂商数字（SoftBank +30%、R&S+Nokia、T-Mobile/Ericsson） | 仅核实标题存在，**测量条件未核实** |
+| `survey/` 中各论文标注【unverified】的个别数字 | 见各文件自己的 "could not verify" 清单 |
+
+★ **引用纪律**：凡进入对外材料（论文/报告/PPT）的数字，**必须回到 `survey/` 里对应的原文证据行**，
+不得直接引用本备忘的转述。
+
+## 7bis. 最终调研（7 条线全部完成）新增的**决策级**结论
+
+> 以下来自调研代理的最终交付（全部 7 条线 + 综合），原始文件见 `survey/`。
+> ★ 其中多条**改变了主规划的默认值**，已在主规划 v1.3 中落实。
+
+### A. ★★ Apple Silicon 的现状：唯一一个"神经接收机在 Apple 硬件上"的数字，是灾难性的
+
+- **文献里没有任何神经接收机（乃至任何无线 PHY 接收机）跑在 Apple Silicon 上。**
+- 唯一一个 Apple 硬件上的神经接收机时延：**M3 Ultra，CPU 模式，1.23 M 参数 DeepRx 前向
+  = 72.10 ms/slot**，+9.12 ms LDPC = **81.23 ms 全链**，对照 **1 ms 时隙预算**；
+  同模型在 RTX 6000 上前向 **24.10 ms**。
+- ★ **"72 ms → 1 ms"这个差距，正是 Metal/CoreML 实现要回答的问题，而没有人发表过它能不能关掉。**
+  这是本工作流**最锋利的开放性陈述**（比"没人做过"更具体）。
+
+### B. ★ ANE 的四条硬约束（v1.2 只知道 dispatch 地板，现在知道更多）
+
+1. **Core ML 没有"只用 ANE"的模式**，也**没有运行时 API 告诉你哪个单元跑了**；
+   `MLComputePlan` 只是离线估算。
+2. ★ **自定义 Metal kernel 不能跑在 ANE 常驻图里**（custom layer 只能 CPU/GPU）。
+   ⇒ 主规划里"Metal 主路径 + ANE 单阶段卸载"**不能是同一个图内混合**，必须是两个独立阶段。
+3. **`EnumeratedShapes`（≤128）是 ANE 认可的形状路径**；无界 `RangeDim` 会被拒。
+4. 设备特化缓存**以 `mlmodelc` 路径为键**。
+
+⇒ 加上 §1 的地板（M1 0.23 ms / M5 Pro ≈70 µs）与工作集悬崖（2 MB / 4.72 MB），
+**ANE 唯一可行的形态**是：**每个时隙一个融合的、固定形状的、预热的程序**。
+
+### C. ★ fp16 的约束是"量程"而不是"尾数"
+
+- 朴素 fp16 SAR 流水线**全是 NaN**，因为中间量达到 **5e6 ≫ 65504**；用 **1/N 块浮点缩放**才修好
+  （arXiv 2605.28451）。
+- ★ **没有任何人发表过 LLR 的"精度-性能"曲线。**
+- ⇒ 工程结论：**LLR 头必须有显式 clamp/tanh，绝不能接近 65504**。
+  这正好接上主规划 §3.3 的标度校准——两者是同一件事的两面。
+
+### D. ★ 量化指导（可直接写进 G3 判据）
+
+| 位宽 | 代价 |
+|---|---|
+| **8-bit** | **基本免费**（与 FP32 差 0.05 dB 以内） |
+| INT4 | **损失 3.3–3.7 dB，并跌破 LS-LMMSE 基线** |
+| FP4 (E2M1) | 可用 |
+
+### E. ★ 损失函数：文献里**没有**"对真值 LLR 做 MSE"的做法
+
+实际观察到的损失：**逐比特 BCE（对编码比特）**为主；soft-BCE（其梯度等价于到 MAP 后验的 KL）；
+符号后验交叉熵（CMDNet）；Donsker-Varadhan 互信息下界（Fritschek）；可达速率类目标。
+★ **"bit-wise MSE against true LLRs" 一个实例都没找到。**
+
+⇒ 主规划 §3.2 的损失优先级**据此调整**：**BCE 为唯一主损失**，
+"LLR 回归/KL"**降级为消融项**（而不是与 BCE 并列的主候选）。
+
+### F. ★ 评价指标：**必须用真实 LDPC 译码器之后的 coded BLER**
+
+- ★ **互信息（MI）不能预测 BLER**：一个接收机可以有近最优的 MI 却仍落在错误平台上
+  （arXiv 2606.29345）。
+- ⇒ 主规划 G2/G3/G6 的判据**以 coded BLER 为唯一主指标**，BER/MI 仅作诊断。
+
+### G. ★★ 负面证据（比 §5 更硬，必须在 P0/G 门禁里正面处理）
+
+1. **ETH Zurich 2026（arXiv 2609.04004）**：标准合规 5G NR 试验台 + 商用 UE，
+   decoder-in-the-loop 的 DUIDD 从**站点特化微调**只得到 **0.004 绝对 BLER** 的改善；
+   而 **"站点特化 LMMSE + 经典 IDD"是所有被测接收机里错误率最低的**。
+2. **Calibration-drift（arXiv 2605.26157）16 个场景**：**3/16 增益 1.0–2.0 dB；10/16 打平（±0.2 dB）；
+   QPSK 反而差 ~2 dB**（标定不佳，训练以 16QAM 为主）；64QAM 在该参考模型里是**架构性失败**；
+   **DMRS AddPos=2（分布外）从 4 dB 起静默地钉在 100% BLER**；
+   "自信地判错"的比特比例**平台在 ~7%**，这给任何"有界 LLR 残差修正"设了上限。
+3. ★★ **朴素回滚会失败**：在 500 Hz Doppler 下**经典接收机崩溃而神经接收机能工作**
+   —— 所以"AI 不行就回退经典"是错的。他们的解法是**逐时隙"神经+经典并行仲裁"**，
+   代价 **<5% 时延**。
+4. **Nokia OTA（arXiv 2408.04182）**：LOS 训练的 DeepRx 模型
+   *"failed the over-the-air tests despite converging well during training"*；
+   **宽随机化胜过参数匹配**（0–30 m/s 训练的模型打败了按实际步行速度训练的模型）。
+5. **训练不稳定性**：只最小化最终损失 "leads to poor performance"，需要对所有展开迭代做多损失；
+   min-sum 的折点处需要次梯度。
+
+### H. 其它可引用的实测锚点
+
+- 标准合规实时 NRX：**A100 + TensorRT < 1 ms，代价是 SNR 损失 < 0.7 dB**（arXiv 2409.02912）。
+- Sionna Research Kit 实时 TensorRT 接收机：**Jetson AGX Orin + 商用 UE**（arXiv 2505.15848）。
+- **DGX Spark 上 LDPC：CPU = 0.71 ms/码字 @20 迭代（超过 0.5 ms 时隙），GPU 只占时隙的 6–24%**
+  （arXiv 2602.04652）★ 这条对我们的"整链预算"很重要：**译码器本身就可能吃掉整个时隙**。
+- **尾延迟才是门禁**：HELENA 在 RTX PRO 4500 上 P99 = 0.0595 ms，但
+  **在 10 W Jetson Orin NX 上没有任何模型满足 P99 预算**。
+- DeepRx MIMO（2010.16283）在 ~14 dB 出现 *"a BER floor"*；★ 但**没有人把神经接收机的 BLER
+  画到 1e-5 做错误平台研究**。
+
+### I. 最终"文献空白"清单（我们的贡献点）
+
+★ **完全不存在**：Apple Silicon 上的任何神经接收机；任何 PHY 负载的 ANE 时延；
+活跃 RAN 里 transformer 检测器的 **P99/P99.9 每时隙时延分布**；
+任何 **LLR-vs-精度**曲线；任何针对学习型接收机 LLR 的**温度缩放/有原则的标定**；
+任何 **1e-5 的神经接收机 BLER 错误平台**研究；任何 AI PHY 在宿主机器上的**功耗/热**数据。
+
+⇒ 本工作流的贡献**不是新架构**，而是上面这一串的组合。与 §6 的判断一致。
+
+### J. 由证据直接推出的五条"立即行动"（已并入主规划）
+
+1. **P99.9 尾延迟**作为验收门禁（不是均值）。
+2. **Metal/MPS 为引擎**，ANE 只作**一个**融合阶段（且不能与 Metal 自定义 kernel 同图）。
+3. 内部规格直接采用 **OCUDU Class A/B/C 契约**。
+4. **每个时隙都保持经典接收机武装**——但注意 §G.3：回滚判据不能是"AI 差就退回经典"。
+5. LLR 头**从第一天就带显式 clamp 与逐调制标度**。
 
 ## 8. 参考（主线）
 

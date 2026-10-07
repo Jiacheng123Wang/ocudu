@@ -11,9 +11,15 @@
 | `survey_line_a_part1_detnet_oampnet.md` | LINE A 的 Part 1 细化稿（DetNet / OAMP-Net 逐条证据） |
 | `survey_line_b_llr_output_receivers.md` | ★ LINE B：**输出 LLR** 的神经接收机与编码感知损失、**LLR 校准/失配/裁剪**、LLR→译码器接口（**修订稿**，方法学标注更严：凡未取证的一律标注，不从记忆补全） |
 | `survey_line_c_decoder_in_the_loop.md` | LINE C：**译码器在环**（端到端、外信息、以及文献报告的问题） |
+| `survey_line_a_b_output_types_llr_calibration_deep_dive.md` | 输出类型与 LLR 标定的深挖 |
+| `survey_line_a_part2.md` | LINE A 的 Part 2 |
+| `survey_line_b2_neural_receivers.md` | LINE B 续：神经接收机实现 |
+| `survey_line6_complexity_latency_energy.md` | **复杂度 / 时延 / 能耗**的真实硬件实测汇总 |
+| `survey_line7_apple_silicon_inference.md` | ★ **Apple Silicon 推理**：CoreML/ANE/Metal 的能力与限制、fp16 量程问题、尾延迟 |
 
-> ⚠ 调研仍在进行中，**同一主题可能有修订稿**（文件名相同即已覆盖为最新稿）。
-> 全部调研线结束后会做一次统一整理；若某条结论与 `memo_03` 冲突，**以 `memo_03` 为准**。
+> ✅ 调研的 7 条线**已全部完成**（2026-10-07）。若某条结论与 `memo_03` 冲突，**以 `memo_03` 为准**。
+> 重要：调研代理用 **`curl`**（而非被封的 `web_fetch`）直读了大量原文，所以这些文件里的
+> 证据等级比早期草稿高得多；请以每份文件自己的 "could not verify" 清单为准。
 
 ## 阅读这些文件时必须知道的三件事
 

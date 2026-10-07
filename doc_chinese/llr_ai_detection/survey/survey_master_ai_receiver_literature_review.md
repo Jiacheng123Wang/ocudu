@@ -32,20 +32,26 @@ evidence and explicit "could not verify" lists):
 
 ### 1.1 The DEFINED line (arXiv 2503.16594) — full characterisation
 
-**Identity and versions.** The paper the team asked about has been renamed between versions:
+**Identity and versions** (verified against the arXiv abstract page itself via `curl`, not via search):
 
-| Version | Title | Where |
-|---|---|---|
-| v1 (originally posted) | *Decision Feedback In-Context Learning for Wireless Symbol Detection* | [arXiv 2503.16594](https://arxiv.org/abs/2503.16594) |
-| v2 (current) | *Transformer-based Wireless Symbol Detection Over Fading Channels* | [arXiv HTML v2](https://arxiv.org/html/2503.16594v2), [ar5iv](https://ar5iv.labs.arxiv.org/html/2503.16594) |
-| Preliminary version | *Decision Feedback In-Context Symbol Detection Over Block-Fading Channels* — **IEEE ICC 2025** | [IEEE Xplore 11161684](https://ieeexplore.ieee.org/document/11161684), [arXiv 2411.07600](https://ar5iv.labs.arxiv.org/html/2411.07600), [NSF PAR manuscript](https://par.nsf.gov//servlets/purl/10631659), [SpectrumX](https://www.spectrumx.org/publication/decision-feedback-in-context-symbol-detection-over-block-fading-channels/) |
+| Item | Value |
+|---|---|
+| arXiv ID | **2503.16594** ([abs](https://arxiv.org/abs/2503.16594), [HTML v2](https://arxiv.org/html/2503.16594v2), [ar5iv](https://ar5iv.labs.arxiv.org/html/2503.16594)) |
+| Canonical title | ***Decision Feedback In-Context Learning for Wireless Symbol Detection*** |
+| Authors | **Li Fan, Wei Shen, Jing Yang, Cong Shen** — Charles L. Brown Dept. of ECE, **University of Virginia** |
+| Version history | v1 submitted **20 Mar 2025**; v2 (latest) **7 Jul 2025** |
+| Preliminary version | *Decision Feedback In-Context Symbol Detection Over Block-Fading Channels* — **IEEE ICC 2025** ([IEEE Xplore 11161684](https://ieeexplore.ieee.org/document/11161684), [arXiv 2411.07600](https://ar5iv.labs.arxiv.org/html/2411.07600), [NSF PAR manuscript](https://par.nsf.gov//servlets/purl/10631659), [SpectrumX](https://www.spectrumx.org/publication/decision-feedback-in-context-symbol-detection-over-block-fading-channels/)) |
+| Code | `https://github.com/ShenGroup/DEFINED` (stated in the paper's own footnote) |
 
-Authors are at the Charles L. Brown Department of ECE, **University of Virginia** (Li Fan, Jing Yang,
-Cong Shen and one further co-author — the paper's footnote lists four UVA e-mail addresses:
-`lf2by, zyy5hb, yangjing, cong@virginia.edu`). **Simulation code is public:
-`https://github.com/ShenGroup/DEFINED`.** The venue/author/code facts are verified from the paper's own
-indexed footnote text; the v1→v2 title change and the ICC 2025 preliminary-version mapping are verified
-from the ADS/Semantic Scholar/NSF-PAR records.
+> **Title-alias warning.** Several secondary indexes — Semantic Scholar, ar5iv, and some arXiv HTML
+> mirrors — list this same arXiv ID under the title ***Transformer-based Wireless Symbol Detection Over
+> Fading Channels***, which is the name used in the workstream brief. The arXiv abstract page and the
+> fetched v2 full text both carry the DEFINED title, and the version list shows only v1 and v2. Treat the
+> two names as the same work, and cite the DEFINED title.
+
+*(Meta-note: the earlier draft of this section had the v1/v2 titles the other way round, inferred from
+search snippets. The full-text fetch corrected it — a good illustration of why the team should not trust
+title metadata from aggregators.)*
 
 > **Evidence upgrade:** after a sibling survey found that `curl` works from the sandbox shell even though
 > `web_fetch` is DNS-sinkholed, the whole v2 HTML was retrieved and read. Everything in §1.1 below is now
@@ -411,47 +417,118 @@ provider for exactly the interface this workstream needs.
   ([Sionna 5G NR PUSCH Neural Receiver](https://nvlabs.github.io/sionna/v1.2.2/rk/tutorials/neural_receiver/),
   [NVIDIA pyAerial PUSCH neural receiver notebook](https://docs.nvidia.com/aerial/cuda-accelerated-ran/24-3/content/notebooks/example_neural_receiver.html)).
 
-**Reported practical problems (grouped).**
+**Reported practical problems (grouped).** *This section was upgraded after the LINE C survey retrieved
+full texts via `curl`: the quotes below are read from the papers, and the earlier "gap" claims have been
+replaced with actual results.*
 
-1. **LLR scale mismatch / overconfidence.** Treated as an expected engineering hazard rather than a
-   surprise: see the min-sum-vs-sum-product discussion under "Mismatched Demapping" in the
-   [Sionna BICM tutorial](https://nvlabs.github.io/sionna/phy/tutorials/Bit_Interleaved_Coded_Modulation.html),
-   the [quantizer-gain mismatch stress tests](https://www.zenodo.org/records/21103382/files/Phi_Mismatch_Stress_Tests.pdf),
-   and the fixed-point LLRNet treatment in [ASP-DAC 2024](https://www.aspdac.com/aspdac2024/archive/pdf/9B-3.pdf).
-2. **Calibration drift and the need for a fallback.** The most important recent paper for this workstream:
-   ***When Does a Neural Receiver Help? Calibration-Drift Benchmarking and Detect-and-Rollback for 5G/6G
-   NR Uplink*** ([arXiv 2605.26157](https://arxiv.org/pdf/2605.26157), [scirate](https://scirate.com/arxiv/2605.26157),
-   [Semantic Scholar](https://www.semanticscholar.org/paper/2ac76e9257e6a1185d5aa28b9360781ee2461ca9)). It
-   benchmarks neural receivers on NR uplink, characterises **calibration drift**, and proposes a
-   detect-and-roll-back scheme; the indexed text reports *"The 60.5 % mean rollback rate (Table IV)
-   reflects that R5 trusts R1 on the majority of slots — slots on which R1 has collaps[ed]…"*
-   **[verified snippet]**. Read this as: *in practice a neural receiver is paired with a classical
-   receiver and a trust decision per slot.* That is a design requirement for the team's testbed, not a
-   detail.
-3. **Error floor / behaviour at low BLER.** I found **no** paper that clearly documents a neural-receiver
-   error floor at BLER 1e-5 with an LDPC decoder in the loop; the literature mostly plots BER/BLER down to
-   ~1e-3–1e-4. This is a **gap**, and it matters because an NR gNB operates at 10 % BLER targets with HARQ
-   and cares about residual error behaviour. **[gap claim — see §0]**
+1. **LLR scale mismatch / overconfidence — explicitly documented, with verbatim quotes.**
+   * *"Direct comparison of |L_R1| and |L_R3| is **not meaningful because the two LLR streams have different
+     magnitude scales by construction**; each stream is therefore normalized by its own median absolute
+     value."* — [arXiv 2605.26157](https://arxiv.org/pdf/2605.26157). The same paper notes the hazard for
+     *"any subsequent stage that relies on the LLR scale (such as the LDPC decoder's message scheduling)"*.
+   * *"the LLR magnitudes do in general not match the underlying probabilities… **Without additional LLR
+     correction … 'classical' mismatched demapping can lead to severe performance degradation in forward
+     error correction (FEC) decoding**."* — Wiesmayr et al., [arXiv 2409.02912](https://arxiv.org/abs/2409.02912).
+   * *"recurSIC produces **raw LLRs that are not explicitly scaled by the noise variance**"*, so the
+     clipping level `L_max` is set per channel model and per modulation order — empirically chosen values
+     span a **~20× range** (0.12 / 0.3 / 1.7 / 2.4) — and fallback bit-flip LLRs are scaled by `α = 0.2` and
+     clipped to `0.1·L_max` *"to **limit overconfident soft information**"* — Fesl & Capar,
+     [arXiv 2601.16586](https://arxiv.org/html/2601.16586v1).
+   * *"Conventionally trained DNN-based modules are known to produce **poorly calibrated, typically
+     overconfident, decisions**"*, and — importantly — end-to-end Bayesian calibration does **not** fix
+     internal modules: *"the soft estimates learned by the internal modules may still be overconfident."*
+     — Raviv, Park, Simeone, Shlezinger, [arXiv 2302.02436](https://arxiv.org/abs/2302.02436).
+   * Also relevant from the search-indexed layer: the Sionna BICM tutorial's section **"Mismatched Demapping
+     and the Advantages of Min-sum Decoding"** ([tutorial](https://nvlabs.github.io/sionna/phy/tutorials/Bit_Interleaved_Coded_Modulation.html)) —
+     fetched text confirms it analyses *"what happens for mismatched demapping, e.g., if the SNR is unknown
+     and show how min-sum decoding can have practical advantages in such cases."*
+2. **Calibration drift, and a per-slot fallback — the single most important paper for this testbed.**
+   ***When Does a Neural Receiver Help? Calibration-Drift Benchmarking and Detect-and-Rollback for 5G/6G NR
+   Uplink*** — Elnashar, [arXiv 2605.26157](https://arxiv.org/pdf/2605.26157) (May 2026). Configuration:
+   16 scenarios, LDPC in the loop, MathWorks DeepRx_2M (1.23 M parameters), 26 PRB SIMO 1×2, 3.5 GHz,
+   operating point = SNR at 10 % BLER. Results as measured:
+   * **3/16 scenarios gain 1.0–2.0 dB** (30 ns delay spread 14.2 → 12.3 dB; 100 ns 12.3 → 10.3 dB; 200 Hz
+     Doppler 12.5 → 11.6 dB);
+   * **10/16 are statistical ties** (within 0.2 dB of MMSE);
+   * **QPSK is ~2 dB worse** (0.4 dB vs 2.3 dB) because only 2 of 4 output channels are used and the model
+     was trained 16-QAM-dominant — *"the QPSK output, while functional, is **suboptimally calibrated**"*;
+   * **64-QAM is an architectural failure** in that model (4 output channels < 6 bits/symbol) — but this is a
+     property of the MathWorks reference model, not of DeepRx generally (original DeepRx uses 8 channels +
+     hierarchical bit masking and covers up to 256-QAM, [arXiv 2005.01494](https://arxiv.org/abs/2005.01494));
+   * **DMRS AddPos=2 is out-of-distribution: BLER floors at 100 % from 4 dB upward, silently** (normal LLR
+     magnitudes, no NaNs);
+   * a **confidently-wrong bit fraction plateaus at ≈7 %** at high SNR under a 4:1 LLR magnitude budget, so
+     no bounded additive LLR-residual correction can push BER below ~7 %;
+   * at 500 Hz Doppler the **conventional** receiver collapses (BLER ≈95 %) while the neural receiver works,
+     so a naive disagreement-based rollback fails there (60.5 % mean rollback rate → ≈0.61 BLER). **No single
+     scalar detector resolves both failure modes.**
+   * Their remedy is architectural: **run neural + conventional in parallel and arbitrate per slot before
+     decoding**; the detect-and-rollback path adds **<5 % latency** over the neural receiver alone.
+3. **Error floor — the gap is now closed with evidence, and the news is mixed.**
+   * DeepRx MIMO (Korpi, Honkala, Huttunen, Starck, **IEEE ICC 2021**,
+     [arXiv 2010.16283](https://arxiv.org/abs/2010.16283)): *"it can nearly match the uncoded BER of the
+     genie-aided LMMSE up to SNRs of 14 dB, **after which it seems to encounter a BER floor**"*, and the
+     conclusion flags *"the **error floor** of the proposed MIMO DeepRx, which hinders its performance at
+     very low bit error rates."*
+   * Counterexample for balance: [arXiv 2312.02601](https://arxiv.org/abs/2312.02601) reports a
+     *significantly lower* error floor for a neural receiver.
+   * Decoder-side state of the art: [arXiv 2405.13413](https://arxiv.org/abs/2405.13413) (IEEE JSAC 2025)
+     notes 6G xURLLC needs FER < 1e-9 while 5G-NR LDPC has an error floor. **But no paper deliberately plots
+     neural-receiver BLER down to 1e-5 as an error-floor study** — that specific measurement is still missing.
 4. **Constellation-order generalisation.** Recognised and studied in adjacent work:
    *Joint Demapping of QAM and APSK Constellations Using Machine Learning*
    ([IEEE 10908647](https://ieeexplore.ieee.org/document/10908647/references)), and studies of *"the impact
    of changing the modulation format on the NN equalizer's performance"*
-   ([IEEE 9523752](https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=9523752)) **[verified snippets]**.
-   In NR uplink the MCS/modulation order changes every few slots, so a detector that is only valid for one
-   QAM order is not deployable without re-selection logic.
+   ([IEEE 9523752](https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=9523752)). The literature's consensus
+   fix is **hierarchical bit masking with output width set to the maximum supported order** (DeepRx) or
+   **modulation-index input embeddings** (Sionna) — i.e. do not ship a single-order network.
 5. **SNR / channel-distribution generalisation and the simulation-to-field gap.**
-   * DEFINED's own Rayleigh-trained → Rician-tested study (see §1.1) **[verified]**.
-   * Sites-specific training for a real 5G NR system: ***On the Impact of Site-Specific Training for a
-     Real-World 5G NR System*** ([arXiv 2609.04004](https://scirate.com/arxiv/2609.04004),
-     [PDF](https://export.arxiv.org/pdf/2609.04004)) — a measured, real-system study (NVIDIA-sponsored)
-     of how much a neural receiver depends on the deployment site's channel statistics.
-   * *AirNet: Neural Network Transmission over the Air* ([ar5iv 2105.11166](https://ar5iv.labs.arxiv.org/html/2105.11166))
-     states the SNR-generalisation problem bluntly: *"how to train the network when we do not know the
-     channel SNR in advance"* **[verified snippet]**.
+   * **Counter-intuitive and important:** Luostari, Korpi, Honkala, Huttunen, **IEEE WCNC 2025**,
+     [arXiv 2408.04182](https://arxiv.org/abs/2408.04182) — Nokia SDR over-the-air study: DeepRx models
+     trained on **LOS models (TDL-D/E, CDL-D/E) "failed the over-the-air tests despite converging well
+     during training"**; models trained on a **randomly mixed TDL/CDL set performed best**, and a model
+     trained at simulated speeds of 0–30 m/s **beat** models trained at the actual walking speed.
+     Conclusion: **broad randomisation beats parameter matching.**
+   * SNR specialisation: *"a separate NN is trained for each SNR value as the trained NNs struggle to
+     generalize to other SNR values"* ([arXiv 1812.05929](https://arxiv.org/abs/1812.05929)); finetuning at
+     low SNR destroys high-SNR performance and produces a high error floor
+     ([arXiv 1707.03384](https://arxiv.org/abs/1707.03384)).
+   * **Measured disappointment for decoder-in-the-loop:** Wiesmayr, Baytekin, Dick, Studer,
+     *On the Impact of Site-Specific Training for a Real-World 5G NR System*,
+     [arXiv 2609.04004](https://arxiv.org/abs/2609.04004) (Sept 2026) — ETH Zurich standard-compliant 5G NR
+     testbed with COTS UEs, two campaigns >6 months apart. Their **DUIDD** receiver (deep-unfolded IDD,
+     30 tunable parameters, LDPC message-passing decoder in the loop) gained only **0.004 absolute dataset
+     BLER** from site-specific finetuning, versus roughly a one-third BLER reduction for the decoder-free
+     NRX. Worse for the "decoder in the loop" thesis: **site-specific LMMSE + classical iterative
+     detection/decoding had the lowest error rate of every receiver tested.** Putting the decoder in the
+     loop *reduced* what site adaptation could buy.
+   * **The one strong measured win for decoder-in-the-loop:** Cammerer, Aït Aoudia, Dörner, Stark, Hoydis,
+     ten Brink, *Trainable Communication Systems: Concepts and Prototype*, **IEEE TCOM 2020**,
+     [arXiv 1911.13055](https://arxiv.org/abs/1911.13055) — fully differentiable neural IDD (demapper +
+     802.11n LDPC BP decoder unfolded over **I = 40** iterations) trained end-to-end; over the air on two
+     USRP B210s at 2.35 GHz the learned demapper gains **0.6 dB over an AWGN-MAP demapper**, and
+     re-optimising the LDPC code on measured OTA EXIT curves adds **0.2 dB (m = 6) / 0.4 dB (m = 8)**.
+   * DEFINED's own Rayleigh-trained → Rician-tested study (see §1.1) — the ICL-side counterpart.
    * SoftBank's trial claims ~30 % throughput gain from a transformer AI-RAN architecture
      ([press release](https://www.softbank.jp/en/corp/news/press/sbkk/2025/20250821_02/)) — a rare
      *field* datapoint, but a vendor claim without published methodology. **[headline verified, evidence
      unverified]**
+6. **Training instability (solved, but non-trivially).**
+   * *"It was experimentally observed that **training the end-to-end system by minimizing [the final-output
+     loss] leads to poor performance**"* — the fix was a multi-loss that sums BCE at the demapper output
+     over **all 40 iterations** ([arXiv 1911.13055](https://arxiv.org/abs/1911.13055)).
+   * Vanishing gradients through unrolled decoders: iteration-by-iteration greedy training
+     ([arXiv 2102.03828](https://arxiv.org/abs/2102.03828)); block-wise schedules with tuned block sizes
+     (`Δ1 = 5`, `Δ2 = 10`; one-shot training leaves test FER stuck) ([arXiv 2405.13413](https://arxiv.org/abs/2405.13413)).
+   * Non-differentiable operations: min-sum check nodes have *"non-differentiable kinks"* → subgradient
+     descent ([arXiv 1706.07043](https://arxiv.org/abs/1706.07043)); Viterbi state-equality → surrogate
+     cross-entropy loss ([arXiv 2009.02591](https://arxiv.org/abs/2009.02591)).
+7. **Evaluation-metric warning.** *"MI alone does not fully predict BLER performance, as the latter is also
+   governed by the LDPC code and graph structure"*, and an unaugmented LMMSE can have MI only marginally
+   below an augmented receiver yet *"its BLER saturates at an error floor with no waterfall behavior"* —
+   Eger & Shlezinger, [arXiv 2606.29345](https://arxiv.org/html/2606.29345v1). Practical rule for the team:
+   **use coded BLER after the real LDPC decoder as the primary metric, never uncoded BER and never MI
+   alone** — this is also DeepRx's own stated proxy for LLR quality.
 
 ---
 
@@ -485,11 +562,37 @@ provider for exactly the interface this workstream needs.
 * **Real-time receiver on conventional hardware:** *Design and Real-Time Implementation of an Intelligent
   Wireless Receiver System* ([KCI](https://www.kci.go.kr/kciportal/ci/sereArticleSearch/ciSereArtiView.kci?sereArticleSearchBean.artiId=ART003304335)).
 
-**What is missing.** I found **no** paper that reports measured per-slot inference latency of a
-*transformer-based detector* inside a live 5G NR gNB — the closest are the dApp interface papers (which
-measure the plumbing, not the model) and NVIDIA's standard-compliant receiver. Complexity claims in the
-transformer-receiver literature are overwhelmingly **analytical or desktop-GPU** rather than
-deadline-verified in a running RAN.
+**Measured-on-hardware results (LINE 6 survey; the numbers that actually matter).**
+
+| Work | Hardware | Reported result | Measured? |
+|---|---|---|---|
+| Wiesmayr/Cammerer/Hoydis et al., *Design of a Standard-Compliant Real-Time Neural Receiver for 5G NR* ([arXiv 2409.02912](https://arxiv.org/abs/2409.02912), [IEEE 11140048](https://ieeexplore.ieee.org/document/11140048)) | NVIDIA **A100**, TensorRT | **<1 ms** inference; MU-MIMO NRX with adaptive MCS and no re-training; the speed-up cost **<0.7 dB** SNR vs the non-real-time NRX; TensorRT source released | ✅ hardware. **Caveat: the abstract contains no parameter or FLOP count** |
+| Cammerer et al., *Sionna Research Kit* ([arXiv 2505.15848](https://arxiv.org/abs/2505.15848)) | **Jetson AGX Orin** | Real-time TensorRT neural receiver in a 5G NR network with **commercial UEs** | ✅ hardware (no latency figure in abstract) |
+| O'Shea, Pennybacker, Kharchenko, *Real-Time dApps for AI-RAN* ([arXiv 2609.07805](https://arxiv.org/pdf/2609.07805v1.pdf)) | NVIDIA GB10 (DGX Spark) | 39 AI-RAN use cases audited against NR timing; **>half cannot cross the observer boundary**; every carrier meets a **100 µs** control deadline on an idle host, **only in-process paths still do with the DU running**; neural-receiver dApp **1.47 MB in / up to 4.4 MB out per slot, ≤500 µs occupancy** | ✅ measured |
+| Same authors, *The OCUDU dApp Platform* ([arXiv 2609.07843](https://arxiv.org/pdf/2609.07843v1.pdf)) | GB10 gNB + attached handsets | Class A/B/C timing contracts; **an out-of-tree neural equalizer ran on a live cell with zero fallbacks**, 7–11 pp lower first-transmission BLER at MCS 11–15; Class B direct call 0.29 µs P99.9 quiet / 5.2 µs with cell on air; receiver kernels 82 µs P50 / 112 µs P99.9; Class A budgets 100 µs (estimation) + 150 µs (completion) | ✅ measured |
+| *Six Times to Spare* ([arXiv 2602.04652](https://arxiv.org/abs/2602.04652)) | DGX Spark Grace **CPU vs GB10 GPU** | LDPC decoding on the Grace CPU = **0.71 ms/codeword at 20 iterations — exceeds the 0.5 ms slot**; on the GPU **6–24 % of the slot**; ~6× speed-up; **+10–15 W** over GPU idle; the CPU version consumes ~10 Grace cores | ✅ measured — the cleanest TTI-budget calibration found |
+| HELENA, LEO-NTN receiver ([arXiv 2506.13408](https://arxiv.org/abs/2506.13408), [arXiv 2609.14735](https://arxiv.org/abs/2609.14735)) | RTX PRO 4500 vs **10 W Jetson Orin NX** | 0.175 ms vs 0.318 ms ViT baseline, **8× fewer parameters** (0.11 M vs 0.88 M); on the RTX PRO 4500 **0.0595 ms P99 (88.1 % under the 0.5 ms budget)**, but **on the Jetson Orin NX no model meets the P99 0.5 ms budget** | ✅ measured — the sharpest evidence that **tail latency, not mean, is the gate** |
+| *Computationally Efficient Neural Receivers via Axial Self-Attention* ([arXiv 2510.12941](https://arxiv.org/abs/2510.12941)) | — | Explicit complexity reduction **O((TF)²) → O(T²F + TF²)**; "a fraction of the parameters" vs CNN baselines; beats global attention/CNN/LS-LMMSE at 10 % BLER on CDL-C | ❌ simulated only |
+| FPGA/ASIC accelerator line | Zynq UltraScale+ / RFSoC / 28 nm / 12 nm | Massive-MIMO localization transformer accelerator **0.51–2.11 ms, 1961 pos/s**; SwiftChannel RFSoC **sub-ms, 24× speedup and >33× energy efficiency vs GPU**; DL channel estimation on Zynq **88–90 % lower execution time**; attention-CNN RF recognition **98 µs/frame**; 28 nm DL MIMO detector **5.76 Gb/s, 79.7 pJ/b**; 12 nm transformer accelerator **18.1 TFLOPS/W**; analog NN receiver **21.3 TOPS/W** | ✅ mostly measured |
+| Quantisation studies (all Yellapagada/Ollila/Costa) | — | PTQ: 8-bit per-channel ≈ no loss, 4-bit needs work. QAT: 4-bit and 8-bit match FP32 at 10 % BLER, **8× compression**. **FP microformats: 8-bit within 0.05 dB of FP32; INT4 loses 3.3–3.7 dB and falls *below* LS-LMMSE, while FP4 (E2M1) halves the loss to 1.3–1.4 dB and stays ~0.5 dB above LS-LMMSE even after 50 % pruning** | ❌ simulated — but the most actionable design rule found: **format matters more than bit-width; INT4 is the wrong choice, FP4 is viable** |
+
+**Two methodology warnings from this line.**
+
+* **AtlasRAN** ([arXiv 2603.14661](https://arxiv.org/abs/2603.14661)): a reported goodput collapse from 1→12
+  users turned out to be **harness time-scale dilation / I/O starvation, not decoder saturation**. Read
+  every "the receiver is the bottleneck" claim with that in mind.
+* **The only "low-cost transformer receiver" headline in this space is unquantified.** CHOOSE
+  ([arXiv 2506.21093](https://arxiv.org/abs/2506.21093)) claims 1–2 layer transformers match much deeper
+  ones via latent CoT, but its abstract carries **no parameter count, no FLOPs, no latency, and no
+  hardware** — it is simulation-only with qualitative efficiency claims. Do not use it to justify a
+  hardware design without reading the full text.
+
+**What is missing.** I found **no** paper that reports a measured per-slot inference latency distribution
+(P99/P99.9) of a *transformer-based detector* inside a live 5G NR gNB. The decisive pattern in this line:
+**every paper with a real measured in-budget per-slot latency uses a CNN or a compact attention/conv
+hybrid, not a full transformer**; where transformers *are* measured, the task is localization or channel
+estimation rather than detection. Complexity claims in the transformer-receiver literature remain
+overwhelmingly **analytical or desktop-GPU**.
 
 ---
 
@@ -527,6 +630,17 @@ be measured locally.
 **Apple-Silicon numbers that decide the architecture** (gathered by a parallel survey pass; the two ANE
 papers below were corroborated by independent search hits — [HF papers entry for ANEForge](https://huggingface.co/papers/2606.17090), [press coverage of the ANE study](https://iphonesoft.fr/2026/08/06/neural-engine-apple-plus-secrets-etude-universitaire) — but I did **not** read the PDFs myself):
 
+* **The only published Apple-Silicon timing for a neural receiver that exists** — and it is CPU-only:
+  [arXiv 2605.26157](https://arxiv.org/pdf/2605.26157) measures a **Mac Studio M3 Ultra in CPU mode**
+  running a 1.23 M-parameter DeepRx_2M forward pass at **72.10 ms/slot**, with LDPC decoding at 9.12 ms and
+  the full neural pipeline at **81.23 ms/slot**. On an RTX 6000 GPU the same forward pass is 24.10 ms. The
+  paper states this is *"still well above the 1 ms 5G slot budget at 15 kHz SCS"*. Compute ratio: ~1.5
+  GFLOPs/slot at 26 PRB ≈ **~30× the FLOPs of MMSE equalisation**. For contrast, NVIDIA reached **<1 ms on
+  an A100 with TensorRT** ([arXiv 2409.02912](https://arxiv.org/abs/2409.02912)) — but only after shrinking
+  the model, at a cost of **<0.7 dB** SNR. **No CoreML/Metal/ANE number for any neural receiver exists
+  publicly.** This is simultaneously the biggest opportunity and the biggest unmeasured risk in the plan:
+  the gap between 72 ms (CPU, unoptimised) and a slot budget is exactly what a Metal/CoreML implementation
+  would have to close, and nobody has published whether it can.
 * **ANE dispatch floor ≈ 0.23 ms per evaluation on M1** — even a ReLU, a 64-element linear layer or a
   small conv costs 0.23–0.26 ms; on an **M5 Pro the floor is ≈ 70 μs** (≈ 90 μs for a small fused
   program), per *Apple Neural Engine: Architecture, Programming, and Performance* (Bryngelson, Jun 2026,
@@ -549,11 +663,58 @@ papers below were corroborated by independent search hits — [HF papers entry f
   P99.9 with the cell on air; 68 KB ring publish 2.3 μs P99.9; **receiver kernels 82 μs P50 / 112 μs
   P99.9**; grid copy 50–100 μs per slot for 273 PRB 4-port. **[Reported to me by the parallel survey pass
   from the paper text; internally consistent with the snippets I verified myself.]**
-* **Timing context for a real gNB:** NR numerology gives a 1 ms subframe / 0.5 ms slot at 15/30 kHz SCS
-  and ~71.4 μs per OFDM symbol at 15 kHz; with HARQ feedback the practical per-slot compute budget is a
-  fraction of a slot. The OCUDU dApp measurements above (≤500 μs occupancy for a neural-receiver-to-LLR
-  function) are the concrete published instance of that budget being exercised. **[The generic numerology
-  numbers are standard knowledge; the dApp occupancy figure is verified.]**
+* **Timing context for a real gNB (3GPP-quoted by the LINE 7 survey):** [TS 38.211](https://www.etsi.org/deliver/etsi_ts/138200_138299/138211/) Table 4.2-1 numerologies — 10 ms frame, 1 ms subframe, 14 symbols/slot, slot = **1 ms (15 kHz), 0.5 ms (30 kHz), 0.25 ms (60 kHz), 0.125 ms (120 kHz)**; OFDM symbol ≈71.4 µs at 15 kHz, ≈35.7 µs at 30 kHz. [TR 38.913](https://www.etsi.org/deliver/etsi_tr/138900_138999/138913/) URLLC = 0.5 ms UL + 0.5 ms DL; [TS 38.213](https://www.etsi.org/deliver/etsi_ts/138200_138299/138213/) §9.2.3 makes `k1` a **slot count** via `dl-DataToUL-ACK` (k1 = 4 at 30 kHz = 2 ms). **Working budget used by the team's own analysis: 500 µs slot − ~100–150 µs conventional processing tail = ~100–150 µs neural allowance ≈ 7–11 µs/symbol amortised — versus a 70–230 µs ANE dispatch floor.** Hence: *one fused ANE dispatch per slot is the only viable ANE shape*; the practical engine is Metal/MPS.
+* **Core ML API facts that constrain the design** (LINE 7 survey, verified against Apple's DocC JSON API and `apple.github.io/coremltools`):
+  `MLComputeUnits = {cpuOnly, cpuAndGPU, cpuAndNeuralEngine, all}`; Apple's own wording is *"Use `all` to
+  allow the OS to select the best processing unit (including the neural engine, if available)"* — there is
+  **no ANE-only mode and no runtime API reporting which unit actually ran**. `MLComputePlan` gives per-op
+  `deviceUsage()` and `estimatedCost()`, but these are **offline estimates, not guarantees**. Device
+  specialisation ("may take a few seconds or even minutes") is **cached keyed to the `mlmodelc` path** —
+  move the folder and you pay again (Apple's fix: `CompiledMLModel` / a pinned `.mlmodelc`).
+  `EnumeratedShapes` (≤128) is the ANE-blessed flexible-shape path; an unbounded `RangeDim` is **rejected**
+  for `mlprogram`; `reshapeFrequency = .infrequent` unlocks ANE for flexible shapes on iOS 17.4+. Apple's
+  FAQ warns conversion can **silently** *"introduce dynamic layers not supported on the NE, such as
+  converting a static reshape to a fully dynamic reshape"*, and Apple's own Stable-Diffusion conversion
+  **pads to a static 77-token envelope** — i.e. pad-and-waste is the sanctioned pattern.
+* **Custom Metal kernels and ANE residency are mutually exclusive inside one Core ML model.**
+  `MLCustomLayer`/custom ops provide **CPU + GPU implementations only**, and Apple advises using them
+  "only as a last resort". Hand-written Metal and ANE cannot coexist in one graph — this is a hard
+  architectural fork for the team.
+* **Core ML/ANE performance numbers** (LINE 7 survey; sources tagged in
+  `docs/line7_apple_silicon_inference_survey_english.md`): whisper.cpp encoder, **ANE vs CoreML vs Metal** —
+  tiny 5.7 / 11.2 / 7.3 ms, base 12.2 / 23.0 / 13.5 ms, small 40.3 / 77.2 / 40.9 ms, medium
+  117.6 / 236 / 120 ms (direct ANE ≈2× CoreML at every size). Apple-published: **DistilBERT seq-128 batch-1
+  at 3.47 ms / 0.454 W on an iPhone 13 ANE**; W8A8 int8 vs fp16 ResNet-50 on A17 Pro **1.38 → 0.77 ms**.
+  Cross-runtime on an M2 Ultra: **MLX ≈230 > MLC ≈190 > llama.cpp ≈150 > Ollama 20–40 > PyTorch MPS ≈7–9
+  tok/s**. Same-harness Qwen3.5-0.8B on M4 Max: **MLX TTFT 43 ms vs CoreML/ANE 526 ms** (and ANE model load
+  13.2 s vs MLX 1.03 s). 100 % ANE residency *is* achievable (op audits 1058/1058 etc.) at ~30 ms/token.
+* **The fp16 range problem, which is the top numerical risk for LLRs.** On the ANE, fp16 activations
+  outside roughly [1e-4, 1e2] lose precision and tiny values flush to zero; the binding constraint is
+  **exponent range, not mantissa**. Apple-Silicon fp16 FFT achieves 56–61 dB SQNR, but a naïve fp16 SAR
+  pipeline produced **only NaNs** because intermediates reached 5e6 ≫ 65504 — fixed by a `1/N`
+  block-floating-point scale ([arXiv 2605.28451](https://export.arxiv.org/pdf/2605.28451)). Apple GPUs have
+  **no native FP8 datapath** (FP8 collapses to 14–20 dB SQNR). **Implication for this workstream
+  (unpublished anywhere): clamp/tanh the LLR head inside the model, never let values approach 65504, and
+  consider a block-floating-point output scale — and note that nobody has published an LLR-vs-precision
+  curve.**
+* **Jitter, not mean, decides feasibility — with a hard datapoint.** The DAFx-26 study of real-time neural
+  inference inside a real audio callback on an M3 (2.67 ms deadline) found an isolated-RTF-0.211 model hit
+  **p99 = 158.5 % of its deadline with 355 xruns**, while an AOT-compiled **BNNSGraph** held **p99 = 14.3 %
+  with 0 xruns** under maximum contention; BNNSGraph is RealtimeSanitizer-verified (no allocation, locks or
+  syscalls) and supports dynamic shapes without recompiling. **Practical rule: budget and report P99.9 per
+  slot, not the mean.**
+* **Apple-Silicon SDR prior art is qualitative, not quantitative.** srsRAN 4G v25.10 + GNU Radio 3.10.12 +
+  UHD 4.10 do run natively on macOS ARM64 (MacBook Pro M4 + LibreSDR B220) — but only after 21 libosmocore
+  patches, a 1150-line SCTP shim and 23 srsRAN patches, and **no latency or sample-rate numbers were
+  published**. There is nothing for a 5G gNB on macOS. Metal real-time DSP has one strong datapoint: a
+  kernel-fused SAR single-dispatch of 4096² in **370 ms on an M1 GPU (22× over the multi-dispatch
+  version)**, at 138 GFLOPS fp32 / 306 GFLOPS fp16 radix-8 FFT — **fusion is where the speed-up lives**.
+* **The single closest published wireless-on-ANE item** is a GNSS interference-classification paper
+  (ION GNSS+ 2026 / IEEE 11683190) — paywalled during this survey, no number extracted. Everything else in
+  "wireless on Apple Silicon" is empty.
+* **Open uncertainty that could date this section:** several 2026 community sources describe a **"Core AI"**
+  framework as Core ML's successor, but this could not be confirmed against any Apple page. If real, the
+  Core ML specifics above may be one generation stale.
 
 ---
 
@@ -561,47 +722,69 @@ papers below were corroborated by independent search hits — [HF papers entry f
 
 ### 8.1 What is established
 
-1. **In-context / prompt-based detection works in simulation and is a real research line with theory
-   behind it.** Pilot pairs as a prompt, adaptation without weight updates, and provable
+1. **In-context / prompt-based detection is a real research line with theory behind it, and DEFINED is now
+   fully characterised.** Pilot pairs as a prompt, adaptation without weight updates, and provable
    in-context estimation are all published ([DEFINED/ICC 2025](https://ieeexplore.ieee.org/document/11161684),
    [ICL gradient-free adaptation](https://ar5iv.labs.arxiv.org/html/2506.15176),
-   [AISTATS 2025](https://proceedings.mlr.press/v258/kunde25a.html)). DEFINED's specific contribution is
-   the *decision-feedback* twist plus a pilot-matched comparison (`MMSE-P_k`) and a Rayleigh→Rician
-   robustness study.
+   [AISTATS 2025](https://proceedings.mlr.press/v258/kunde25a.html)). DEFINED itself: a 0.42 M-parameter
+   8-layer GPT-2-style classifier, receiver-only, backward compatible with the existing frame structure,
+   using previously detected symbols as pseudo-pilot pairs; **+19.3 % to +62.6 % SER reduction from decision
+   feedback across BPSK→64QAM, +50.2 % in 2×2 MIMO, +67.8 % under Rayleigh→Rician mismatch**, and 2 pilots
+   landing within ~10 % relative SER of a 30-pilot MMSE estimator. **But it is simulation-only, has no
+   latency measurement, and its decision-feedback mechanism has no theory yet** (the authors say so).
 2. **Model-based DL detectors are mature but symbol-oriented.** DetNet/OAMP-Net2/MMNet output symbols or
-   hard bits; the LLR-native variant of this family is IDD-style unfolding (DUIDD).
-3. **LLR mismatch is a known, named problem with known mitigations** (min-sum robustness, clipping,
-   quantiser gain, fixed-point LLR estimation, learned decoders), and there is at least one paper whose
-   subject is precisely quantiser-gain mismatch stress testing.
-4. **Inline-PHY AI with a real LLR interface has been engineered and measured** on an open 5G stack —
-   byte volumes per slot and ≤500 μs occupancy — and the transport overhead can be microseconds.
-   Standard-compliant real-time neural receivers exist.
-5. **Real-system evidence of benefit exists** (SoftBank ~30 % AI-RAN throughput; T-Mobile/Ericsson;
-   Nokia Bell Labs + R&S 6G receiver demo), but it is vendor-reported rather than peer-reviewed.
+   hard bits; the LLR-native variant of this family is IDD-style unfolding (DUIDD, deep-unfolded SISO SIC,
+   soft-output deep LAS). Note the corrected citations: DetNet's 2017 venue is **SPAWC**, not SPL, and there
+   is **no** "one-bit DetNet, TSP 2019" paper.
+3. **LLR mismatch is a named, documented problem with concrete practice norms** — median normalisation,
+   per-modulation clipping levels spanning ~20×, scaling factors, learned LLR quantisation, LLR refinement
+   modules, and min-sum's documented robustness advantage. What does **not** exist is a principled
+   calibration method (temperature scaling or equivalent) for a learned receiver's LLRs.
+4. **Inline-PHY AI with a real LLR interface has been engineered and measured on an open 5G stack**: byte
+   volumes per slot (1.47 MB in / up to 4.4 MB out), ≤500 µs occupancy, and an **out-of-tree neural
+   equalizer running on a live GB10 cell with zero fallbacks**. Standard-compliant real-time neural receivers
+   exist (<1 ms on an A100 via TensorRT, at a <0.7 dB SNR cost).
+5. **Decoder-in-the-loop has exactly one strong measured win** (Cammerer et al., IEEE TCOM 2020: 0.6 dB over
+   an AWGN-MAP demapper over the air) **and one measured disappointment** (ETH Zurich 2026: 0.004 absolute
+   BLER from site-specific finetuning, with a classical LMMSE + IDD chain achieving the lowest error rate of
+   every receiver tested).
+6. **Quantisation guidance is actionable**: 8-bit is essentially free (within 0.05 dB of FP32), INT4 is
+   *worse than useless* (−3.3 to −3.7 dB, below LS-LMMSE), and **FP4 (E2M1) is the viable 4-bit format**.
 
 ### 8.2 What is contested
 
-1. **Whether learned/ICL receivers beat a well-tuned conventional chain once the decoder is in the loop
-   and the comparison is honest.** Most gains are at uncoded BER or at 1e-2–1e-3 BLER; the 2026
-   calibration-drift paper shows a neural receiver needing a per-slot trust/rollback decision against a
-   classical receiver, with a 60.5 % mean rollback rate — hardly a clean win.
-2. **Generalisation:** across SNR, modulation order, channel model, and *site*. The literature shows both
-   encouraging robustness (DEFINED's Rayleigh→Rician) and clear fragility (site-specific training).
-3. **Transformers vs CNNs/GNNs at equal latency budget.** Transformer-receiver papers argue
-   parallelisability; almost none normalise against a CNN baseline *at the same measured latency*.
-4. **Where the LLRs should be produced** — inside the model (bit-wise loss, calibration burden) or derived
-   analytically from a symbol estimate (Gaussian assumption, cleaner calibration).
+1. **Whether learned/ICL receivers beat a well-tuned conventional chain once the decoder is in the loop.**
+   Most gains are reported at uncoded BER or 1e-2–1e-3 BLER. The 2026 calibration-drift study found only
+   3/16 scenarios with a 1–2 dB gain, 10/16 statistical ties, QPSK ~2 dB *worse*, and a silently broken
+   out-of-distribution DMRS configuration; the ETH study found the classical chain winning outright. The
+   mainstream deployment answer is now **a per-slot trust/rollback decision against a conventional
+   receiver**, not a wholesale replacement.
+2. **Generalisation**, across SNR, modulation order, channel model and site — with genuinely conflicting
+   evidence: DEFINED is robust to Rayleigh→Rician, Nokia found LOS-trained models *failing over the air*
+   while broad randomisation won, and ETH found site-specific finetuning barely helped a decoder-in-the-loop
+   receiver.
+3. **Transformers vs CNNs/compact hybrids at equal *measured* latency.** Every in-budget measured PHY
+   receiver found uses a CNN or attention/conv hybrid; transformer-receiver papers argue parallelisability
+   but almost never normalise against a CNN baseline at the same measured latency.
+4. **Where the LLRs should be produced** — inside the model (bit-wise losses, calibration burden) or derived
+   analytically from a symbol estimate. Related: **MI/uncoded-BER are not valid proxies** — BLER can sit at
+   an error floor while MI is nearly optimal.
+5. **Whether the ≤1 ms-class real-time results transfer to a full-band, high-order-MIMO NR carrier** — they
+   were obtained at small bandwidths (e.g. 26 PRB), with model shrinkage, and in some cases on a single
+   architecture.
 
 ### 8.3 Where the literature is thin — and what this workstream would add
 
 | Gap | Status in literature | What a hardware-measured OCUDU + Apple-Silicon implementation contributes |
 |---|---|---|
-| Apple-Silicon GPU/ANE for real-time PHY | **Nothing found** | First measured per-slot latency/throughput for a grid→LLR model on CoreML/Metal in a live gNB; includes the fp16-range problem for LLRs |
-| Per-slot latency of a *transformer* detector in a running RAN | Only analytical/desktop-GPU; dApp papers measure plumbing, not the model | A deadline-verified number (occupancy per slot) and the latency/accuracy Pareto for shallow vs deep, prompt vs non-prompt |
-| ICL/prompt detectors under a **fixed** NR DMRS budget | DEFINED-style work assumes a pilot-fed prompt; no standard-compliant study found | Evidence on whether prompt-based detection survives the DMRS density the standard actually grants |
-| LLR calibration + **decoder-in-the-loop BLER at 1e-5 / error floor** | Thin; most papers stop at 1e-3–1e-4 or report uncoded BER; **no** work found applying temperature scaling or a principled calibration procedure to a learned receiver's LLRs | Measured BLER/error-floor curves through the real NR LDPC decoder, plus a calibration/scaling study (temperature scaling, clipping limits, bit-width) with numbers |
-| Trust/fallback engineering (drift detection, rollback) | One 2026 paper (calibration drift + detect-and-rollback) | Independent reproduction on different hardware/model family; a deployable fallback design |
-| Energy/thermals of AI PHY on a workstation-class device | Nothing found | Power/thermal measurements — decisive for any "AI on the gNB host" argument |
+| Apple-Silicon GPU/ANE for real-time PHY | **Nothing.** The only published Apple timing for a neural receiver is **CPU-mode M3 Ultra at 72.1 ms/slot** (vs a 1 ms budget); no Metal/ANE/CoreML number exists for any wireless PHY workload, and the OCUDU dApp runtime is **CUDA-only** | First measured per-slot P99 latency/throughput for a grid→LLR model on Metal/CoreML in a live gNB, including the fp16-exponent-range behaviour of LLRs and the fused-kernel vs per-op gap |
+| Per-slot latency of a *transformer* detector in a running RAN | Only analytical/desktop-GPU, or CNN hybrids; dApp papers measure plumbing, not the model. No P99/P99.9 distributions anywhere | A deadline-verified **tail**-latency number (P99.9 occupancy per slot) and the latency/accuracy Pareto for shallow vs deep, prompt vs non-prompt |
+| ICL/prompt detectors under a **fixed** NR DMRS budget | DEFINED is pilot-fed by design and assumes the pilot set can be used as a prompt; no standard-compliant study found. Its 31-symbol block-fading frame is **not** an NR slot with HARQ | Evidence on whether prompt-based detection survives the DMRS density NR actually grants, with the real LDPC decoder behind it |
+| LLR calibration for learned receivers | **Genuine gap**: clipping/normalisation practice exists, but no temperature-scaling or principled calibration study, and no published **LLR-vs-precision** curve | A calibration study (temperature scaling, clipping limits, bit-width, fp16 vs fp32) with decoder-in-the-loop BLER numbers |
+| **Decoder-in-the-loop BLER at 1e-5 / error floors** | Partially closed: DeepRx MIMO documents a BER floor at ~14 dB, and a confidently-wrong fraction plateau of ~7 % bounds any bounded LLR correction — but nobody plots neural-receiver BLER to 1e-5 as an error-floor study | Measured BLER/error-floor curves through the real NR LDPC decoder at NR operating points, including HARQ |
+| Trust/fallback engineering (drift detection, rollback) | One 2026 paper (calibration drift + detect-and-rollback, <5 % added latency) | Independent reproduction on different hardware/model family; a deployable per-slot fallback design following the OCUDU Class-A contract |
+| Modulation/SNR generalisation under a real MCS schedule | DeepRx-style hierarchical bit masking and modulation embeddings exist; the failure modes are documented but not solved | Measured evidence across the actual MCS/modulation schedule a live cell uses, not a fixed-order benchmark |
+| Energy/thermals of AI PHY on a workstation-class device | Nothing found for PHY; GPU-idle-to-load delta (+10–15 W) is the only nearby datapoint | Power/thermal measurements — decisive for any "AI on the gNB host" argument |
 
 **The one-line pitch:** the literature already has (a) transformer/ICL detectors that work in simulation,
 (b) deep-unfolded detectors that talk to a decoder via extrinsic LLRs, and (c) a single measured
