@@ -20,28 +20,34 @@
 | — | `survey/` | **英文原始调研材料**（11 份，带逐条引用与来源等级），`memo_03` 是它们的中文综合 | ✅ |
 | — | `ref_paper/` | **参考论文原文 PDF（38 篇）**，文件名 = 论文标题；`README.md` 是按用途分组的索引 | ✅ |
 
-## 五句话结论（先读这个）
+## 六句话结论（先读这个）
 
-1. ★ **深度 3 才是标准形态,接缝要选对**:OCUDU dApp 把内联替换分成三个深度——
+1. ★★ **一个网络,深度 3,从一开始就这样做**。"深度 3"= 单个联合网络同时做
+   **信道估计 + 均衡 + 解映射**:输入是网格**及其几何**(DM-RS 位置张量、data-RE 索引、PUSCH 元数据),
+   一个共享 trunk 出多路头(主:**逐 RE 逐比特 LLR**;辅:后均衡噪声方差 + 信道估计与噪声)。
+   **不是** CE 网络 + EQ/DEM 网络两个级联——中间那层信道估计会成为有损瓶颈、断掉端到端梯度,
+   而且每多一个网络就多付一次 dispatch 地板(mkf023 一个边界 ≈6.5 µs;ANE 单次 dispatch 地板 70–230 µs)。
+   文献同形:DeepRx 是**单个**全卷积网络,Sionna 的 neural receiver 也是**一个**网络替换三步。
+   我们**已经有 AI CE 模块**,不存在"先做浅一层"的必要(memo 01 §1.4–§1.6,规划 §2.1)。
+2. ★ **接缝要选对**:OCUDU dApp 把内联替换分成三个深度——
    ①仅 CE(100 µs)②CE+均衡③**CE+均衡+解映射**(150 µs)。**我们的目标 = 深度 3**,
-   与 Sionna(*"substitutes channel estimation, equalization, and demapping"*)和 DeepRx
-   (*"the whole receiver pipeline from frequency domain signal stream to uncoded bits"*)同形。
-   `channel_equalizer::submit_fused()`(memo 01 v1.0 认定的接缝)**只是它的子集**——它吃的是
-   **已经算好的信道估计**。dApp 原文:*"no hook replaces equalization alone"*。
+   OCUDU dApp 把它列为 **depth 3**(预算 **150 µs**),并给出一句关键判断:
+   *"no hook replaces equalization alone"*。我早先认定的 `channel_equalizer::submit_fused()`
+   **只是它的子集**——它吃的是**已经算好的信道估计**。
    ⇒ 深度 3 的宿主是 `estimator.estimate()` + `demodulator.demodulate()` **两处的合并**;
    好消息是设备侧 `merged_hop` **已经**是深度 3 的形状(memo 01 §1.4–§1.6)。
    ★ 代价:深度 3 **继承 CE 的上报义务**(RSRP/EPRE/噪声/SNR/TA/CFO → CSI)——规划选定
    "net 附带输出信道估计与噪声,经典测量核跑在它上面"(memo 01 §1.5)。
-2. **输出必须是加扰域 LLR**，解扰保持经典；量化由既有的 `log_likelihood_ratio::quantize()` 一处完成，
+3. **输出必须是加扰域 LLR**，解扰保持经典；量化由既有的 `log_likelihood_ratio::quantize()` 一处完成，
    但**标度校准是独立步骤**（scaling + clipping 在文献里是标准做法），做不好会让 LDPC 直接崩掉
    （memo 01 §2、§3；memo 03 §4.2）。
-3. ★ **"AI detector 能提高精度"是待证伪的假设，不是前提**：实测我们的工作点是
+4. ★ **"AI detector 能提高精度"是待证伪的假设，不是前提**：实测我们的工作点是
    **10.7% 导频密度 / 15–25 dB / 宽分配 / SISO**，而参考论文报告最大收益的区间是**极少导频**。
    规划里的 **P0** 就是为裁决这件事设计的——**在写模型代码之前完成**（memo 04 §4）。
-4. ★ **引擎：ANE 不能做逐符号引擎**（单次 dispatch 地板 M1 0.23 ms / M5 Pro ≈70 µs，而接缝是逐符号调用的，
+5. ★ **引擎：ANE 不能做逐符号引擎**（单次 dispatch 地板 M1 0.23 ms / M5 Pro ≈70 µs，而接缝是逐符号调用的，
    14 次/槽直接超预算）⇒ **Metal/MPS 为主路径**，ANE 只作单个大融合阶段的可选卸载，
    且必须**一次融合、按符号/子带分块**（memo 03 §1，主规划 §2.3）。
-5. ★ **内联是唯一路线**：OCUDU dApp 运行时只声明 CPU/CUDA，没有 Metal/ANE/CoreML 后端
+6. ★ **内联是唯一路线**：OCUDU dApp 运行时只声明 CPU/CUDA，没有 Metal/ANE/CoreML 后端
    （memo 03 §2）。这反而避免了把每槽 1.47 MB 进 / 4.4 MB 出的搬运重新加回一条以
    "零主机↔设备数据穿越"为核心成就的 lane。
 
