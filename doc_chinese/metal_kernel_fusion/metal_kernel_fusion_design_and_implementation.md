@@ -1942,6 +1942,76 @@ record_ldpc_start                ← 段尾（codeblock task 线程 ✓）
 | ★ **C 大** ✓ | ★ **投递/调度** ✓ ⇒ 看 codeblock task 落在哪个线程、`ivcsw` 高不高 ✓ |
 | ★ **A+B+C ≠ `eqdem`** ✓ | ★ **有采样缺口** ✗ ⇒ 先修配对，**不许解释** ✓ |
 
+### 2.32 ★★★ 实测结果：`eqdem` 那 ~660 µs **就在 `demodulate()` 里等 lane** ✓ —— 而 §2.31(1) 的推断是**错的** ✗（2026-10-07 ✓）
+
+★ 腿 ✓：`mkf032-rank4-confirm`（对照 ✓、CRC **99.6 % CLEAN** ✓ —— ★ **顺带把 RANK 4 默认形态欠的那次确认补上了** ✓）
+与 `mkf033-phase-interior`（臂 ✓、CRC **99.8 % CLEAN** ✓），都跑在 **`b91cad5669`** ✓。
+
+#### (1) ★ 自证 ✓（**先看这个** ✓）
+
+| 判据 ✓ | 结果 ✓ |
+|---|---|
+| ★ 对照腿**不得出现**任何 `[ul_phase_interior]` 行 ✓ | ★ **0 行** ✓ ⇒ **默认关是真空的** ✓ |
+| ★ `assembled` ≈ 跳数 ✓ | **80 626** ✓ / 跳数 108 583 ✓（**74 %** ✓，见下 ✓）|
+| ★ **A/B/C 三段 `samples` 必须一致** ✓ | ★ **三者都是 80 626** ✓ ⇒ **内部自洽** ✓ |
+| `mismatched` ✓ | **0** ✓ |
+| `missing-landmarks` ✓ | 27 922 ✓ —— ★ **不是采样缺口** ✓：`record_ldpc_start` **每个码块都调** ✓，★ **第一个码块配对并擦除两个 landmark** ✓、**后续码块算 missing** ✓ ⇒ ★ 0.26 ≈ 每 TB 多一个码块 ✓ |
+
+#### (2) ★★★ 结果：**A 与 C 可忽略，B 就是全部** ✓
+
+| 段 ✓ | median ✓ | 是什么 ✓ |
+|---|---|---|
+| **A** ✓ | **6.5 µs** ✓ | `record_ce_end → demod_enter` ✓：宿主自己的 setup ✓（含 `decoder->new_data` 武装解码器 ✓）|
+| ★★ **B** ✓ | ★★ **683.9 µs** ✗ | ★ `demod_enter → demod_return` ✓：**整个 `demodulate()`** ✓ |
+| **C** ✓ | **7.5 µs** ✓ | `demod_return → record_ldpc_start` ✓：投递到 codeblock task ✓ |
+| A+B+C ✓ | **697.9 µs** ✓ | 对照本腿 `eq_demap` median **667.4 µs** ✓（★ 群体略偏，见 (4) ✓）|
+| ★ **B / 段** ✓ | ★ **≈ 98 %** ✓ | ★★ **那一段的时间就在 `demodulate()` 里** ✓ |
+
+★★ **⇒ 排除了两条** ✓：★ **不是"宿主 setup"** ✗（6.5 µs ✓）、★ **不是"投递/调度"** ✗（7.5 µs ✓）——
+★ 而这两条恰是第 0 步那 680 µs/窗口最可疑的去处 ✓。
+
+★ **而 `demodulate()` 里唯一的同步点** ✓（`pusch_demodulator_impl.cpp` ✓）：
+```cpp
+      // Single synchronization point of the group. The demapper's wait also covers the
+      demapper->wait();
+      equalizer->wait();
+```
+⇒ ★★ **B 就是在等 lane** ✓（那条 burst 里装着 CE + 均衡 + 解映射 ✓）。
+
+#### (3) ★★ 而它同时证明 **§2.31(1) 的推断是错的** ✗
+
+★ §2.31(1) 我写的是 ✓：★ "`record_ce_end` 时本跳设备活已干完" ✓ —— **依据是那句注释** ✓：
+> "The channel estimator **has finished**: the channel estimates … are ready."
+
+★★ **而那句话后面两行就写着相反的** ✗（`pusch_processor_impl.cpp:363-366` ✓）：
+> "the demodulation in between **is what overlaps the estimator's device work when the estimator DEFERS it**" ✓
+
+⇒ ★★ **估计器是 defer 的** ✓ ⇒ ★ **`record_ce_end` 只记"宿主侧的边界"，设备的活在它之后才被等** ✗✗。
+★ **教训** ✓：★ **我读了一句注释就下了结论，而关键的限定条件在同一个注释块里** ✗ ——
+★ 与 §2.29/§2.30 的教训**同形** ✓（★ **机制要从定义里读全，不是读半句** ✓）。
+
+#### (4) ★★ 新的、精确的剩余问题 ✓（**B 比 lane 整个窗口还长** ✗）
+
+| 量 ✓（median ✓）| 值 ✓ |
+|---|---|
+| lane `residency` ✓（首 CB 开始 → 末 CB 结束 ✓）| **471.0 µs** ✓ |
+| lane `busy` ✓ | **454.8 µs** ✓ |
+| lane `gap` ✓ | **36.4 µs** ✓ |
+| ★ **B** ✓ | ★ **683.9 µs** ✗ |
+| ★ **B − residency** ✓ | ★★ **≈ +213 µs** ✗ |
+
+★★★ **⇒ B 比 lane 整个窗口还长约 213 µs** ✓ ⇒ ★ **"等到 lane 结束"之后还有 ~213 µs 才从 `demodulate()` 返回** ✗ ——
+★ **这就是新的、而且比原来精确得多的剩余问题** ✓（§7 未决项已更新 ✓）。
+
+★ **候选** ✓（都是候选 ✓，未定 ✗）：① ★ 两次 wait（`demapper->wait()` **与** `equalizer->wait()` ✓）如果落在**不同 CB** 上 ⇒ **两次队列往返** ✓；
+② ★ 等待返回本身的延迟 ✓；③ ★ 宿主在 wait 返回后被**换出** ✓。★ **判法** ✓：`wait` 两侧各加一个 landmark，
+或把 `OCUDU_UL_TIMING_EVENTS` 打开看那段的 `cpu`/`ivcsw` ✓（机制已有 ✓）。
+
+★ **顺带更正第 0 步的一处读数** ✓：`host: stage entry -> lane commit` = **82.5 µs wall / 82.0 µs CPU** ✓
+（`[ul_gpu_lane]` 自报 ✓）⇒ ★ **一跳的宿主编码工作只有 ~82 µs** ✓ ⇒
+★ **第 0 步那个"680 µs/窗口"不是"每跳的宿主工作"** ✗ —— ★ **窗口里混了别的活** ✓
+（★ 它自己的注释就警告过 ✓："READ THE WINDOW, NOT JUST THE CPU" ✓）。
+
 ### 2.25 ★★ M4 的"**Linux 不变**"从**静态核验**升级为**真机实测** ✓✓（2026-10-07 ✓）
 
 > ★ **为什么这条重要** ✓：M4 验收（§2.18 ✓）里"Linux 不变"一项当时**只能做静态核验** ✗
