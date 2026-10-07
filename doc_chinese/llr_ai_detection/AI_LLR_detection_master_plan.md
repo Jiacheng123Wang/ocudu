@@ -1,22 +1,29 @@
 # AI LLR Detection 工作流 — 详细规划
 
 > **工作流名称**：`llr_ai_detection`
-> **一句话**：把 PUSCH 接收链的"均衡 + 解映射"（实测中位 **667.4 µs**）换成一次神经前向，
-> **直接输出加扰域 LLR**，交给现有 LDPC 译码器。
+> **一句话**：把 PUSCH 接收链的"**信道估计 + 均衡 + 解映射**"换成一次神经前向，
+> 输入是 DFT 后的时频网格**及其几何**（哪些是 DM-RS RE、哪些是 data RE、它们的相对关系），
+> 输出是**加扰域 LLR**，交给现有 LDPC 译码器。
+> （实测：`ce` **73.3 µs** + `eqdem` **667.4 µs**；设备侧的融合单元 `merged_hop` 中位 **449.8 µs**。）
 > **前身**：`metal_kernel_fusion`（已收官：融合清单穷尽，性能目标在吞吐/占用维度关闭）。
 > 本工作流继承它的问题陈述——"一格 667 µs 里只有几十 µs 是算力"——并换一条完全不同的路去解决它。
 >
-> 版本：v1.3 ｜ 状态：**规划（待 P0 裁决）** ｜ 日期：2026-10-07
+> 版本：v1.4 ｜ 状态：**规划（待 P0 裁决）** ｜ 日期：2026-10-07
 > 配套文档：`memo_01_repo_seams_and_llr_contract.md`（接缝与契约）、
 > `memo_02_paper_2503.16594_reading.md`（参考论文）、`memo_03_literature_survey.md`（文献调研，完整版）、
 > `memo_04_data_labels_and_operating_point.md`（数据与工作点实测）
+>
+> ★ **v1.4 变更（范围澄清）**：本工作流的目标是 **"信道估计 + 均衡 + 解映射"融合成一个 net**
+> （输入网格 + 几何，输出 LLR）——这是**标准 neural receiver 形态**，也是 OCUDU dApp 的 **depth 3**
+> （预算 **150 µs**）。`memo_01` v1.0 描述的 `submit_fused` 只是它的**子集**（不含 CE）。
+> 详见 `memo_01` §1.4–§1.6；第 1 章的接缝选择据此改写。
 >
 > **v1.2 变更（由完整版文献调研触发，均为架构级）**：
 > ① ★ **ANE 不再是目标引擎**——ANE 单次 dispatch 地板在 M1 是 **0.23 ms**、M5 Pro 约 **70 µs**，
 > 而我们的接缝是**逐符号**调用的，14 次/槽直接超预算（`memo_03` §1）。**Metal/MPS GPU 升为主路径**，
 > ANE 仅作"单个大融合阶段的可选卸载"，且必须**一次融合、按符号/子带分块**。
 > ② ★ **路线 D（dApp）在 Apple Silicon 上不可用**（运行时只声明 CPU/CUDA，无 Metal/ANE/CoreML 后端，
-> 且接缝不在本 checkout）⇒ **内联是唯一路线**（§1.2）。
+> 且接缝不在本 checkout）⇒ **内联是唯一路线**（§1.3）。
 > ③ 采纳 dApp 论文的 **Class A/B/C 时序契约**作为 G5 规格（§4）。
 > ④ 新增 **R9：逐槽信任/回滚**（前作实测 60.5% 平均回滚率，`memo_03` §4.4）。
 > ⑤ 定位澄清：我们属于 **LINE B（输出 LLR 的神经接收机）**，不是 LINE A（符号输出的深度展开检测器）。
@@ -39,7 +46,7 @@
 
 | | 目标 | 内容 | 状态 |
 |---|---|---|---|
-| **G-A** | **时延** | eqdem 段 667 µs → 一次神经前向 + 同步开销，**CRC 不明显掉** | **第一目标**。⚠ 引擎已改：**Metal/MPS GPU 为主**，ANE 仅作单阶段卸载（v1.2，见 §2.3） |
+| **G-A** | **时延** | `ce`+`eqdem` 两段 → 一次神经前向 + 同步开销，**CRC 不明显掉** | **第一目标**。⚠ 引擎已改：**Metal/MPS GPU 为主**，ANE 仅作单阶段卸载（v1.2，见 §2.3） |
 | **G-B** | **精度** | 在少导频 / 高阶调制区间**超过**经典 MMSE + LLR | **待证伪的第二目标**，由 P0 裁决 |
 
 ★ 为什么必须分开：`memo_04` 实测我们的工作点是 **10.7% 导频密度、15–25 dB、宽分配、SISO**，
@@ -57,20 +64,52 @@
 
 ## 1. 接口契约（先钉死，再写代码）
 
-全部依据见 `memo_01_repo_seams_and_llr_contract.md`。这里只列**冻结项**：
+### 1.0 ★ 先选深度：本工作流 = **深度 3**（CE + 均衡 + 解映射）
 
-| 项 | 冻结值 |
+OCUDU dApp 的 Class A 契约把内联替换分成**三个深度**（`memo_01` §1.4，dApp 论文逐字）：
+
+| 深度 | 替换 | 输出 | 生产预算 |
+|---|---|---|---|
+| 1 | 仅 CE | 信道估计 + 噪声 | **100 µs**（"estimation"） |
+| 2 | CE + 均衡 | 均衡符号 + 后均衡噪声 | **150 µs**（"to completion"） |
+| **3 ★ 本工作流** | **CE + 均衡 + 解映射** | **解扰前软比特（= 加扰域 LLR）** | **150 µs** |
+
+选择深度 3 的四条理由：
+
+1. **它是文献里 "neural receiver" 的标准范围**：Sionna 逐字 *"substitutes channel estimation,
+   equalization, and demapping"*；DeepRx 逐字 *"the whole receiver pipeline from frequency domain
+   signal stream to uncoded bits"*，且输入构造显式用到导频位置。
+2. **它匹配我们的融合单元**：`merged_hop`（"the whole hop's buffer"）**已经**把
+   CE 抽取 + CE 权重 + 均衡 + 解映射放在一个命令缓冲里（mkf033 中位 449.8 µs）
+   ⇒ 替换的是一个**已经存在的融合单元**，不需要把两个独立阶段缝起来。
+3. **dApp 论文明确说"不存在只替换均衡的钩子"**（*"no hook replaces equalization alone, because the
+   equalizer interface also implements channel estimation"*）——浅接缝在架构上就是别扭的。
+4. 收益更大：`ce` 73.3 µs + `eqdem` 667.4 µs 两段一起被替换。
+
+★ **但深度 3 继承了 CE 的"上报义务"**（见 `memo_01` §1.5）：CE 还产出 RSRP / EPRE / 噪声 / SNR /
+TA / CFO，`pusch_processor_impl.cpp` 末尾把它们**合并进 CSI 上报**。dApp 论文的对应约束逐字：
+*"A module that succeeds at the second or third depth **also supplies the scheduler's uplink SINR from
+its own post-equalization noise**, because the conventional measurement kernels are skipped on that path."*
+
+⇒ **本规划的选型（路线 a）**：net **附带输出信道估计与噪声**，经典测量核**跑在 net 的输出上**。
+理由：上报口径不变（对调度器零影响），同时把最贵的那部分算力移走。
+
+### 1.1 冻结项：宿主接缝（深度 3）
+
+| 项 | 值 |
 |---|---|
-| 宿主接缝 | `channel_equalizer::submit_fused()`，谓词 `supports_fused_demapping(mod, nof_ports, nof_layers)`（`include/ocudu/phy/upper/equalization/channel_equalizer.h:188-221`） |
-| 输入 | `ch_symbols`（rx RE）、`ch_estimates`（`ch_est_list`，含 `device_slice`）、`noise_var_estimates`（per rx port）、`mod`、shape |
-| 输出 1 | `llrs`：int8，**加扰域**，RE-major（`llrs[re*Qm + b]`），由浮点 LLR 经 `log_likelihood_ratio::quantize()` 得到 |
-| 输出 2 | `eq_noise_vars`：**必须写**——后均衡 SINR 是上报统计，融合路由不得停掉（同文件 `:204-208`） |
-| 量化 | `LLR_MAX=120`；`±127` = 确定比特；`range_limit` 按调制取 **24 / 24 / 20 / 20**（BPSK、QPSK、16QAM、64QAM） |
-| 解扰 | **保持经典**（模型输出加扰域 ⇒ `pusch_demodulator_impl.cpp:730` 的 `revert_scrambling` 原样保留） |
-| 回退 | 谓词为 false（不支持的 shape / 模型缺失 / 非 ARM 平台）⇒ 经典路径；**透明回退，绝不静默出错** |
-| 开关 | `config.pusch_channel_equalizer_backend == "ai"`（沿用 `upper_phy_factories.cpp:743-756` 的形状）；CLI 覆盖仅用于调试 |
+| 要替换的两处 | `pusch_processor_impl.cpp:264` `estimator.estimate(notifier, grid, ch_est_config)` **+** `:559` `demodulator.demodulate(buffer, notifier, grid, est_results, demod_config)` |
+| 输入 1 | `resource_grid_reader& grid`（DFT 后的时频网格） |
+| 输入 2（几何） | `dmrs_pusch_estimator::configuration`（`symbols_mask` = DM-RS 位置、`crb_bitmap` = 分配、`first_symbol`、`scaling`、`sequence_config`）+ `pusch_demodulator::configuration`（`rb_mask`、`modulation`、`start_symbol_index`、`nof_symbols`、`dmrs_symb_pos`、`dmrs_type`、`nof_cdm_groups_without_data`、`n_id`、`nof_tx_layers`、`dc_position`、`rx_ports`） |
+| 输出 1 | 加扰域 LLR（int8，RE-major）→ 交给既有 `revert_scrambling` |
+| 输出 2 | ★ **后均衡噪声方差**（上报统计，必须写）+ ★ **信道估计与噪声**（供经典测量核出 RSRP/EPRE/SNR/TA/CFO） |
+| 回退 | 深度 3 不可用 ⇒ **经典 CE + 经典 eq/demap**（与 dApp 的"经典阶段在同一次调用里兜底"同构） |
 
-### 1.1 契约测试（是单测，不是文档）
+★ **仍可复用的既有事实**（`memo_01` §1.2、§2、§3）：`ch_est_list::device_slice` 的零拷贝思路、
+LLR 量化（`LLR_MAX=120`、`range_limit` 24/24/20/20）、**模型输出加扰域 LLR**、
+以及后端开关的形状（`upper_phy_factories.cpp:743-756`）。
+
+### 1.2 契约测试（是单测，不是文档）
 
 1. **ALL-OR-NOTHING**：谓词为真时调用方**不得**再 demap 该符号（构造一个会断言二次 demap 的假 demapper）。
 2. **谓词是 shape 的属性**：同一 shape 下对任意数值输入，谓词结果恒定。
@@ -79,7 +118,7 @@
 5. **加扰域一致性**：把经典 demapper 的输出与模型输出放在**同一域**对拍（同为加扰域）。
 6. **回退等价**：开关关闭时，与 HEAD 的经典路径 **bit-exact**（用 `ab_dumps.sh` 的 0 差异控制臂）。
 
-### 1.2 路线选择：内联（I）还是 dApp（D）—— **内联是唯一可用路线**
+### 1.3 路线选择：内联（I）还是 dApp（D）—— **内联是唯一可用路线**
 
 文献调研（`memo_03` §2、§3）查清了三件事：
 
@@ -93,7 +132,7 @@
 以"零主机↔设备数据穿越"为核心成就的 lane（`phy_pipeline_crossings.h` 的整个设计目的）。
 路线 D 保留为**对照臂**，仅在"内联做不到"时才复审——且复审必须显式，不得悄悄改道。
 
-### 1.3 ★ 逐槽信任 / 回滚（v1.3 重写：朴素回滚是错的）
+### 1.4 ★ 逐槽信任 / 回滚（v1.3 重写：朴素回滚是错的）
 
 前作实测：神经接收机需要一个**逐槽**的"是否信任自己"的判决。但**"AI 差就回退经典"这个朴素做法
 被证明是错的**——*When Does a Neural Receiver Help?*（arXiv 2605.26157）在 **500 Hz Doppler** 下
@@ -120,14 +159,16 @@
 
 ⇒ **G6 的判据必须同时包含仲裁/回滚率**，否则统计门不成立。
 
-## 2. 模型设计：三个候选，按风险递增
+## 2. 模型设计：四个候选，按风险递增
 
-任务重述：`f(网格切片, 信道估计, σ², 调制, DM-RS 掩码) → 逐 RE 浮点 LLR`
+任务重述（深度 3）：`f(时频网格, DM-RS 位置张量, data-RE 索引, PUSCH/DM-RS 元数据) → 逐 RE 浮点 LLR`
+**外加**：后均衡噪声方差（上报用）+ 信道估计与噪声（供经典测量核出 RSRP/EPRE/SNR/TA/CFO）
 
 | 候选 | 形态 | 替换掉什么 | 风险 | 定位 |
 |---|---|---|---|---|
-| **A1 神经解映射器** | 输入 = **均衡后**符号 + 逐 RE σ²；小 CNN 输出 LLR | 只替换 `demodulate_soft`（几十 µs） | 最低 | **P2 的第一个原型**；时延收益小，但用于验证"损失/标度/量化"整条链路 |
-| **A2 联合均衡 + 解映射** | 输入 = **原始 rx RE** + 信道估计（多端口）+ σ²；2D 卷积（时频局部性天然匹配）输出逐 RE LLR | 替换 **eqdem 整段（667 µs）** | 中 | **主线**。形态与 DeepRx / Sionna Neural Receiver 同类【见 memo 03】 |
+| **A0 神经解映射器**（原 A1） | 输入 = **均衡后**符号 + 逐 RE σ²；小 CNN 输出 LLR | 只替换 `demodulate_soft` | 最低 | **P2 的第一个原型**；时延收益小，但用于验证"损失/标度/量化"整条链路。**深度 2 的子集** |
+| **A1 联合均衡 + 解映射**（原 A2） | 输入 = **原始 rx RE** + **已算好的信道估计** + σ²；2D 卷积输出逐 RE LLR | 替换 eqdem 段（667 µs） | 中 | **深度 2**。原主线；现降为**通向 A2 的踏脚石**（因为它仍需经典 CE 供给信道估计） |
+| **A2 联合 CE + 均衡 + 解映射** ★ | 输入 = **网格 + 几何**（DM-RS 位置张量、data-RE 索引、allocation/modulation/ports/layers 元数据）；2D 卷积输出逐 RE LLR **+ 信道估计与噪声** | 替换 **`ce` + `eqdem` 两段**；对应 `merged_hop`（449.8 µs） | 中高 | ★ **主线（深度 3）**，与 DeepRx / Sionna neural receiver / OCUDU dApp depth 3 同一形态 |
 | **A3 ICL / 判决反馈 Transformer** | DM-RS 作 in-context 示例 + 判决反馈（论文形态，0.42 M / 8 层） | 同上 | **高**：注意力 O(N²)、DF 串行性、**且它属于 LINE A（符号输出）**——输出符号/硬比特，**要多一步才能接上译码器**（`memo_03` §4.1） | **研究支线**，不作为主线 |
 
 ★ **家族定位（v1.2 新增）**：文献里"AI 检测"分两个家族——
@@ -298,11 +339,11 @@ arXiv 2208.05186）、自适应 LLR 裁剪（arXiv 1011.2113）、学习型标�
 |---|---|---|---|
 | **P0** | **值不值得做**：经典链的导频/SNR 扫描 + genie 上界 | **G0** | 给出"检测环节可改善空间"的**量化上界**（memo 04 §4 的 P0-a/b/c）。**若上界很小 ⇒ 工作流只保留 G-A（时延）目标，或终止** |
 | **P1** | 离线数据管线：grid + TB → 训练集（划分、增强、统计、复现脚本） | G1 | 数据集可一键复现；泄漏检查通过；**经典链在同一测试集上的 SER/BLER 已记录**（否则后面没有可比基线） |
-| **P2** | A1 神经解映射器：离线训练 | G2 | ★ **主指标 = 真实 LDPC 译码器之后的 coded BLER**（**互信息不能预测 BLER**，`memo_03` §7bis.F）；BER/MI 仅作诊断。标度校准后 CRC 不掉 |
-| **P3** | A2 联合模型：离线训练，覆盖 16/64/256QAM | G3 | 同 G2（coded BLER），且**逐调制**分别达标；给出参数量/FLOPs 与**Metal 实测时延曲线**、**量化曲线**（8-bit 应基本免费；INT4 预计不可用）；ANE 仅作可选卸载评估 |
+| **P2** | A0 神经解映射器：离线训练 | G2 | ★ **主指标 = 真实 LDPC 译码器之后的 coded BLER**（**互信息不能预测 BLER**，`memo_03` §7bis.F）；BER/MI 仅作诊断。标度校准后 CRC 不掉 |
+| **P3** | A1/A2 联合模型：离线训练，覆盖 16/64/256QAM | G3 | 同 G2（coded BLER），且**逐调制**分别达标；给出参数量/FLOPs 与**Metal 实测时延曲线**、**量化曲线**（8-bit 应基本免费；INT4 预计不可用）；ANE 仅作可选卸载评估 |
 | **P4** | **接链**：实现 `channel_equalizer` 后端 + 谓词 + 回退 + 契约测试 + crossings 声明 | G4 | §1.1 六项单测全过；开关关闭时与经典 **bit-exact**；开关打开时 CRC ≥ 参考 |
 | **P5** | 实时性：端到端时延 + **同步开销** | G5 | **采用 dApp 论文的 Class A 契约**（`memo_03` §2.1）：**驻留接收链、零拷贝设备张量、完成 ≤150 µs**。三个对标基线：① 现网 eqdem **667.4 µs**（mkf033 中位）；② dApp 的 neural-receiver→LLR **≤500 µs 槽占用**；③ NVIDIA GB10 接收机 kernels **82 µs P50 / 112 µs P99.9**（273 PRB 4 端口，我们体量的 ~21 倍，**不可直接套用**）。★ **必须包含 GPU→模型 的等待与 模型→LDPC 的可见性开销**，不得只报前向时间；**必须报 dispatch 次数** |
-| **P6** | OTA 实测：真实采集上的 CRC/BLER A/B | G6 | 统计门通过（同批采集、同一译码器、同一 LDPC 配置），**且必须同时报逐槽回滚率**（§1.3） |
+| **P6** | OTA 实测：真实采集上的 CRC/BLER A/B | G6 | 统计门通过（同批采集、同一译码器、同一 LDPC 配置），**且必须同时报逐槽回滚率**（§1.4） |
 
 ★ 门禁纪律（继承自 `metal_kernel_fusion`，都是付过学费的）：
 
@@ -322,7 +363,7 @@ arXiv 2208.05186）、自适应 LLR 裁剪（arXiv 1011.2113）、学习型标�
 | **R3** | **判决反馈的串行性**与实时冲突 | DF 轮数 × 单轮时延 > slot 预算 | 无 DF 的一轮并行检测（A2 本身就没有 DF） |
 | **R4** | **LLR 标度/量化不匹配**：离线指标好、CRC 崩 | 量化前后 CRC 差异大 | §3.3 标度校准；逐调制重标定 `range_limit` |
 | **R5** | **训练/部署错配**（AI CE 的老坑） | 仿真好、OTA 差 | **"把适配写进输入格式"**——DEFINED 已显式验证 Rayleigh(NLOS) 训练 → Rician(LOS) 测试的错配场景（`memo_02` §3.1）；辅以 OTA 微调 |
-| **R6** | **打破融合 lane 的"一次提交"结构** | crossings 计数上升、`gap` 变大 | 显式声明新同步点；或改走 dApp 路线 D——但那时要把 **1.47/4.4 MB 的每槽搬运**计入 G5（§1.2） |
+| **R6** | **打破融合 lane 的"一次提交"结构** | crossings 计数上升、`gap` 变大 | 显式声明新同步点；或改走 dApp 路线 D——但那时要把 **1.47/4.4 MB 的每槽搬运**计入 G5（§1.4） |
 | **R7** | 语料不足（17.7 万次接收 vs 0.4 M 参数量级模型） | 训练/验证曲线分离 | 仿真为主 + OTA 微调；先训小模型 |
 | **R8** | 与 CUDA/NVIDIA 路线相比无优势 | 竞品分析 | 如实记录（仓库已有 `metal_vs_cuda_architecture.md` 的方法论） |
 | **R9** | ★ **模型在某些槽上"崩"**，而整体指标看不出来 | 逐槽 CRC 方差大、退化槽集中在某些信道实现 | **逐槽信任/回滚**：前作实测**平均 60.5% 回滚率**（`memo_03` §4.4）⇒ 这是运维必需品。★ 内联路线在此有天然优势：**经典路径始终在链上，回退 = 让谓词返回 false**，不需要额外机制 |
@@ -347,7 +388,7 @@ arXiv 2208.05186）、自适应 LLR 裁剪（arXiv 1011.2113）、学习型标�
 
 | | 复用 | 差异 |
 |---|---|---|
-| 交叉计数契约 | `phy_pipeline_crossings` / `phy_pipeline_grid_ready` 的纪律直接用 | AI 路径**必须新增声明**（GPU↔模型）；若走 dApp 路线则**主动增加**每槽 1.47/4.4 MB 搬运（§1.2） |
+| 交叉计数契约 | `phy_pipeline_crossings` / `phy_pipeline_grid_ready` 的纪律直接用 | AI 路径**必须新增声明**（GPU↔模型）；若走 dApp 路线则**主动增加**每槽 1.47/4.4 MB 搬运（§1.4） |
 | 验收方式 | 离线重放、leg 协议、Linux 复验流程 | **门禁从"0 差异"变成"统计不劣"**（AI 不可能 bit-exact） |
 | 问题陈述 | eqdem 667 µs、一次提交 + 设备排队 | 本工作流是它的**续集**：不重写链路结构，把这段计算换成学习型的一次前向 |
 
@@ -369,7 +410,7 @@ arXiv 2208.05186）、自适应 LLR 裁剪（arXiv 1011.2113）、学习型标�
 3. **Metal 主路径的真实时延曲线** —— 必须实测；现有锚点全部来自 ANE 或别家硬件，**不可外推**。
 4. 17.7 万次接收是否足够 —— 待 P1 的学习曲线；并需同时给出"仿真训练"臂作对照（§3.1 的负面证据）。
 5. 导频密度的精确值 —— `dmrs_type` / `nof_cdm_groups_without_data` 未被采集记录（memo 04 §5）。
-6. **信任/回滚判据的具体形式** —— §1.3 定了必须做，但"用哪个廉价指标"要在 P2/P3 用数据选。
+6. **信任/回滚判据的具体形式** —— §1.4 定了必须做，但"用哪个廉价指标"要在 P2/P3 用数据选。
 7. **ANE 在我们自己的 M4 Pro 上的 dispatch 地板** —— 论文的 M1/M5 Pro 数字已直读原文，
    但**带条件（固定形状、预热）**，必须自测。
 8. **Metal 主路径能否关掉"72 ms → 1 ms"这个差距** —— 这是本工作流最核心的未知，

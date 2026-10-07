@@ -1,7 +1,9 @@
 # `doc_chinese/llr_ai_detection/` — AI LLR Detection 工作流
 
-> **工作流目标**：把 PUSCH 接收链的"均衡 + 解映射"（实测中位 **667.4 µs**）换成一次神经前向，
-> **直接输出加扰域 LLR**，交给现有 LDPC 译码器。
+> **工作流目标**：把 PUSCH 接收链的"**信道估计 + 均衡 + 解映射**"换成一次神经前向，
+> 输入是 DFT 后的时频网格**及其几何**（哪些是 DM-RS RE、哪些是 data RE、二者的相对关系），
+> 输出是**加扰域 LLR**，交给现有 LDPC 译码器。
+> （实测：`ce` **73.3 µs** + `eqdem` **667.4 µs** 两段；设备侧融合单元 `merged_hop` 中位 **449.8 µs**。）
 >
 > 前身工作流：`metal_kernel_fusion`（GPU 融合 lane，已收官）。本工作流继承它的问题陈述，
 > 换一条完全不同的路去解决它：**不重写链路结构，把这段计算换成学习型的一次前向**。
@@ -20,9 +22,16 @@
 
 ## 五句话结论（先读这个）
 
-1. **接缝已经存在**：`channel_equalizer::submit_fused()` 就是 AI detector 的宿主——它的语义恰好是
-   "用一次前向替换 `equalize + demodulate_soft`"，而它那条"谓词只能是 shape 的属性、不能看数值"
-   的契约，神经网络天然满足（memo 01 §1）。
+1. ★ **深度 3 才是标准形态,接缝要选对**:OCUDU dApp 把内联替换分成三个深度——
+   ①仅 CE(100 µs)②CE+均衡③**CE+均衡+解映射**(150 µs)。**我们的目标 = 深度 3**,
+   与 Sionna(*"substitutes channel estimation, equalization, and demapping"*)和 DeepRx
+   (*"the whole receiver pipeline from frequency domain signal stream to uncoded bits"*)同形。
+   `channel_equalizer::submit_fused()`(memo 01 v1.0 认定的接缝)**只是它的子集**——它吃的是
+   **已经算好的信道估计**。dApp 原文:*"no hook replaces equalization alone"*。
+   ⇒ 深度 3 的宿主是 `estimator.estimate()` + `demodulator.demodulate()` **两处的合并**;
+   好消息是设备侧 `merged_hop` **已经**是深度 3 的形状(memo 01 §1.4–§1.6)。
+   ★ 代价:深度 3 **继承 CE 的上报义务**(RSRP/EPRE/噪声/SNR/TA/CFO → CSI)——规划选定
+   "net 附带输出信道估计与噪声,经典测量核跑在它上面"(memo 01 §1.5)。
 2. **输出必须是加扰域 LLR**，解扰保持经典；量化由既有的 `log_likelihood_ratio::quantize()` 一处完成，
    但**标度校准是独立步骤**（scaling + clipping 在文献里是标准做法），做不好会让 LDPC 直接崩掉
    （memo 01 §2、§3；memo 03 §4.2）。
