@@ -145,7 +145,13 @@ public:
 class gpu_lane_probe
 {
 public:
-  enum class stage : unsigned { dft, channel_estimator, channel_estimator_weights, equalizer_demapper, other, count };
+  // \c merged_hop IS PART OF THIS ENUM TOO, even though nothing here reads it (M4 acceptance, 2026-10-07).
+  // set_commit_label() is called UNCONDITIONALLY from the merged route's runtime code, so the label has to be
+  // nameable in every configuration; leaving it out of this stub made the Metal channel estimator uncompilable
+  // with ENABLE_METAL_STATS=OFF, i.e. in the default configuration. It is kept in the SAME POSITION as in the
+  // instrumented enum above even though the stubs below discard every value: an enum whose members shift with a
+  // debug aid is a trap for the next reader, and matching costs nothing here.
+  enum class stage : unsigned { dft, channel_estimator, channel_estimator_weights, equalizer_demapper, merged_hop, other, count };
 
   static void register_commit(id<MTLCommandBuffer>, stage) {}
   static void close_lane() {}

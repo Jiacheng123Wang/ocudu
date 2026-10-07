@@ -28,7 +28,6 @@ using ocudu::metal::mmse_refusals;
 #include <mutex>
 #include <vector>
 
-#if defined(OCUDU_CE_TIME)
 namespace {
 
 /// \brief Aggregated channel-estimation phase statistics (ENABLE_CE_TIME build only).
@@ -154,11 +153,27 @@ void sigma2_report()
                (lo > 0.0F) ? (static_cast<double>(hi) / static_cast<double>(lo)) : 0.0);
 }
 
-const bool sigma2_report_registered = []() {
+/// \note \c [[maybe_unused]] because with the CE-time aid off nothing calls sigma2_report() from this file's
+///       own code - the registration below is what keeps it alive, and that is deliberate rather than dead: the
+///       noise-level spread is a RUNTIME reading (it prices the matrix reuse window, dev doc 6.169), not part of
+///       the timing aid.
+[[maybe_unused]] const bool sigma2_report_registered = []() {
   std::atexit(sigma2_report);
   ocudu::register_p0_report(sigma2_report);
   return true;
 }();
+
+// ---- Everything BELOW this point is the CE-timing aid (ENABLE_CE_TIME / OCUDU_CE_TIME) --------------------
+//
+// WHY THE GUARD MOVED HERE (M4 acceptance, 2026-10-07). This anonymous namespace used to open INSIDE the
+// OCUDU_CE_TIME block, and its `#endif` sat far below at the end of the timing accumulator - so with the aid
+// off, the block removed the namespace AND every RUNTIME helper that had been declared in it: note_sigma2(),
+// mmse_matrix_cache, matrix_cache() and matrix_cache_enabled(). Their callers stayed, and the file could not
+// be compiled with ENABLE_CE_TIME=OFF at all. Nothing caught it because an INCREMENTAL build never recompiled
+// this object, while a fresh configure and build fails in seconds - which is exactly what M4's "the probes can
+// be switched off and it still compiles" check is for. The runtime readings (sigma2 spread, matrix reuse) are
+// NOT instrumentation and do not belong to the timing aid; only mmse_time_stats and its report do.
+#if defined(OCUDU_CE_TIME)
 
 struct mmse_time_stats {
   std::atomic<uint64_t> calls{0};
@@ -338,8 +353,8 @@ void mmse_stats_accumulate(unsigned nof_prb,
   }
 }
 
-} // namespace
 #endif // OCUDU_CE_TIME
+} // namespace
 
 #include <chrono>
 #include <cmath>

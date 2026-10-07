@@ -118,7 +118,16 @@ const bool ce_site_report_registered = []() {
 }();
 #endif // OCUDU_METAL_STATS
 
-#if defined(OCUDU_METAL_STATS)
+// mmse_stats_t and mmse_stats() BELOW ARE DELIBERATELY OUTSIDE THE AID'S BLOCK (M4 acceptance, 2026-10-07).
+// Fifteen callers use mmse_stats(); eleven sit inside the mmse_stats_*() helpers that carry their own guard, but
+// four count the hand-over MISS path's grid waits from ordinary runtime code (see begin_stage_on_handed()). With
+// the type and the accessor inside the aid's block, ENABLE_METAL_STATS=OFF removed both while those four callers
+// stayed, so the Metal channel estimator could not be compiled with the stats aid off AT ALL - which is the
+// DEFAULT configuration everywhere except this workstream's own macOS legs. Nothing caught it because an
+// incremental build never recompiled this object, while a fresh configure and build fails immediately: exactly
+// the trap M4's "the probes can be switched off and it still compiles" check exists to catch. The four sites are
+// guarded individually at their call points rather than the accessor being stubbed, so a build without the aid
+// does no counting at all.
 struct mmse_stats_t {
   std::atomic<uint64_t> commits{0};
   std::atomic<uint64_t> waits{0};
@@ -207,6 +216,11 @@ static bool drop_miss_wait_armed()
   const char* env = std::getenv("OCUDU_L1_DROP_MISS_WAIT");
   return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
 }
+
+// The aid's block reopens HERE: everything below is timing instrumentation, while the counters above and this
+// knob are read by RUNTIME code. drop_miss_wait_armed() in particular is a falsification arm of the L1b harness
+// (see its note) and has nothing to do with the METAL_STATS aid - it must exist in every configuration.
+#if defined(OCUDU_METAL_STATS)
 
 static void mmse_stats_corr_build()
 {
@@ -1052,10 +1066,18 @@ static stage_encoder begin_stage(mmse_engine_impl*          e,
     if (s.burst) {
       // A burst that was already open cannot carry the wait before its dispatches; the burst keeps it
       // pending for the next buffer, and this counter is what says it happened (it must stay 0).
+      //
+      // The counting is guarded and the BRANCHING is not: which path is taken is runtime behaviour, while these
+      // two counters belong to the METAL_STATS aid. See the note on mmse_stats_t for why the guard has to be
+      // here at all - with the aid off these four sites were the ones that could not compile.
       if (ocudu::metal::shared_burst::grid_wait_pending()) {
+#if defined(OCUDU_METAL_STATS)
         mmse_stats().grid_wait_unencoded.fetch_add(1, std::memory_order_relaxed);
+#endif
       } else if (pending_grid_wait != 0) {
+#if defined(OCUDU_METAL_STATS)
         mmse_stats().grid_devwaited.fetch_add(1, std::memory_order_relaxed);
+#endif
       }
       return s;
     }
@@ -1065,11 +1087,15 @@ static stage_encoder begin_stage(mmse_engine_impl*          e,
   s.cb  = [e->queue commandBuffer];
   if (pending_grid_wait != 0) {
     if (ocudu::metal::shared_queue::grid_ready_encode_wait(s.cb, pending_grid_wait)) {
+#if defined(OCUDU_METAL_STATS)
       mmse_stats().grid_devwaited.fetch_add(1, std::memory_order_relaxed);
+#endif
     } else {
       // No fence to wait for (no grid production was ever armed): nothing to order against, and encoding a
       // wait for a value nobody signals would hang the buffer. Counted so it cannot be silent.
+#if defined(OCUDU_METAL_STATS)
       mmse_stats().grid_wait_unencoded.fetch_add(1, std::memory_order_relaxed);
+#endif
     }
   }
   // Extraction fence (S-7g-22, Step 2): this stage reads what the EXTRACTION's command buffer wrote -
@@ -4096,7 +4122,11 @@ static bool encode_run(mmse_engine_impl*     e,
     [enc setBytes:&lse_params length:sizeof(lse_params) atIndex:4];
     [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
         threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
+#if defined(OCUDU_METAL_STATS)
+    // Guarded at the CALL, not inside the helper: the helper is defined in the METAL_STATS block, so with
+    // the aid off it does not exist - see the note on mmse_stats_t.
     mmse_stats_lse_apply();
+#endif
   } else {
     enc = stage_pipeline(e, st, e->apply_pipe);
     [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:0];
@@ -4621,7 +4651,11 @@ bool encode_weights_only(mmse_engine_impl*                  e,
     [enc setBytes:&lse_params length:sizeof(lse_params) atIndex:4];
     [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
         threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
+#if defined(OCUDU_METAL_STATS)
+    // Guarded at the CALL, not inside the helper: the helper is defined in the METAL_STATS block, so with
+    // the aid off it does not exist - see the note on mmse_stats_t.
     mmse_stats_lse_apply();
+#endif
   } else {
     enc = stage_pipeline(e, st, e->apply_pipe);
     [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:0];

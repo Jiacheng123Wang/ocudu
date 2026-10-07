@@ -2017,11 +2017,19 @@ dft_metal_engine::batch_stats_t dft_metal_engine::batch_stats()
 {
   batch_stats_t out;
   out.override_value = front_end_batch_override();
-  out.told_symbols   = dft_stats().slot_symbols.load(std::memory_order_relaxed);
-  out.cap            = front_end_batch_cap(out.told_symbols);
 #if defined(OCUDU_METAL_STATS)
-  out.dispatches = dft_stats().batch_dispatches.load(std::memory_order_relaxed);
-  out.transforms = dft_stats().batch_transforms.load(std::memory_order_relaxed);
+  // THE GUARD IS THE POINT, not the two counters. dft_stats() is defined INSIDE the OCUDU_METAL_STATS block
+  // above (it disappears with the aid), so every call to it has to sit in a guard too - and these two did not,
+  // while token_release_stats() above guards the identical call. The result was a tree that could not be
+  // configured with the stats aid off AT ALL, which is the default everywhere except this workstream's own
+  // macOS legs. It hid for the same reason the watchdog's field did: an incremental build never recompiled this
+  // object, and a fresh configure and build fails immediately - the trap M4's "the probes can be switched off
+  // and it still compiles" check exists to catch. With the aid off, told_symbols and cap fall back to the
+  // defaults the struct already declares (0 and 1), which is what "no instrumentation" should report.
+  out.told_symbols = dft_stats().slot_symbols.load(std::memory_order_relaxed);
+  out.cap          = front_end_batch_cap(out.told_symbols);
+  out.dispatches   = dft_stats().batch_dispatches.load(std::memory_order_relaxed);
+  out.transforms   = dft_stats().batch_transforms.load(std::memory_order_relaxed);
 #endif
   return out;
 }

@@ -88,7 +88,18 @@ private:
   ~ul_stall_watchdog() = default;
 
   struct impl;
-  impl* p = nullptr;
+  /// \c [[maybe_unused]] IS LOAD-BEARING, not tidiness. This file's implementation (ul_stall_watchdog.cpp) is
+  /// compiled only when OCUDU_FLOW_PROBES and __APPLE__ are both defined, and its whole body is inside that
+  /// guard - so in every other build this class is DECLARED in the translation units that include the header
+  /// and never defined or used in any of them. `-Wunused-private-field` then fires on the field itself, and with
+  /// -Werror that is a hard build failure in translation units that have nothing to do with the watchdog
+  /// (measured: ngap_cause_converters.cpp, compression_validator.cpp, amplitude_controller_clipping_impl.cpp).
+  /// It hid until now because an INCREMENTAL build never recompiled them - their objects predated this field -
+  /// while a fresh configure and build fails immediately, which is exactly the trap M4's "the probes can be
+  /// switched off and it still compiles" check exists to catch. A guard around the include would silence it too,
+  /// but the include is deliberately NOT tied to the probes (see lower_phy_baseband_processor.cpp:14: an earlier
+  /// macOS build paid for that coupling).
+  [[maybe_unused]] impl* p = nullptr;
 };
 
 } // namespace ocudu
