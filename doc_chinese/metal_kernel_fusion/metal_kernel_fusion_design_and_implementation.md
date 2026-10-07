@@ -651,7 +651,9 @@ CRC 该腿 **95.6 %（marginal）** ✗，但**同轮的 `mkf023` 是 93.1 %（D
 #### ② ★★ 探针 OFF 可编：**不通过 → 已修复** ✓✗
 
 **发现** ✓：`ENABLE_FLOW_PROBES=OFF` + `ENABLE_METAL_STATS=OFF` 的**全新 configure + build 直接失败** ✗。
-逐层剥开是**同一类缺陷重复六次** ✗ —— ★ **运行时功能被声明在探针的条件编译块里，而调用点留在块外** ✓：
+逐层剥开是**同一类缺陷** ✗ —— ★ **运行时功能被声明在探针的条件编译块里，而调用点留在块外** ✓：
+★ **清单分两批** ✓：`gnb` 目标暴露 **6 处** ✓；★ **`BUILD_TESTING=On` 的全量构建**（**CI 真正构建的范围** ✓）
+又暴露 **2 处**（都在测试侧 ✓，见下 7–8 ✓）⇒ **共 8 处 / 6 个文件** ✓。
 
 | # | 位置 | 被误吞的东西 ✓ | 修法 ✓ |
 |---|---|---|---|
@@ -661,11 +663,21 @@ CRC 该腿 **95.6 %（marginal）** ✗，但**同轮的 `mkf023` 是 93.1 %（D
 | 4 | `ocudu_metal_mmse_engine.mm` ✓ | `mmse_stats()` 及其计数器类型 ✓（15 个调用点里**有 4 个是普通运行时代码** ✓ —— 就是 MISS 路径的网格等待计数 ✓）| 类型与访问器移出 ✓、**那 4 个点逐个 guard** ✓（保留**分支逻辑**、只护住计数 ✓）|
 | 5 | `ocudu_metal_mmse_engine.mm` ✓ | `drop_miss_wait_armed()` ✓ —— ★ **运行时 falsification 旋钮** ✓（L1b 伪证臂 ✓），与 METAL_STATS **毫无关系** ✗ | 移出 guard ✓ |
 | 6 | `ocudu_metal_lane_probe.h` ✓ | 探针关闭版枚举**没有 `merged_hop` 标签** ✓，而 `set_commit_label()` **无条件**从运行时代码调用 ✓ | 补上 ✓，**且与插桩版同位置** ✓（枚举成员随调试开关漂移是给下一个读者的陷阱 ✓）|
+| ★ 7 | `tests/unittests/support/macos_compat_test.cpp` ✓ | `[sched]` 回读 lambda **无条件定义、只在 `OCUDU_FLOW_PROBES` 下被调用** ✓ ⇒ `-Wunused-variable` ✗ | `[[maybe_unused]]` ✓（定义必须在该 guard **之前** ✓ ⇒ 不能挪 ✓）|
+| ★ 8 | `pusch_demodulator_impl.cpp` ✓ | ★ **"ce device estimates" 契约检查与它读的计数器一起在 `METAL_STATS` 块内** ✗ ⇒ 探针关闭时**根本不注册** ✓，而**测试断言它必须注册** ✗ | 计数器与注册**无条件化** ✓、两个计数点**保持 guard** ✓（探针关闭时该检查报 **0 device / 0 host** ✓ = 不计数构建的**事实** ✓）|
+
+★ **7 与 8 是"全量构建"（`BUILD_TESTING=On`）才暴露的** ✓ —— **`gnb` 目标看不到它们** ✓
+（一个在测试里 ✓、一个在测试的**期望**里 ✓：缺陷在**对交付物的断言**上 ✓，不在交付物里 ✓）。
+★ **这正是 CI 的范围** ✓：`.github/workflows/ccpp.yml` 用**默认选项**（探针因此是 OFF ✓）+
+`-DBUILD_TESTING=On` 构建 ✓ —— ⇒ ★ **本工作流的分支"ahead of origin by 22"从未推送** ✓
+⇒ **CI 从未跑过它** ✓ ⇒ **这解释了这个缺陷为什么没人报** ✓（**一旦推送，CI 会直接红** ✓）。
 
 **验证三重** ✓（全部通过 ✓）：
 1. **三种配置全新编译 0 error** ✓：探针全关 ✓ / **交付默认** ✓ / **全开（含 `ENABLE_CE_TIME`）** ✓；
+   ★ 外加 **`BUILD_TESTING=On` 的探针全关全量构建 0 error** ✓（**CI 的范围** ✓）；
 2. ★ **行为不变** ✓：**交付形态**的输出与改动前**逐位一致** ✓（四个 dump ✓，对照来自 stash 后重建 ✓）；
-3. **6/6 相关单测 PASS** ✓（含 `[fused]` 段 ✓）。
+3. **相关单测在两种形态下都 PASS** ✓（探针 ON ✓ 含 `[fused]` 段 ✓；探针 OFF ✓ 全量 8254 项**无真实失败** ✓
+   —— 那 9 项 "failed" **全是 `Skipped`** ✓（SCTP/E2AP 在本机跳过 ✓）、metal 单测在该形态下**本就不构建** ✓）。
 
 **★ 为什么它一直没被发现** ✗（**与 M3 那次同一族** ✓）：
 `ul_stall_watchdog.h` 是 **10-04** 的 ✓，而包含它的 `ngap_cause_converters.cpp.o` 是 **09-25** 的 ✓ ——
@@ -674,7 +686,7 @@ CRC 该腿 **95.6 %（marginal）** ✗，但**同轮的 `mkf023` 是 93.1 %（D
 
 **★ 既有的检查工具为什么没拦住** ✗（查清了 ✓，两个盲点 ✓）：
 `wip/probes_off_syntax_check.sh` 的 M3 记录写着"**34 TU 全过 ✓**"，与这次的真实构建**直接矛盾** ✗：
-1. ★ **它只去掉 `-DOCUDU_FLOW_PROBES` 一个键** ✗ —— 而这 6 处里 **5 处属于 `OCUDU_METAL_STATS` / `OCUDU_CE_TIME`** ✓，
+1. ★ **它只去掉 `-DOCUDU_FLOW_PROBES` 一个键** ✗ —— 而这 8 处里绝大多数属于 `OCUDU_METAL_STATS` / `OCUDU_CE_TIME` ✓，
    它**根本不覆盖** ✓（它报的 "the default configuration is safe" ✓ 对那两个键而言是**空话** ✗）；
 2. ★ **它只做 `-fsyntax-only`** ✗ —— 第 1 处那个 `-Wunused-private-field` **只在真的 codegen 时**才报 ✓，
    语法检查**看不见** ✓。
@@ -1372,14 +1384,14 @@ counter set: timestamp / GPUTimestamp
 ⚠ **本腿的环境注记** ✓：`stale=2`（>8 ms，max 15.3 ms ✓）且队列 max = **8022.7 µs** ✓
 ⇒ 该腿有一次停顿 ✓（属环境 ✓；均值仍在簇内 ✓ ⇒ 结论不受影响 ✓）。
 
-### 2026-10-07 · ★★ M4 验收：**三项结清** ✓ —— 探针 OFF **原本编不过** ✗，修出一类**既有缺陷**（6 处 / 4 文件 ✓）
+### 2026-10-07 · ★★ M4 验收：**三项结清** ✓ —— 探针 OFF **原本编不过** ✗，修出一类**既有缺陷**（**8 处 / 6 文件** ✓）
 
 **① Linux 不变** ✓（**静态核验** ✓，本机无 Linux 工具链 ⇒ **诚实标注为静态** ✓）：
 `METAL_OFFLOADS_ENABLED` 非 Apple 恒 OFF ✓（显式打开会 `FATAL_ERROR` ✓）⇒ 全部 metal 目录不进入 ✓；
 新增 include 无平台泄漏 ✓（两条是平台无关类型 ✓、一条只在 Metal 门控测试里 ✓）；
 接口新方法**有默认实现** ✓ ⇒ 既有后端与 CPU 路线不受影响 ✓。
 
-**② ★ 探针 OFF：不通过 → 已修复** ✓✗ —— 缺陷模式**六次重复** ✓：
+**② ★ 探针 OFF：不通过 → 已修复** ✓✗ —— 缺陷模式**八次重复** ✓（`gnb` 暴露 6 ✓、**`BUILD_TESTING=On` 全量**又暴露 2 ✓）：
 ★ **运行时功能声明在探针条件块里、调用点在块外** ✗。
 `ul_stall_watchdog.h` 的 `p` 字段 ✓、`dft_metal_engine.mm` 的 `dft_stats()` 调用 ✓、
 `port_channel_estimator_metal_mmse_impl.cpp` 的**匿名命名空间开在 `OCUDU_CE_TIME` 块内** ✓
@@ -1387,9 +1399,21 @@ counter set: timestamp / GPUTimestamp
 `mmse_engine.mm` 的 `mmse_stats()` 类型+访问器 ✓（15 个调用点里 **4 个是运行时代码** ✓）与
 `drop_miss_wait_armed()` ✓（**运行时伪证旋钮** ✓，与探针无关 ✗）、
 `lane_probe.h` 探针关闭版缺 `merged_hop` 标签 ✓（`set_commit_label()` 是**无条件**调用的 ✓）。
+★ **另有两处只在 `BUILD_TESTING=On` 的全量构建下暴露** ✓（**`gnb` 看不到** ✓，**CI 的范围** ✓）：
+`macos_compat_test.cpp` 的回读 lambda **无条件定义、只在探针下调用** ✓（`-Wunused-variable` ✗）；
+★ `pusch_demodulator_impl.cpp` 的 **"ce device estimates" 契约检查与计数器同在 `METAL_STATS` 块内** ✗
+⇒ 探针关闭时**不注册** ✓，而**测试断言它必须注册** ✗ ⇒ 那是**测试对交付物的期望** ✓、不是交付物的缺陷 ✓
+（修法：计数器与注册无条件化 ✓、计数点保持 guard ✓ ⇒ 探针关闭时报 **0/0** ✓ = 事实 ✓）。
+⇒ **共 8 处 / 6 文件** ✓。
+
+★ **为什么没人报** ✓：`.github/workflows/ccpp.yml` 用**默认选项**（探针 OFF ✓）+ `BUILD_TESTING=On` 构建 ✓，
+而**本分支 `ahead of origin by 22` 从未推送** ✓ ⇒ **CI 从未跑过它** ✓ ⇒ ★ **这棵树一旦推送，CI 会直接红** ✗
+—— 这一项修复因此**不只是形式验收** ✓，它**解锁了 CI** ✓。
 
 **验证三重** ✓：三配置全新编译 **0 error** ✓（全关 ✓ / 交付默认 ✓ / 全开含 `ENABLE_CE_TIME` ✓）、
-★ **交付形态输出与改动前逐位一致** ✓（四 dump ✓）、**6/6 单测 PASS** ✓。
+★ **`BUILD_TESTING=On` 的探针全关全量构建 0 error** ✓（**CI 范围** ✓）、
+★ **交付形态输出与改动前逐位一致** ✓（四 dump ✓）、
+**单测两种形态都 PASS** ✓（ON：含 `[fused]` ✓；OFF：全量 **8254 项无真实失败** ✓ —— 9 项 "failed" 全是 `Skipped` ✓）。
 
 **★ 为什么没被发现** ✗：`ul_stall_watchdog.h` 是 **10-04** ✓、包含它的 `.o` 是 **09-25** ✓
 ⇒ ★ **增量构建从未重编** ✗ ⇒ 树看着健康、**全新构建几秒就失败** ✓。
@@ -1397,7 +1421,7 @@ counter set: timestamp / GPUTimestamp
 （与 M3 那次"单测二进制烘着已删库路径"**同一族** ✓）。
 
 **★ 既有检查工具为何没拦住** ✗（`wip/probes_off_syntax_check.sh` ✓，M3 记录说"34 TU 全过" ✗ 与真实构建矛盾）：
-① 它**只去掉一个键**（`FLOW_PROBES` ✓）⇒ 对这 6 处里的 **5 处**（`METAL_STATS` ✓ / `CE_TIME` ✓）**完全不覆盖** ✗；
+① 它**只去掉一个键**（`FLOW_PROBES` ✓）⇒ 对其中绝大多数（`METAL_STATS` ✓ / `CE_TIME` ✓）**完全不覆盖** ✗；
 ② 它**只做 `-fsyntax-only`** ✗ ⇒ `-Wunused-private-field` 那处**只在 codegen 时报** ✓，看不见 ✗。
 **已修** ✓：三键各跑一遍 ✓ + **真编译** ✓ + 过滤加宽 ✓。★ **回归实证** ✓：改进版在**修复前**的代码上抓到
 **3 处 FAIL** ✓，而旧版对同一代码报 **"34 TU 全过、safe"** ✗。修复后 **114 编译 × 3 键全 OK** ✓。
