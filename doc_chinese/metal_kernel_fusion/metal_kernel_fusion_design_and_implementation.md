@@ -2012,6 +2012,71 @@ record_ldpc_start                ← 段尾（codeblock task 线程 ✓）
 ★ **第 0 步那个"680 µs/窗口"不是"每跳的宿主工作"** ✗ —— ★ **窗口里混了别的活** ✓
 （★ 它自己的注释就警告过 ✓："READ THE WINDOW, NOT JUST THE CPU" ✓）。
 
+### 2.33 ★★★ 收口：那 ~660 µs = **一次提交** ✓ + **设备排队** ✓ —— ★ 我"两次往返"的猜测**被排除** ✗（2026-10-07 ✓，用户第三次质疑 ✓）
+
+> **用户的质疑（原文 ✓）** ✓：
+> > "实际上，我们已经完成了 metal kernel 融合，这里应该只有一次。是这样的吗？"
+>
+> ★★ **是对的** ✓ —— ★ 而且这一问**直接排除掉了我上一条提的一个假设** ✗。
+
+#### (1) ★ 提交次数：**数据路径一次** ✓（读码 + 腿上双向核对 ✓）
+
+| 证据 ✓ | 值 ✓ |
+|---|---|
+| `[ul_gpu_lane] cbs/lane` ✓ | **2.00** ✓（`max=5` ✓）|
+| `busy split` ✓ | ★ **`merged_hop` 1 CB/跳（94 %）** ✓ + **`ch_wt` 1 CB/跳（6 %）** ✓，`ch_est`/`eq_demap` **都是 0 CB** ✓ |
+| `[metal_stats] burst dispatches` ✓ | ★ `equalizer=108583`（**1/跳** ✓）+ `demapper=0` ✓ + `channel_estimator=217164`（**2/跳** ✓）⇒ ★ **均衡、解映射、CE 抽取、CE 权重全在那条 burst 里** ✓ |
+| `[metal_stats] mmse_ce commits` ✓ | **108590 ≈ 1/跳** ✓ = ★ **相关矩阵那条 CB** ✓（参数的纯函数 ✓、与数据路径无依赖 ✓）|
+
+★★ **⇒ 数据路径确实只有一次提交** ✓：★ **CE 的抽取与权重都骑在 lane 那条 burst 上** ✓
+（这正是 `begin_stage() → shared_burst::encoder()` 的机制 ✓，也是本工作流融合的落点 ✓）。
+★★ **⇒ 我上一条说"如果它们是两次提交，那就是两次设备往返"是多余的** ✗ —— ★ **代码已经排除了它** ✓。
+
+#### (2) ★★★ 而 `defer_wait` 的**定义**直接确认了"一次" ✓
+
+★ `port_channel_estimator_metal_mmse_impl.cpp:300` 原文 ✓：
+> `deferred_wait_us` = "**Wall time between the end of a deferred stage and the completion of its batch.**" ✓
+> "… and, **because the estimator is deferred, the rest of the receiving chain (the equalization and the demapping)
+> runs inside it.**" ✓
+
+⇒ ★★ **不是两次往返** ✓ —— ★ **是同一个 batch，均衡与解映射就跑在那段区间里面** ✓。
+★ 而**两个独立仪器给出同一个数** ✓：`defer_wait` median **671.5 µs** ✓（n=108 583 ✓）vs 我加的 B = **683.9 µs** ✓
+（★ 段内分解 B 与它相差 ~2 % ✓，群体略有不同 ✓）。
+
+#### (3) ★★★ 那剩下的 ~215 µs 是什么：**设备排队** ✓ —— 而代码里早有名字 ✓
+
+| 量 ✓（median ✓）| 值 ✓ |
+|---|---|
+| `defer_wait` ✓ | **671.5 µs** ✓ |
+| lane `residency` ✓（首 CB 开始 → 末 CB 结束 ✓）| **471.0 µs** ✓ |
+| lane `busy` ✓ | **454.8 µs** ✓ |
+| ★ **差额** ✓ | ★ **≈ 215 µs** ✓ |
+
+★★ **而 lane probe 自己的注释已经把这个量命名了** ✓（`ocudu_metal_lane_probe.mm:962-974` ✓ 原文 ✓）：
+> "What the number has to be is the distance between the host **COMMITTING** a command buffer and the device
+> **STARTING** it — which is exactly **where a back-end command buffer waits when the GPU is busy**, and
+> **the question this probe exists to answer**: **the lane's gap is ~200us** … and **the front end submits one
+> indivisible 423us transform per slot** (~42 % of every 1 ms slot), so '**the device was late getting to this
+> buffer**' is …" ✓
+
+⇒ ★★★ **那 ~215 µs = "设备还没来得及开始跑这条 buffer"** ✓ ——
+★ **即后端在前端那台不可分割的 ~423 µs/时隙的变换后面排队** ✓。
+
+★★★ **⇒ 一跳的账到此闭合** ✓：
+```
+defer_wait (671.5)  ≈  设备排队 (~215)  +  batch 的设备窗口 (residency 471 / busy 455)
+```
+★ **而这两项都不是"CE 的错"** ✓：★ 一项是**前端占着设备** ✓、一项是**这批 kernel 自己跑的时间**（其中算术只有 ~41 µs ✓）。
+
+#### (4) ★ 仍然存在的一个**工具缺口** ✓（**这才是下一步该补的** ✓）
+
+★ 那个本该直接量出"提交→设备开始"的序列 ✓（`gap: commit -> first command buffer starts (queue)` ✓）
+★ **只采到 1 个样本** ✗（`samples=1` ✓）—— ★ 而它的注释自己写着 ✓：
+> "This is the quantity the … series **always claimed to report, and never did**." ✓（★ 第一版是**恒等于零** ✓：拿抽取的 GPU start 减 lane 最早的 GPU start ✓，而**抽取按构造就是最早那条** ✓）
+
+⇒ ★★ **所以"~215 µs 是设备排队"目前是**由量级 + 注释指认的** ✓，**不是直接实测**的** ✗** ——
+★ **补法** ✓：让那个序列真正落样本 ✓（它已经有实现 ✓，缺的是覆盖 ✓），**零新概念** ✓。
+
 ### 2.25 ★★ M4 的"**Linux 不变**"从**静态核验**升级为**真机实测** ✓✓（2026-10-07 ✓）
 
 > ★ **为什么这条重要** ✓：M4 验收（§2.18 ✓）里"Linux 不变"一项当时**只能做静态核验** ✗
