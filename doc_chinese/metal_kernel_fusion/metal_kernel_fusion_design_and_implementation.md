@@ -1373,6 +1373,43 @@ grep -o "ce_sites.*" $LEG_LOGDIR/gnb_gpu_mkf028-rank3_*.log.stderr
 RANK 4 的价值同样**只在结构** ✓）；★ 或先测**严格模式下 K1 的精度** ✓ 以解锁 `corr_a`+`inv` ✓
 —— 那是**唯一能治 27 % 地雷边界**的一对 ✓（把跨派发的不可见写变成**一个 threadgroup barrier** ✓）。
 
+### 2.25 ★★ M4 的"**Linux 不变**"从**静态核验**升级为**真机实测** ✓✓（2026-10-07 ✓）
+
+> ★ **为什么这条重要** ✓：M4 验收（§2.18 ✓）里"Linux 不变"一项当时**只能做静态核验** ✗
+>（`lib/phy/CMakeLists.txt:12` 的 `METAL_OFFLOADS_ENABLED` 门控 ✓ —— 逐条查过 ✓，但**本机不能编 Linux** ✗），
+> 文档里**诚实标注**了这一点 ✓，并写明"**若要更强的证据，必须在 Linux 上真编一次**" ✓。
+> ★ **现在做了** ✓。
+
+**机器** ✓：`jwang@192.168.100.131`（`jwang-NUC9i7QNX` ✓、Ubuntu 24.04 ✓、gcc **13.3.0** ✓、
+cmake 3.28.3 ✓、**12 核 / 31 GB** ✓）。
+★ **交付形态** ✓：`git fetch` + **`merge --ff-only`** 到 **`61b3ed1a0c`** ✓（= 推送后的 HEAD ✓、工作树无脏跟踪文件 ✓）。
+
+★ **先查了"GitHub Actions 到底跑没跑"** ✗：`gh` 未登录 ✓ ⇒ 走公开 API ✓ ——
+★ `actions/workflows` 报**两个 workflow 都是 `active`** ✓（`C/C++ CI` ✓、`Docker Builder` ✓）、
+workflow 文件在所推 ref 上也**存在** ✓，★ **而 `actions/runs` 的 `total_count` 是 0** ✗✗ ——
+即 ★ **这个仓库上 Actions 从未产生过任何一次运行** ✗ ⇒ ★ **"推送后 CI 会跑"这个前提本身不成立** ✗
+（§2.18 记的是"CI 从未跑过本分支" ✓ —— ★ 实际范围更大：**整个仓库都没有跑过** ✗）。
+⇒ ★ **CI 的等价验证只能在真机上做** ✓，这正是本节 ✓。
+
+#### 配置与结果 ✓
+
+| 配置 ✓ | 范围 ✓ | 构建 ✓ | 测试 ✓ |
+|---|---|---|---|
+| ★ **全新 `build_ci`** ✓：`-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=On` ✓ | ★ **= CI 的范围** ✓（**默认选项 ⇒ 探针 OFF** ✓ + 测试 ✓）| ★ **RC=0 / 0 error** ✓ | ★★ **`100% tests passed, 0 tests failed out of 8250`** ✓✓（82.3 s ✓）|
+| **既有 `build/`** ✓：`BUILD_TESTING=ON` ✓ + **`ENABLE_FLOW_PROBES=ON`** ✓ | ★ **另一条探针臂** ✓（`METAL_STATS=OFF` ✓ —— ★ 与两个本地配置都不同 ✓）| **RC=0** ✓ | ★★ **`100% tests passed, 0 tests failed out of 8272`** ✓✓ |
+
+★ **两个 `Skipped`** ✓（`lower_phy_uplink_processor_assembly_arm` ✓、
+`ul_pipeline_probe_test.compiled_out_without_flow_probes` ✓）—— ★ **都是故意的** ✓：
+后者的源码自己写着 ✓ > "built without ENABLE_FLOW_PROBES: the UL pipeline probe compiles to no-ops …
+> **Say so instead of passing silently, which would look like the probe had been checked**" ✓
+⇒ ★ **是"报事实"而不是"静默通过"** ✓，正是本工作流要的形状 ✓。
+
+★ **Linux 上能编到哪些改动** ✓（值得写清楚 ✓，免得把这条读成"什么都验了" ✗）：
+Linux **不进入 Metal 目录** ✓ ⇒ `.metal` 与 `.mm` **根本不编译** ✓；本节真正覆盖的是
+★ **非 Metal 的那几处** ✓ —— `ul_stall_watchdog.h` ✓ 与 `pusch_demodulator_impl.cpp` ✓ 的
+"ce device estimates" 契约 ✓（§2.18 的第 1 与第 8 处 ✓，**正是"全量构建才暴露"的那两处** ✓）。
+★ **RANK 3 本身** ✓（`.metal` + `.mm` ✓）**不在**这个范围内 ✗ —— 它的证据是**离线逐位对拍 + 两条腿** ✓（§2.22/§2.23 ✓）。
+
 ### 2.24 ★★ `corr_a` + `inv` 的**前置测量**：**严格数学改变 K1 的输出** ⇒ 该融合**关闭** ✗✗（2026-10-07 ✓）
 
 > **为什么先测这个** ✓：§2.21(4) 把 `corr_a`+`inv` 列为"**结构上最有趣的一对**" ✓ ——
