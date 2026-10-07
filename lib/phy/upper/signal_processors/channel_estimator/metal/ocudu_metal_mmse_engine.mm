@@ -769,24 +769,38 @@ struct mmse_engine_impl {
   /// them either: what separates them is a geometry, not an order. So they can go out as one grid that
   /// is the concatenation of their O1 grids.
   ///
-  /// ★ DEFAULT OFF, unlike O1 and the CFO pair, and for one reason only: this is the third change to
-  /// reach the delivered route in two days and the second one whose air verdict is still owed (RANK 2
-  /// has not had a clean leg yet). Leaving it off means the next flight prices ONE of the two at a
-  /// time, with the leg before it as its control, instead of asking one leg to answer for both. Turn
-  /// it into the default - and delete this note - on the leg that verifies it
-  /// (`EXTRA_KNOBS="OCUDU_CE_CORR_PAIR=1"`), the way OCUDU_CE_CORR_MERGED and OCUDU_CE_CFO_FUSED were
-  /// turned, once a leg has shown `corr_pair != 0`, `merged == 2 * corr_pair`, and the red lines.
+  /// ★ ON BY DEFAULT since 2026-10-07, on the pair of legs that measured it (`mkf027` without it,
+  /// `mkf028` with it, one variable apart, both CLEAN at 99.9% CRC, `pair_check` PASS).
+  ///
+  /// It was implemented OFF on purpose, and that reason is worth keeping because it is the reason the
+  /// measurement exists: RANK 2's own red lines were still owed, and turning this on then would have
+  /// asked ONE flight to answer for two changes - the shape this workstream keeps paying for. With it
+  /// off, the first flight was RANK 2's control arm and the second priced this one against it.
+  ///
+  /// What the pair measured, against that control:
+  ///   * STRUCTURE. `corr_pair=49317` over 108573 hops, and `merged - corr_pair = 108574` is the hop
+  ///     count: every hop now makes exactly ONE correlation dispatch instead of 1.45, i.e. the 49317
+  ///     hops that carry an edge group stopped paying a second boundary.
+  ///   * WHERE IT PAID. `ch_wt` 30.5 -> 28.5 us/lane. That is the field the correlation command buffer
+  ///     is accounted in (`flush_correlations_fenced()` arms its GPU time as "ce_weights"), so this is
+  ///     the one number that is a DIRECT measurement of the fusion; an earlier draft of this note
+  ///     predicted ch_wt would stay flat, on the argument that the build has a command buffer of its
+  ///     own, and the argument was wrong about which bucket that buffer lands in.
+  ///   * `busy` median 464.0 -> 461.7, the lowest of the six legs flown since mkf023. `merged_hop`
+  ///     moved +2.8us, but that is the lane burst, which this change does not touch, and its spread
+  ///     across those six legs is 452.3-458.1.
   ///
   /// \note It is gated behind corr_merged_enabled() at the call site, because the pair kernel IS a
   ///       merged build (it produces A and R_hp for both groups in one dispatch): the O1 retreat has
   ///       to retreat from this too, or OCUDU_CE_CORR_MERGED=0 would no longer mean what it says.
   /// \note A metal library WITHOUT the pair entry point keeps the two O1 dispatches: the check is
   ///       `pipe != nil`, so a stale metallib degrades to the delivery behaviour instead of failing.
+  /// \note `=0` is the retreat and the control arm of its A/B, like the other two route switches.
   static bool corr_pair_enabled()
   {
     static const bool value = []() {
       const char* env = std::getenv("OCUDU_CE_CORR_PAIR");
-      return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+      return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
     }();
     return value;
   }
