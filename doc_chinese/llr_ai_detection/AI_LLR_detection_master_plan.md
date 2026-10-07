@@ -32,8 +32,9 @@
 > ⑤ 定位澄清：我们属于 **LINE B（输出 LLR 的神经接收机）**，不是 LINE A（符号输出的深度展开检测器）。
 >
 > **v1.3 变更（文献调研 7 条线全部完成，5 条改变默认值）**：
-> ① ★ **损失函数**：文献里**没有"对真值 LLR 做 MSE"的做法**——**逐比特 BCE 是唯一主损失**，
-> "LLR 回归/KL" 降级为消融项（§3.2）。
+> ① ★ **损失函数**：**逐比特 BCE(Binary Cross-Entropy, 二元交叉熵)是唯一主损失**——
+> 即对每个编码比特的模型 logit 与真值比特做二元交叉熵。文献主流如此(Sionna/NVIDIA NRX);
+> "对参考 LLR 做 MSE" 存在但属少数派(NVIDIA `LLRNet`),且本质是蒸馏 ⇒ 只作热身与消融(§3.2)。
 > ② ★ **主指标**：**互信息不能预测 BLER**（可有近最优 MI 却落在错误平台上）⇒
 > 门禁一律用**真实 LDPC 译码器之后的 coded BLER**，BER/MI 仅作诊断（§4）。
 > ③ ★ **量化**：8-bit 基本免费（与 FP32 差 ≤0.05 dB）；**INT4 损失 3.3–3.7 dB 并跌破 LS-LMMSE**；
@@ -313,8 +314,16 @@ Benefits of OTA Training for Learned Receivers*（arXiv 2608.12918, 2026）指�
 
 ### 3.2 损失（按优先级）
 
-1. ★ **逐比特 BCE（对编码比特）——唯一主损失。** 这是文献里实际使用的做法
-   （Sionna 神经接收机：对每 RE 每比特的 logit 做 log-base-2 的 BCE；CMDNet：符号后验交叉熵）。
+1. ★ **逐比特 BCE（Binary Cross-Entropy，二元交叉熵）——唯一主损失。**
+   记法：对每个编码比特，模型给一个 logit `z`（实数，可正可负），真值比特 `b ∈ {0,1}`，
+   损失 `L = −[b·ln σ(z) + (1−b)·ln(1−σ(z))]`，其中 `σ` 是 sigmoid；对 `z` 的梯度就是
+   **`σ(z) − b`**（形式极简，这是它好训的原因之一）。
+   ★ **关键恒等式**：**logit 本身就是 LLR**——`ln(P(b=0)/P(b=1)) = … = z`（符号随标签约定，
+   见 `memo_01` §2 的"正 LLR = 比特 0"约定）⇒ **BCE 训练出来的 `z` 可以直接当 LLR 用**，
+   不需要额外的概率→LLR 换算。这正是"输出 LLR"与"用 BCE 训练"是同一件事的原因。
+   文献同做法：Sionna 神经接收机对每 RE 每比特的 logit 做 **log-base-2** 的 BCE（训练时**不带外码**）；
+   NVIDIA 合规实时 NRX 的 `ReadoutLLRs` 对 **LDPC 编码后的真值比特**做 BCE
+   （*"the code rate and coding scheme is transparent to the NRX"*）；CMDNet 用符号后验交叉熵。
    允许模型超过经典 demapper（无蒸馏天花板）。
 2. ★ **MSE-on-参考-LLR 存在但属少数派**（NVIDIA Aerial `LLRNet`，"Machine LLRning"）。
    它需要"参考 LLR"作监督，**本质是蒸馏 ⇒ 会把教师的上限变成学生的上限**。
