@@ -18,6 +18,7 @@
 | 3 | `memo_03_literature_survey.md` | 公开文献调研：**ANE 不能做逐符号引擎**、内联 vs dApp、LLR 校准与回滚、本工作流的空白 | ✅ v1.0 |
 | 4 | `memo_04_data_labels_and_operating_point.md` | **我们的工作点在哪**（实测）、监督信号从哪来、P0 前置实验、语料缺口 | ✅ v1.0 |
 | — | `survey/` | **英文原始调研材料**（11 份，带逐条引用与来源等级），`memo_03` 是它们的中文综合 | ✅ |
+| 5 | `memo_05_reference_repo_survey.md` | **参考 repo 代码调研**：NVIDIA `aerial-cuda-accelerated-ran` 里的两个训练好的模型、完整的 ML 设计流程、cuPHY 的 LLR 契约、E3/data lake；以及**哪些可重用 / 需修改**与可移植性分析 | ✅ v0.9 |
 | — | `ref_paper/` | **参考论文原文 PDF（38 篇）**，文件名 = 论文标题；`README.md` 是按用途分组的索引 | ✅ |
 
 ## 六句话结论（先读这个）

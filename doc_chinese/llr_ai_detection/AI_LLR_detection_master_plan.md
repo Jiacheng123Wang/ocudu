@@ -8,10 +8,21 @@
 > **前身**：`metal_kernel_fusion`（已收官：融合清单穷尽，性能目标在吞吐/占用维度关闭）。
 > 本工作流继承它的问题陈述——"一格 667 µs 里只有几十 µs 是算力"——并换一条完全不同的路去解决它。
 >
-> 版本：v1.6 ｜ 状态：**规划（待 P0 裁决）** ｜ 日期：2026-10-07
+> 版本：v1.7 ｜ 状态：**规划（待 P0 裁决）** ｜ 日期：2026-10-07
 > 配套文档：`memo_01_repo_seams_and_llr_contract.md`（接缝与契约）、
 > `memo_02_paper_2503.16594_reading.md`（参考论文）、`memo_03_literature_survey.md`（文献调研，完整版）、
 > `memo_04_data_labels_and_operating_point.md`（数据与工作点实测）
+>
+> ★★ **v1.7 变更（参考 repo 代码调研，见 `memo_05`）**：把 NVIDIA `aerial-cuda-accelerated-ran`
+> 里的**神经接收机**（`pyaerial/models/neural_rx.onnx`，**145 232 参数**，7 输入 / 2 输出）
+> 作为**工业参考形态**并入：
+> ① ★ **输入契约增加一项**：**导频处的经典 LS 信道估计**作为网络输入
+> （原文：*"the neural receiver takes LS channel estimates as inputs in addition to the received PUSCH slot"*）
+> ⇒ **深度 3 不等于"从零学估计"**；
+> ② 尺寸锚点 1.45e5 从"引用文献"变为**手里有权重文件**；
+> ③ 多任务头（LLR 读出 + 信道估计读出）得到**工业印证**；
+> ④ ★ **量化章更正**：cuPHY 出货 LDPC SPI **只接受 fp16**（fp8 被拒），默认 clamp **32.0**；
+> **`RANGE_LIMIT` 全仓不存在**——它是**我们的设计**，模型标度只能对准它。
 >
 > ★ **v1.4 变更（范围澄清）**：本工作流的目标是 **"信道估计 + 均衡 + 解映射"融合成一个 net**
 > （输入网格 + 几何，输出 LLR）——这是**标准 neural receiver 形态**，也是 OCUDU dApp 的 **depth 3**
@@ -197,6 +208,7 @@ tensor with bounded coordinates, compact ordered data-RE indices, and typed PUSC
 | **DM-RS 位置张量** | `[1, T, F]` 0/1 掩码 | **哪些 RE 是导频**——★ 必须显式给，而不是让网络去猜 |
 | **data-RE 索引 / 掩码** | `[1, T, F]` 0/1 掩码（或紧凑索引 + 散写） | **哪些 RE 要出 LLR** |
 | **元数据** | 标量/嵌入，广播到空间维 | allocation shape、`nof_tx_layers`、`rx_ports`、`modulation`、`nof_cdm_groups_without_data`、`dc_position`、`scaling` |
+| ★ **导频处的 LS 信道估计** | `[2, N_dmrs_re, layers, ports]`（实/虚） | ★ **工业参考形态的必备输入**（见 §2.2.1） |
 
 ★ **导频掩码显式输入是关键设计选择**：DeepRx 的做法就是 *"constructing the input … in a very
 specific manner using both the data and pilot symbols"*，而它的性能被归因于
@@ -207,6 +219,30 @@ local symbol distribution"*。让网络知道"哪些是已知的、哪些是待�
 `dmrs_pusch_estimator::configuration`（`symbols_mask` / `crb_bitmap` / `first_symbol` / `scaling`）+
 `pusch_demodulator::configuration`（`rb_mask` / `modulation` / `nof_symbols` / `dmrs_symb_pos` /
 `dmrs_type` / `nof_cdm_groups_without_data` / `n_id` / `nof_tx_layers` / `dc_position` / `rx_ports`）。
+
+#### 2.2.1 ★★ 工业参考形态：NVIDIA `neural_rx.onnx` 的精确张量规格（`memo_05` §1.2）
+
+这是一份**可直接对照**的工业实现（该 repo 的 `pyaerial/models/` 里就带着 ONNX 权重）：
+
+| 张量 | 形状（不含 batch） | dtype | 含义 |
+|---|---|---|---|
+| `rx_slot_real` / `rx_slot_imag` | `(3276, 12, 4)` | fp32 | 接收网格 `[子载波, 符号, 端口]` |
+| ★ `h_hat_real` / `h_hat_imag` | `(4914, 1, 4)` | fp32 | **导频处的 LS 信道估计** |
+| `active_dmrs_ports` | `(1,)` | fp32 | 激活 DM-RS 端口数 |
+| ★ `dmrs_ofdm_pos` | `(3,)` | **int32** | **DM-RS 的 OFDM 符号位置** |
+| ★ `dmrs_subcarrier_pos` | `(6,)` | **int32** | **DM-RS 在 PRB 内的子载波位置**（`{0,2,4,6,8,10}`） |
+| `output_1` | `(8,1,3276,12)` | fp32 | **LLR** `[Qm, 层, 子载波, 符号]` |
+| `output_2` | — | fp32 | 另一路读出（图中有 `readout_ch_est` 分支） |
+
+- 位置核验：3276 = 273 PRB × 12 ✓；**4914 = 3 × 1638 = 3 个 DM-RS 符号 × (3276/2)** ✓
+  ⇒ **type-1 DM-RS comb-2 图案**，与 `dmrs_subcarrier_pos` 一致 ✓。
+- ★ 论文原文（`example_neural_receiver.ipynb`）：*"the neural network is used to **replace channel
+  estimation, noise and interference estimation and channel equalization**, and thus outputs
+  log-likelihood ratios directly … **Also, the neural receiver takes LS channel estimates as inputs**"*。
+- ★ **参数 145 232 ≈ 1.45e5**，与 §2.6 引用的"实时模型 1.4e5 权重"**完全吻合**。
+
+⇒ **本规划的输入契约据此定为**：网格 I/Q + **导频 LS 估计** + **DM-RS 符号位置** + **DM-RS 子载波位置**
+（+ §2.2 的元数据）。**深度 3 = 学习"插值 + 噪声估计 + 均衡 + 解映射"的联合，而不是从零学信道估计。**
 
 ### 2.3 输出：一个 trunk，多个头
 
@@ -364,11 +400,24 @@ arXiv 2208.05186）、自适应 LLR 裁剪（arXiv 1011.2113）、学习型标�
 | INT4 | ★ **损失 3.3–3.7 dB，并跌破 LS-LMMSE 基线** ⇒ 预计不可用 |
 | FP4 (E2M1) | 可用 |
 
+★★ **代码级更正（`memo_05` §2.1–§2.2）**：
+- **cuPHY 全仓没有 `RANGE_LIMIT`**，也没有逐调制 LLR 标度——它按噪声方差**自然标度且不裁**
+  （`LLR = 2·A·z/σ²_PAM`）。⇒ ★ **`range_limit` 是"我们的"设计，不是业界标准**；
+  模型的输出标度**只能对准我们自己的量化器**，没有可照抄的"业界标度"。
+- **NVIDIA 出货的 LDPC SPI 只接受 fp16**（*"Only ::CUPHY_R_16F is supported"*），
+  虽然类型枚举里有 fp8 且存在 fp8 代码路径，但**被 SPI 拒绝** ⇒ "fp8 LLR" 参考价值下降。
+- **LDPC `clamp_value` 默认 32.0**，规则是**严格小于**类型 max finite（fp16 上界 65504）。
+  ★ 32.0 这个默认值说明**典型 LLR 幅度在"几十"量级**——可作我们标度校准的合理性检查。
+- ★ 他们还有**两级裁剪**：LDPC 输入 clamp（默认 32）+ rate-match 后的 HARQ buffer clamp（±10000）。
+- ★ LLR 布局与我们**同约定**（`[re][bit]`、bit 最快变化）；差别只在**他们恒 pad 到 8**、我们不 pad。
+
 ★ **fp16 的约束是"量程"不是"尾数"**：朴素 fp16 流水线曾因中间量达到 **5e6 ≫ 65504** 而**全 NaN**，
 用 **1/N 块浮点缩放**才修好（arXiv 2605.28451）。
 ⇒ **LLR 头必须有显式 clamp / tanh，绝不能接近 65504**——这与 §3.3 的标度校准是同一件事的两面。
 ★ 并且 **没有任何人发表过 LLR 的"精度-性能"曲线**（`memo_03` §7bis.C）——
 **这条曲线本身就是本工作流的一个可交付结果**。
+★ 参照 `memo_05` §2.2，建议的对比臂至少三条：**int8-uniform（我们的链） / fp16（NVIDIA 出货口径） /
+fp8-E4M3（存在但被拒的路径）**。
 
 ### 3.5 数据划分（★ 曾吃过大亏的地方）
 
