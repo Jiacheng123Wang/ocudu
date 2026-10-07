@@ -28,35 +28,82 @@ huggingface.co 及多数厂商域名均不可达，全部返回 "resolves to a n
 
 ---
 
-## 1. ★★ 改变架构决策的发现：ANE 不能做逐符号引擎
+## 1. ★ 引擎选择（v1.1 重写）：ANE **仍是首选**——我 v1.0 的推论有两处硬伤
 
-这是本次调研对规划影响最大的一条，**直接推翻了规划 v1.0 把 ANE 当作目标引擎的隐含前提**。
+> ⚠ **勘误**：本节 v1.0 的标题是"ANE 不能做逐符号引擎"，并据此把 **Metal/MPS 升为主路径**。
+> **这个结论是错的**，两处理由都站不住：
+> ① **调用粒度搞错了**（见 §1.2）；② **把 M1 的数字当成我们 M4 Pro 的约束**（见 §1.3）。
+> 而且它与本仓库自己的实测（ANE 141 µs vs MPS **690 µs**）和本仓库的 high-level 架构原则
+> （`apple_silicon_heterogeneous_gnb_plan.md:17`：**"AI 推理走 NPU"**）**都矛盾**。
+
+### 1.1 事实清单（不变）
 
 | 事实 | 数字 | 来源 |
 |---|---|---|
-| ANE **单次 dispatch 地板**（M1） | **0.23–0.26 ms**——哪怕只是一个 ReLU / 64 元素线性层 / 小卷积 | *Apple Neural Engine: Architecture, Programming, and Performance*（Bryngelson, 2026-06, ~302 页），arXiv [2606.22283](https://arxiv.org/abs/2606.22283) |
-| ANE 单次 dispatch 地板（**M5 Pro**） | **≈ 70 µs**（小融合程序 ≈ 90 µs） | *ANEForge*，arXiv [2606.17090](https://huggingface.co/papers/2606.17090) |
-| **我们自己的实测**（M4 Pro，HELENA 116k 参数，(1,612,14,2)） | **p50 141 µs / p99 208 µs** | 本仓库 AI CE G1（`doc_chinese/ai_ce/`） |
-| ANE **工作集悬崖** | **2 MB（M1）/ 4.72 MB（M5）**；超过后从 ~12 TFLOP/s fp16 算力屋顶掉到 ~85 GB/s 带宽屋顶（ridge ≈ 141 FLOP/byte） | 同上两篇 |
+| ANE 单次 dispatch 地板（**M1**） | 0.23–0.26 ms（哪怕只是一个 ReLU / 64 元素线性层 / 小卷积） | arXiv [2606.22283](https://arxiv.org/abs/2606.22283) |
+| ANE 单次 dispatch 地板（**M5 Pro**） | ≈ **70 µs**（小融合程序 ≈90 µs） | arXiv [2606.17090](https://huggingface.co/papers/2606.17090) |
+| ★ **我们自己的实测**（**M4 Pro**，HELENA 116 k 参数，(1,612,14,2)） | ★ **p50 141 µs / p95 179 / p99 208** | AI CE G1（`doc_chinese/ai_ce/`） |
+| 同模型同机 **MPS/GPU 路径** | **p50 690 µs**（p99 747） | 同上 —— ★ **ANE 快 4.9×** |
+| 同模型同机 **CPU_ONLY** | p50 693 µs | 同上 |
+| ANE **工作集悬崖** | 2 MB（M1）/ 4.72 MB（M5）；超过后从 ~12 TFLOP/s fp16 掉到 ~85 GB/s 带宽屋顶 | 同 ANE 两篇 |
+| ANE 上的**整链** CE 时延（G-4 实链） | helena **221 µs** vs cpu **25 µs**（★ 但那是 CE 单模块，见 §1.4） | AI CE G-4 |
 
-### 1.1 推论（对规划的硬约束）
+### 1.2 硬伤一：调用粒度——**是每跳一次，不是每符号一次**
 
-1. ★ **ANE 不能按符号调用。** 我们的接缝 `submit_fused` 是**逐符号**调用的
-   （`pusch_demodulator_impl.cpp:601`）；一个槽有 14 个符号 ⇒ 14 次 ANE dispatch ⇒
-   在 M1 上 **3.2 ms/槽**、在 M5 Pro 上 **≈1 ms/槽**，**全部超预算**。
-   ⇒ 若用 ANE，必须是**一次融合的、分块的（chunked）程序**，每个槽（或每个符号组）只 dispatch 一次。
-2. ★ **Metal / MPS GPU 才是主路径**，ANE 只作为"**单个大融合阶段的可选卸载**"。
-   （v1.0 规划把 ANE 当锚点，是因为只看了 HELENA 的 141 µs —— 那是 **M4 Pro + 单个中等模型**的结果，
-   不能外推到"每符号一次"的调用模式。）
-3. **分块方向是明确的**：按符号 / 子带切。工作集悬崖针对的是"**在 RE 上跑 transformer**"，
-   不是网格本身——273 PRB × 14 符号 × 4 端口 complex-fp16 网格只有 **≈ 0.12 MB**。
-   这从另一个角度支持了"**A2 卷积形态优于 A3 Transformer 形态**"（主规划 §2）。
-4. **fp16 的"量程 vs 精度"是 CoreML/ANE 的真实约束**，会打到 LLR 与相关求和上——
-   方法论先例见 *Range, Not Precision: Block-Floating-Point Half-Precision FFT and SAR Imaging on
-   Apple Silicon*，arXiv [2605.28451](https://export.arxiv.org/pdf/2605.28451)。
-5. **Apple GPU 的 DSP 是带宽瓶颈而非算力瓶颈**——*Bandwidth, Not FLOPS: FFT Kernels, Matrix Units
-   and SAR Imaging on Apple M6*，arXiv [2609.32237](https://ar5iv.labs.arxiv.org/html/2609.32237v1)。
-   ★ 这与本仓库 `metal_kernel_fusion` 自己的结论**独立吻合**（"一格 667 µs 里只有几十 µs 是算力"）。
+v1.0 写"接缝是逐符号调用的 ⇒ 14 次/槽"。**这与本工作流自己认定的事实矛盾**：
+
+- `submit_fused` 确实**按符号被调用**，但后端在**第一个符号**触发**整组**的工作，靠调用方
+  **均匀步长的目的视图**写到后续符号的槽位（`memo_01` §2.4，接口原文：
+  *"The backend reaches the later symbols of the same group through the distance between two
+  consecutive destinations"*）。
+- 到了**深度 3**，替换单元是 `merged_hop`——*"the whole hop's buffer"*，
+  **一个命令缓冲覆盖整跳**（`memo_01` §1.6）。
+
+⇒ 正确的粒度是 **1 次 dispatch / 跳**。按实测跳率 **~444.7 跳/秒**，
+即使每次 150 µs，ANE 占空比也只有 **≈6.3%**。**dispatch 地板在这个粒度上完全不是问题。**
+
+### 1.3 硬伤二：用**代际**数字否定我们手上的机器
+
+- 0.23 ms 是 **M1** 的数字，而且是在**极小模型**（一个 ReLU）上测的**地板**。
+- 我们在 **M4 Pro** 上的实测是 **整次 HELENA 推理 141 µs**——**已经含 dispatch 开销**。
+- M5 Pro ≈70 µs，正好说明这条曲线是**代际改善**的：
+  **M1 0.23 ms → M4 Pro ≤141 µs → M5 Pro ~70 µs**。
+
+⇒ ★ 用 M1 的地板去论证"我们不该用 ANE"是**拿两代前的芯片给今天的决定定价**。
+
+### 1.4 ★ 结论（与 high-level 架构一致）
+
+| 引擎 | 定位 | 依据 |
+|---|---|---|
+| ★ **ANE** | **首选**（AI 推理专用引擎） | 本仓库架构原则 *"AI 推理走 NPU"*（`apple_silicon_heterogeneous_gnb_plan.md:17`）；本机实测 ANE 比 MPS **快 4.9×**（141 vs 690 µs）；AI CE 的引擎栈、宽度分桶、keep-alive、worker 线程**全部已在 ANE 上跑通** |
+| **Metal / MPS GPU** | **对照臂 / 回退** | 卷积型深度 3 网络在 MPS 上未必像 attention 型那样吃亏，**要用测量决定**（AI CE 的 MPS 负结果来自 HELENA 的 MHA 在 MPS 上退化到 CPU） |
+| CPU | 经典路径兜底 | 已有 |
+
+★ 用户给的定位是准确的：**态度 open，核心是算力调度（compute scheduling），但默认走 ANE。**
+本规划据此把引擎决策从"已定"改为**"默认 ANE，由 P4/P5 的实测裁决是否例外"**。
+
+### 1.5 ANE 的真实约束（这些才是设计要处理的，而不是"所以别用 ANE"）
+
+| # | 约束 | 设计后果 |
+|---|---|---|
+| 1 | ★ **自定义 Metal kernel 不能跑在 ANE 常驻图里**（custom layer 只能 CPU/GPU） | 模型必须可由 **CoreML 原生算子**表达；任何自定义 Metal 前/后处理必须是**独立阶段**，不能同图 |
+| 2 | **fp16 的约束是量程不是尾数**（中间量 5e6 ≫ 65504 → 全 NaN） | **LLR 头必须显式 clamp/tanh** |
+| 3 | **工作集悬崖 2 MB / 4.72 MB** | 按符号/子带分块。★ 网格本身很小（273 PRB × 14 符号 × 4 端口 complex-fp16 ≈ **0.12 MB**），悬崖针对的是"在 RE 上跑 transformer" |
+| 4 | **`EnumeratedShapes`（≤128）是 ANE 认可的形状路径**；无界 `RangeDim` 被拒 | **宽度分桶**——AI CE 已经在做（≤624→52 模型 / 625–1272→106 模型 / 零填充到桶宽） |
+| 5 | **没有 ANE-only 模式，也没有运行时 API 告诉你哪个单元跑了**（`MLComputePlan` 只是离线估算） | 引擎驻留必须**用测量证明**：AI CE 的做法是对比 ANN/ANE、MPS、CPU 三条路径的时延 |
+| 6 | **每次 dispatch 都有成本** | ★ 整跳必须是**一次前向**（我们的接缝已经满足，见 §1.2） |
+
+★ 关于"如何证明真的跑在 ANE 上"：`meta.csv` 里的 `engine_nsc` **不是** ANE 核数，
+它是**该槽激活引擎处理的子载波数**（624 / 1272 / 612；0 = 该槽 NN 未激活）
+（`port_channel_estimator_helena_impl.cpp:158-177`）。真正的驻留证据是**三条计算单元路径的时延对比**，
+而 `ocudu_coreml_nn_engine.mm:143` 用的是 `MLComputeUnitsAll`（*"ANE > GPU > CPU as the runtime sees fit"*）
+——即**交给运行时调度**，这正是用户说的"算力调度"。
+
+### 1.6 一条仍然成立的旁证
+
+**Apple GPU 的 DSP 是带宽瓶颈而非算力瓶颈**——*Bandwidth, Not FLOPS*（arXiv 2609.32237）。
+★ 这与本仓库 `metal_kernel_fusion` 自己的结论**独立吻合**（"一格 667 µs 里只有几十 µs 是算力"）。
+它不构成"选 ANE 而不选 GPU"的理由，但说明**移植到 GPU 也不会自动变快**。
 
 ---
 
