@@ -8,12 +8,24 @@
 > **前身**：`metal_kernel_fusion`（已收官：融合清单穷尽，性能目标在吞吐/占用维度关闭）。
 > 本工作流继承它的问题陈述——"一格 667 µs 里只有几十 µs 是算力"——并换一条完全不同的路去解决它。
 >
-> 版本：v1.7 ｜ 状态：**规划（待 P0 裁决）** ｜ 日期：2026-10-07
+> 版本：v2.0 ｜ 状态：**规划（待 P0 裁决）** ｜ 日期：2026-10-07
 > 配套文档：`memo_01_repo_seams_and_llr_contract.md`（接缝与契约）、
 > `memo_02_paper_2503.16594_reading.md`（参考论文）、`memo_03_literature_survey.md`（文献调研，完整版）、
 > `memo_04_data_labels_and_operating_point.md`（数据与工作点实测）
 >
-> ★★ **v1.7 变更（参考 repo 代码调研，见 `memo_05`）**：把 NVIDIA `aerial-cuda-accelerated-ran`
+> ★★★ **v2.0 变更（OCUDU dApp 平台代码调研，见 `memo_06`）——接口章按**生产契约**重写**：
+> ① ★★★ **宿主的正规契约已找到**：平台有**完整的接收机接缝**
+> （`pusch_demodulator_gpu_impl.cpp:3049` → `invoke_receiver` → **同 stream 就地解扰** → LDPC），
+> 输入 = `rx_grid + pusch + dmrs` 元数据，输出 = **解扰前** LLR（bit 最快变化、**正 = 比特 0**、值有限、I8 不用 −128）。
+> **与 `memo_01` §3 的设计逐字一致**；§1.1 据此**冻结**。
+> ② ★★ **两条硬约束改架构**：**逐 RE 后均衡噪声是必需输出**（主机 SINR 的唯一来源，
+> 且**不得近零常数**）；**模型产物上限 1 MiB**。§2.3 据此把噪声头升为必需。
+> ③ ★★ **§1.4 修正**：平台**没有 shadow/并行仲裁**，只有"失败即回退"——文献的"并行仲裁"是**建议**，
+> **shadow 要我们自己建**。
+> ④ ★★ **新增 §1.5 路线选择**：自建接缝 vs 采用平台 ABI（含 **Metal 后端的两个结构性阻塞**）。
+> ⑤ ★ **LLR 位宽成为显式决策点**：契约规定 **host = I8**、**accelerator = F16**；我们链上是 int8。
+>
+> ★★ **v1.7 变更（NVIDIA aerial 代码调研，见 `memo_05`）**：把 NVIDIA `aerial-cuda-accelerated-ran`
 > 里的**神经接收机**（`pyaerial/models/neural_rx.onnx`，**145 232 参数**，7 输入 / 2 输出）
 > 作为**工业参考形态**并入：
 > ① ★ **输入契约增加一项**：**导频处的经典 LS 信道估计**作为网络输入
@@ -122,20 +134,48 @@ its own post-equalization noise**, because the conventional measurement kernels 
 ⇒ **本规划的选型（路线 a）**：net **附带输出信道估计与噪声**，经典测量核**跑在 net 的输出上**。
 理由：上报口径不变（对调度器零影响），同时把最贵的那部分算力移走。
 
-### 1.1 冻结项：宿主接缝（深度 3）
+### 1.1 ★★★ 冻结项：接口契约以**生产契约**为准（`memo_06` §1）
 
-| 项 | 值 |
+平台的正规契约（`include/ocudu/dapp/use_cases/v1/receiver.h`）与我们的设计**逐项一致**，
+因此**直接以它冻结**，而不是自创：
+
+**输入**（`ocudu_dapp_receiver_input_v1`）：
+
+| 张量 | 元素类型 | rank | 布局 | 含义 |
+|---|---|---|---|---|
+| `rx_grid` | ★ **CBF16**（复数 bf16） | 3 | `[port, symbol, subcarrier]` | DFT 后的接收网格（整槽） |
+| `dmrs.reference_symbols` | **CF32** | 2 | `[layer, pilot]` | **已知的 DM-RS 符号值** |
+| ★ `dmrs.coordinates` | **U16** | 2 | `[pilot, 2]` = (symbol, subcarrier) | ★ **每个导频的时频坐标 = "几何"** |
+| ★ `pusch.data_re_indices` | **U32** | 1 | `..._PUSCH_DATA_RE_INDICES_U32_V1` | ★ **要出 LLR 的 data RE 索引** |
+| （另）`dmrs` 的 OFDM 符号掩码 | — | — | 在 `reserved[0]` 里 | DM-RS 的符号位置 |
+
+**准入包络**：1–2 层、1–64 端口、DM-RS type 1/2、`nof_pilots ≤ 4096`、data-RE 选择完整、
+必需 flags `LAYER_COMPLETE | COORDINATES_SHARED_ACROSS_LAYERS`。
+
+**输出**（`ocudu_dapp_receiver_output_v1`）：
+
+| 字段 | 契约（逐字要点） |
 |---|---|
-| 要替换的两处 | `pusch_processor_impl.cpp:264` `estimator.estimate(notifier, grid, ch_est_config)` **+** `:559` `demodulator.demodulate(buffer, notifier, grid, est_results, demod_config)` |
-| 输入 1 | `resource_grid_reader& grid`（DFT 后的时频网格） |
-| 输入 2（几何） | `dmrs_pusch_estimator::configuration`（`symbols_mask` = DM-RS 位置、`crb_bitmap` = 分配、`first_symbol`、`scaling`、`sequence_config`）+ `pusch_demodulator::configuration`（`rb_mask`、`modulation`、`start_symbol_index`、`nof_symbols`、`dmrs_symb_pos`、`dmrs_type`、`nof_cdm_groups_without_data`、`n_id`、`nof_tx_layers`、`dc_position`、`rx_ports`） |
-| 输出 1 | 加扰域 LLR（int8，RE-major）→ 交给既有 `revert_scrambling` |
-| 输出 2 | ★ **后均衡噪声方差**（上报统计，必须写）+ ★ **信道估计与噪声**（供经典测量核出 RSRP/EPRE/SNR/TA/CFO） |
-| 回退 | 深度 3 不可用 ⇒ **经典 CE + 经典 eq/demap**（与 dApp 的"经典阶段在同一次调用里兜底"同构） |
+| `llrs` | ★ **"soft-bit tensor before scrambling reversal"**；**bit 最快变化**；**正 = 比特 0，负 = 比特 1**；值必须有限；**I8 不得用 −128**。★ **host = `I8 [data_re × Qm]`；accelerator = `F16 [data_re, layer, bit]`** |
+| `metrics.post_equalization_noise` | ★★ **F32 `[data_re, layer]`——主机 SINR 的唯一来源**（见 §2.3） |
+| `metrics.equalized_symbols` | 可选 CF32；★ 官方明确允许*"direct-bit neural receivers without an explicit symbol estimate"*不填 |
+| `reserved0` | 有效位 flags（`..._METRICS_VALID_V1` / `..._EQUALIZED_SYMBOLS_VALID_V1`） |
+| `confidence_q16` | 存在，但★ **平台明文"the v1 host does not gate decoding on it"** |
 
-★ **仍可复用的既有事实**（`memo_01` §1.2、§2、§3）：`ch_est_list::device_slice` 的零拷贝思路、
+**我们仓库里对应的两处替换点**（自建接缝时）：
+`pusch_processor_impl.cpp:264` `estimator.estimate(notifier, grid, ch_est_config)` **+**
+`:559` `demodulator.demodulate(buffer, notifier, grid, est_results, demod_config)`。
+
+★ **可直接复用的既有事实**（`memo_01` §1.2、§2、§3）：`ch_est_list::device_slice` 零拷贝思路、
 LLR 量化（`LLR_MAX=120`、`range_limit` 24/24/20/20）、**模型输出加扰域 LLR**、
-以及后端开关的形状（`upper_phy_factories.cpp:743-756`）。
+后端开关形状（`upper_phy_factories.cpp:743-756`）。
+
+### 1.1bis ★ 两个必须显式决策的接口点
+
+| # | 决策 | 选项 | 建议 |
+|---|---|---|---|
+| 1 | ★★ **LLR 位宽** | 契约：host `I8` / accelerator `F16`；**我们链上是 int8** | 走 accelerator 就面对 F16 ⇒ ★ **在 P4 之前定**；见 §3.4 的"LLR-vs-精度曲线"正好可以裁决它 |
+| 2 | ★ ★ **输入是否含"导频处 LS 估计"** | 工业形态（`neural_rx.onnx`）**含**；平台的 `dmrs.reference_symbols` 给了**已知导频值**，LS 估计要自己算 | ★ **采用工业形态**：喂 LS 估计（见 §2.2.1） |
 
 ### 1.2 契约测试（是单测，不是文档）
 
@@ -145,47 +185,75 @@ LLR 量化（`LLR_MAX=120`、`range_limit` 24/24/20/20）、**模型输出加扰
 4. **量化边界**：±120 裁剪、±127 语义、`quantize` 的 mid-tread 步长。
 5. **加扰域一致性**：把经典 demapper 的输出与模型输出放在**同一域**对拍（同为加扰域）。
 6. **回退等价**：开关关闭时，与 HEAD 的经典路径 **bit-exact**（用 `ab_dumps.sh` 的 0 差异控制臂）。
+7. ★ **几何张量自检**：`dmrs.coordinates` 的 (symbol, subcarrier) 与 `pusch.data_re_indices`
+   必须与**经典路径实际使用的 RE 集合**逐项一致（防止"少算/多算 RE"这类静默错误）。
+8. ★ **LLR 符号约定**：正 = 比特 0。★ 这是一个"训练全绿、译码全崩"级别的坑
+   （`memo_01` §2 的 BCE 恒等式那一节）。
+9. ★ **fence 纪律**（照 `memo_06` §2bis 采纳）：**实现即使失败或抛异常也必须记录完成 fence**
+   （可能已入队工作）；失败**毒化**该 slot；迟到用**事件查询**而非等待。
+10. ★ **不越界持有借来的张量指针**：不得超出本次调用的完成事件存活。
 
-### 1.3 路线选择：内联（I）还是 dApp（D）—— **内联是唯一可用路线**
+### 1.3 ★★ 路线选择：**自建接缝** 还是 **采用平台的 dApp ABI**（v2.0 重写）
 
-文献调研（`memo_03` §2、§3）查清了三件事：
+`memo_06` 的代码调研把这个问题从"要不要走 dApp"变成了一个**具体的工程取舍**：
 
-| 事实 | 后果 |
+| | 路线 A：**自建接缝**（默认） | 路线 B：**采用平台 dApp ABI** |
+|---|---|---|
+| 做法 | 在我们 fork 里把 `estimator.estimate` + `demodulator.demodulate` 两处合并成一个 AI 后端 | vendored `ocudu-dapp-sdk`（3.4 M，明文"不复制 OCUDU ABI 头、不要求 OCUDU 源码树"），实现一个 Class-A 模块 |
+| 契约 | **照抄 `receiver.h` 的字段语义**（不引入 C ABI） | 直接用平台 C ABI + 生命周期 + 打包 + 验证阶梯 |
+| 成本 | 自己写接缝 + 自己写模型生命周期 | ★ **要改平台运行时**（见下） |
+| 收益 | 立刻可做；无外部依赖 | ★ 与上游同构：签名包、SBOM、ABI 指纹门、模型 stage/warm/activate、验证阶梯**全部现成** |
+
+★★ **采用平台 ABI 的两个结构性阻塞**（`memo_06` §4ter，不是接线问题）：
+
+| # | 阻塞 | 后果 |
+|---|---|---|
+| 1 | `include/ocudu/dapp/management/types.h:29` 有 `other_accelerator`，**但** `instance_manager_helpers.inc:42-43` 把它映射成 `std::nullopt`，且 `instance_manager_lifecycle.cpp:66` 在无 ABI backend 时**拒绝 in-process 放置** | ★ Class A **只能 in-process** ⇒ **Metal 后端的 Class A 包当前无法加载** |
+| 2 | `class_a_l1_path_incompatibility`（`instance_manager_helpers.inc:284-293`）把"加速 L1"与"CUDA"**当同义词** | 同上 |
+
+★ **但方向是对的**：`abi/v1/memory.h:36-43` **已显式枚举 `HOST / CUDA / HIP / SYCL`** 并自述 backend-neutral
+⇒ **Metal 是"第五个 id"，不是逆着契约来**。
+
+★★ **本规划的裁决（v2.0）**：
+1. **主线走路线 A（自建接缝）**——立刻可做，不被平台的 CUDA 绑定卡住；
+2. **但契约字段、生命周期机制、fence 纪律、验证阶梯全部按路线 B 的形态设计**，
+   使得将来若平台开放非 CUDA 后端，我们**只需换壳**；
+3. ★ **引入 `ocudu-dapp-sdk` 作为"规范参照"而非依赖**：读它的参考实现与文档，不链接。
+4. ⚠ **许可差异**：他们是 **BSD-3-Clause-Clear**（含专利条款），我们是 BSD-3-Clause-Open-MPI；
+   vendoring 前必须过一遍。
+
+★ **仍然成立的两条硬事实**（`memo_03` §3.1）：
+① 外部 dApp 框架对神经接收机 **Inexpressible**（没有把 LLR 张量送回同一槽 PUSCH 链的回路）⇒ **必须内联**；
+② 内联避免把每槽 MB 级搬运加回一条以"零主机↔设备数据穿越"为核心成就的 lane（`phy_pipeline_crossings.h`）。
+
+#### 1.3bis ★★ 可复用 / 需重写的清单（路线 B 若启动时用）
+
+| | 内容 |
 |---|---|
-| OCUDU dApp 运行时声明后端为 **"CPU (x86, ARM) 或 CUDA"**，**没有 Metal / ANE / CoreML 后端** | 路线 D **今天在 Apple Silicon 上不存在** |
-| dApp 接缝**不在本 checkout**（无 `lib/phy/upper/dapp`），平台是独立预览仓库 `gitlab.com/ocudu/work_groups/wg2_ai_ran` | 走 dApp 需要**我们自己拥有一个 Metal 后端** |
-| dApp 的实测记账：neural-receiver→LLR **每槽 1.47 MB 进 / 最多 4.4 MB 出、占用 ≤500 µs**；Class B 直接调用 **0.29 µs P50 / 5.2 µs P99.9** | 这笔账**用作 G5 的对标基线**（§4），而不是我们要走的路线 |
+| ✅ **原样复用** | **全部** `include/ocudu/dapp/abi/v1/*.h` 与 `use_cases/v1/*.h`（**纯 C**）；`circuit_breaker.cpp`、`incident*.cpp`、`guarded_call.h`、`instance_runtime.h`；`module_loader.cpp`、`abi_validation.cpp`、`native_worker.cpp`、`native_hook_point.cpp`、`native_hook_slot.cpp`、`native_instance.cpp`、`instance_manager*.cpp`、`package_*.cpp`、`artifact_verifier.cpp`、`lifecycle.cpp`；`pusch_dapp_demodulator.cpp`、`native_pusch_dapp_demodulator_target.cpp`、`pusch_route_table.cpp`、`upper_phy_dapp_*.cpp` |
+| ❌ **必须重写** | `lib/phy/upper/dapp/pusch_resident_dapp.cpp`（**1401 行热适配器**：stream→`cudaStream_t`、`cudaMemcpyAsync`、`cudaEventRecord`，整体在 `#ifdef ENABLE_CUDA` 下）；`native_receiver_resident_adapter.cpp:59-67`（硬编码 `MEM_ACCELERATOR_DEVICE_V1` + `BACKEND_CUDA_V1`）；`pusch_resident_dapp_cuda.cu/.h`、`srs_*_cuda.cu`、`class_c_cuda_export_pool.cpp`、`native_cuda_control_context.cpp`；`pusch_demodulator_gpu_impl.cpp`（**4058 行**） |
 
-⇒ **结论：走内联（I）**。这不只是偏好——它同时避免把每槽 MB 级搬运重新加回一条
-以"零主机↔设备数据穿越"为核心成就的 lane（`phy_pipeline_crossings.h` 的整个设计目的）。
-路线 D 保留为**对照臂**，仅在"内联做不到"时才复审——且复审必须显式，不得悄悄改道。
+### 1.4 ★★ 逐槽信任 / 回滚（v2.0 修正：平台**没有** shadow 模式）
 
-### 1.4 ★ 逐槽信任 / 回滚（v1.3 重写：朴素回滚是错的）
+★★ **必须分清"文献建议"与"平台实现"**：
 
-前作实测：神经接收机需要一个**逐槽**的"是否信任自己"的判决。但**"AI 差就回退经典"这个朴素做法
-被证明是错的**——*When Does a Neural Receiver Help?*（arXiv 2605.26157）在 **500 Hz Doppler** 下
-观察到 ★ **经典接收机崩溃、而神经接收机能工作**（`memo_03` §7bis.G.3）。
-所以回退的判据不能是"单方面不信任 AI"。
-
-该论文的解法是 **逐时隙"神经 + 经典并行仲裁"**，代价 **<5% 时延**。其它可引用的实测细节：
-
-| 事实 | 数字 |
+| 来源 | 做法 |
 |---|---|
-| 16 个场景的结果分布 | **3/16 增益 1.0–2.0 dB；10/16 打平（±0.2 dB）**；QPSK 反而差 ~2 dB |
-| 分布外配置的下场 | **DMRS AddPos=2 从 4 dB 起静默钉在 100% BLER** |
-| "自信地判错"的比特比例 | **平台在 ~7%** ⇒ 给任何"有界 LLR 残差修正"设了上限 |
+| ★ **文献建议**（calibration-drift, arXiv 2605.26157） | 逐时隙**神经+经典并行仲裁**，代价 <5% 时延；因为 **500 Hz Doppler 下经典先崩**，"AI 差就退回经典"是错的 |
+| ★★ **平台实现**（`memo_06` §2quater） | ★ **没有 shadow / 没有对比模式 / 没有基于 LLR 置信度的门控**。回退**严格只在失败或 profile 被拒时**发生 |
 
-⇒ 设计调整：
+⇒ **本规划的裁决**：
+1. **近期按平台形态做**（失败即回退），因为它**简单、可验证、且是生产已验证的**；
+2. ★ **但明确记录：shadow/并行仲裁要我们自己建**，它不是"平台能力"；
+3. ★ `confidence_q16` **平台不用于 gate** ⇒ 置信度门控若要做，也是我们自己的机制；
+4. **回退/仲裁率必须与收益一起报**（只报收益 = 不诚实的比较）。
 
-| 项 | 设计 |
-|---|---|
-| 结构 | **并行仲裁**（神经与经典都算，逐槽选），而不是"先 AI 后回退" |
-| 判据 | 必须**廉价且推理时可得**；不能依赖事后 CRC（那时已太晚） |
-| 成本 | ★ 内联路线的优势仍在：**经典路径始终在链上**，仲裁不需要额外的数据搬运 |
-| 度量 | 回滚率/仲裁率必须与收益**一起报**（只报收益 = 不诚实的比较） |
-| 参考实现 | dApp 平台的做法：经典阶段在**同一次调用**里兜底、**连续 8 次迟到才打开 lane breaker**、权重双 bank 原子切换（`memo_03` §2.1） |
-
-⇒ **G6 的判据必须同时包含仲裁/回滚率**，否则统计门不成立。
+**参考实现的具体机制**（`memo_06` §2quater，可直接抄）：
+- `breaker_policy{ recoverable_failure_threshold{8} }`，**第 8 次**连续可恢复失败打开；
+- ★ **迟到确实喂 breaker**（`native_worker.cpp:932`），但**计数器共享**（deadline/invalid-input/invalid-output/resource 同一个 latch）；
+- **按 lane 独立**；恢复**只能靠运维探针**（`begin_authorized_probe()` → half_open → `close_after_successful_probe()`）；
+- 打开期间 `guarded_call.h:29` 返回 `OCUDU_DAPP_BYPASS_V1`；
+- ★★ **completion 契约在生产里未启用**（`host_capabilities{}` 从不填充，加载器拒绝需要它的接收机）⇒ **生产是 invoke-only**。
 
 ## 2. 模型设计：★ 一个网络做深度 3（不是 CE 与 EQ/DEM 两个网络）
 
@@ -456,6 +524,29 @@ fp8-E4M3（存在但被拒的路径）**。
 | **P5** | 实时性：端到端时延 + **同步开销** | G5 | **采用 dApp 论文的 Class A 契约**（`memo_03` §2.1）：**驻留接收链、零拷贝设备张量、完成 ≤150 µs**。三个对标基线：① 现网 eqdem **667.4 µs**（mkf033 中位）；② dApp 的 neural-receiver→LLR **≤500 µs 槽占用**；③ NVIDIA GB10 接收机 kernels **82 µs P50 / 112 µs P99.9**（273 PRB 4 端口，我们体量的 ~21 倍，**不可直接套用**）。★ **必须包含 GPU→模型 的等待与 模型→LDPC 的可见性开销**，不得只报前向时间；**必须报 dispatch 次数** |
 | **P6** | OTA 实测：真实采集上的 CRC/BLER A/B | G6 | 统计门通过（同批采集、同一译码器、同一 LDPC 配置），**且必须同时报逐槽回滚率**（§1.4） |
 
+### 4.1 ★★ 借用平台的验证阶梯与 ABI 门禁（`memo_06` §5.1）
+
+| 机制 | 内容 | 我们怎么用 |
+|---|---|---|
+| **三级阶梯** | `packaging → algorithm → system` | 我们的 G1–G6 与之对齐：打包（P4）、算法（P2/P3）、系统（P5/P6） |
+| ★★ **官方承认深度 3 的证据不在开放阶梯内** | 逐字：*"**Vendor-only (not in open ladder): a proprietary neural receiver vs the conventional receiver, side-by-side SER.**"* | ★ **这份 side-by-side SER 证据正是我们的 G6**,要自己产出 |
+| ★ **ABI 编译器矩阵门** | 在 **GCC × Clang × C11 × C++17** 下编译公共 C ABI，要求与冻结的 **LP64 布局指纹**逐字节一致 | ★ 我们若定义跨引擎接口，值得引入同等机制 |
+| **certifier 覆盖** | 生命周期、caller-owned 输出、golden/canary、六种 shape、全 QAM × DM-RS 1/2、模型生命周期 | 我们的 P4 契约测试应向这个覆盖面看齐 |
+| ★ **安全边界定位** | 逐字：*"A malicious or memory-unsafe Class A/B module can compromise the DU."*；*"E3 … is not an acceptable Class A/B tensor transport."* | 若将来做模块化，**签名 = 出处证明，不是沙箱** |
+
+### 4.2 ★★ G5 的死线必须带**争用条件**（别人踩过的坑）
+
+平台的 `demodulator_deadline` 默认 **2000 µs**，注释逐字记录：
+
+> *"**500 µs (one 30 kHz slot) and then 1000 µs both still classified good PBC results as late under
+> 4-UE OTA contention; 2000 µs keeps the tripwire without disabling a working EQ.**"*
+
+⇒ ★ **我们的 G5 判据不能只写一个 µs 数**，必须写明：**几 UE、什么负载、哪个 stream 上的争用**。
+否则会重演"死线定得比实现能力还紧，把能工作的东西判成失败"。
+
+⚠ 一处待核实的数值不一致：SDK 文档写 CE 预算 **~300 µs**（`validation_ladder.md:49`），
+平台头文件 `channel_estimator_deadline` 默认 **800 µs**。引用前必须核准。
+
 ★ 门禁纪律（继承自 `metal_kernel_fusion`，都是付过学费的）：
 
 1. **判据在飞之前写死**；事后改判据等于没有判据。
@@ -477,6 +568,11 @@ fp8-E4M3（存在但被拒的路径）**。
 | **R6** | **打破融合 lane 的"一次提交"结构** | crossings 计数上升、`gap` 变大 | 显式声明新同步点；或改走 dApp 路线 D——但那时要把 **1.47/4.4 MB 的每槽搬运**计入 G5（§1.4） |
 | **R7** | 语料不足（17.7 万次接收 vs 0.4 M 参数量级模型） | 训练/验证曲线分离 | 仿真为主 + OTA 微调；先训小模型 |
 | **R8** | 与 CUDA/NVIDIA 路线相比无优势 | 竞品分析 | 如实记录（仓库已有 `metal_vs_cuda_architecture.md` 的方法论） |
+| **R10** | ★★ **采用平台 ABI 时 Metal 后端无法加载** | 尝试走路线 B 时模块被运行时拒绝 | 路线 A 自建接缝；或改平台的 `other_accelerator` 映射与放置校验（`memo_06` §4ter） |
+| **R11** | ★ **模型产物超 1 MiB** 被拒 | 权重文件 > 1 MiB | 现模型 290 KB fp16 在限内；增长时抬高上限或走带外资源 |
+| **R12** | ★ **噪声头输出近零常数** ⇒ 主机算出极大的 SINR ⇒ 调度器被带偏 | SINR 上报异常偏高 | 写成 G3 的**数值判据**（"低噪声区不得输出近零常数"） |
+| **R13** | ★ **completion 契约在生产里未启用** | 依赖 completion 的设计无法上生产 | 按 **invoke-only** 设计主线；completion 只作未来选项 |
+| **R14** | ★ **没有 shadow 模式**，无法逐槽对比 | 无法量化"AI vs 经典"的逐槽差异 | ★ **shadow 自己建**（这是本工作流的一项额外工程，不是平台能力） |
 | **R9** | ★ **模型在某些槽上"崩"**，而整体指标看不出来 | 逐槽 CRC 方差大、退化槽集中在某些信道实现 | **逐槽信任/回滚**：前作实测**平均 60.5% 回滚率**（`memo_03` §4.4）⇒ 这是运维必需品。★ 内联路线在此有天然优势：**经典路径始终在链上，回退 = 让谓词返回 false**，不需要额外机制 |
 
 ★ R6 值得单列一段：当前融合 lane 的核心性质是**一次提交 + 设备排队**（`metal_kernel_fusion` §2.33）。
@@ -528,3 +624,67 @@ fp8-E4M3（存在但被拒的路径）**。
 8. ★ **ANE 能否关掉"72 ms → 1 ms"这个差距** —— 这是本工作流最核心的未知，
    也是文献里**没有人回答过**的问题（`memo_03` §7bis.A）。
 9. **量化曲线与 LLR-vs-精度曲线**（文献空白，见 §3.4）—— 待 P2/P3 产出。
+
+---
+
+## 9. ★★ 调研状态与**开工前功课**（v2.0 新增）
+
+> 用户裁定（2026-10-08）：**不要急于开工；把功课做足。**
+
+### 9.1 已完成的调研（可作为事实基础）
+
+| # | 范围 | 产出 | 状态 |
+|---|---|---|---|
+| 1 | **仓库自身的接缝与 LLR 契约** | `memo_01` | ✅ 代码级 |
+| 2 | **参考论文 DEFINED** | `memo_02` | ✅ 全文级 |
+| 3 | **公开文献 7 条线** | `memo_03` + `survey/`（11 份原始材料 + 38 篇 PDF） | ✅ 全文级 |
+| 4 | **数据、标签与工作点实测** | `memo_04` | ✅ **本仓库实测** |
+| 5 | **NVIDIA `aerial-cuda-accelerated-ran`** | `memo_05` | ✅ 代码级（含两个训练好的 ONNX） |
+| 6 | **OCUDU dApp 平台 5 仓** | `memo_06` | ✅ 代码级（契约、接缝、fence、生命周期、可移植性） |
+
+### 9.2 ★ 开工前的功课清单（按优先级）
+
+#### A. 必做（不做则无法开工）
+
+| # | 功课 | 为什么必须 | 预计产出 |
+|---|---|---|---|
+| **A1** | ★★ **我们仓库侧的"上报路径"彻底摸清**：`est_results.get_channel_state_information(...)` 的**每一个消费字段**（RSRP/EPRE/SNR/TA/CFO）分别被谁读、精度要求、是否影响后续槽 | 深度 3 继承 CE 的全部上报义务；平台已承认这是缺口（`memo_06` §4）。**不知道消费者，就不知道噪声头要输出什么** | `memo_07_reporting_obligations.md` |
+| **A2** | ★★ **`resource_grid_reader` 的内存布局与零拷贝可行性**：port/symbol/subcarrier 的物理排布、能否直接暴露成 `[port, symbol, subcarrier]` 张量（对应平台的 `RESOURCE_GRID_PORT_SYMBOL_SUBCARRIER_V1`） | 这是模型输入的第一步；布局不对就要拷贝，而拷贝会毁掉零拷贝成就 | 同 A1 或独立 memo |
+| **A3** | ★★ **P0 的实验设计（判据预登记）**：genie 上界怎么算、用哪批数据、**经典链基线用哪一条**（CPU generic / metal mmse？）、BLER 操作点与样本量 | ★ **P0 是"值不值得做"的裁决**，而**没有定义基线就没有可比性** | `memo_08_p0_design.md`（**判据必须写在飞之前**） |
+| **A4** | ★ **TA/CFO 的下游用途**：它们只被上报，还是被用于补偿/影响后续槽？ | 若被用于补偿，深度 3 的网络**必须继续产出它们**（或保留一个轻量 DM-RS 经典块）；若只上报，问题小得多 | 并入 A1 |
+
+#### B. 应做（能显著降低返工）
+
+| # | 功课 | 为什么 |
+|---|---|---|
+| **B1** | ★★ **平台的 `resource_grid_tensor_adapter.{h,cpp}` 读完** | 这是"网格 → 张量"的**官方转换**；我们必然要写一个等价物，先看别人怎么做 |
+| **B2** | ★ **平台的 `pusch_resident_dapp.cpp`（1401 行）读完** | 热适配器做了哪些校验/转换/计时；这是"接缝实现"的完整样本 |
+| **B3** | ★ **SDK 的 `ref_receiver_cuda/algorithm.cu` 读完** | 参考算法本体。即使不抄，也要知道**基线**是什么 |
+| **B4** | ★ **平台的深度 1/2 契约读完**（`pusch_dapp_channel_estimator.h`、`ocudu_dapp_equalizer_input_v1/output_v1`） | 三个深度要一起理解，才知道选深度 3 的边界在哪 |
+| **B5** | ★ **`neural_rx.onnx` 的完整 dataflow**（CGNN 结构、`readout_ll_rs` vs `readout_ch_est` 与 ONNX 输出名的对应） | ★ 待核实项：notebook 与单测的**输出形状不一致**；且它 1.45e5 参数的架构选择值得理解 |
+| **B6** | ★ **`ai_train/` 工具链的能力边界**（能做什么、不能做什么、缺什么） | 决定 P1 要写多少新代码 |
+| **B7** | ★ **语料的逐字段可用性核查**（`ul_capture` 五件套 vs 训练需要） | `memo_04` §5 列了缺口，但**没逐字段核** |
+| **B8** | ★ **quickstart 的零硬件 E3 测试台**能不能用作我们的 E2E 环境 | 若能，P5/P6 的环境搭建成本大幅下降 |
+
+#### C. 可选（有则更好）
+
+| # | 功课 |
+|---|---|
+| C1 | 平台 `docs/dapp/` 全目录（我们只读了 SDK 侧 docs） |
+| C2 | `cuPHY/examples/ch_est/torch_to_trt_chest_example.py`（端到端 PyTorch→ONNX→TRT 脚本，方法学可移植） |
+| C3 | 3GPP 侧：`dmrs_type` / `nof_cdm_groups_without_data` 与我们实测分布的关系（`memo_04` §5 的缺口） |
+| C4 | 我们 fork 与平台 fork 的**接缝差异**（若走路线 B，需要知道要移植多少） |
+
+### 9.3 ★★ 开工判据（Definition of Ready）
+
+**以下全部为真，才开始写模型代码：**
+
+1. ☐ **A1–A4 完成**：上报义务清单、网格布局结论、P0 判据预登记、TA/CFO 结论；
+2. ☐ **P0 判据已预登记且被复核**（不是"打算怎么做"，而是"写成文的、可证伪的判据"）；
+3. ☐ **经典链基线已定义**（哪条链、什么配置、在什么数据上、多少样本）；
+4. ☐ **LLR 位宽决策已定**（§1.1bis 决策 1）；
+5. ☐ **路线 A/B 已选**（§1.3；默认 A，但要说清理由）；
+6. ☐ **G0–G6 的判据全部预登记**，且每条都写明**争用条件**（§4.2）。
+
+★ **纪律**：**功课没做完就开工，等于把"值不值得做"这个问题推迟到已经投入之后才回答**——
+而这正是 `metal_kernel_fusion` 那条线用几个月换来的教训。
