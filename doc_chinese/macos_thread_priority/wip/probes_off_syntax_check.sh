@@ -39,13 +39,28 @@ SRC=()
 while IFS= read -r f; do
   SRC+=("$f")
 done < <(git ls-files lib apps utils include | grep -E '\.(cpp|mm)$' | while read -r f; do
-  grep -lqE 'ul_pipeline_probe|handoff_probe|macos_compat' "$f" 2>/dev/null && echo "$f"
+  # WIDENED 2026-10-07 (M4 acceptance). The original three tokens miss the Metal DEBUG AIDS, which are probes
+  # too and share the same failure mode: a RUNTIME declaration inside the aid's block with its callers left
+  # outside. ocudu_metal_mmse_engine.mm and port_channel_estimator_metal_mmse_impl.cpp were both skipped by
+  # this filter and both had that defect.
+  grep -lqE 'ul_pipeline_probe|handoff_probe|macos_compat|OCUDU_METAL_STATS|dft_stats|mmse_stats|note_sigma2|matrix_cache' "$f" 2>/dev/null && echo "$f"
 done)
 
 [ "${#SRC[@]}" -gt 0 ] || { echo "no probe-using sources found (wrong tree?)" >&2; exit 2; }
 
+# WHICH KEYS ARE TURNED OFF, one run each (2026-10-07). The original removed -DOCUDU_FLOW_PROBES and nothing
+# else, so it verified ONE of the three probe families while reporting "the default configuration is safe" for
+# the other two. All three are OFF by default, so all three have to be exercised.
+PROBE_OFF_SETS=(
+  "OCUDU_FLOW_PROBES"
+  "OCUDU_METAL_STATS"
+  "OCUDU_CE_TIME"
+)
+
 fail=0
 checked=0
+for probe_off in "${PROBE_OFF_SETS[@]}"; do
+echo "---- ${probe_off} off ----"
 for src in "${SRC[@]}"; do
   base="$(basename "$src")"
   # The flags.make of the target that builds this file: found through the build.make whose object rule names the
@@ -79,13 +94,16 @@ for src in "${SRC[@]}"; do
     printf '%-56s %s\n' "$src" "SKIP (no ${prefix}_FLAGS in its target)"
     continue
   fi
-  defs="$(sed -n "s/^${prefix}_DEFINES = //p" "$dir/flags.make" | sed 's/-DOCUDU_FLOW_PROBES//')"
+  defs="$(sed -n "s/^${prefix}_DEFINES = //p" "$dir/flags.make" | sed "s/-D${probe_off}//")"
   incs="$(sed -n "s/^${prefix}_INCLUDES = //p" "$dir/flags.make")"
   flgs="$(sed -n "s/^${prefix}_FLAGS = //p" "$dir/flags.make")"
 
   checked=$((checked + 1))
   printf '%-56s ' "$src"
-  if eval "c++ $defs $incs $flgs -fsyntax-only '$src'" 2>"/tmp/probes_off_$(basename "$src").err"; then
+  # REAL COMPILATION, not -fsyntax-only (2026-10-07). The declaration that broke the probes-off build,
+  # ul_stall_watchdog.h's `impl* p`, is diagnosed by -Wunused-private-field, which fires only when a translation
+  # unit is actually CODEGEN'd - so a syntax-only check cannot see it and reported OK for the whole tree.
+  if eval "c++ $defs $incs $flgs -c -o /dev/null '$src'" 2>"/tmp/probes_off_$(basename "$src").err"; then
     echo "OK"
   else
     echo "FAIL"
@@ -93,12 +111,13 @@ for src in "${SRC[@]}"; do
     fail=1
   fi
 done
+done
 
 echo
 if [ "$fail" -eq 0 ]; then
-  echo "probes-OFF arm: $checked TU(s) compile (the default configuration is safe)."
+  echo "probes-OFF arms: $checked compile(s) over ${#PROBE_OFF_SETS[@]} key(s) - the default configuration is safe."
 else
-  echo "probes-OFF arm: BROKEN. A probe method that unguarded code calls is missing from the no-op class in"
-  echo "ul_pipeline_probe.h's '#else // not OCUDU_FLOW_PROBES' arm - add the stub with the same signature."
+  echo "probes-OFF arms: BROKEN. The usual cause is a probe method - or a runtime declaration - that unguarded"
+  echo "code calls but that the '#else' arm lacks: add the stub, or move the runtime part out of the probe block."
 fi
 exit "$fail"
