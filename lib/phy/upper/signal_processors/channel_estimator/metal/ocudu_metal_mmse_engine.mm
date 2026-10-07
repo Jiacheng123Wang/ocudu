@@ -86,6 +86,17 @@ struct ce_site_diag_t {
   /// own a fused leg and a split leg read identically, which is exactly how corr_merged earned its own
   /// counter (see its note above).
   std::atomic<uint64_t> cfo_fused{0};
+  /// CE fusion RANK 3 (2026-10-07): dispatches that built BOTH correlation groups of a fenced build in
+  /// one go (OCUDU_CE_CORR_PAIR, mmse_corr_a_rhp_pair).
+  ///
+  /// \note The three counters above count GROUP BUILDS, not dispatches, and deliberately so: corr_a /
+  ///       corr_rhp / corr_merged are incremented once per group by every route, so a pair dispatch adds
+  ///       2 to each of them and they stay EQUAL to one another and comparable against an unfused leg.
+  ///       corr_pair is the dispatch count, which makes the leg's arithmetic exact:
+  ///         merged == corr_a == corr_rhp      (groups built)
+  ///         merged == 2 * corr_pair           (in the arm; corr_pair is 0 in the control)
+  ///         merged - corr_pair                (correlation dispatches, either way)
+  std::atomic<uint64_t> corr_pair{0};
 };
 
 ce_site_diag_t& ce_site_diag()
@@ -95,16 +106,25 @@ ce_site_diag_t& ce_site_diag()
   return *s;
 }
 
+/// \brief Records that \p n correlation groups were built by ONE dispatch: "A was built" and "R_hp was
+/// built", once per group, whoever built them (dev doc 6.61 - and corr_merged's own note for why those
+/// two questions are not the same as the dispatch count).
+static void count_corr_group_built(unsigned n)
+{
+  ce_site_diag().corr_a.fetch_add(n, std::memory_order_relaxed);
+  ce_site_diag().corr_rhp.fetch_add(n, std::memory_order_relaxed);
+}
+
 /// The site names as the report prints them, in report order.
 static const char* ce_site_names[] = {"reformat", "pilots_lse", "pilots_cfo", "corr_a", "corr_rhp", "scatter",
-                                      "merged", "cfo_fused"};
+                                      "merged", "cfo_fused", "corr_pair"};
 
 void ce_site_report()
 {
   const ce_site_diag_t& d = ce_site_diag();
   const std::atomic<uint64_t>* const sites[] = {&d.reformat, &d.pilots_lse, &d.pilots_cfo,
                                                 &d.corr_a,   &d.corr_rhp,   &d.scatter,  &d.corr_merged,
-                                                &d.cfo_fused};
+                                                &d.cfo_fused, &d.corr_pair};
   uint64_t total = 0;
   std::fprintf(stderr, "[metal_stats] ce_sites");
   for (unsigned i = 0; i != (sizeof(sites) / sizeof(sites[0])); ++i) {
@@ -529,6 +549,9 @@ struct mmse_engine_impl {
   id<MTLComputePipelineState>    corr_rhp_pipe = nil;
   /// O1 (dev doc 6.174): A and R_hp in ONE dispatch (optional - a metallib without it keeps the two).
   id<MTLComputePipelineState>    corr_merged_pipe = nil;
+  /// RANK 3 (CE fusion, 2026-10-07): BOTH correlation groups of one fenced build in ONE dispatch
+  /// (optional - a metallib without it, or OCUDU_CE_CORR_PAIR=0, keeps the two O1 dispatches).
+  id<MTLComputePipelineState>    corr_pair_pipe = nil;
   // K0-a: the estimator's input stage - pilot extraction, LSE, CFO (optional, same metallib).
   id<MTLComputePipelineState>    pilots_lse_pipe   = nil;
   id<MTLComputePipelineState>    pilots_cfo_pipe   = nil;
@@ -733,6 +756,37 @@ struct mmse_engine_impl {
     static const bool value = []() {
       const char* env = std::getenv("OCUDU_CE_CORR_MERGED");
       return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+    }();
+    return value;
+  }
+  /// \brief RANK 3 (CE fusion, 2026-10-07): the TWO correlation groups of one fenced build in ONE
+  /// dispatch (mmse_corr_a_rhp_pair).
+  ///
+  /// A hop carries up to two groups - the standard blocks and the narrower edge block tucked into the
+  /// systems after them - and O1 above builds each one with a dispatch of its own. The two are
+  /// independent (disjoint systems, neither feeding the other) and they are already encoded back to
+  /// back into the SAME command buffer, where two dispatches of one encoder have no barrier between
+  /// them either: what separates them is a geometry, not an order. So they can go out as one grid that
+  /// is the concatenation of their O1 grids.
+  ///
+  /// ★ DEFAULT OFF, unlike O1 and the CFO pair, and for one reason only: this is the third change to
+  /// reach the delivered route in two days and the second one whose air verdict is still owed (RANK 2
+  /// has not had a clean leg yet). Leaving it off means the next flight prices ONE of the two at a
+  /// time, with the leg before it as its control, instead of asking one leg to answer for both. Turn
+  /// it into the default - and delete this note - on the leg that verifies it
+  /// (`EXTRA_KNOBS="OCUDU_CE_CORR_PAIR=1"`), the way OCUDU_CE_CORR_MERGED and OCUDU_CE_CFO_FUSED were
+  /// turned, once a leg has shown `corr_pair != 0`, `merged == 2 * corr_pair`, and the red lines.
+  ///
+  /// \note It is gated behind corr_merged_enabled() at the call site, because the pair kernel IS a
+  ///       merged build (it produces A and R_hp for both groups in one dispatch): the O1 retreat has
+  ///       to retreat from this too, or OCUDU_CE_CORR_MERGED=0 would no longer mean what it says.
+  /// \note A metal library WITHOUT the pair entry point keeps the two O1 dispatches: the check is
+  ///       `pipe != nil`, so a stale metallib degrades to the delivery behaviour instead of failing.
+  static bool corr_pair_enabled()
+  {
+    static const bool value = []() {
+      const char* env = std::getenv("OCUDU_CE_CORR_PAIR");
+      return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
     }();
     return value;
   }
@@ -2342,6 +2396,14 @@ bool mmse_engine::init(const char* metallib_path)
                                                                 reflection:nil
                                                                      error:&err];
     }
+    // RANK 3 (CE fusion, 2026-10-07): the pair kernel, when this metallib carries it.
+    id<MTLFunction> corr_pair_fn = [e->library newFunctionWithName:@"mmse_corr_a_rhp_pair"];
+    if (corr_pair_fn != nil) {
+      e->corr_pair_pipe = [e->device newComputePipelineStateWithFunction:corr_pair_fn
+                                                                 options:MTLPipelineOptionNone
+                                                              reflection:nil
+                                                                   error:&err];
+    }
   }
   // ARC-managed; no explicit release.
   return e->inv_pipe != nil && e->weights_pipe != nil && e->apply_pipe != nil;
@@ -2817,14 +2879,44 @@ static_assert(offsetof(mmse_corr_params_t, sigma2_from_device) == 60,
 static_assert(offsetof(mmse_corr_params_t, sigma2_slot) == 64, "must match mmse_corr_params::sigma2_slot");
 static_assert(offsetof(mmse_corr_params_t, dmrs_slots) == 68, "must match mmse_corr_params::dmrs_slots");
 
-/// Encodes the two correlation dispatches of \p c into \p enc: the caller owns the command buffer,
-/// so the same encoding serves the standalone entry point and the prefix of an engine call.
-static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine::corr_stage& c,
-                        unsigned nof_systems)
+/// Must match mmse_corr_pair_params in ocudu_mmse_corr.metal: the TWO correlation groups of one fenced
+/// build, for the single dispatch that builds both (RANK 3, CE fusion 2026-10-07).
+struct mmse_corr_pair_params_t {
+  /// Threadgroups the whole of group 0 occupies (2 * g[0].nof_systems * its own width). Group 1's
+  /// threadgroups follow it in the same 1-D grid - see the kernel's own note for why this one number
+  /// crosses the boundary and group 1's width does not.
+  uint32_t           nof_tgs0;
+  mmse_corr_params_t g[2];
+};
+// Same reasoning as mmse_corr_params_t above: the struct crosses as opaque setBytes bytes, so one
+// field added on one side only would shift everything after it. 4 + 2 * 132, the two parameter blocks
+// being aligned to 4 like every member they hold.
+static_assert(sizeof(mmse_corr_pair_params_t) == 268, "mmse_corr_pair_params_t must match mmse_corr_pair_params");
+static_assert(offsetof(mmse_corr_pair_params_t, g) == 4, "must match mmse_corr_pair_params::g");
+
+/// \brief Everything ONE correlation group's dispatch needs: its kernel parameters, its two zero-copy
+/// mappings, and the threadgroup width its (matrix, system) blocks are laid out with.
+///
+/// A group is the unit that goes out either on its own (two K0-d dispatches, or one under O1) or
+/// concatenated with another group's (RANK 3, encode_corr_pair). The packing is therefore shared and
+/// the dispatch site only chooses the shape - which is what keeps "fused" and "not fused" from ever
+/// meaning two different sets of kernel parameters.
+struct corr_group_pack {
+  mmse_corr_params_t       p{};
+  mmse_engine_impl::mapped a_buf{};
+  mmse_engine_impl::mapped rhp_buf{};
+  NSUInteger               a_per_sys   = 0;
+  NSUInteger               rhp_per_sys = 0;
+  /// Threadgroups ONE (matrix, system) block occupies: ceil(max(Ls*Ls, nout*L) / 256). It is what the
+  /// kernel derives for itself (mmse_corr_tgs_wide), so it is the one number the two sides of a
+  /// dispatch must agree on, and it is computed from the same parameters the same way.
+  NSUInteger tgs_wide = 0;
+};
+
+/// \brief Fills \p out from \p c. Returns false on a geometry the kernels cannot take.
+static bool pack_corr_group(mmse_engine_impl* e, const mmse_engine::corr_stage& c, unsigned nof_systems,
+                            corr_group_pack& out)
 {
-  if ((e == nullptr) || (s.enc == nil) || (e->corr_a_pipe == nil) || (e->corr_rhp_pipe == nil)) {
-    return false;
-  }
   if ((c.a == nullptr) || (c.r_hp == nullptr) || (nof_systems == 0) || (c.l == 0) || (c.npf == 0) ||
       (c.ncomb == 0)) {
     return false;
@@ -2866,7 +2958,7 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
   const NSUInteger rhp_bytes =
       (static_cast<NSUInteger>(nof_systems - 1) * r_sys + rhp_extent) * sizeof(float);
 
-  mmse_corr_params_t p{};
+  mmse_corr_params_t& p = out.p;
   p.nof_systems = nof_systems;
   p.npt         = npt;
   p.npf         = c.npf;
@@ -2898,39 +2990,76 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
   // ONE dispatch per matrix for the whole batch: the second grid dimension selects the system, so
   // the batch's matrices are contiguous and the kernel indexes them itself. A dispatch per system
   // measured 628us of GPU time on a 25 PRB hop - more than the host loops it replaces.
-  mmse_engine_impl::mapped a_buf   = e->wrap(c.a, a_bytes);
-  mmse_engine_impl::mapped rhp_buf = e->wrap(c.r_hp, rhp_bytes);
-  if ((a_buf.buf == nil) || (rhp_buf.buf == nil)) {
+  out.a_buf   = e->wrap(c.a, a_bytes);
+  out.rhp_buf = e->wrap(c.r_hp, rhp_bytes);
+  if ((out.a_buf.buf == nil) || (out.rhp_buf.buf == nil)) {
+    return false;
+  }
+  // The threadgroup width the kernel derives for itself (mmse_corr_tgs_wide): the grid is sized for
+  // the WIDER of the two matrices, so it is this one number that must agree on both sides.
+  out.a_per_sys   = a_per_sys;
+  out.rhp_per_sys = rhp_per_sys;
+  out.tgs_wide    = (((a_per_sys > rhp_per_sys) ? a_per_sys : rhp_per_sys) + 255u) / 256u;
+  return true;
+}
+
+/// \brief Binds the noise-variance buffer \p c reads its diagonal loading from, at \p index.
+///
+/// \param placeholder what to bind when the stage has no device buffer. A is passed by every caller
+///        (it is non-null by pack_corr_group's guard), which satisfies the argument without the kernel
+///        ever being able to read it on that branch.
+///
+/// WHY A PLACEHOLDER IS NOT OPTIONAL (★ the F2 defect, metal_kernel_fusion 2026-10-07). MSL leaves an
+/// unbound device pointer undefined and nil is not an option for a non-nullable argument, so the rule
+/// was written out long before it was followed: the binding happened only when c.sigma2_dev was
+/// non-null, which left the argument UNBOUND on exactly the hops the note is about. It was latent
+/// because the kernel dereferences scalars only when p.sigma2_from_device says so, and that flag comes
+/// from the same pointer being non-null. The rule now lives in ONE place, because the pair dispatch
+/// below needs it too and "must always bind" is not a rule to keep re-deriving per call site.
+static bool bind_corr_scalars(mmse_engine_impl*                e,
+                              id<MTLComputeCommandEncoder>     enc,
+                              const mmse_engine::corr_stage&   c,
+                              const mmse_engine_impl::mapped&  placeholder,
+                              NSUInteger                       index)
+{
+  if (c.sigma2_dev != nullptr) {
+    // \c c.sigma2_dev is the BASE of the caller's sigma2 buffer and \c p.sigma2_slot the element the
+    // kernel reads, so the two agree on the address by construction - pointing the pointer at the
+    // element instead would make the kernel's scalars[slot] land past the end (which is exactly how
+    // this once read a different element and loaded A with no noise at all).
+    mmse_engine_impl::mapped sig_buf = e->wrap(c.sigma2_dev, 4 * sizeof(float));
+    if (sig_buf.buf == nil) {
+      return false;
+    }
+    [enc setBuffer:sig_buf.buf offset:sig_buf.offset atIndex:index];
+    return true;
+  }
+  [enc setBuffer:placeholder.buf offset:placeholder.offset atIndex:index];
+  return true;
+}
+
+/// Encodes the correlation dispatches of \p c into \p enc: the caller owns the command buffer, so the
+/// same encoding serves the standalone entry point and the prefix of an engine call.
+static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine::corr_stage& c,
+                        unsigned nof_systems)
+{
+  if ((e == nullptr) || (s.enc == nil) || (e->corr_a_pipe == nil) || (e->corr_rhp_pipe == nil)) {
+    return false;
+  }
+  corr_group_pack g{};
+  if (!pack_corr_group(e, c, nof_systems, g)) {
     return false;
   }
 
   // Two pipelines in a row: in burst mode each switch goes through the stage's pipeline selection, so
   // the barrier that orders the A build against K1 (and the R_hp build against K2) is the burst's.
   id<MTLComputeCommandEncoder> enc = stage_pipeline(e, s, e->corr_a_pipe);
-  [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:0];
-  [enc setBytes:&p length:sizeof(p) atIndex:1];
+  [enc setBuffer:g.a_buf.buf offset:g.a_buf.offset atIndex:0];
+  [enc setBytes:&g.p length:sizeof(g.p) atIndex:1];
   // buffer(2) is only read when p.sigma2_slot says so, but it must be bound for that kernel anyway
-  // (MSL leaves an unbound device pointer undefined, and nil is not an option for a non-nullable
-  // argument). \c c.sigma2_dev is the BASE of the caller's sigma2 buffer and \c p.sigma2_slot the
-  // element the kernel reads, so the two agree on the address by construction - pointing the pointer
-  // at the element instead would make the kernel's scalars[slot] land past the end (which is exactly
-  // how this read a different element and loaded A with no noise at all).
-  //
-  // ★ THE `else` BRANCH IS THE FIX (metal_kernel_fusion, 2026-10-07): the rule above was written here
-  // and then not followed - the binding happened only when c.sigma2_dev was non-null, so a hop with no
-  // device sigma2 left the argument UNBOUND, which is the very thing the note forbids. It was latent
-  // because the kernel dereferences scalars only when p.sigma2_from_device says so, and that flag comes
-  // from the same pointer being non-null. A is already bound at index 0 and is non-null by the guard
-  // above, so it serves as the placeholder: any non-null buffer satisfies the argument, and the kernel
-  // cannot read it on this branch.
-  if (c.sigma2_dev != nullptr) {
-    mmse_engine_impl::mapped sig_buf = e->wrap(c.sigma2_dev, 4 * sizeof(float));
-    if (sig_buf.buf == nil) {
-      return false;
-    }
-    [enc setBuffer:sig_buf.buf offset:sig_buf.offset atIndex:2];
-  } else {
-    [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:2];
+  // (see bind_corr_scalars, which is where the rule and its history live).
+  if (!bind_corr_scalars(e, enc, c, g.a_buf, 2)) {
+    return false;
   }
   // O1 (dev doc 6.174): ONE dispatch for both matrices when asked for. The knob is checked here rather
   // than at the pipeline choice because the encoder binds the pipeline that goes with the grid, and the
@@ -2938,37 +3067,25 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
   if (mmse_engine_impl::corr_merged_enabled() && (e->corr_merged_pipe != nil)) {
     // The grid is the UNION of the two matrices' widths with one extra gid.y for A (see the kernel):
     // gid.y == 0 is A, gid.y in [1, nof_systems] is R_hp's system gid.y - 1.
-    const NSUInteger union_elems = (a_per_sys > rhp_per_sys) ? a_per_sys : rhp_per_sys;
-    enc                          = stage_pipeline(e, s, e->corr_merged_pipe);
-    [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:0];
-    [enc setBuffer:rhp_buf.buf offset:rhp_buf.offset atIndex:1];
-    [enc setBytes:&p length:sizeof(p) atIndex:2];
-    // buffer(3) must be bound even when the kernel does not read it: MSL leaves an unbound device
-    // pointer undefined, and the A kernel reads scalars[p.sigma2_slot] whenever sigma2_from_device
-    // says so. Same rule as the two-kernel route above (see its own note) - INCLUDING its else branch,
-    // which is the part that was missing on both routes until 2026-10-07: binding only when
-    // c.sigma2_dev is non-null leaves the argument unbound on exactly the hops the note is about.
-    if (c.sigma2_dev != nullptr) {
-      mmse_engine_impl::mapped sig_buf = e->wrap(c.sigma2_dev, 4 * sizeof(float));
-      if (sig_buf.buf == nil) {
-        return false;
-      }
-      [enc setBuffer:sig_buf.buf offset:sig_buf.offset atIndex:3];
-    } else {
-      [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:3];
+    enc = stage_pipeline(e, s, e->corr_merged_pipe);
+    [enc setBuffer:g.a_buf.buf offset:g.a_buf.offset atIndex:0];
+    [enc setBuffer:g.rhp_buf.buf offset:g.rhp_buf.offset atIndex:1];
+    [enc setBytes:&g.p length:sizeof(g.p) atIndex:2];
+    // buffer(3) must be bound even when the kernel does not read it: same rule as the two-kernel route
+    // above, through the same helper.
+    if (!bind_corr_scalars(e, enc, c, g.a_buf, 3)) {
+      return false;
     }
     for (unsigned rep = 0; rep != mmse_engine_impl::corr_repeat(); ++rep) {
       // BOTH counters, because both matrices are built by this one dispatch: the site census is what the
       // legs read to know what ran, and it has to keep answering "A was built" and "R_hp was built".
-      ce_site_diag().corr_a.fetch_add(1, std::memory_order_relaxed);      // dev doc 6.61
-      ce_site_diag().corr_rhp.fetch_add(1, std::memory_order_relaxed);    // dev doc 6.61
+      count_corr_group_built(1);
       ce_site_diag().corr_merged.fetch_add(1, std::memory_order_relaxed); // O1: ONE dispatch, both matrices
       // ONE dimension of threadgroups, always: the kernel decodes (matrix, system) from the threadgroup
       // index, so neither the driver's mapping of a second dimension nor the dispatch type can change
       // which work items exist. Two earlier layouts depended on that mapping and both left part of A
       // unwritten (see the kernel's own warning, and dev doc 6.174).
-      const NSUInteger tgs_wide = (union_elems + 255u) / 256u;
-      [enc dispatchThreadgroups:MTLSizeMake(tgs_wide * 2u * static_cast<NSUInteger>(nof_systems), 1, 1)
+      [enc dispatchThreadgroups:MTLSizeMake(g.tgs_wide * 2u * static_cast<NSUInteger>(nof_systems), 1, 1)
           threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }
     return true;
@@ -2983,27 +3100,89 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
       // from 27% to 10% and never to zero), and the dispatch-type mismatch is the one structural
       // difference left that changes neither the submission nor the host's blocking. Both kernels
       // already guard gid.x, so padding the grid is a no-op per thread.
-      const NSUInteger tgs = (a_per_sys + 255u) / 256u;
+      const NSUInteger tgs = (g.a_per_sys + 255u) / 256u;
       ce_site_diag().corr_a.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
       [enc dispatchThreadgroups:MTLSizeMake(tgs, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     } else {
       ce_site_diag().corr_a.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
-      [enc dispatchThreads:MTLSizeMake(a_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+      [enc dispatchThreads:MTLSizeMake(g.a_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }
   }
 
   enc = stage_pipeline(e, s, e->corr_rhp_pipe);
-  [enc setBuffer:rhp_buf.buf offset:rhp_buf.offset atIndex:0];
-  [enc setBytes:&p length:sizeof(p) atIndex:1];
+  [enc setBuffer:g.rhp_buf.buf offset:g.rhp_buf.offset atIndex:0];
+  [enc setBytes:&g.p length:sizeof(g.p) atIndex:1];
   for (unsigned rep = 0; rep != mmse_engine_impl::corr_repeat(); ++rep) {
     if (mmse_engine_impl::corr_uniform()) {
-      const NSUInteger tgs = (rhp_per_sys + 255u) / 256u;
+      const NSUInteger tgs = (g.rhp_per_sys + 255u) / 256u;
       ce_site_diag().corr_rhp.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
       [enc dispatchThreadgroups:MTLSizeMake(tgs, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     } else {
       ce_site_diag().corr_rhp.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
-      [enc dispatchThreads:MTLSizeMake(rhp_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+      [enc dispatchThreads:MTLSizeMake(g.rhp_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }
+  }
+  return true;
+}
+
+/// \brief RANK 3 (CE fusion, 2026-10-07): the TWO correlation groups of one fenced build in ONE
+/// dispatch (mmse_corr_a_rhp_pair).
+///
+/// A hop carries up to two groups - the standard blocks, and the narrower edge block tucked into the
+/// systems AFTER them in the same slots - and each one is an O1 dispatch of its own (encode_corr
+/// above). Nothing orders the two against each other, and nothing could: they write disjoint systems,
+/// no element of either feeds the other, and they are already encoded back to back into the SAME
+/// command buffer, where two dispatches of one encoder have no barrier between them anyway. What
+/// separates them is a GEOMETRY, not a dependency, and a geometry is one more parameter block. So the
+/// two go out as one grid that is the CONCATENATION of their O1 grids, with the kernel decoding which
+/// group a threadgroup belongs to from its index alone.
+///
+/// \note The two stages share one scalars buffer by construction: both come out of
+///       correlation_stage(), which sets sigma2_dev = device_sigma2_rel and sigma2_slot = kRatioSlot
+///       for every group it packs. Each parameter block still carries its own sigma2_from_device /
+///       sigma2_slot, so a future caller that hands the two groups different buffers keeps working.
+static bool encode_corr_pair(mmse_engine_impl* e, stage_encoder& s, const mmse_engine::corr_stage& c0,
+                             unsigned n0, const mmse_engine::corr_stage& c1, unsigned n1)
+{
+  if ((e == nullptr) || (s.enc == nil) || (e->corr_pair_pipe == nil)) {
+    return false;
+  }
+  corr_group_pack g0{};
+  corr_group_pack g1{};
+  if (!pack_corr_group(e, c0, n0, g0) || !pack_corr_group(e, c1, n1, g1)) {
+    return false;
+  }
+  // Group 0's threadgroups are passed rather than derived because the host has to size the grid with
+  // them anyway; group 1's are not, because its own width follows from its own parameters on both
+  // sides (see mmse_corr_pair_params).
+  const NSUInteger tgs0 = g0.tgs_wide * 2u * static_cast<NSUInteger>(n0);
+  const NSUInteger tgs1 = g1.tgs_wide * 2u * static_cast<NSUInteger>(n1);
+  mmse_corr_pair_params_t q{};
+  q.nof_tgs0 = static_cast<uint32_t>(tgs0);
+  q.g[0]     = g0.p;
+  q.g[1]     = g1.p;
+
+  id<MTLComputeCommandEncoder> enc = stage_pipeline(e, s, e->corr_pair_pipe);
+  [enc setBuffer:g0.a_buf.buf offset:g0.a_buf.offset atIndex:0];
+  [enc setBuffer:g0.rhp_buf.buf offset:g0.rhp_buf.offset atIndex:1];
+  [enc setBuffer:g1.a_buf.buf offset:g1.a_buf.offset atIndex:2];
+  [enc setBuffer:g1.rhp_buf.buf offset:g1.rhp_buf.offset atIndex:3];
+  [enc setBytes:&q length:sizeof(q) atIndex:4];
+  // buffer(5): one scalars argument for both groups, bound by the same rule as every other route
+  // (see bind_corr_scalars) - group 0's A stands in for it when there is no device buffer.
+  if (!bind_corr_scalars(e, enc, c0, g0.a_buf, 5)) {
+    return false;
+  }
+  for (unsigned rep = 0; rep != mmse_engine_impl::corr_repeat(); ++rep) {
+    // TWO groups were built by this ONE dispatch, and the census has to keep answering the same
+    // questions it answered when they were two: corr_a/corr_rhp/corr_merged count GROUP BUILDS (so
+    // they stay comparable across the fused and the split route, and stay equal to each other), and
+    // corr_pair counts DISPATCHES. The invariant a leg reads is merged == 2 * corr_pair here, and
+    // merged - corr_pair is the hop's correlation dispatch count either way.
+    count_corr_group_built(2);
+    ce_site_diag().corr_merged.fetch_add(2, std::memory_order_relaxed);
+    ce_site_diag().corr_pair.fetch_add(1, std::memory_order_relaxed);
+    [enc dispatchThreadgroups:MTLSizeMake(tgs0 + tgs1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   }
   return true;
 }
@@ -3093,8 +3272,39 @@ uint64_t mmse_engine::flush_correlations_fenced(unsigned fallback_nof_systems)
   if (st.enc == nil) {
     return 0;
   }
-  for (unsigned i = 0; i != queued; ++i) {
-    if (!encode_corr(e, st, e->corr_queue[i], fallback_nof_systems)) {
+  // HOW MANY SYSTEMS EACH QUEUED STAGE COVERS. corr_stage::nof_systems exists for exactly this
+  // question - its own note explains at length that a MERGED batch holds two geometries, the standard
+  // blocks in the systems [0, nof_layers) and the edge block in the ones after them - and it was
+  // nevertheless dead: the argument below was handed to every stage as-is, which is correct only
+  // because every caller happens to queue stages whose own count IS the batch's (the standard prefix
+  // sets nof_systems = nof_layers, the edge group is packed for nof_layers, and the standalone one
+  // passes it through). A stage that covers the whole batch says so with 0, which is what the fallback
+  // is for. Read here rather than inside encode_corr() so that the standalone entry point
+  // (build_correlation(), which takes the count as an argument and has no queue) is untouched.
+  const auto stage_systems = [fallback_nof_systems](const mmse_engine::corr_stage& c) {
+    return (c.nof_systems != 0) ? c.nof_systems : fallback_nof_systems;
+  };
+  // RANK 3 (CE fusion, 2026-10-07): the two groups of THIS build in one dispatch when asked for. It is
+  // decided here, at the one place that knows how many groups there are, and it is decided for the pair
+  // as a PAIR: with one group there is nothing to fuse and the O1 dispatch below is what runs.
+  //
+  // \note The order the two were queued in is preserved as (group 0, group 1). The kernel does not care
+  //       which is which (each parameter block carries its own pointers and geometry), but keeping the
+  //       queue order means a leg that turns this on is comparing the same two builds.
+  const bool paired = (queued == 2) && mmse_engine_impl::corr_merged_enabled() &&
+                      mmse_engine_impl::corr_pair_enabled() && (e->corr_pair_pipe != nil);
+  if (paired) {
+    if (!encode_corr_pair(e, st, e->corr_queue[0], stage_systems(e->corr_queue[0]), e->corr_queue[1],
+                          stage_systems(e->corr_queue[1]))) {
+      [st.enc endEncoding];
+      mmse_stats_corr_build_failure();
+      return 0;
+    }
+    mmse_stats_corr_build();
+    mmse_stats_corr_build();
+  }
+  for (unsigned i = 0; !paired && (i != queued); ++i) {
+    if (!encode_corr(e, st, e->corr_queue[i], stage_systems(e->corr_queue[i]))) {
       [st.enc endEncoding];
       mmse_stats_corr_build_failure();
       return 0;

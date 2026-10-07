@@ -88,6 +88,12 @@ static_assert(sizeof(mmse_corr_params) == 132, "mmse_corr_params must stay in st
 /// amplified by the matrix inverse into ~1% of W and h.
 constant float MMSE_TWOPI = as_type<float>(0x40C90FDBu);
 
+/// The threadgroup size of every O1 and pair dispatch. It is a compile-time constant HERE because
+/// work item identity is decoded from the threadgroup INDEX and the element index from the thread's
+/// position inside it: a host that dispatched a different size would mis-index the matrices, and both
+/// sides deriving "256" separately is one more chance for them to disagree (dev doc 6.174).
+constant uint MMSE_CORR_TPT = 256u;
+
 /// Real part of the exponential-PDP time correlation (identical to the host's rt_corr).
 static inline float mmse_rt_corr(float delta_t_s, float fd_hz)
 {
@@ -199,77 +205,70 @@ kernel void mmse_corr_r_hp(device float* r_hp [[buffer(0)]],
 }
 
 // ---------------------------------------------------------------------------------------------------
-// O1 (dev doc 6.174): A and R_hp in ONE dispatch.
+// The O1 work item and the geometry its dispatch is built from.
 //
-// WHY. The two kernels above have identical shapes - same parameter block, same second grid
-// dimension (the system), one thread per output element - and their outputs are INDEPENDENT: A is
-// L*L per system, R_hp is (nout*L) per system, and neither reads what the other writes. Dispatched
-// separately they cost two dispatch boundaries per correlation build, and the air legs price a
-// boundary at ~39us (p72/p73/p74: merged_hop 468.7 -> 703.4us as the front end's 14 transforms went
-// from 1 dispatch to 7, with the threadgroup count unchanged) against the ~1.6us the same boundary
-// costs off-line - a 24x gap that no measurement of the boundary itself explains, which is exactly
-// why removing one is worth trying.
-//
-// HOW. One flat grid over [0, Ls*Ls + nout*L) with the system as the second dimension: an index
-// below a_elems is an A element (and the pad inside Ls*Ls keeps the blockdiag identity, as the A
-// kernel does), one above it is an R_hp element. Every thread computes exactly what its own kernel
-// above computes, with the same expressions, so the two destinations end up bit-identical to the two
-// dispatches' result - "one dispatch" here changes WHEN the work is issued, not what is computed.
-//
-// \note The grids differ in size (Ls*Ls against nout*L), so the dispatch covers the union and the
-//       guard below is that union's bound. Both original kernels already guard their own index, and
-//       this one reproduces both guards: the pad of A is still written, which is what the inversion
-//       reads.
-kernel void mmse_corr_a_rhp(device float* a [[buffer(0)]],
-                            device float* r_hp [[buffer(1)]],
-                            constant mmse_corr_params& p [[buffer(2)]],
-                            device const float* scalars [[buffer(3)]],
-                            uint  gid_x [[thread_position_in_grid]],
-                            uint  tgid [[threadgroup_position_in_grid]])
+// These are functions, not part of the kernel below, for one reason: "one dispatch" is only worth
+// anything if it computes what two dispatches computed, and the strongest form of that guarantee is a
+// single implementation of "compute an element of A or of R_hp" that BOTH the single-group kernel and
+// the fused pair kernel (RANK 3, further down) call. A copy with the same expressions would be a
+// promise; a shared body is a fact.
+/// \brief Threadgroups ONE A block needs: its Ls x Ls elements, rounded up to whole threadgroups.
+static inline uint mmse_corr_tgs_a(constant mmse_corr_params& p)
 {
-    // ONE DIMENSIONAL GRID OF THREADGROUPS. Work item identity comes from `tgid` and the threadgroup
-    // size, never from gid.y: a threadgroup is either one lane of A's or one lane of R_hp's, and which
-    // system it serves is decoded from its index.
-    //
-    // WHY IT IS BUILT THIS WAY. Two earlier layouts were dispatched, and the offline byte-for-byte arm
-    // caught both:
-    //   * both matrices end to end in gid.x with the system in gid.y - R_hp came out correct while A's
-    //     SECOND system kept whatever the buffer held before the dispatch;
-    //   * the matrix in gid.y (0 = A, 1..nof_systems = R_hp) on a 2-D grid of threadgroups - A's first
-    //     system and BOTH systems' R_hp came out correct, A's second system was never written.
-    // A missing write is invisible until something reads the slot, which is why the layout no longer
-    // depends on how the driver maps a second grid dimension at all.
-    //
-    // LAYOUT: `tgs_wide` threadgroups per (matrix, system) block, blocks laid out as
-    //   [0, nof_systems)                     -> A, system = block
-    //   [nof_systems, 2 * nof_systems)       -> R_hp, system = block - nof_systems
-    //
-    // \warning Dispatch ONE dimensionally with
-    //          `tgs_wide * 2 * nof_systems` threadgroups of `tpt` threads, via dispatchThreadgroups().
+    const uint Ls = (p.Ls != 0u) ? p.Ls : p.L;
+    return (Ls * Ls + MMSE_CORR_TPT - 1u) / MMSE_CORR_TPT;
+}
+
+/// \brief Threadgroups ONE R_hp block needs: its (nf * 14) x L elements, rounded up.
+static inline uint mmse_corr_tgs_r(constant mmse_corr_params& p)
+{
+    return (p.nf * 14u * p.L + MMSE_CORR_TPT - 1u) / MMSE_CORR_TPT;
+}
+
+/// \brief Threadgroups per (matrix, system) block: the grid is sized for the WIDER of the two
+/// matrices, so A's blocks and R_hp's blocks are handed the same lane count and the narrower one
+/// sends the lanes it does not need home (see the guard in mmse_corr_a_rhp_block).
+static inline uint mmse_corr_tgs_wide(constant mmse_corr_params& p)
+{
+    const uint a = mmse_corr_tgs_a(p);
+    const uint r = mmse_corr_tgs_r(p);
+    return (a > r) ? a : r;
+}
+
+/// \brief ONE (matrix, system) block of the O1 build - the whole of the work item, in a function.
+///
+/// It is a function rather than the body of the kernel below so that the fused PAIR build (RANK 3,
+/// further down) runs the same code instead of a copy of it: two correlation groups fused into one
+/// dispatch must compute what two dispatches computed, and the strongest way to guarantee that is to
+/// have exactly one implementation of "compute an element of A or of R_hp".
+///
+/// \param block index in the [0, 2 * p.nof_systems) layout: below \c p.nof_systems it is A's system
+///              \c block, at or above it R_hp's system \c block - p.nof_systems .
+/// \param lane  the threadgroup's lane inside that block (0 .. tgs_wide - 1).
+/// \param i     the element this thread owns inside the block: \c lane * TPT + (gid_x % TPT),
+///              with TPT = MMSE_CORR_TPT.
+static inline void mmse_corr_a_rhp_block(device float*              a,
+                                         device float*              r_hp,
+                                         constant mmse_corr_params& p,
+                                         device const float*        scalars,
+                                         uint                       i,
+                                         uint                       block,
+                                         uint                       lane)
+{
     const uint Ls        = (p.Ls != 0u) ? p.Ls : p.L;
     const uint a_elems   = Ls * Ls;
     const uint nout      = p.nf * 14u;
     const uint rhp_elems = nout * p.L;
-    const uint wider     = (a_elems > rhp_elems) ? a_elems : rhp_elems;
-    // The threadgroup size this kernel is dispatched with, and therefore the base of the packing below.
-    // `gid_x` is the thread's position INSIDE its threadgroup (0..tpt-1) when the grid is one dimensional
-    // of threadgroups, which is the only way this kernel may be dispatched (see the warning above).
-    const uint tpt       = 256u;
-    const uint tgs_wide  = (wider + tpt - 1u) / tpt;
-
-    const uint block = tgid / tgs_wide;
-    const uint lane  = tgid % tgs_wide;
-    const uint i     = lane * tpt + (gid_x % tpt); // gid_x < tpt for a 1-D threadgroup grid
     // A's blocks need `tgs_a` threadgroups, R_hp's need `tgs_r`; the grid is sized for the wider of the
     // two, so the narrower matrix's blocks receive LANES THEY DO NOT NEED. Return before touching
-    // anything: an out-of-range lane would compute an out-of-range element index from `lane * tpt`,
+    // anything: an out-of-range lane would compute an out-of-range element index from `lane * MMSE_CORR_TPT`,
     // which lands in the NEXT system's slot rather than harmlessly past the end.
     //
     // This guard is also the reason a first version of this kernel measured SLOWER than the two it
     // replaces: without it, A's blocks were each handed ceil(27216/256)=107 threadgroups instead of
     // ceil(2916/256)=12, so 190 threadgroups per dispatch were launched, found nothing to do and
     // returned - and their launch is not free (dev doc 6.177).
-    const uint my_tgs = (block < p.nof_systems) ? ((a_elems + tpt - 1u) / tpt) : ((rhp_elems + tpt - 1u) / tpt);
+    const uint my_tgs = (block < p.nof_systems) ? mmse_corr_tgs_a(p) : mmse_corr_tgs_r(p);
     if (lane >= my_tgs) {
         return;
     }
@@ -326,4 +325,131 @@ kernel void mmse_corr_a_rhp(device float* a [[buffer(0)]],
     const float rf = mmse_rf_corr((float)abs(df) * p.scs_hz, p.tau_rms_s);
 
     r_sys[(ulong)o * p.Ls + col] = rt * rf;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// O1 (dev doc 6.174): A and R_hp in ONE dispatch.
+//
+// WHY. The two kernels above have identical shapes - same parameter block, same second grid
+// dimension (the system), one thread per output element - and their outputs are INDEPENDENT: A is
+// L*L per system, R_hp is (nout*L) per system, and neither reads what the other writes. Dispatched
+// separately they cost two dispatch boundaries per correlation build, and the air legs price a
+// boundary at ~39us (p72/p73/p74: merged_hop 468.7 -> 703.4us as the front end's 14 transforms went
+// from 1 dispatch to 7, with the threadgroup count unchanged) against the ~1.6us the same boundary
+// costs off-line - a 24x gap that no measurement of the boundary itself explains, which is exactly
+// why removing one is worth trying.
+//
+// HOW. One flat grid over [0, Ls*Ls + nout*L) with the system as the second dimension: an index
+// below a_elems is an A element (and the pad inside Ls*Ls keeps the blockdiag identity, as the A
+// kernel does), one above it is an R_hp element. Every thread computes exactly what its own kernel
+// above computes, with the same expressions, so the two destinations end up bit-identical to the two
+// dispatches' result - "one dispatch" here changes WHEN the work is issued, not what is computed.
+//
+// \note The grids differ in size (Ls*Ls against nout*L), so the dispatch covers the union and the
+//       guard below is that union's bound. Both original kernels already guard their own index, and
+//       this one reproduces both guards: the pad of A is still written, which is what the inversion
+//       reads.
+kernel void mmse_corr_a_rhp(device float* a [[buffer(0)]],
+                            device float* r_hp [[buffer(1)]],
+                            constant mmse_corr_params& p [[buffer(2)]],
+                            device const float* scalars [[buffer(3)]],
+                            uint  gid_x [[thread_position_in_grid]],
+                            uint  tgid [[threadgroup_position_in_grid]])
+{
+    // ONE DIMENSIONAL GRID OF THREADGROUPS. Work item identity comes from `tgid` and the threadgroup
+    // size, never from gid.y: a threadgroup is either one lane of A's or one lane of R_hp's, and which
+    // system it serves is decoded from its index.
+    //
+    // WHY IT IS BUILT THIS WAY. Two earlier layouts were dispatched, and the offline byte-for-byte arm
+    // caught both:
+    //   * both matrices end to end in gid.x with the system in gid.y - R_hp came out correct while A's
+    //     SECOND system kept whatever the buffer held before the dispatch;
+    //   * the matrix in gid.y (0 = A, 1..nof_systems = R_hp) on a 2-D grid of threadgroups - A's first
+    //     system and BOTH systems' R_hp came out correct, A's second system was never written.
+    // A missing write is invisible until something reads the slot, which is why the layout no longer
+    // depends on how the driver maps a second grid dimension at all.
+    //
+    // LAYOUT: `tgs_wide` threadgroups per (matrix, system) block, blocks laid out as
+    //   [0, nof_systems)                     -> A, system = block
+    //   [nof_systems, 2 * nof_systems)       -> R_hp, system = block - nof_systems
+    //
+    // \warning Dispatch ONE dimensionally with
+    //          `tgs_wide * 2 * nof_systems` threadgroups of MMSE_CORR_TPT threads, via dispatchThreadgroups().
+    const uint tgs_wide = mmse_corr_tgs_wide(p);
+    const uint block    = tgid / tgs_wide;
+    const uint lane     = tgid % tgs_wide;
+    // `gid_x` is the thread's position INSIDE its threadgroup (0..255) when the grid is one dimensional
+    // of threadgroups, which is the only way this kernel may be dispatched (see the warning above).
+    const uint i = lane * MMSE_CORR_TPT + (gid_x % MMSE_CORR_TPT);
+
+    mmse_corr_a_rhp_block(a, r_hp, p, scalars, i, block, lane);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// RANK 3 (CE fusion, 2026-10-07): the TWO correlation groups of one fenced build in ONE dispatch.
+//
+// WHY. A hop carries up to two correlation groups - the standard blocks, and the narrower edge block
+// tucked into the systems after them - and each group is one O1 dispatch (above). The two are
+// independent: they write different systems of the same slots, and no element of either feeds the
+// other. They already share everything a dispatch needs - the destination allocation, the slot
+// strides, the scalars buffer - and what differs is the GEOMETRY (nof_systems, L, Ls, nf, npt, the
+// DM-RS slots, the pilot positions), which is exactly what a second parameter block carries. Fusing
+// them removes one dispatch boundary per hop from the correlation build, and it removes it from a
+// boundary that is NOT ordered by anything today either: both groups are already encoded into the
+// same command buffer, back to back, with no barrier between them.
+//
+// HOW. One flat grid of threadgroups over the CONCATENATION of the two groups' O1 grids:
+//   [0, nof_tgs0)                             -> group 0, block/lane decoded from the index itself
+//   [nof_tgs0, nof_tgs0 + tgs_wide(g1)*2*n1)  -> group 1, decoded from (index - nof_tgs0)
+// and every threadgroup runs mmse_corr_a_rhp_block() - the SAME function the single-group kernel
+// above runs, not a copy of it. One dispatch therefore changes WHEN the two groups' work is issued,
+// not what either group computes.
+//
+// \note A group whose threadgroups the host over-counted is harmless: mmse_corr_a_rhp_block() guards
+//       both `block` and `lane` and computes nothing outside its own matrices. A group it
+//       UNDER-counted would leave slots unwritten, which the offline byte-for-byte arm and the
+//       estimator's own pending_corr_check both read.
+struct mmse_corr_pair_params {
+    /// Threadgroups the whole of group 0 occupies: 2 * g[0].nof_systems * mmse_corr_tgs_wide(g[0]).
+    /// Group 1's threadgroups follow it, so a threadgroup index below this one belongs to group 0.
+    ///
+    /// It is PASSED rather than derived because the host has to size the grid with it anyway
+    /// (dispatchThreadgroups), and a second derivation of the same quantity is a second chance for the
+    /// two sides to disagree. Group 1's threadgroup count is deliberately NOT passed: the host never
+    /// needs it (the grid is the SUM of the two groups' counts, each derived on its own side from the
+    /// same parameters with the same expression).
+    uint             nof_tgs0;
+    mmse_corr_params g[2];
+};
+
+static_assert(sizeof(mmse_corr_pair_params) == 268, "mmse_corr_pair_params must stay in step with its host mirror");
+
+/// \warning Dispatch ONE dimensionally with
+///          `nof_tgs0 + mmse_corr_tgs_wide(g[1]) * 2 * g[1].nof_systems` threadgroups of
+///          MMSE_CORR_TPT threads,
+///          via dispatchThreadgroups().
+kernel void mmse_corr_a_rhp_pair(device float* a0 [[buffer(0)]],
+                                 device float* r_hp0 [[buffer(1)]],
+                                 device float* a1 [[buffer(2)]],
+                                 device float* r_hp1 [[buffer(3)]],
+                                 constant mmse_corr_pair_params& q [[buffer(4)]],
+                                 device const float* scalars [[buffer(5)]],
+                                 uint  gid_x [[thread_position_in_grid]],
+                                 uint  tgid [[threadgroup_position_in_grid]])
+{
+    // Which group this threadgroup belongs to, and where it sits inside that group's own O1 grid.
+    const uint gi    = (tgid < q.nof_tgs0) ? 0u : 1u;
+    const uint local = (gi == 0u) ? tgid : (tgid - q.nof_tgs0);
+    // The group's own threadgroup width, derived from its own parameters by the same expression the
+    // single-group kernel uses - the one thing the two sides of this dispatch must agree on.
+    const uint tgs_wide = mmse_corr_tgs_wide(q.g[gi]);
+    const uint block    = local / tgs_wide;
+    const uint lane     = local % tgs_wide;
+    const uint i        = lane * MMSE_CORR_TPT + (gid_x % MMSE_CORR_TPT);
+
+    if (gi == 0u) {
+        mmse_corr_a_rhp_block(a0, r_hp0, q.g[0], scalars, i, block, lane);
+    } else {
+        mmse_corr_a_rhp_block(a1, r_hp1, q.g[1], scalars, i, block, lane);
+    }
 }
