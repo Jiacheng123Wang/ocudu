@@ -1404,6 +1404,10 @@ workflow 文件在所推 ref 上也**存在** ✓，★ **而 `actions/runs` 的
 > **Say so instead of passing silently, which would look like the probe had been checked**" ✓
 ⇒ ★ **是"报事实"而不是"静默通过"** ✓，正是本工作流要的形状 ✓。
 
+★ **原始读数留在本地** ✓：`wip/logs/linux_verify_2026-10-07.txt` ✓
+（★ **按本仓约定 `doc_chinese/.gitignore:17` 忽略 `**/logs/`** ✓ ⇒ **腿日志从不入库** ✓，
+**数字由文档承载** ✓ —— 本节即是 ✓）。
+
 ★ **Linux 上能编到哪些改动** ✓（值得写清楚 ✓，免得把这条读成"什么都验了" ✗）：
 Linux **不进入 Metal 目录** ✓ ⇒ `.metal` 与 `.mm` **根本不编译** ✓；本节真正覆盖的是
 ★ **非 Metal 的那几处** ✓ —— `ul_stall_watchdog.h` ✓ 与 `pusch_demodulator_impl.cpp` ✓ 的
