@@ -136,6 +136,12 @@
 一等公民问题）。**我们属于 LINE B**——A1/A2 就在这条线上，A3 属于 LINE A 的符号输出范式。
 这条定位把"AI detection"这个模糊的词收缩成了一条具体的技术线（`memo_03` §4.1）。
 
+★ **支持这条定位的最硬证据**：CMDNet（IEEE TCOM 2021）用 LLR 直方图**实测**发现
+**DetNet 的"软"输出其实是硬的**——*"DetNet mostly provides hard decisions with **∼97 % LLRs
+being −1 and 1**"*，并补一句 *"In coded systems with soft decoders usually employed today,
+delivering soft information is a strict requirement."*（`memo_03` §7bis.K）
+⇒ LINE A 不是"软输出弱一点"，而是**根本不产出可用软信息**。选型上不要跨界。
+
 ### 2.1 输出参数化：直接输出 LLR
 
 论文的输出头是"对星座点分类"，再边缘化得到 LLR（memo 02 §4.1）。我们**直接输出 LLR**：
@@ -176,6 +182,10 @@
 ⇒ "Metal 主路径 + ANE 单阶段卸载"必须是**两个独立阶段**，不能同图混合；
 **③ `EnumeratedShapes`（≤128）是 ANE 认可的形状路径**，无界 `RangeDim` 会被拒；
 **④ 设备特化缓存以 `mlmodelc` 路径为键**。
+
+★ **可引用的尺寸上界**：NVIDIA 合规实时 NRX 的**实时模型只有 1.4e5 权重**（2 次迭代，<0.7 dB 代价；
+8 迭代版 4.4e5），@132 PRB/2 UE 在 A100 上 1 ms，其中 **~350 µs/迭代 + 270 µs 开销 ⇒ 最多 2 次迭代**。
+⇒ **能进 1 ms 时隙的模型在 10⁵ 量级，不是 10⁶**（与 HELENA 的 1.16e5 同量级）。
 
 ★ **必须放在第一章的基线**：文献里唯一一个"神经接收机跑在 Apple 硬件上"的数字是
 **M3 Ultra CPU 模式、1.23 M 参数 DeepRx 前向 = 72.10 ms/槽**（+9.12 ms LDPC = 81.23 ms 全链，
@@ -226,10 +236,14 @@ Benefits of OTA Training for Learned Receivers*（arXiv 2608.12918, 2026）指�
 1. ★ **逐比特 BCE（对编码比特）——唯一主损失。** 这是文献里实际使用的做法
    （Sionna 神经接收机：对每 RE 每比特的 logit 做 log-base-2 的 BCE；CMDNet：符号后验交叉熵）。
    允许模型超过经典 demapper（无蒸馏天花板）。
-2. ★ **"对真值 LLR 做 MSE" 在文献里一个实例都没有**（`memo_03` §7bis.E）
-   ⇒ **LLR 回归 / KL 只作预训练热身与消融对照，不作为主候选**。
-3. **码字级 / 译码器感知**：仓库里有 Metal LDPC 译码器，可以做一个"以 CRC 通过为信号"的微调阶段。
-   **先做离线批处理版本，不做 RL。**
+2. ★ **MSE-on-参考-LLR 存在但属少数派**（NVIDIA Aerial `LLRNet`，"Machine LLRning"）。
+   它需要"参考 LLR"作监督，**本质是蒸馏 ⇒ 会把教师的上限变成学生的上限**。
+   ⇒ **LLR 回归 / KL 只作预训练热身与消融对照，不作为主候选**（`memo_03` §7bis.M）。
+3. **码字级 / 译码器感知**（★ 已按负面证据降级）：文献里**把译码器放进训练**的收益是
+   mixed-to-weak——arXiv 2312.02601 用了可微 LDPC 译码器却报告 *"we empirically did not observe
+   any gains by doing so"*；ETH 2026 的站点微调只买到 0.004 绝对 BLER。
+   ⇒ ★ **区分两件事：译码器在环「评测」是必须的；译码器在环「训练」不是。**
+   本工作流把后者列为**可选探索**，先做离线批处理版本，不做 RL。
 
 ### 3.3 标度校准（独立步骤，不是训练细节）
 
@@ -239,6 +253,12 @@ Benefits of OTA Training for Learned Receivers*（arXiv 2608.12918, 2026）指�
 
 - 做法：训练后单独拟合一个标度/温度参数，最大化量化后 LLR 与真值比特的互信息；
 - **验收**：量化**前**与量化**后**的 CRC 差异 ≤ 预登记阈值。
+
+★ **可抄的具体数字**（`memo_03` §7bis.L）：Sionna 的神经解映射器输出 **int16 LLR，用 `np.ldexp(llrs,8)`
+（2⁸ 缩放）**，并**实测到相对 OAI 参考 2.42× 的标度失配**；其 `LDPC5GDecoder` 内部裁剪 **`llr_max = 20.0`**，
+且指出 **min-sum 对 LLR 标度失配天然鲁棒**（⇒ 我们也可以在译码器侧买鲁棒性）。
+★ 注意 **他们的 20.0 与我们的 `LLR_MAX = 120` 不是同一层的东西**（译码器内部裁剪 vs int8 量化上限）——
+"LLR 动态范围取多大"是**必须自己测**的量，不能照抄。
 
 ★ **这不是我们的特殊困难，而是已被命名的成熟问题**（`memo_03` §4.2）：LLR 的 scaling + clipping
 在文献里是标准做法，且有现成技术路线——学习型量化（*Learning Quantization in LDPC Decoders*,

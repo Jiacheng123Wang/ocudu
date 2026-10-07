@@ -1,0 +1,40 @@
+OK    2503.16594   2.7M   Decision Feedback In-Context Learning for Wireless Symbol Detection
+OK    2411.07600   2.1M   Decision Feedback In-Context Symbol Detection over Block-Fading Channels
+OK    2609.07805   344K   Real-Time dApps for AI-RAN-Measured Interface Requirements for Inline PHY and Slot-Level Control
+OK    2609.07843   396K   The OCUDU dApp Platform-An Open Runtime and E3 Interface for Real-Time AI-RAN
+OK    2606.22283   3.0M   Apple Neural Engine-Architecture, Programming, and Performance
+OK    2606.17090   520K   ANEForge-Python for direct computation on the Apple Neural Engine
+OK    2605.26157   1.0M   When Does a Neural Receiver Help? Calibration-Drift Benchmarking and Detect-and-Rollback for 5G-6G NR
+OK    2608.12918   488K   Input-Correlated Supervision Noise Limits the Benefits of OTA Training for Learned Receivers
+OK    2605.28451   268K   Range, Not Precision-Block-Floating-Point Half-Precision FFT and SAR Imaging on Apple Silicon
+OK    2609.32237   328K   Bandwidth, Not FLOPS-FFT Kernels, Matrix Units and SAR Imaging on Apple M6
+OK    2005.01494   1.1M   DeepRx-Fully Convolutional Deep Learning Receiver
+OK    2010.16283   516K   DeepRx MIMO-Convolutional MIMO Detection with Learned Multiplicative Transformations
+OK    2507.10409   832K   Energy Efficiency in AI for 5G and Beyond-A DeepRx Case Study
+OK    2606.29345   1.2M   Neural Augmentation of MIMO-OFDM Receivers for Universal LLR Reconstruction
+OK    1911.13055   744K   Trainable Communication Systems-Concepts and Prototype
+OK    2609.04004   2.0M   On the Impact of Site-Specific Training for a Real-World 5G NR System
+OK    2408.04182   3.3M   Adapting to Reality-Over-the-Air Validation of AI-Based Receivers Trained with Simulated Channels
+OK    2208.05186   708K   Learning Quantization in LDPC Decoders
+OK    1011.2113     92K   Complexity Adjusted Soft-Output Sphere Decoding by Adaptive LLR Clipping
+OK    2601.16586   444K   Learning Successive Interference Cancellation for Low-Complexity Soft-Output MIMO Detection
+OK    2102.12756   656K   CMDNet-Learning a Probabilistic Relaxation of Discrete Variables for Soft Detection with Low Complexity
+OK    1903.02865   364K   Deep Learning for Channel Coding via Neural Mutual Information Estimation
+OK    1706.01151   312K   Deep MIMO Detection
+OK    2212.07816   780K   DUIDD-Deep-Unfolded Interleaved Detection and Decoding for MIMO Wireless Systems
+OK    2505.15848   1.8M   Sionna Research Kit-A GPU-Accelerated Research Platform for AI-RAN
+OK    2506.15176   2.1M   In-Context Learning for Gradient-Free Receiver Adaptation-Principles, Applications, and Theory
+OK    2506.21093   1.9M   Chain-of-Thought Enhanced Shallow Transformers for Wireless Symbol Detection
+OK    2404.05538   1.0M   Cell-Free Multi-User MIMO Equalization via In-Context Learning
+OK    2510.12941   1.4M   Computationally Efficient Neural Receivers via Axial Self-Attention
+OK    2210.14103   772K   Bit Error and Block Error Rate Training for ML-Assisted Communication
+OK    2502.05952   3.0M   Comprehensive Review of Deep Unfolding Techniques for Next-Generation Wireless Communication Systems
+OK    2102.02993   1.1M   LoRD-Net-Unfolded Deep Detection Network with Low-Resolution Receivers
+OK    2409.02912   1.3M   Design of a Standard-Compliant Real-Time Neural Receiver for 5G NR
+OK    2602.04652   2.0M   Six Times to Spare-Characterizing GPU-Accelerated 5G LDPC Decoding for Edge-RSU Communications
+OK    2609.31177   356K   Floating-Point Microformat Quantization and Pruning for Efficient MU-MIMO Neural Receivers
+OK    2409.05610   932K   SpikingRx-From Neural to Spiking Receiver
+OK    2510.01533   612K   NVIDIA AI Aerial-AI-Native Wireless Communications
+OK    2507.18538   908K   AI-ML Life Cycle Management for Interoperable AI Native RAN
+
+=== 38 downloaded, 0 failed ===

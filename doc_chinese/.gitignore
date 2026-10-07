@@ -40,3 +40,8 @@ worktree_backups/
 # Nothing above 2 MB is a document: the largest tracked file here is a design document of ~1 MB.
 # (Git cannot express a size rule; this block is the manual equivalent - see the table in
 # doc_chinese/README.md for what is expected to be tracked.)
+
+# Reference papers (doc_chinese/llr_ai_detection/ref_paper/): third-party PDFs, ~43 MB, and not
+# ours to redistribute in the history. The tracked artefact is the README.md index beside them
+# (title, arXiv ID, why each is cited); `bash fetch_refs.sh` restores the PDFs on a new machine.
+llr_ai_detection/ref_paper/*.pdf

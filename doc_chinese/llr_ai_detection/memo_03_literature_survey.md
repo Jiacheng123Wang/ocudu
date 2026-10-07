@@ -311,11 +311,12 @@ huggingface.co 及多数厂商域名均不可达，全部返回 "resolves to a n
 | INT4 | **损失 3.3–3.7 dB，并跌破 LS-LMMSE 基线** |
 | FP4 (E2M1) | 可用 |
 
-### E. ★ 损失函数：文献里**没有**"对真值 LLR 做 MSE"的做法
+### E. ★ 损失函数：主流是逐比特 BCE（⚠ 本条措辞已被 §M 修正——MSE-on-LLR **存在但属少数派**）
 
 实际观察到的损失：**逐比特 BCE（对编码比特）**为主；soft-BCE（其梯度等价于到 MAP 后验的 KL）；
 符号后验交叉熵（CMDNet）；Donsker-Varadhan 互信息下界（Fritschek）；可达速率类目标。
-★ **"bit-wise MSE against true LLRs" 一个实例都没找到。**
+★ 早期结论是"bit-wise MSE against true LLRs 一个实例都没找到"——**该结论在 §M 被修正**：
+NVIDIA Aerial 的 `LLRNet` 就是用 MSE 对参考 LLR 训练的。准确表述见 §M。
 
 ⇒ 主规划 §3.2 的损失优先级**据此调整**：**BCE 为唯一主损失**，
 "LLR 回归/KL"**降级为消融项**（而不是与 BCE 并列的主候选）。
@@ -371,6 +372,87 @@ huggingface.co 及多数厂商域名均不可达，全部返回 "resolves to a n
 3. 内部规格直接采用 **OCUDU Class A/B/C 契约**。
 4. **每个时隙都保持经典接收机武装**——但注意 §G.3：回滚判据不能是"AI 差就退回经典"。
 5. LLR 头**从第一天就带显式 clamp 与逐调制标度**。
+
+## 7ter. 最终补充（LINE A+B 全文核对后的追加，含**引用勘误**）
+
+### K. ★★ 最有说服力的一条负面证据：DetNet 的"软"输出其实是硬的
+
+**CMDNet**（IEEE TCOM 69(12):8214–8227, 2021，arXiv 2102.12756）用直方图实测：
+
+> "the soft output version of DetNet should deliver accurate probabilities or LLRs … Indeed, we visualize
+> with an exemplary histogram of LLRs that **this is not the case** … DetNet mostly provides hard
+> decisions with **∼97 % LLRs being −1 and 1**"
+
+并补一句：*"In coded systems with soft decoders usually employed today, delivering soft information is a
+strict requirement."* CMDNet 自己**带真实的 128×64 rate-1/2 LDPC 译码器（BP, 10 迭代）并报 coded FER**。
+
+⇒ ★ 这是"**LINE A ≠ 我们**"最硬的证据：符号输出的检测器**不是"软输出弱一点"，而是根本不产出可用的软信息**。
+⇒ 也给出一个我们**应当复现的测量**：Baumgartner 等（arXiv 2211.06054）的
+**逐 |LLR| 分桶经验错误率** `P_emp,k = (#该桶内错误硬判决)/(#该桶内比特)`。
+
+### L. ★ LLR 接口的具体数字（可以直接抄）
+
+| 来源 | 事实 |
+|---|---|
+| **Sionna Research Kit** 神经解映射器 | float16 入；**int16 LLR 出，用 `np.rint(np.ldexp(llrs, 8))`（即 2⁸ 缩放）**；教程**实测到相对 OAI 参考有 2.42× 的标度失配**；并指出 min-sum *"is known to be robust against mis-scaling of the LLRs"*；`LDPC5GDecoder` 内部 **`llr_max = 20.0`**、20 迭代 |
+| **NVIDIA 合规实时 NRX**（2409.02912） | `ReadoutLLRs` 输出**编码比特**的 LLR，训练用 **对 LDPC 编码后真值比特的 BCE**；*"the code rate and coding scheme is transparent to the NRX"*；**float16 权重、无 QAT**、接口处**未声明 LLR 位宽/饱和**；预算：A100 上 1 ms，**~350 µs/迭代 + 270 µs 开销 @132 PRB/2 UE ⇒ 最多 2 次迭代**；**实时模型只有 1.4e5 权重**（2 迭代）vs 4.4e5（8 迭代）；性能代价 **<0.7 dB** |
+| **CENTRIC PoC**（Zenodo 12731570） | LLR 进"标准合规 LDPC 译码器"，KPI = **LDPC 之后的 BLER**；**<1 dB 相对 LMMSE+K-Best**；A100 上 132 PRB **1 ms**；**未描述 LLR 量化/裁剪** |
+
+★★ **两条对我们直接有用的对比**：
+1. **他们的 `llr_max = 20.0`，我们的 `LLR_MAX = 120`**（`memo_01` §2）。
+   两者不是同一层的东西（他们是译码器内部裁剪，我们是 int8 量化上限），但
+   **"LLR 动态范围该取多大"是一个必须自己测的量**，不能照抄。
+2. ★ **实时神经接收机的参数量锚点是 1.4e5**（NVIDIA，2 迭代，<0.7 dB 代价）——
+   与 HELENA 的 1.16e5 同量级。这给规划 §2.3 的"尺寸预算"一个**可引用的上界**：
+   **能进 1 ms 时隙的模型在 10⁵ 量级，不是 10⁶**。
+
+### M. ★ 勘误：MSE-on-LLR **确实存在**（修正 §7bis.E 的措辞）
+
+§7bis.E 写的是"对真值 LLR 做 MSE 一个实例都没有"。**这句过强了**：
+NVIDIA Aerial 的 **`LLRNet`**（"Machine LLRning"，Shental & Hoydis, IEEE Globecom Wkshps 2019,
+arXiv 1907.01512）**就是用 MSE 对参考 LLR 训练**的。
+
+修正后的准确表述：
+- **主流是逐比特 BCE**（Sionna、NVIDIA NRX、CMDNet 的符号后验交叉熵）；
+- **MSE-on-reference-LLR 存在，但属于少数派**（LLRNet 一线，且它需要"参考 LLR"作为监督，
+  本质是**蒸馏**——会有教师上限）。
+⇒ 主规划 §3.2 据此改为：**BCE 为唯一主损失；MSE/回归对参考 LLR 只作热身与消融**
+（不仅因为少人用，更因为它把教师的上限变成学生的上限）。
+
+### N. ★ 勘误：**译码器放进训练**的收益是 mixed-to-weak（放进评测是必须的）
+
+| 来源 | 结果 |
+|---|---|
+| "A Neural Receiver for 5G NR Multi-user MIMO"（IEEE Globecom Wkshps 2023, arXiv 2312.02601） | 训练里用了**可微 LDPC 译码器**，却报告 *"we empirically **did not observe any gains** by doing so"* |
+| ETH 2026（2609.04004） | 站点特化微调只买到 **0.004 绝对 BLER** |
+| Cammerer TCOM 2020（1911.13055） | OTA **+1.3 dB（vs 256QAM + 802.11n LDPC）**；+0.6 dB 是对 **AWGN-MAP demapper** 的——两个数字都对，回答的是不同问题 |
+
+⇒ ★ **区分两件事**：**译码器在环评测（mandatory）** vs **译码器在环训练（收益未证实）**。
+主规划 §3.2 第 3 条据此降级。
+
+### O. 引用勘误（全文核对后确认，勿再传播）
+
+| 常见说法 | 事实 |
+|---|---|
+| DetNet 2017 发表在 IEEE SPL | **IEEE SPAWC 2017**（arXiv 1706.01151）；期刊版 "Learning to Detect", IEEE TSP 67(10):2554, 2019 |
+| "DetNet with one-bit quantization, IEEE TSP 2019" | ★ **不存在**（该 TSP 论文全文 zero occurrences of "one-bit"/"quantiz"/"ADC"/"low-resolution"）。低分辨率展开的真实出处是 **LoRD-Net**（IEEE TSP 69:5651, 2021）等 |
+| OAMP-Net 是 GLOBECOM | **IEEE GlobalSIP 2018**（arXiv 1809.09336）；OAMP-Net2 = **IEEE TSP 68:1702–1715, 2020**（不是 JSTSP）。混淆源：arXiv 1907.09439 的 **v1→v2 改了标题** |
+| MMNet 假设 CDL/Kronecker 信道 | MMNet = **IEEE TWC 19(8):5635–5648, 2020**；信道是 **i.i.d. 高斯 + 3GPP 3D MIMO（TR 36.873）经 QuaDRiGa**——**不是** CDL/Kronecker（Kronecker 只出现在它的 prior work 里） |
+| "End-to-End Learning for OFDM: From Neural Receivers to Hardware Feasibility" | ★ **不存在**；真实标题是 *…to **Pilotless Communication***（IEEE TWC 2021, DOI 10.1109/TWC.2021.3101364） |
+| 深度展开综述 arXiv 2502.05952 有期刊版 | **仅预印本**。要引期刊综述用 **IEEE Communications Magazine 2026, DOI 10.1109/MCOM.001.2500444**；Model-Based Deep Learning = **Proc. IEEE 111(5):465–499, 2023** |
+
+### P. MMNet / OAMP-Net2 的输出类型（LINE A 的完整画像）
+
+| 模型 | 输出 | 译码器在环 |
+|---|---|---|
+| **DetNet** | 近似**符号后验概率** P(x=s\|y)（§IV "Soft decision output"），**明确不是逐比特 LLR**；原文 *"a full iterative decoding scheme is outside the scope of this paper"*。运行时（batch-1）：**0.0045 s**（对照 SDR 0.009、AMP 0.005、球形译码 0.001） | **无** |
+| **OAMP-Net2** | 条件均值 E{x\|r,τ}，**外加式 (29) 的 LLR 读出**，并声称 soft-in/soft-out turbo——但原文说 *"specific experimental results are outside the scope of this paper and will be conducted in the future"*。每层 4 个可训练参数 | **未做实验** |
+| **MMNet** | 内部软符号，**对外硬符号判决**；★ 全文 **LLR / log-likelihood / LDPC / channel-decoder 零次出现，"BER" 也是零次**——**只报 SER** | **无** |
+
+⇒ ★ **结论**：LINE A 成熟，但**几乎不产出标定好的 LLR、几乎不带译码器在环**（`memo_03` §4.1 的判断被全文核对确认）。
+
+> ★ **原文 PDF 已下载到 `ref_paper/`**（38 篇，文件名 = 论文标题，索引见 `ref_paper/README.md`）。
+> 写进对外材料前请打开原文核对——本节只是指路。
 
 ## 8. 参考（主线）
 

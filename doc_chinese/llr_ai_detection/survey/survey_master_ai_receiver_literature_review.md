@@ -278,6 +278,61 @@ LLRs, with one important exception (IDD-style unfolding).
 decoder-ready soft bits". If the workstream's interface is LLRs into an NR LDPC decoder, the closest
 prior art is IDD-style unfolding (DUIDD and the Sionna IDD material), not DetNet/OAMP-Net/MMNet.
 
+**Full-text-verified corrections and additions** (from
+`survey_line_a_b_output_types_llr_calibration_deep_dive.md`; [FT] = read from the paper's full text):
+
+* **DetNet — "Learning to Detect", IEEE TSP vol. 67 no. 10 p. 2554, 2019, DOI 10.1109/TSP.2019.2899805**
+  ([arXiv 1805.07631](https://arxiv.org/abs/1805.07631)). [FT] Unfolds projected gradient descent on a
+  **one-hot** representation with loss `Σ_l log(l)‖x_oh − x̂_oh,l‖²`. Its §IV "Soft decision output" gives
+  approximate **symbol posterior probabilities** `P(x=s|y)` — explicitly **not** per-bit LLRs — and the paper
+  says additional soft inputs are left "for future work", i.e. **no decoder feedback**. Reported batch-1
+  runtime: **DetNet 0.0045 s vs SDR 0.009 s, AMP 0.005 s, sphere decoding 0.001 s**. A full-text keyword scan
+  found **zero** hits for "one-bit", "quantiz", "ADC", "low-resolution" — confirming the correction above.
+  Soft-output quality is scored only against M-Best sphere decoding over `δ(P,Q)=Σ_s|P(s)−Q(s)|`, and is
+  "comparable only at high SNR". Simulation-only.
+* **OAMP-Net — IEEE GlobalSIP 2018** (not GLOBECOM), [arXiv 1809.09336](https://ar5iv.labs.arxiv.org/html/1809.09336).
+  Per-layer learned step `r_t = x̂_t + γ_t W_t(y − Hx̂_t)`; 2T parameters; symbol estimates; no LLR/decoder.
+* **OAMP-Net2 — IEEE TSP vol. 68 pp. 1702–1715, 2020, DOI 10.1109/TSP.2020.2976585** (not JSTSP).
+  [FT] **The citation confusion has a concrete cause: arXiv 1907.09439 v1 was titled "…for Joint MIMO
+  Channel Estimation and Signal Detection", and v2 was retitled "…for MIMO Detection".** Output =
+  conditional mean `E{x_i|r_i,τ_t}` **plus an LLR read-out, Eq. (29)**, with an explicit soft-in/soft-out
+  turbo claim — but the paper states it will "only provide the principle … specific experimental results are
+  outside the scope of this paper and will be conducted in the future". **4 trainable parameters per layer
+  (4T total)**. Complexity Table I: OAMP-Net2 `O(TN_t³)`, DetNet `O(TN_t²)`, DNN-dBP/DNN-MPD/TPG/LcgNet
+  `O(TN_rN_t)`; learnable variables OAMP-Net2 **4T** vs DetNet `(6N_rN_t+2N_r+N_t)T`. Channels: i.i.d.
+  Rayleigh, **Kronecker** correlated Rayleigh, and **3GPP 3D MIMO TR 36.873 via QuaDRiGa** (where it loses,
+  because it needs unitarily-invariant channels); perfect CSI; simulation-only.
+* **MMNet — IEEE TWC vol. 19 no. 8 pp. 5635–5648, 2020, DOI 10.1109/TWC.2020.2996144**
+  ([arXiv 1906.04610](https://arxiv.org/abs/1906.04610)). [FT] 10 layers; per layer a learned complex
+  linear operator `Θ_t` (`N_t×N_r`) plus a per-symbol noise-variance scaling `θ_t`, then a **model-based
+  posterior-mean denoiser**; `2N_t(N_r+1)` parameters (20 K–41 K). **Output = soft symbols internally, then
+  hard symbol decisions. A full-text scan found ZERO occurrences of LLR / log-likelihood / LDPC /
+  channel-decoder, and the BER count is 0 — it is an SER-only paper.** Reported: *"same error rate as
+  OAMPNet at 2.5 dB lower SNR and with at least 10× less computational complexity … 4–8 dB better overall
+  than MMSE"*; `O(N_r²)` vs `O(N_r³)`. Channels: i.i.d. Gaussian + **3GPP 3D MIMO (TR 36.873) via
+  QuaDRiGa** — **the common claim that MMNet assumes CDL/Kronecker is wrong; Kronecker appears only for
+  prior work.**
+* **CMDNet is the decisive calibration datapoint for the whole unfolding family** — IEEE TCOM 69(12):
+  8214–8227, 2021 ([arXiv 2102.12756](https://ar5iv.labs.arxiv.org/html/2102.12756)). [FT] It measures that
+  DetNet's "soft" output is not actually soft: *"the soft output version of DetNet should deliver accurate
+  probabilities or LLRs … Indeed, we visualize with an exemplary histogram of LLRs that this is not the
+  case … **DetNet mostly provides hard decisions with ∼97 % LLRs being −1 and 1**"*, adding *"In coded
+  systems with soft decoders usually employed today, delivering soft information is a strict requirement."*
+  CMDNet itself runs a **real 128×64 rate-1/2 LDPC decoder (BP, 10 iterations)** and reports **coded FER**.
+* **An empirical LLR-calibration metric for a DetNet-family detector already exists** — Baumgartner et al.,
+  [arXiv 2211.06054](https://arxiv.org/abs/2211.06054): a per-|LLR|-bin reliability curve
+  `P_emp,k = (# wrong hard decisions in bin k)/(# bits in bin k)`, plus a DetNet-vs-MDetNet parameter table.
+  This is the natural template for the team's own calibration study.
+* **Survey corrections:** *Comprehensive Review of Deep Unfolding Techniques* ([arXiv 2502.05952](https://ar5iv.labs.arxiv.org/html/2502.05952v2))
+  is a **preprint only — no journal venue exists** (v4, Jan 2026), and its open-challenge list does **not**
+  mention LLR compatibility. The dedicated survey to cite instead is *Applications for Deep Unfolding
+  Techniques in MIMO Wireless Communications Systems*, **IEEE Communications Magazine 2026**,
+  DOI 10.1109/MCOM.001.2500444. *Model-Based Deep Learning* is **Proceedings of the IEEE 111(5):465–499, 2023**,
+  DOI 10.1109/JPROC.2023.3247480; *Deep Learning-Aided 6G Wireless Networks* is **IEEE OJ-COMS 2022**,
+  DOI 10.1109/OJCOMS.2022.3210648.
+* **Negative result worth noting:** no 2024–2026 survey frames *decoder-compatible LLR output* as an open
+  problem — the only primary-literature evidence that it is one comes from CMDNet and OAMP-Net2.
+
 ---
 
 ## 4. Receivers that output LLRs, and coding-aware / bit-wise training losses
@@ -293,6 +348,37 @@ directly from the Sionna documentation, not via a search snippet):
 
 That is the reference formulation of "grid → LLRs → outer decoder", and Sionna is the natural baseline
 provider for exactly the interface this workstream needs.
+
+**The concrete LLR interface — numbers the team can copy** (full-text verified by the LINE A/B survey):
+
+* **Sionna Research Kit neural demapper**: emits one LLR per coded bit, trained with
+  `nn.BCEWithLogitsLoss()` (float16 in), and hands the decoder **int16 LLRs via
+  `np.rint(np.ldexp(llrs, 8))` — a 2⁸ scaling**. The tutorial measures a **2.42× scale mismatch vs the
+  OpenAirInterface reference** and notes *"the LDPC decoder is implemented as min-sum decoder which is known
+  to be robust against mis-scaling of the LLRs"*. `LDPC5GDecoder` has an internal clipping limit
+  **`llr_max = 20.0`**, `cn_update ∈ {boxplus-phi (default), boxplus, minsum, offset-minsum}`,
+  `vn_update = 'sum'`, 20 iterations, float input. **[This is the single most directly reusable artifact in
+  the whole survey for the team's model→LDPC boundary.]**
+* **NVIDIA standard-compliant real-time NRX** — **IEEE ICMLCN 2025**, DOI 10.1109/ICMLCN64995.2025.11140048
+  ([arXiv 2409.02912](https://arxiv.org/abs/2409.02912)): a CGNN over the resource grid whose
+  `ReadoutLLRs` layer *"outputs LLR estimates for each UE's symbol of all REs"*, trained with **BCE between
+  LLR estimates and LDPC-coded ground-truth bits** (*"the code rate and coding scheme is transparent to the
+  NRX, as the NRX outputs LLRs on coded bits"*). **Weights are float16 with no QAT, and no LLR
+  bit-width/saturation value is stated at the LDPC interface.** Budget numbers: 1 ms latency budget on an
+  A100; **~350 µs per iteration + 270 µs overhead at 132 PRB / 2 UEs → at most 2 iterations**; the
+  real-time variant has **1.4 × 10⁵ weights (2 iterations)** vs **4.4 × 10⁵ (8 iterations)** for the large
+  model; **<0.7 dB SNR degradation** vs the non-real-time NRX; approaches LMMSE + K-Best at 10 % TBLER.
+* **NVIDIA Aerial `LLRNet`** takes the opposite training approach — *"plugged in the PUSCH receiver chain in
+  place of the conventional soft demapper"* with **MSE against target LLRs** rather than BCE — the
+  LLR-regression line from **Shental & Hoydis, *"Machine LLRning": Learning to Softly Demodulate*,
+  IEEE Globecom Wkshps 2019**, DOI 10.1109/GCWkshps45667.2019.9024433 ([arXiv 1907.01512](https://arxiv.org/abs/1907.01512)).
+  `NVlabs/neural_rx` documents the same BCE-on-LLRs loss and an optional MSE channel-estimate loss
+  (weight 0.01–0.02).
+* **CENTRIC (Horizon Europe PoC)** — [Zenodo 12731570](https://zenodo.org/records/12731570): the neural
+  receiver consumes the live IQ stream from the O-RU and *"output[s] the predicted LLR values that are then
+  inputted into a standard-compliant LDPC decoder"*, with **BLER after LDPC** as the KPI; **no LLR
+  quantisation or clipping is described**, and the headline KPIs are **"<1 dB loss vs LMMSE + K-Best"** and
+  **"1 ms latency processing 132 PRBs"** on an A100 (D5.2/D5.3).
 
 **Loss functions actually observed in LLR-output receivers** (evidence from the companion LINE B survey):
 
@@ -529,6 +615,24 @@ replaced with actual results.*
    Eger & Shlezinger, [arXiv 2606.29345](https://arxiv.org/html/2606.29345v1). Practical rule for the team:
    **use coded BLER after the real LDPC decoder as the primary metric, never uncoded BER and never MI
    alone** — this is also DeepRx's own stated proxy for LLR quality.
+8. **A direct negative result on the decoder-in-the-loop thesis.** *A Neural Receiver for 5G NR Multi-user
+   MIMO* — **IEEE Globecom Wkshps 2023**, DOI 10.1109/GCWkshps58843.2023.10464486
+   ([arXiv 2312.02601](https://arxiv.org/abs/2312.02601)) — uses a differentiable LDPC decoder in the
+   training loop and reports that *"we empirically did not observe any gains by doing so."* Combined with the
+   ETH 2026 result (site finetuning of a decoder-in-the-loop receiver bought 0.004 absolute BLER), the
+   evidence for putting the decoder inside training is now **mixed-to-weak**, even though decoder-in-the-loop
+   *evaluation* is essential.
+9. **Numbers on the one measured decoder-in-the-loop win, stated with their baselines** — Cammerer et al.,
+   **IEEE TCOM 2020**, DOI 10.1109/TCOMM.2020.3002915 ([arXiv 1911.13055](https://arxiv.org/abs/1911.13055)):
+   the learned demapper *"outputs LLR and can therefore be smoothly interfaced with a channel decoder"*,
+   trained with bit-wise cross-entropy, and over the air (2× USRP B210) gives **+1.3 dB vs 256-QAM with
+   802.11n LDPC**; the earlier-cited **+0.6 dB** figure is the same system measured against an AWGN-MAP
+   demapper instead. Both are legitimate; they answer different comparison questions.
+10. **Two citation corrections in this area.** *"End-to-End Learning for OFDM: From Neural Receivers to
+    Hardware Feasibility"* **does not exist** — the real paper is *"…to **Pilotless Communication**"*,
+    **IEEE TWC 2021**, DOI 10.1109/TWC.2021.3101364 (≈+7 % throughput at equal BER, simulation only).
+    And *Model-Free Training of End-to-End Communication Systems* (IEEE JSAC 2019) and *Towards Hardware
+    Implementation of NN-based Communication Algorithms* (IEEE SPAWC 2019) contain **no LLR content**.
 
 ---
 
