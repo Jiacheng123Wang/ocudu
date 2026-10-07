@@ -1102,6 +1102,51 @@ lane 的每条 CB 上只编了两道等待 ✓（`burst_ensure_open()` ✓）：
 与 M0 消去三条腿时 CRC 掉到 92.7/98.6/97.8 % 同一类证据 ✓）；
 读数：`[ul_gpu_lane] busy` + `busy split`（`merged_hop` ✓）+ Q9-B 的 **队列/设备均值** ✓。
 
+### 2026-10-07 · ★★★ mkf020/mkf021：**旋钮没进进程 ✗ ⇒ 这一对变成了"同配置重复腿"** ✓ —— 却给出了**噪声底** ✓✓
+
+**① 我的命令错了 ✗**（不是代码问题 ✓）：我让用户把
+`--expert_execution.max_pusch_and_srs_concurrency=1` 作为**第 5 个位置参数**传给 `fly_leg.sh` ✗，
+而 `fly_leg.sh` **只取 4 个位置参数** ✓（`MODE/LABEL/LOAD/PROFILE` ✓），**多余的一律丢弃** ✗。
+两条腿的 `gNB options` 都只有 `--expert_execution.threads.lower_phy.execution_profile=dual` ✓、
+`[ul_lane_exec] PUSCH/SRS concurrency` 都是 **2** ✓ ⇒ **`mkf021` 并没有跑在并发 1 上** ✗。
+★ **正确写法** ✓：经 `fly_leg.sh` 传 gNB 选项要走 **`EXTRA_KNOBS`** ✓ ——
+它把内容并进 `KNOBS` ✓，而 `run_leg.sh` 会**按前缀分流** ✓（`OCUDU_*=` → 环境 ✓、`--…` → argv ✓、其它 → 拒绝 ✓），
+这正是 `mkf008/009` 当初传 `--expert_phy.pusch_dft_type=cpu` 的方式 ✓。
+**教训** ✓（腿协议自己第一段就写着这条 ✓）：**"旋钮没进进程"与"旋钮没效果"在日志里长得一样** ✗
+—— 只有 `gNB options` 那一行能分辨 ✓，所以**每次都要读它** ✓。
+
+**② 白捡的收获：四条同配置腿的重复性** ✓✓（钉住 MCS、并发 2、融合开 ✓）：
+
+| 腿 | `busy` mean / median | `merged_hop` | Q9-B 队列 mean | Q9-B 设备 mean | CRC steady |
+|---|---|---|---|---|---|
+| mkf018 ✓ | 492.2 / 472.6 | 455.9 | 103.8 | 246.1 | 99.5 % ✓ |
+| mkf019（fence 臂 ✓）| 492.0 / 472.3 | 455.5 | 103.5 | 246.0 | 99.6 % ✓ |
+| **mkf020** ✓ | **494.3 / 473.6** | **457.0** | **103.4** | **247.1** | 99.3 % ✓ |
+| **mkf021** ✓ | **492.4 / 472.8** | **455.9** | **102.6** | **246.2** | 99.8 % ✓ |
+| 散布 ✓ | **±1.2 / ±0.7 µs** | **±0.8 µs** | **±0.6 µs** | **±0.6 µs** | 99.3–99.8 % |
+
+⇒ ★★ **lane 的窗口读数重复到 ~±1 µs** ✓✓ —— 这一条反过来给前面每个判决**加了底气** ✓：
+* 融合的收益（`busy` **−7.4 / −7.6 µs** ✓、`merged_hop` **−11.8 / −12.8 µs** ✓）是**噪声底的 6～10 倍** ✓ ⇒ 真实 ✓；
+* fence 臂的"什么都不动"（**−0.2 / −0.4 µs** ✓）**落在噪声底之内** ✓ ⇒ 那条结论**成立且干净** ✓；
+* **`merged_hop ≈ 456 µs` 是这个配置的稳定结构常数** ✓（四条腿 455.5–457.0 ✓）——
+  **不是噪声、不是 fence、不是内核** ✓ ⇒ 谜团是一个**稳定的路径属性** ✓，值得继续追 ✓。
+* 唯一的异常 ✓：mkf021 的**设备中位数 373.4 µs** ✓（其余三条 221–223 ✓），而它的**均值 246.2 正常** ✓
+  ⇒ 该腿设备分布的形状变了（双峰？✓）⇒ **记下** ✓，引用"设备中位数"时避开这一条 ✓。
+
+**③ 下一步** ✓（命令已按 ① 改正 ✓）：并发 1 那条腿**还没飞** ✓ ——
+
+```bash
+cd /Users/jiachengwang/dev/ocudu
+export LEG_CFG=$PWD/doc_chinese/macos_thread_priority/wip/gnb_pinned_mcs13.yml
+export LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs
+# ★ gNB 选项走 EXTRA_KNOBS（run_leg.sh 按前缀分流到 argv），不要当位置参数 ✗
+EXTRA_KNOBS="--expert_execution.max_pusch_and_srs_concurrency=1" \
+sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh mkf022-m1-conc1 dual quiet gpu
+```
+**判读** ✓：先看 `gNB options` 那行**有没有它** ✓、再看 `[ul_lane_exec] PUSCH/SRS concurrency = 1` ✓
+（**这一步不能省** ✗ —— 本轮就是没读它 ✗）；然后比 `merged_hop`（456 µs ✓）：
+**减半 ⇒ 与并发 lane 争设备** ✓、**不动 ⇒ 排除争用** ✓，转查"一条 CB 里多个小 dispatch 的串行化" ✓。
+
 ### 2026-10-07 · ★★★ mkf018/mkf019（**fence 消去，空口**）：**那 ~456 µs 不是 fence** ✗ —— 归因进入下一层 ✓
 
 **腿** ✓：`mkf018`（正常 ✓）与 `mkf019`（`OCUDU_LANE_ABLATE_FENCE=1` ✓），钉住 MCS 的 config ✓、背靠背 ✓。
@@ -1146,8 +1191,12 @@ lane 的 dispatch 真正跑起来时它早就写完了 ✓），所以 fence **�
 ⇒ **空口比离线大 ~17 倍** ✗ ⇒ 这是一个**只在空口出现**的现象 ✓（与 M0 那 ~380 µs 同一个谜 ✓）。
 候选 ✓：(a) **与并发那条 lane 争设备** ✓（本配置 `PUSCH/SRS concurrency = 2` ✓）；
 (b) 设备侧对"一条 CB 里多个小 dispatch"的串行化 ✓；(c) CB 的**完成路径**开销 ✓。
-★ **最便宜的下一测** ✓：**把并发变成 1** ✓（`--expert_execution.max_pusch_and_srs_concurrency=1` ✓，
-一个 argv 选项 ✓、两条腿一对 ✓）—— 若窗口随之**减半** ⇒ 是 (a) 争用 ✓；不动 ⇒ 排除 (a) ✓。
+★ **下一个最便宜的测** ✓：**把并发变成 1** ✓ —— ★★ **经 `EXTRA_KNOBS` 传** ✓
+（`EXTRA_KNOBS="--expert_execution.max_pusch_and_srs_concurrency=1"` ✓；**当位置参数传会被 `fly_leg.sh` 丢掉** ✗，
+`mkf021` 就这么白飞了一条 ✗）—— 判读**先读 `gNB options` 与 `[ul_lane_exec]`** ✓，再比 `merged_hop` ✓：
+**减半 ⇒ 争设备** ✓；不动 ⇒ 排除 ✓。
+★ **噪声底已测** ✓：**四条同配置腿的窗口读数重复到 ±1 µs** ✓（memo ✓）⇒
+`merged_hop ≈ 456 µs` 是**稳定常数** ✓、而前面那些 −7～−13 µs 的判决是它的 6～10 倍 ✓ ⇒ 可信 ✓。
 
 ### 2026-10-07 · ★★★ mkf016/mkf017（**AMC 一对**）：**覆盖率与逐跳路由完全成立 ✓✓**；性能/功能**判不了** ✗
 
