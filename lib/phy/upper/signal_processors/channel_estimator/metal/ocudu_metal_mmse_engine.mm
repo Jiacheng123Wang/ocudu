@@ -2811,12 +2811,22 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
   // element the kernel reads, so the two agree on the address by construction - pointing the pointer
   // at the element instead would make the kernel's scalars[slot] land past the end (which is exactly
   // how this read a different element and loaded A with no noise at all).
+  //
+  // ★ THE `else` BRANCH IS THE FIX (metal_kernel_fusion, 2026-10-07): the rule above was written here
+  // and then not followed - the binding happened only when c.sigma2_dev was non-null, so a hop with no
+  // device sigma2 left the argument UNBOUND, which is the very thing the note forbids. It was latent
+  // because the kernel dereferences scalars only when p.sigma2_from_device says so, and that flag comes
+  // from the same pointer being non-null. A is already bound at index 0 and is non-null by the guard
+  // above, so it serves as the placeholder: any non-null buffer satisfies the argument, and the kernel
+  // cannot read it on this branch.
   if (c.sigma2_dev != nullptr) {
     mmse_engine_impl::mapped sig_buf = e->wrap(c.sigma2_dev, 4 * sizeof(float));
     if (sig_buf.buf == nil) {
       return false;
     }
     [enc setBuffer:sig_buf.buf offset:sig_buf.offset atIndex:2];
+  } else {
+    [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:2];
   }
   // O1 (dev doc 6.174): ONE dispatch for both matrices when asked for. The knob is checked here rather
   // than at the pipeline choice because the encoder binds the pipeline that goes with the grid, and the
@@ -2831,13 +2841,17 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
     [enc setBytes:&p length:sizeof(p) atIndex:2];
     // buffer(3) must be bound even when the kernel does not read it: MSL leaves an unbound device
     // pointer undefined, and the A kernel reads scalars[p.sigma2_slot] whenever sigma2_from_device
-    // says so. Same rule as the two-kernel route above (see its own note).
+    // says so. Same rule as the two-kernel route above (see its own note) - INCLUDING its else branch,
+    // which is the part that was missing on both routes until 2026-10-07: binding only when
+    // c.sigma2_dev is non-null leaves the argument unbound on exactly the hops the note is about.
     if (c.sigma2_dev != nullptr) {
       mmse_engine_impl::mapped sig_buf = e->wrap(c.sigma2_dev, 4 * sizeof(float));
       if (sig_buf.buf == nil) {
         return false;
       }
       [enc setBuffer:sig_buf.buf offset:sig_buf.offset atIndex:3];
+    } else {
+      [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:3];
     }
     for (unsigned rep = 0; rep != mmse_engine_impl::corr_repeat(); ++rep) {
       // BOTH counters, because both matrices are built by this one dispatch: the site census is what the
