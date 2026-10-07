@@ -790,6 +790,27 @@ struct mmse_engine_impl {
     }();
     return value;
   }
+  /// \brief Whether the pair entry point is usable, said ONCE on stderr - the same discipline as
+  /// cfo_fused_available() and for the same reason: an arm whose coverage is unstated reads as "the
+  /// knob did nothing" when the truth is "the metallib did not carry it", and that is the failure this
+  /// workstream has written down three times.
+  ///
+  /// \note It reports the knob and the library, NOT how often the pair was taken: a hop whose two
+  ///       groups are not both in this build's queue keeps the single-group dispatch, and only
+  ///       corr_pair's own count in the leg says how many times the fused one ran.
+  template <typename T>
+  static bool corr_pair_available(T* pipe)
+  {
+    static const bool reported = [pipe]() {
+      std::fprintf(stderr,
+                   "[ce_corr_pair] OCUDU_CE_CORR_PAIR: %s (metallib entry point %s)\n",
+                   corr_pair_enabled() ? "ON" : "OFF",
+                   (pipe != nil) ? "present" : "ABSENT - two O1 dispatches are used");
+      return true;
+    }();
+    (void)reported;
+    return pipe != nullptr;
+  }
   /// \brief Whether K1b runs the threadgroup-memory flavor (OCUDU_CE_WEIGHTS_TILE=1, dev doc 6.168).
   ///
   /// A KNOB rather than a straight replacement, because the two flavors must be comparable ON AIR: the
@@ -3291,8 +3312,13 @@ uint64_t mmse_engine::flush_correlations_fenced(unsigned fallback_nof_systems)
   // \note The order the two were queued in is preserved as (group 0, group 1). The kernel does not care
   //       which is which (each parameter block carries its own pointers and geometry), but keeping the
   //       queue order means a leg that turns this on is comparing the same two builds.
+  //
+  // \note corr_pair_available() is called FIRST on purpose: it is what prints the one line that says
+  //       whether the knob and the library agree, and a leg must not have to infer that from a count
+  //       that can also be zero because this hop had one group.
   const bool paired = (queued == 2) && mmse_engine_impl::corr_merged_enabled() &&
-                      mmse_engine_impl::corr_pair_enabled() && (e->corr_pair_pipe != nil);
+                      mmse_engine_impl::corr_pair_available(e->corr_pair_pipe) &&
+                      mmse_engine_impl::corr_pair_enabled();
   if (paired) {
     if (!encode_corr_pair(e, st, e->corr_queue[0], stage_systems(e->corr_queue[0]), e->corr_queue[1],
                           stage_systems(e->corr_queue[1]))) {

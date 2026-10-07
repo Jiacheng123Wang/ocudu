@@ -1246,6 +1246,51 @@ standalone 路线透传 ✓）⇒ **改动是恒等的** ✓（三份语料 A/B 
 ★ **回退** ✓：`OCUDU_CE_CORR_PAIR=0` ✓；★ 且**它同时受 `OCUDU_CE_CORR_MERGED` 把关** ✓ ——
 pair kernel **本身就是合并构建** ✓，O1 的回退必须能一起退 ✓（离线已验证 `OCUDU_CE_CORR_MERGED=0` ⇒ `merged=0` ✓、`corr_pair=0` ✓）。
 
+### 2.23 ★ 下一步：`mkf027` + `mkf028` 两条腿（**用户 2026-10-07 裁决：两条腿** ✓）
+
+★ **交付形态** ✓ = **HEAD `2b58ccf273`** ✓（指纹 = HEAD ✓、**已在二进制里** ✓、工作树干净 ✓）；
+库 = `ocudu_lane.metallib` **36 kernel** ✓。
+
+```bash
+cd /Users/jiachengwang/dev/ocudu
+export LEG_CFG=$PWD/doc_chinese/metal_kernel_fusion/wip/gnb_mcs16qam.yml
+export LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs
+
+# ① 对照腿 = 现状（O1 + RANK 2，RANK 3 关）✓ —— ★ 替 RANK 2 补红线 ✓，同时是 ② 的对照 ✓
+sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh mkf027-rank2-rerun dual quiet gpu
+
+# ② 臂腿（**只多一个变量** ✓）
+EXTRA_KNOBS="OCUDU_CE_CORR_PAIR=1" \
+sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh mkf028-rank3 dual quiet gpu
+```
+
+**判读** ✓（**先看自证、再看数字** ✓）：
+
+```bash
+bash doc_chinese/macos_thread_priority/wip/ul_health.sh mkf027-rank2-rerun
+bash doc_chinese/macos_thread_priority/wip/ul_health.sh mkf028-rank3
+LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs \
+  bash doc_chinese/macos_thread_priority/wip/pair_check.sh mkf027-rank2-rerun mkf028-rank3
+grep -o "ce_sites.*" $LEG_LOGDIR/gnb_gpu_mkf027-rank2-rerun_*.log.stderr
+grep -o "ce_sites.*" $LEG_LOGDIR/gnb_gpu_mkf028-rank3_*.log.stderr
+```
+
+| # | 判据 ✓ | 对照腿 `mkf027` ✓ | 臂腿 `mkf028` ✓ |
+|---|---|---|---|
+| ★ **旋钮真的进了进程** ✓ | —— | ★ 日志里必须有 `OCUDU_CE_CORR_PAIR: ON` 之类的**自报** ✓ **且** `corr_pair` ≠ 0 ✓（**否则整条腿作废** ✗）|
+| ★ **计数不变式** ✓ | `corr_pair = 0` ✓、`merged == corr_a == corr_rhp` ✓ | ★ **`merged == 2 * corr_pair`** ✓（**精确相等** ✓，因为每条 pair 派发恰好两个组 ✓）|
+| ★ **RANK 2 红线** ✓ | ★ **`stale=0` ✓ + CRC ≥ 99 % ✓ + `cfo_fused` ≠ 0 ✓ + `gaps=0` ✓ ⇒ RANK 2 结清** ✓ | 同左 ✓ |
+| ★ **RANK 3 红线** ✓ | —— | ❓ **同左 ⇒ RANK 3 结清** ✓ |
+| **不劣化** ✓ | 基线 ✓ | `busy` / CE 自身 ✓；★ `ch_wt` **本就该持平** ✓ |
+| ★ **预期** ✓ | —— | ★ **结构**：相关派发 **2 → 1**（仅 `rem_prb != 0` 的跳 ✓）⇒ **≈ −0.5 派发/跳** ✓；★ **不要指望微秒** ✓ |
+
+★ **若臂腿脏** ✓：先看 `pair_check` 的哪一项动了 ✓ + 同轮环境证据（其它腿 CRC ✓、`saturated` ✓、`phy_series` ✓）✓
+—— ★ **`mkf026` 的教训** ✓：**先判环境、再判代码** ✓；需要二分时只有一条命令 ✓：把 ② 重飞成 `OCUDU_CE_CORR_PAIR=0` ✓。
+
+★ **腿之后（若两条都干净）** ✓：① 把 `corr_pair_enabled()` **转默认开** ✓ 并**删掉那段"为什么先关"** ✓；
+② §2.22(6) 与状态文档的开关表同步 ✓；③ 下一项按 §2.21(6) 顺序 = **RANK 4** ✓
+（或先测**严格模式下 K1 的精度** ✓ 以解锁 `corr_a`+`inv` ✓ —— 那是**唯一能治 27 % 地雷边界**的一对 ✓）。
+
 ### 2.4 M1 的执行顺序（每步可停 ✓）
 
 1. **M1.0 读代码**（不飞腿 ✓）：把均衡与解调两段内核的**数学与绑定点逐条抄下来**（含 `mod` 的每种取值、
