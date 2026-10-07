@@ -1,0 +1,369 @@
+# OCUDU dApp 平台代码调研（memo 06）
+
+> 调研对象：`gitlab.com/ocudu/work_groups/wg2_ai_ran` 组下的 **5 个公开仓库**。
+> 目的：**分析对我们工作的启示——哪些可以重用、哪些需要修改**；
+> 并在高层架构上保证可扩展性与可移植性（参照 `metal_vs_cuda_architecture.md`）。
+>
+> 版本：v0.9（初稿）｜ 日期：2026-10-08
+
+---
+
+## 0. ★ 更正：该组是**公开的**，我上一轮判断错了
+
+我上一轮说"`wg2_ai_ran` 是私有的、需要授权"——**错误**。
+真实原因是我把**组路径当成了项目路径**（`ocudu/work_groups/wg2_ai_ran` 是**组**，不是项目），
+所以拿到 404。用正确的项目路径访问后 API 返回 200。
+
+**组内 5 个公开项目，已全部 clone 到 `~/dev/`：**
+
+| 仓库 | 大小 | 是什么 | 价值 |
+|---|---|---|---|
+| ★ **`ocudu-dapp-platform`** | 109 M | **带 dApp 运行时的 OCUDU gNB**（完整 RAN fork） | ★★★ 接缝就在这里 |
+| ★ **`ocudu-dapp-sdk`** | 3.4 M | **dApp 授权工具包**：ABI 头文件、参考实现、脚手架、验证阶梯 | ★★★ 契约与参考实现 |
+| `ocudu-dapp-quickstart` | 232 K | 容器化构建 + **零硬件 E3 测试台**（loopback E3，无需射频/GPU/密钥） | ★★ 复现环境 |
+| `ai_ran_benchmarks` | 132 K | **空模板仓库**（只有 GitLab 默认 README） | — |
+| `use_case_studies` | 132 K | **空模板仓库** | — |
+
+★ 注意 quickstart 说明：**目录名是契约的一部分**——平台仓库必须 clone 成 `ocudu/`，
+容器构建与跨仓文档链接都依赖这个约定。
+
+---
+
+## 1. ★★★★ 深度 3 的**正规契约**：`ocudu/dapp/use_cases/v1/receiver.h`
+
+这是本次调研**最重要的发现**，而且它逐项印证了我们的设计。
+
+### 1.1 输入（`ocudu_dapp_receiver_input_v1`，`include/ocudu/dapp/use_cases/v1/receiver.h:56-61`）
+
+```c
+typedef struct {
+  ocudu_dapp_invocation_v1     invocation;
+  ocudu_dapp_tensor_view_v1    rx_grid;
+  ocudu_dapp_typed_metadata_v1 pusch;
+  ocudu_dapp_typed_metadata_v1 dmrs;
+} ocudu_dapp_receiver_input_v1;
+```
+
+★★★ **就是"网格 + 几何"**：`rx_grid` + `pusch` 元数据 + **`dmrs` 元数据**。
+与用户描述的形态、与 NVIDIA `neural_rx.onnx` 的输入、与 dApp 论文的 Class A 描述**三方一致**。
+
+### 1.2 ★★★★ 输出（`:62-79`）——逐字，以及对我们的四条硬约束
+
+```c
+typedef struct {
+  /// Caller-owned writable soft-bit tensor before scrambling reversal.
+  ///
+  /// Host invocations use I8 [data_re * modulation_order]. Accelerator-resident invocations use F16
+  /// [data_re, layer, bit] with OCUDU_DAPP_LAYOUT_PUSCH_LLR_DATA_RE_LAYER_BIT_V1. In both cases, bit is
+  /// the fastest-varying dimension, positive values favor bit zero, negative values favor bit one, and magnitude
+  /// expresses reliability. Values must be finite (and I8 must not use -128). The host retains ownership of storage
+  /// and completion signaling.
+  ocudu_dapp_tensor_view_v1 llrs;
+  ocudu_dapp_typed_metadata_v1 uci;          // v1 必须全零
+  ocudu_dapp_typed_metadata_v1 metrics;      // 可选：后均衡噪声等
+  uint32_t confidence_q16;                   // ★ 可选置信度 [0,1]（v1 主机不用它 gate 译码）
+  uint32_t reserved0;                        // 输出 flags
+} ocudu_dapp_receiver_output_v1;
+```
+
+★★★★ **四条与我们完全一致 / 必须遵守的约定**：
+
+| # | 契约 | 我们的状态 |
+|---|---|---|
+| 1 | ★ **"before scrambling reversal"**（解扰**前**的软比特） | ★ **与我们 `memo_01` §3 冻结的"模型输出加扰域 LLR、解扰保持经典"逐字一致** |
+| 2 | ★ **"bit is the fastest-varying dimension"** | ★ 与我们的 `llrs[re*Qm + b]` 一致；也与 NVIDIA 的 `[re][bit]` 一致 |
+| 3 | ★★ **"positive values favor bit zero, negative values favor bit one"** | ★★ **正是我们仓库的约定**（`log_likelihood_ratio::to_hard_bit()` 返回 `value <= 0` ⇒ 正 LLR = 比特 0）。三个平台同一个符号约定 |
+| 4 | ★★ **两种 LLR 表示**：**host → `I8 [data_re × Qm]`**；**accelerator-resident → `F16 [data_re, layer, bit]`** | ★ 我们的链是 **int8**（`LLR_MAX=120`）⇒ **与 host 契约同族**；但我们要走的是 **Class A 加速器驻留**，其契约是 **F16** ⇒ **这是一个必须显式决策的接口点**（见 §5） |
+
+★ 补充约束：**值必须有限**；**I8 不得使用 −128**。
+（对照我们：`±127` 保留为"确定比特"、`LLR_MAX=120` ⇒ 我们比它更严。）
+
+### 1.3 ★★ `metrics` 可选输出：正是我们"上报义务"问题的**官方解法**
+
+`receiver_metrics_v1`（`:21-54`）：
+- `post_equalization_noise`：**F32 `[data_re, layer]`**；填满则置 `OCUDU_DAPP_RECEIVER_METRICS_VALID_V1`。
+  ★ 逐字：*"**Leaving that bit clear is supported and means the receiver produced LLRs without
+  scheduler-facing post-EQ noise.**"*
+- `equalized_symbols`：**CF32 `[data_re, layer]`**，可选。★ 逐字：
+  *"A receiver may leave this unfilled even when requested (**for example, direct-bit neural receivers
+  without an explicit symbol estimate**)."* —— ★★ **官方明确预期"不产出符号的神经接收机"**，就是我们。
+
+★★ **这印证并细化了 `memo_01` §1.5 的判断**：深度 3 **继承 CE 的上报义务**，
+而平台的解法是**把这些量做成"可选 + 有效位标记"的输出张量**，而不是强制。
+⇒ 我们的规划路线 (a)（net 附带输出信道估计与噪声）**与该契约同形**，可直接对齐。
+
+### 1.4 C ABI（`:81-88`）
+
+```c
+typedef ocudu_dapp_status_v1 (*ocudu_dapp_receiver_invoke_v1)(void*,
+                                                              const ocudu_dapp_receiver_input_v1*,
+                                                              ocudu_dapp_receiver_output_v1*);
+typedef struct {
+  ocudu_dapp_worker_api_v1      worker;
+  ocudu_dapp_receiver_invoke_v1 invoke;
+  uint64_t                      reserved[8];
+} ocudu_dapp_receiver_interface_v1;
+```
+
+---
+
+## 2. ★★★★ 接缝在平台里的实现：`pusch_dapp_demodulator.h`
+
+`include/ocudu/phy/upper/dapp/pusch_dapp_demodulator.h`（131 行）——
+
+### 2.1 两个深度 = 两个 mode
+
+```c
+enum class pusch_dapp_demodulator_mode : uint8_t { inactive, equalizer, receiver, conflict };
+```
+★★ 即 **`equalizer`（CE+EQ，深度 2）** 与 **`receiver`（CE+EQ+解映射，深度 3）**，
+`conflict` 表示两者同时激活（互斥保护）。
+
+### 2.2 两个 invoke 重载 + 一个**延迟**契约
+
+```c
+virtual dapp::native_invocation_result invoke(uint32_t lane,
+    const ocudu_dapp_equalizer_input_v1&, ocudu_dapp_equalizer_output_v1&) noexcept = 0;  // 深度 2
+virtual dapp::native_invocation_result invoke(uint32_t lane,
+    const ocudu_dapp_receiver_input_v1&, ocudu_dapp_receiver_output_v1&) noexcept = 0;   // ★ 深度 3
+```
+★★ 以及 **`invoke_receiver_deferred(lane, in, out, ticket, worker)`**，注释逐字：
+> *"Completion-aware dispatch is a **separate contract**: never silently call ordinary invoke().
+> Before dispatch rejection leaves ticket/owner untouched. A possibly submitted operation must **retain
+> its original worker and ticket, and must forbid fallback**. Caller retains tensor/metadata storage
+> independently."*
+
+⇒ ★ 这是**异步/完成感知**的路径，与我们融合 lane 的 `submit_fused` + `wait()` 结构同形，
+但**契约更严**：提交过的操作**禁止回退**，且必须持有 worker 与 ticket。
+
+### 2.3 ★★ 真实的死线数值与**它们的实测理由**
+
+```c
+std::chrono::nanoseconds demodulator_deadline{std::chrono::microseconds(2000)};
+std::chrono::nanoseconds channel_estimator_deadline{std::chrono::microseconds(800)};
+float                    noise_variance_floor{1.0e-6F};
+```
+★ `demodulator_deadline` 的注释逐字（**这是别人踩过的坑**）：
+> *"Soft wall for one Class-A equalizer/receiver invoke (enqueue through GPU completion).
+> **Not a 3GPP slot deadline.** **500 µs (one 30 kHz slot) and then 1000 µs both still classified good
+> PBC results as late under 4-UE OTA contention; 2000 µs keeps the tripwire without disabling a
+> working EQ.** Tests may inject a tighter budget."*
+
+★★ **对我们的 G5 极其重要**：他们**先试过 500 µs、再试 1000 µs，在 4-UE 空口争用下都太紧**，
+最后用 2000 µs。⇒ 我们规划里"目标 ≤ 500 µs"的那条**需要一个明确的争用条件**，
+否则会重演"死线定得太紧，把能工作的实现判成失败"。
+
+### 2.4 ★★ 逐 UE 路由 —— `phy_routing_policy` 的生产实现
+
+```c
+virtual dapp::pusch_route resolve_route(uint32_t cell_index, uint16_t rnti) const noexcept;
+virtual pusch_dapp_demodulator_target& route(const dapp::pusch_route&) noexcept;
+```
+> *"Per-UE routing (see `dapp::pusch_route_table`): the route of one grant. A target without a route
+> table always answers the primary route. … **A routed UE sees only its instance's hook; a route to the
+> channel estimator or to the stock receiver is an inactive target.**"*
+
+★★★ **这正是 `metal_vs_cuda_architecture.md` §6.3 提出的"路由策略是独立注入的决策对象"**
+——而且它已经**在生产里**，粒度是 **per-UE**。我们的 `phy_routing_policy` 应当与它对齐。
+
+### 2.5 回退与上报 API
+
+```c
+virtual void report_invalid_output(...) noexcept;
+virtual void report_completion_deadline(..., uint64_t, uint64_t) noexcept;
+virtual void report_fallback(uint32_t, pusch_dapp_demodulator_mode, dapp::class_a_fallback_reason) noexcept;
+```
+★ 以及工厂签名把**经典实现作为 `fallback` 注入**：
+```c
+create_pusch_dapp_demodulator_factory(std::shared_ptr<pusch_demodulator_factory> fallback,
+                                      std::shared_ptr<pusch_dapp_demodulator_target> target, ...);
+```
+⇒ 与我们的"谓词返回 false ⇒ 经典路径"同构，但他们是在**构造期注入**回退实现。
+
+### 2.6 ★ 后端无关：**CPU 适配器存在**
+
+```c
+/// Creates an initial one-layer CPU Class-A CE+EQ/receiver adapter with fixed state per demodulator object.
+std::shared_ptr<pusch_demodulator_factory> create_pusch_dapp_demodulator_factory(...);
+```
+★ **CPU 适配器与 CUDA 参考并存** ⇒ 这个接缝**在设计上就是后端中立的**。
+这是**可移植性的最强信号**：契约不假设 CUDA。
+
+### 2.7 注入点：`upper_phy_dapp_hook_provider`
+
+`include/ocudu/phy/upper/dapp/upper_phy_dapp_hook_provider.h`：
+> *"Optional **construction-time integration** between upper-PHY factories and the runtime dApp hook registry."*
+
+方法返回 `dmrs_pusch_estimator_factory` / **`pusch_demodulator_factory`** / `srs_estimator_factory` / `wrap_phy_tap`。
+⇒ ★ 这是"把 hook 注入工厂"的地方，**与我们的 `upper_phy_factories.cpp` 后端选择同构**
+（`pusch_channel_equalizer_backend == "metal"` 那条路径）。
+
+---
+
+## 3. ★★ SDK：官方把"可替换的算法核心"直接点名到我们的用例
+
+`ocudu-dapp-sdk/docs/extension_model.md` 逐字：
+
+> *"They are deliberately split into a **stable integration shell and a replaceable algorithm core** so
+> another team can improve performance **without recreating the dangerous parts of the host boundary**."*
+
+**可替换的算法扩展点**（原文表格）：
+
+| 参考 | 主要扩展点 |
+|---|---|
+| Channel estimator | pilot processing, interpolation, denoising, **learned estimation**, signal/noise estimation |
+| Equalizer | channel use, MMSE/IRC/MIMO detection, residual-noise and SINR estimation |
+| ★★ **Receiver** | ★★ **joint CE/EQ/demapping, learned receiver stages, model artifacts and persistent GPU state** |
+| Scheduler / Spectrum / SRS-ISAC | … |
+
+★★★ **"Receiver → joint CE/EQ/demapping, learned receiver stages" 就是我们的深度 3**，
+而且是**官方支持的扩展点**，带参考包。
+
+### 3.1 三个深度在 SDK 里的**必需输出**
+
+`docs/class_a_cuda_authoring.md` 原文表格：
+
+| 起始产物 | 替换 | **必需输出** |
+|---|---|---|
+| `ref_channel_estimator_cuda` | 信道估计 | `[port, layer, symbol, subcarrier]` CF32 信道 + `[port, layer]` F32 噪声 |
+| `ref_equalizer_cuda` | CE + 均衡 | `[data_re, layer]` CF32 符号 + **F32 后均衡噪声（必需）** |
+| ★ `ref_receiver_cuda` | ★ **CE + 均衡 + 解映射** | ★ **`[data_re, layer, bit]` FP16 解扰前 LLR** |
+
+★ 而且有**脚手架生成器**：
+```bash
+python3 tools/scaffold_class_a_cuda.py --kind receiver --target my_receiver_cuda \
+  --global-name com.example.ran.my-receiver.cuda --package-id <UUID> --vendor "..." --version v1 \
+  --output ../my-receiver-dapp
+```
+⇒ 会生成带 manifest-v1、SPDX SBOM、哈希绑定、独立 ABI 的完整工程。
+
+### 3.2 ★ 模型生命周期（现成的，我们要的）
+
+```bash
+ocudu-dappctl model stage --instance INSTANCE --model receiver-levels \
+  --version 1 --model-generation 1 --artifact receiver-model.bin
+# 然后 validate → warm → activate，用返回的 model generation
+```
+⇒ **stage / validate / warm / activate / rollback + generation 检查**，与 dApp 论文描述一致。
+★ 参考实现还带一个模型产物生成器（`make_receiver_cuda_model`），便于在不复现私有权重布局的情况下演练状态管理。
+
+### 3.3 ★ 调用契约（逐字要点，对我们的 Metal/CoreML 实现直接适用）
+
+- *"enqueue only on `invocation.execution_stream`; **never synchronize that stream**"*；
+- *"allocate and upload model state in **lifecycle** or model-management operations, **not in invocation**"*；
+- *"keep mutable scratch **per admitted worker/lane**, since concurrent PUSCH lanes may invoke the same
+  module instance"*；
+- *"keep the ABI callback `noexcept` … `std::bad_alloc` → `RESOURCE`，其余异常 → `EXCEPTION`"*；
+- ★ *"if persistent device/model state can be referenced by queued work, **record its lane-local
+  completion fence even when the implementation returns failure or throws**, since it may have enqueued
+  work before failing"*；
+- ★ *"**do not retain borrowed tensor pointers beyond the completion event**"*；
+- *"write only caller-owned outputs and return an explicit unsupported/error status **before launching**
+  when the requested profile cannot be handled"*。
+
+★★ 这七条**几乎逐条对应我们融合 lane 已经付过学费的教训**
+（跨 TG 依赖要用 MTLEvent/命令缓冲顺序表达、fence 归属、借来的指针不能越界存活）。
+⇒ **建议直接采纳为我们的 AI 后端实现规约。**
+
+### 3.4 参考实现的文件切分（"壳 vs 核心"）
+
+`reference/receiver_cuda/` 只有 4 个文件：
+`module.cpp`（query trampoline）、`module_support.cpp`（生命周期/ABI）、`reference_api.cpp`、
+★ **`algorithm.cu`（要替换的算法核心）**。
+⇒ **要改的就是 `algorithm.cu`**，其余保持。
+
+---
+
+## 4. ★★ `known_limitations.md`：官方的诚实清单（挑出与我们直接相关的）
+
+| 条目 | 对我们的意义 |
+|---|---|
+| ★★ *"On the resident Class-A inline path the **conventional CSI measurement kernels are skipped**: `pusch.symbols` telemetry and the E3 diagnostics carry **post-EQ SINR only, with EPRE / RSRP / CFO / TA absent** for those grants. **Planned fix**: the Class-A CE/EQ output contract gains **reserved-slot fields so the dApp reports its own DMRS-derived measurements**."* | ★★★ **这正是 `memo_01` §1.5 的"上报义务"，而且是一个生产平台承认的现有缺口**。我们的路线 (a) 与它计划的修法**同形** |
+| ★ *"Third-party module deadlines are **advisory**: the boundary is measured and recorded, but an invocation is **not preempted** and the **breaker does not open on deadline misses alone**."* | 修正 dApp 论文给人的印象（"连续 8 次迟到打开 lane breaker"）：**光靠死线超时不触发 breaker** |
+| *"Host inline Class-C copies the whole resource grid on the UL-PHY thread (~734 KB, 50-100 µs/slot/cell)"* | 网格搬运代价的实测锚点 |
+| *"E3AP over SCTP has **no TLS or token authentication** in this release; the gNB binds loopback by default"* | 若将来走 E3 需外部边界 |
+| *"**Schema drift** in the reference client tarball: ships a trimmed `class-c-publication-v1.fbs` with **different enumerator numbering** than the normative schema … or **enumerator values will silently disagree**"* | ★ 一个"静默不一致"的真实案例——值得引以为戒 |
+| *"The Class C process boundary provides **fault containment, not a hostile multi-tenant sandbox**"* | 安全边界定位 |
+| ★ *"Optional advisory confidence in Q16 [0,1] … **the v1 host does not gate decoding on it**"*（`receiver.h:76`） | ★ 平台**提供了置信度通道但不用于 gate** ⇒ 我们的**信任/回滚（规划 §1.4）目前没有平台级支撑**，得自己做 |
+
+---
+
+## 5. 可以重用 / 需要修改
+
+### 5.1 ✅ 可以直接重用（契约与工程纪律）
+
+| 项 | 说明 |
+|---|---|
+| ★★ **深度 3 的输入/输出契约** | `rx_grid + pusch + dmrs` → **解扰前** LLR；**bit 最快变化**；**正 = 比特 0**；值有限；I8 不用 −128。**与我们的设计逐项一致** |
+| ★★ **"stable shell / replaceable core"的切分** | 壳（ABI/生命周期/校验/fence/回退/打包）不动，只换 `algorithm.cu` 对应的算法核心 |
+| ★★ **模型生命周期**（stage/validate/warm/activate/rollback + generation） | 直接照搬概念；我们的 CoreML 引擎需要补"模型代际 + 原子切换" |
+| ★★ **调用契约七条**（§3.3） | 建议直接采纳为后端实现规约 |
+| ★ **`metrics` 可选 + 有效位的做法** | 解决"上报义务"的官方形态 |
+| ★ **逐 UE 路由（`pusch_route_table`）** | 与我们的 `phy_routing_policy` 对齐 |
+| ★ **回退在构造期注入**（`fallback` 工厂参数） | 比"运行期判断"更干净 |
+| ★ **验证阶梯 / ABI 编译器矩阵**（GCC/Clang × C11/C++17，LP64 布局指纹） | 我们没有这一层；对"将来换平台"有直接价值 |
+| ★ **`e3agent-standalone` 式"无依赖测试台 + 漂移检查"**（`memo_05` §2bis.4） | 同组的 quickstart 也体现这个思路 |
+
+### 5.2 ⚠️ 需要修改 / 我们自己要补的
+
+| 项 | 为什么 | 我们怎么做 |
+|---|---|---|
+| ★★ **LLR 表示** | 契约规定 **host = I8**、**accelerator-resident = F16**；**我们的链是 int8（`LLR_MAX=120`）** | 必须显式决策：① 保持 int8 并说明我们走的是 host 同族表示；② 采用 F16 并加一级转换。**这是一个要在 P4 之前定下来的接口点** |
+| ★ **引擎后端** | SDK 参考是 CUDA；契约**在 CPU 上也已实现**（`create_..._factory` 的 CPU 适配器） | ★ **这给我们信心**：契约不假设 CUDA。我们做的是**第三个后端**（Metal/CoreML），而不是"逆着契约来" |
+| **`invocation.execution_stream`** | 概念是 CUDA stream | 映射到 Metal command queue / CoreML 引擎句柄。★ 注意 `memo_03` §1.5：**自定义 Metal kernel 不能进 ANE 常驻图** |
+| **"never synchronize that stream"** | 与 ANE 的同步模型不同（CoreML 的 predict 是阻塞调用） | ★ 这是我们**最需要设计的**一处：要么用专用 worker 线程把 predict 变成异步（AI CE 已有这个模式），要么显式声明一个新的同步点 |
+| **`confidence_q16` 不被平台用于 gate** | 平台的信任/回滚没有用上它 | 我们的 §1.4 逐槽信任/回滚**要自己做**，并如实报告它与平台的关系 |
+| **死线默认值** | 2000 µs（实测 500/1000 太紧） | ★ 我们的 G5 判据**必须写明争用条件**，不能只写一个 µs 数 |
+
+### 5.3 ❌ 不需要 / 不该抄的
+
+- `ai_ran_benchmarks`、`use_case_studies` —— **空模板**。
+- CUDA 专属的 `cuphy::tensor_desc`/stream capture/CUDA graph 手术（`memo_05` §4.3）。
+- 不要为了"与平台一致"而接受 **copy-through** 的推理路径（`memo_05` §2.5）——
+  契约**不要求**拷贝，它要求的是"caller-owned buffer + inherited stream + 无分配无同步"，
+  **这三条在 UMA 上零拷贝即可满足**。
+
+---
+
+## 6. 对规划的直接影响（待并入）
+
+| # | 变更 | 依据 |
+|---|---|---|
+| 1 | ★★ **接口契约以 `receiver.h` 为准冻结**：输入 `rx_grid+pusch+dmrs`；输出**解扰前** LLR、bit 最快变化、**正 = 比特 0**、值有限、I8 不用 −128 | §1.1–1.2 |
+| 2 | ★★ **LLR 位宽成为显式决策点**（host I8 vs accelerator F16），需在 P4 前定 | §1.2、§5.2 |
+| 3 | ★ **"上报义务"的官方解法**：`metrics` 可选张量 + 有效位 ⇒ 采纳（呼应 `memo_01` §1.5） | §1.3、§4 |
+| 4 | ★ **后端实现规约采纳 SDK 的调用契约七条**（尤其"失败也要记 fence"、"不越界持有借来的指针"） | §3.3 |
+| 5 | ★ **G5 死线必须带争用条件**（他们 500/1000 µs 在 4-UE 空口下太紧，最终 2000 µs） | §2.3 |
+| 6 | ★ **信任/回滚要自己做**：平台的 `confidence_q16` 明确"不用于 gate 译码" | §4 |
+| 7 | ★ **路由策略对齐 `pusch_route_table` 的 per-UE 粒度** | §2.4 |
+| 8 | ★ **验证阶梯 + ABI 稳定性门禁**（编译矩阵 / 布局指纹）值得引入 | §5.1 |
+
+---
+
+## 7. 未完成 / 待办
+
+- ⏳ 两路并行深挖进行中：①平台侧"模块如何被 PUSCH 链调用"的完整调用栈与回退/breaker 代码；
+  ②SDK 侧参考接收机实现、模型生命周期与可移植层的细节。回来后并入 §2/§3。
+- ⏳ `ocudu_dapp_equalizer_input_v1` / `..._output_v1`（深度 2）的字段未逐条读。
+- ⏳ `pusch_dapp_channel_estimator.h`（深度 1）未读。
+### 7.1 ✅ 已解决：dApp 接缝是**平台独有增补**，不在上游
+
+| 核查 | 结果 |
+|---|---|
+| 我们 fork 里有吗 | **没有** `include/ocudu/dapp`、**没有** `include/ocudu/phy/upper/dapp` |
+| **公开上游 `ocudu/ocudu` 里有吗** | ★ **没有**（API 列出 `include/ocudu/` 的 40 个条目，**无 `dapp`**） |
+| 平台仓库是上游的 fork 吗 | **不是**（`forked_from_project: None`；独立项目，创建于 2026-05-28） |
+
+★ 顺带确认了一件与本工作流另一条线相关的事：**上游 `include/ocudu/` 里确实有 `cuda`** ——
+这正是 `metal_vs_cuda_architecture.md` 分析的"上游 CUDA 增补"。
+⇒ **`memo_05` §4.0 的"两个不同 CUDA 代码库"区分得到证实**。
+
+★★ **对我们的战略含义**：
+1. **我们无法"对齐上游"**——上游根本没有这套接缝。
+2. 两条路：(a) **自己实现等价的接缝**（我们规划的 `estimator.estimate` + `demodulator.demodulate`
+   两处合并，本质就是 Depth-3 hook）；(b) **采用平台的 ABI**（把契约头文件 vendored 进来）。
+3. ★ **许可差异**：平台/ SDK 是 **BSD-3-Clause-Clear**，我们是 **BSD-3-Clause-Open-MPI**。
+   两者都宽松、兼容，但 **"Clear" 变体含专利条款**，vendoring 前应过一遍许可。
+4. ★ 平台 109 M 的完整 fork 不好跟；但 **`ocudu-dapp-sdk` 只有 3.4 M 且"不复制 OCUDU ABI 头、
+   不要求 OCUDU 源码树"**（它消费安装好的 `OCUDUDAppSDK` CMake 包）
+   ⇒ **若要采用平台 ABI，SDK 是唯一值得引入的依赖**。
