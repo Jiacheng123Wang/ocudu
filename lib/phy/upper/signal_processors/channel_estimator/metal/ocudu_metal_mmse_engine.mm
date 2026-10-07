@@ -97,6 +97,18 @@ struct ce_site_diag_t {
   ///         merged == 2 * corr_pair           (in the arm; corr_pair is 0 in the control)
   ///         merged - corr_pair                (correlation dispatches, either way)
   std::atomic<uint64_t> corr_pair{0};
+  /// CE fusion RANK 4 (2026-10-07): the noise variance and the EPRE sum in one dispatch
+  /// (OCUDU_CE_SIGMA2_EPRE, mmse_pilots_sigma2_epre).
+  ///
+  /// \note Same split as corr_pair's: pilots_sigma2 and pilots_epre count SITES (incremented by BOTH
+  ///       routes, so a fused leg and a split leg still answer "the noise variance was reduced" and
+  ///       "the EPRE sum was reduced"), and sigma2_epre counts DISPATCHES. The invariant a leg reads
+  ///       is `pilots_sigma2 == pilots_epre == sigma2_epre` in the arm and `sigma2_epre = 0` in the
+  ///       control - and the dispatch count for the pair is `pilots_epre - sigma2_epre`, i.e. one per
+  ///       hop before and zero after.
+  std::atomic<uint64_t> pilots_sigma2{0};
+  std::atomic<uint64_t> pilots_epre{0};
+  std::atomic<uint64_t> sigma2_epre{0};
 };
 
 ce_site_diag_t& ce_site_diag()
@@ -116,15 +128,16 @@ static void count_corr_group_built(unsigned n)
 }
 
 /// The site names as the report prints them, in report order.
-static const char* ce_site_names[] = {"reformat", "pilots_lse", "pilots_cfo", "corr_a", "corr_rhp", "scatter",
-                                      "merged", "cfo_fused", "corr_pair"};
+static const char* ce_site_names[] = {"reformat",    "pilots_lse", "pilots_cfo", "corr_a", "corr_rhp",
+                                      "scatter",     "merged",     "cfo_fused",  "corr_pair", "pilots_sigma2",
+                                      "pilots_epre", "sigma2_epre"};
 
 void ce_site_report()
 {
   const ce_site_diag_t& d = ce_site_diag();
-  const std::atomic<uint64_t>* const sites[] = {&d.reformat, &d.pilots_lse, &d.pilots_cfo,
-                                                &d.corr_a,   &d.corr_rhp,   &d.scatter,  &d.corr_merged,
-                                                &d.cfo_fused, &d.corr_pair};
+  const std::atomic<uint64_t>* const sites[] = {&d.reformat,      &d.pilots_lse,  &d.pilots_cfo, &d.corr_a,
+                                                &d.corr_rhp,      &d.scatter,     &d.corr_merged, &d.cfo_fused,
+                                                &d.corr_pair,     &d.pilots_sigma2, &d.pilots_epre, &d.sigma2_epre};
   uint64_t total = 0;
   std::fprintf(stderr, "[metal_stats] ce_sites");
   for (unsigned i = 0; i != (sizeof(sites) / sizeof(sites[0])); ++i) {
@@ -564,6 +577,9 @@ struct mmse_engine_impl {
   // its own so that a metallib without them keeps the host's estimate_sigma2().
   id<MTLComputePipelineState>    pilots_smooth_pipe = nil;
   id<MTLComputePipelineState>    pilots_sigma2_pipe = nil;
+  /// RANK 4 (CE fusion, 2026-10-07): the noise variance AND the EPRE sum in ONE dispatch. Optional - a
+  /// metallib without it, or OCUDU_CE_SIGMA2_EPRE=0, keeps the two.
+  id<MTLComputePipelineState>    pilots_sigma2_epre_pipe = nil;
 
   id<MTLComputePipelineState>    pilots_power_pipe   = nil;
   // S13-P2: the received pilots' EPRE sum, reduced from the array mmse_pilots_lse() writes. Optional
@@ -820,6 +836,53 @@ struct mmse_engine_impl {
                    "[ce_corr_pair] OCUDU_CE_CORR_PAIR: %s (metallib entry point %s)\n",
                    corr_pair_enabled() ? "ON" : "OFF",
                    (pipe != nil) ? "present" : "ABSENT - two O1 dispatches are used");
+      return true;
+    }();
+    (void)reported;
+    return pipe != nullptr;
+  }
+  /// \brief RANK 4 (CE fusion, 2026-10-07): the noise variance and the EPRE sum in ONE dispatch
+  /// (mmse_pilots_sigma2_epre).
+  ///
+  /// Both are one threadgroup of mmse_sigma2_tg_size threads reducing the hop's pilots, both are
+  /// dispatched at the same site, and NOTHING passes between them: sigma2 writes out[0] and reads
+  /// smoothed / ref / rx / cfo, EPRE writes epre[0] and reads rx. The received pilots are the only
+  /// array they share and only for reading. The boundary therefore orders nothing.
+  ///
+  /// It also needs NO REORDERING: EPRE's own note says it "reads rx_buf, so it goes AFTER the barrier
+  /// the sigma2 block already puts between the extraction and its consumers", and a fused kernel placed
+  /// where sigma2 is sits after exactly that barrier. That is what makes this pair different from the
+  /// others the dependency analysis ranked, and why it was the one worth building.
+  ///
+  /// DEFAULT OFF while its arm is being flown, like every route switch in this estimator before its
+  /// leg: it is a delivered-route change, and the leg that verifies it is also the only thing that can
+  /// price it. Turn it on - and update this note - on the leg that shows `sigma2_epre` equal to
+  /// `pilots_sigma2` and `pilots_epre`, with the red lines, the way the other three were turned.
+  ///
+  /// \note A metal library WITHOUT the fused entry point keeps the two dispatches: the check is
+  ///       `pipe != nil`, so a stale metallib degrades to the delivery behaviour instead of failing.
+  static bool sigma2_epre_enabled()
+  {
+    static const bool value = []() {
+      const char* env = std::getenv("OCUDU_CE_SIGMA2_EPRE");
+      return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+    }();
+    return value;
+  }
+  /// \brief Whether the fused entry point is usable, said ONCE on stderr - the same discipline as
+  /// cfo_fused_available() and corr_pair_available(), and for the same reason: an arm whose coverage is
+  /// unstated reads as "the knob did nothing" when the truth is "the metallib did not carry it".
+  ///
+  /// \note It reports the knob and the library, not how often the pair was taken: EPRE is dispatched
+  ///       only when the caller passed a destination for it, so coverage is sigma2_epre's own count.
+  template <typename T>
+  static bool sigma2_epre_available(T* pipe)
+  {
+    static const bool reported = [pipe]() {
+      std::fprintf(stderr,
+                   "[ce_sigma2_epre] OCUDU_CE_SIGMA2_EPRE: %s (metallib entry point %s)\n",
+                   sigma2_epre_enabled() ? "ON" : "OFF",
+                   (pipe != nil) ? "present" : "ABSENT - two dispatches are used");
       return true;
     }();
     (void)reported;
@@ -2403,11 +2466,22 @@ bool mmse_engine::init(const char* metallib_path)
                                                                        error:&err];
       }
     }
+    // RANK 4 (CE fusion, 2026-10-07): the fused sigma2 + EPRE kernel, when this metallib carries it.
+    // Created AFTER the EPRE pipe below, because it needs both of the pipes it replaces: a metallib
+    // that carries the fused entry point but not one of the two is not a metallib this route can use,
+    // and the check is what turns that into "the two dispatches are used" rather than a crash.
     if (epre_fn != nil) {
       e->pilots_epre_pipe = [e->device newComputePipelineStateWithFunction:epre_fn
                                                                     options:MTLPipelineOptionNone
                                                                  reflection:nil
                                                                       error:&err];
+    }
+    id<MTLFunction> sigma2_epre_fn = [e->library newFunctionWithName:@"mmse_pilots_sigma2_epre"];
+    if ((sigma2_epre_fn != nil) && (e->pilots_sigma2_pipe != nil) && (e->pilots_epre_pipe != nil)) {
+      e->pilots_sigma2_epre_pipe = [e->device newComputePipelineStateWithFunction:sigma2_epre_fn
+                                                                         options:MTLPipelineOptionNone
+                                                                      reflection:nil
+                                                                           error:&err];
     }
   }
 
@@ -2632,6 +2706,21 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     }
   }
 
+  // RANK 4 (CE fusion, 2026-10-07): can the EPRE sum ride the sigma2 dispatch? It needs the sigma2
+  // block to run at all (that is where the dispatch is), the caller to have asked for the sum, and the
+  // metallib to carry the fused entry point. Decided HERE, above the block, because the answer changes
+  // both what that block dispatches and whether the standalone EPRE below still runs.
+  //
+  // \note The EPRE parameters are built here rather than at the dispatch below for the same reason: the
+  //       fused dispatch binds them at index 7, so they have to exist before it is encoded.
+  mmse_epre_params_t epre_params{};
+  epre_params.nof_dmrs_symb = s.nof_dmrs_symb;
+  epre_params.nof_cdm       = (s.nof_layers + 1) / 2;
+  epre_params.nof_pilots    = s.nof_pilots;
+  const bool epre_fused = sigma2_ok && (epre_buf.buf != nil) &&
+                          mmse_engine_impl::sigma2_epre_available(e->pilots_sigma2_epre_pipe) &&
+                          mmse_engine_impl::sigma2_epre_enabled();
+
   mmse_pilots_params_t p{};
   p.nof_dmrs_symb    = s.nof_dmrs_symb;
   p.nof_layers       = s.nof_layers;
@@ -2788,15 +2877,34 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     }
     [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
-    [enc setComputePipelineState:e->pilots_sigma2_pipe];
+    // RANK 4 (CE fusion, 2026-10-07): the EPRE sum rides THIS dispatch when it can. The two
+    // reductions have the same geometry (one threadgroup, 256 threads - both reductions are written
+    // for it, so the count is part of their arithmetic and does not change here), and the only array
+    // they share is rx_buf, which both only read. The boundary between them therefore orders nothing,
+    // and removing it is the whole of this fusion - see sigma2_epre_enabled().
+    [enc setComputePipelineState:epre_fused ? e->pilots_sigma2_epre_pipe : e->pilots_sigma2_pipe];
     [enc setBuffer:smoothed_buf.buf offset:smoothed_buf.offset atIndex:0];
     [enc setBuffer:ref_buf.buf offset:ref_buf.offset atIndex:1];
     [enc setBuffer:rx_buf.buf offset:rx_buf.offset atIndex:2];
     [enc setBuffer:cfo_buf.buf offset:cfo_buf.offset atIndex:3];
     [enc setBuffer:sigma2_buf.buf offset:sigma2_buf.offset atIndex:4];
     [enc setBytes:&q length:sizeof(q) atIndex:5];
-    // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (its reduction tree is written for it).
+    if (epre_fused) {
+      // The second phase's own two arguments. rx is already bound at index 2: the body reads the same
+      // array through the same index, which is why the fused layout puts it there rather than binding
+      // it twice.
+      [enc setBuffer:epre_buf.buf offset:epre_buf.offset atIndex:6];
+      [enc setBytes:&epre_params length:sizeof(epre_params) atIndex:7];
+    }
+    // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (both reduction trees are written for it).
     for (unsigned rep = 0; rep != mmse_engine_impl::sigma2_repeat(); ++rep) {
+      ce_site_diag().pilots_sigma2.fetch_add(1, std::memory_order_relaxed);
+      if (epre_fused) {
+        // The EPRE site and the fused dispatch are both satisfied by this one dispatch, and the leg
+        // reads the exact invariant pilots_sigma2 == pilots_epre == sigma2_epre from that.
+        ce_site_diag().pilots_epre.fetch_add(1, std::memory_order_relaxed);
+        ce_site_diag().sigma2_epre.fetch_add(1, std::memory_order_relaxed);
+      }
       [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }
 
@@ -2818,23 +2926,23 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   // rx_buf, so it goes AFTER the barrier the sigma2 block already puts between the extraction and its
   // consumers - and it runs whenever the caller asked for it, sigma2 block or not (the EPRE statistic
   // does not depend on the noise variance).
-  if (epre_buf.buf != nil) {
+  // ... unless it already rode the sigma2 dispatch above (RANK 4), in which case the only thing left
+  // to do here is nothing: the site was counted there, and a second dispatch would both cost what the
+  // fusion saves and write epre[0] twice.
+  if ((epre_buf.buf != nil) && !epre_fused) {
     if (!sigma2_ok) {
       // The barrier above is encoded inside the sigma2 block: without it, the store the LSE kernel
       // just made would not be ordered against this reduction.
       [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
     }
-    mmse_epre_params_t e_params{};
-    e_params.nof_dmrs_symb = s.nof_dmrs_symb;
-    e_params.nof_cdm       = (s.nof_layers + 1) / 2;
-    e_params.nof_pilots    = s.nof_pilots;
     [enc setComputePipelineState:e->pilots_epre_pipe];
     [enc setBuffer:rx_buf.buf offset:rx_buf.offset atIndex:0];
     [enc setBuffer:epre_buf.buf offset:epre_buf.offset atIndex:1];
-    [enc setBytes:&e_params length:sizeof(e_params) atIndex:2];
+    [enc setBytes:&epre_params length:sizeof(epre_params) atIndex:2];
     // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (the kernel's reduction tree is written
     // for it, and its walk strides by that constant).
     for (unsigned rep = 0; rep != mmse_engine_impl::epre_repeat(); ++rep) {
+      ce_site_diag().pilots_epre.fetch_add(1, std::memory_order_relaxed);
       [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }
   }

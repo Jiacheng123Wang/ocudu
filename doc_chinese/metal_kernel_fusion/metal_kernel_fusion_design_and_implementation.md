@@ -1373,6 +1373,77 @@ grep -o "ce_sites.*" $LEG_LOGDIR/gnb_gpu_mkf028-rank3_*.log.stderr
 RANK 4 的价值同样**只在结构** ✓）；★ 或先测**严格模式下 K1 的精度** ✓ 以解锁 `corr_a`+`inv` ✓
 —— 那是**唯一能治 27 % 地雷边界**的一对 ✓（把跨派发的不可见写变成**一个 threadgroup barrier** ✓）。
 
+### 2.26 ★★ RANK 4：噪声方差 + EPRE **一个派发**（CE 融合第 4 项，2026-10-07 ✓）
+
+> **性质** ✓：与 RANK 3 一样，**价值全在结构** ✓（§2.20(6)：性能目标已关闭 ✓）。
+> ★ 但这一对**不是**排序表里那一行照抄 ✓ —— 它是**重新读过依赖之后**才定下来的 ✓（见 (1) ✓）。
+
+#### (1) ★ 先做依赖分析：排序表那一行**不能照抄** ✗
+
+★ §2.21(3) 第 4–6 档写的是 `cfo+apply_cfo+(fd_smooth)+(sigma2)+(epre)` ✓、几何"1 tg × 256" ✓。
+★ **逐条核对后**：RANK 2 已吃掉 `cfo+apply_cfo` ✓；★ 而 **`fd_smooth` 是 `nof_dmrs_symb × nof_layers`
+个 threadgroup × 128 线程** ✗（`ocudu_metal_mmse_engine.mm` 的 `128 = mmse_smooth_tg_size` ✓）
+—— 与 `sigma2`/`epre`/`power` 的 **1 tg × 256** ✓ **不同几何** ✗ ⇒ **它不是干净的一对** ✗。
+★ 逐一排查后的**可融集合** ✓（提取段编码顺序 ✓）：
+
+| 对 ✓ | 同文件同数学模式 ✓ | 同几何 ✓ | 之间有 RAW ✓ | 判定 ✓ |
+|---|---|---|---|---|
+| `smooth` + `sigma2` ✗ | 是 ✓ | ✗ **N×128 vs 1×256** ✗ | 是 ✓ | ✗ 几何不同 ⇒ 会重划两个归约 ✗ |
+| ★ **`sigma2` + `epre`** ✓ | ★ **是** ✓（同在 `pilots.metal` ✓）| ★ **是** ✓（1 tg × 256 ✓）| ★ **否** ✓ | ★★ **可融** ✓ |
+| `sigma2` + `power` ✗ | ✗ `power` 在**严格文件** ✓ | 是 ✓ | 否 ✓ | ✗ **跨严格边界** ✗ |
+| `power` + `epre` ✗ | ✗ 同上 ✓ | 是 ✓ | 否 ✓ | ✗ 同上 ✗ |
+
+★★ **而 `sigma2` + `epre` 这一对还有一个额外的好性质** ✓：★ **它不需要任何重排、也不需要任何新 barrier** ✓ ——
+`epre` 自己的注释写着 ✓ > "it reads rx_buf, so it goes **AFTER the barrier the sigma2 block already puts**
+> between the extraction and its consumers" ✓ ⇒ ★ **把融合后的 kernel 放在 `sigma2` 原来那个位置，
+> 它就正好在那道 barrier 之后** ✓。★ 融合后的写也与邻居不相交 ✓：
+本 kernel 写 `out[0]` ✓、`power` 写同缓冲的 `out[1]` ✓、`epre` 写 `epre_buf` ✓ ⇒ **三条互不相干** ✓。
+
+#### (2) 实现 ✓
+
+| 侧 | 改动 |
+|---|---|
+| **kernel** ✓ | ★ **`mmse_pilots_sigma2` 与 `mmse_pilots_epre` 的整个工作项各抽成一个 `static inline` body** ✓；两个原 kernel 变成薄包装 ✓；★ **新增 `mmse_pilots_sigma2_epre`** ✓ —— **两个相位各自调用各自的 body** ✓，★ **各自用自己的 `threadgroup` 暂存数组** ✓（`red_sigma2` / `red_epre` ✓ —— 共享一个会让两个归约互相踩 ✓，而这本来要额外加 barrier 才能讲清 ✓）|
+| **buffer 布局** ✓ | `0..5` = sigma2 原有 ✓；★ **`rx` 只在 index 2 绑一次** ✓（两个 body 读的是同一个数组 ✓）；`6` = epre 出参 ✓、`7` = epre 参数 ✓ |
+| **host** ✓ | `pilots_sigma2_epre_pipe` ✓（**在两个被替代的 pipe 都就绪之后才建** ✓ —— 少一个就不是这条路线能用的库 ✓）；`OCUDU_CE_SIGMA2_EPRE` ✓；自报横幅 ✓；★ **融合判定提到 `sigma2` 块之前** ✓（它同时决定那块发什么 ✓ 和下面那个独立 `epre` 还跑不跑 ✓）|
+| **计数** ✓ | 新增 **三个**字段 ✓：`pilots_sigma2` ✓ / `pilots_epre` ✓（**站点** ✓，两条路线都计数 ✓）、`sigma2_epre` ✓（**派发** ✓）|
+
+★ **为什么又抽 body** ✓：与 RANK 3 同一条理由 ✓ —— 融合唯一的主张是"算的是同一件事" ✓，
+而**最强形式的保证是只有一份实现** ✓。★ 这里还多一层 ✓：两个相位在**同一个 256 线程的 threadgroup** 里 ✓
+⇒ ★ **stride（`i += mmse_sigma2_tg_size`）与 `simd_sum` 的 SIMD 分组都没变** ✓ ——
+★ 而**线程数与 SIMD 分组是这两个归约算术的一部分** ✓（源码自己写着"the reduction tree is written for it" ✓）。
+
+#### (3) 离线证据 ✓（**已做** ✓）
+
+| 语料 ✓ | 配置 ✓ | 结果 ✓ |
+|---|---|---|
+| `/tmp/q64c` ✓ | `--metal --repeat 8` ✓ | ★ **27 capture × 4 dump = 0 差异** ✓ |
+| `/tmp/q16c` ✓ | 同上 ✓ | ★ **0 差异** ✓ |
+| **`work_tmp/corpus`（真 QPSK）** ✓ | 同上 ✓ | ★ **0 差异** ✓ |
+| ★ **`--repeat 1`** ✓ | 同上 ✓ | ★ **0 差异** ✓（**这一遍是必须的** ✓，见下 ✓）|
+| 单测 ✓ | —— | **5/5 PASS** ✓ |
+| 探针 OFF ✓ | `probes_off_syntax_check.sh build` ✓ | **114 编译 × 3 键全 OK** ✓ |
+| 全量构建 ✓ | 交付默认 ✓ | **0 error** ✓ |
+| 库 ✓ | —— | **37 个 kernel** ✓（新增 `mmse_pilots_sigma2_epre` ✓）|
+
+★★ **"对拍不是空的"这次是逐条查过的** ✓（RANK 3 的教训 ✓）：`--repeat 1` 下
+**`sigma2_epre = 1`** ✓（融合**在第一跳就生效** ✓ —— 与 RANK 3 不同 ✓，它没有"要上一跳的块"这种前提 ✓）
+⇒ ★ **`ab_dumps.sh` 的默认设置（`--repeat 1`）这一遍就是非空的** ✓，而 `--repeat 8` 是加验 ✓。
+★ **两遍都跑了、都是 0 差异** ✓。
+
+#### (4) ★ 预登记判据 ✓（腿 `mkf030` ✓，`EXTRA_KNOBS="OCUDU_CE_SIGMA2_EPRE=1"` ✓；`mkf029` = 对照 ✓）
+
+| 判据 ✓ | 对照腿 `mkf029` ✓ | 臂腿 `mkf030` ✓ |
+|---|---|---|
+| ★ **旋钮进了进程** ✓ | `[ce_sigma2_epre] … OFF (…)` ✓ | ★ **`… ON (metallib entry point present)`** ✓ **且** `sigma2_epre` ≠ 0 ✓（否则整条腿作废 ✗）|
+| ★★ **计数不变式** ✓ | `pilots_sigma2 = pilots_epre = 跳数` ✓、★ **`sigma2_epre = 0`** ✓ | ★ **`pilots_sigma2 == pilots_epre == sigma2_epre`** ✓（**三者精确相等** ✓）|
+| ★ **省下的派发** ✓ | `pilots_epre − sigma2_epre` = **1/跳** ✓ | ★ **= 0/跳** ✓ |
+| **红线** ✓ | CRC 同档 ✓ + `gaps=0` ✓ + `stale=0` ✓ | 同左 ✓（与**同轮对照腿**比 ✓）|
+| ★ **性能** ✓ | —— ✓ | ★ **报告制** ✓：★ **`merged_hop`** ✓ 是**唯一可能看到它**的字段 ✓（★ 提取那条 CB 被**持有进 lane burst** ✓ ⇒ 不走 `ch_est` 桶 ✓、落在 `merged_hop` 里 ✓），★ **而 −1 个派发落在它 ~6 µs 的腿间散布里** ✗ ⇒ ★ **不要拿它当判据** ✓ |
+
+★ **预期收益** ✓：**约 −6.5 µs/跳** ✓（`mkf023` 实测的空口边界价 ✓）落在 `merged_hop` 里 ✓；
+★ **结构收益** ✓：提取段每跳少一次派发 ✓、EPRE 不再有独立派发 ✓。
+
 ### 2.25 ★★ M4 的"**Linux 不变**"从**静态核验**升级为**真机实测** ✓✓（2026-10-07 ✓）
 
 > ★ **为什么这条重要** ✓：M4 验收（§2.18 ✓）里"Linux 不变"一项当时**只能做静态核验** ✗
@@ -2190,6 +2261,29 @@ counter set: timestamp / GPUTimestamp
 **③ 对照表** ✓：两对腿在案 ✓（16QAM `busy` **478.9 → 469.6** ✓、64QAM **479.8 → 472.5** ✓、
 dispatch **4 → 3** ✓、覆盖 **99.997 %** ✓、CRC 同档或更好 ✓）。
 ★ **允许的回退只有一项** ✓：64QAM **p99.9 +29 µs** ✗（A 路 p99.9 是改善 ✓ ⇒ 非路线性质 ✓）。
+
+### 2026-10-07 · ★★ RANK 4 实现完成（**CE 融合第 4 项** ✓）：噪声方差 + EPRE **一个派发** ✓，离线逐位一致 ✓，★ **默认先关** ✓
+
+★ **这一对不是排序表照抄来的** ✓（§2.26(1) ✓）：§2.21(3) 第 4–6 档写的是 `cfo+apply_cfo+(fd_smooth)+(sigma2)+(epre)` ✓，
+★ **逐条核对后只有 `sigma2`+`epre` 成立** ✗✓ —— `fd_smooth` 是 **N×128** 而其余是 **1×256** ✗（几何不同 ⇒ 会重划归约 ✗）、
+`sigma2`+`power` 与 `power`+`epre` **跨严格边界** ✗ ⇒ ★ **先做依赖、后定接缝** 又一次直接决定了做哪一对 ✓。
+
+★★ **而它有一个别的一对都没有的好性质** ✓：★ **不需要重排、也不需要新 barrier** ✓ ——
+`epre` 自己的注释点明了它"reads rx_buf, so it goes **after the barrier the sigma2 block already puts**" ✓
+⇒ ★ **融合 kernel 放在 `sigma2` 原位置，就正好在那道 barrier 之后** ✓；
+三个写（`out[0]` ✓ / `power` 的 `out[1]` ✓ / `epre_buf` ✓）**互不相交** ✓。
+
+| 项 ✓ | 结果 ✓ |
+|---|---|
+| ★ **kernel** ✓ | 两个工作项各抽成 `static inline` body ✓、原 kernel 变薄包装 ✓、★ **新增 `mmse_pilots_sigma2_epre`** ✓（两个相位各调各的 body ✓、★ **各用自己的 `red[]`** ✓）|
+| ★ **几何** ✓ | ★ **两个相位仍在同一个 256 线程 threadgroup 里** ✓ ⇒ ★ **stride 与 `simd_sum` 的分组都没变** ✓（源码自己写着线程数是这两个归约算术的一部分 ✓）|
+| ★ **离线对拍** ✓ | ★ **三份语料 `--repeat 8` 全 0 差异** ✓ **且 `--repeat 1` 也全 0 差异** ✓ |
+| ★★ **对拍非空** ✓ | ★ **`--repeat 1` 下 `sigma2_epre = 1`** ✓ —— 融合**第一跳就生效** ✓（★ 与 RANK 3 不同 ✓：它没有"要上一跳的块"这种前提 ✓）⇒ ★ **`ab_dumps.sh` 的默认那遍就是非空的** ✓ |
+| **计数不变式** ✓ | 臂 **`pilots_sigma2 == pilots_epre == sigma2_epre`** ✓；对照 **`sigma2_epre = 0`** ✓ |
+| **单测/构建/探针** ✓ | 5/5 ✓、全量 0 error ✓、探针 OFF 114 编译全 OK ✓；库 **37 kernel** ✓ |
+
+★ **为什么又抽 body** ✓：与 RANK 3 同一条理由 ✓（"只有一份实现" ✓ 而不是"两份长得一样" ✗）✓。
+★ **默认先关** ✓、**下一步 = `mkf029` 对照 + `mkf030` 臂** ✓（§2.26(4) ✓）。
 
 ### 2026-10-07 · ★★ `corr_a`+`inv` 的前置测量：**严格数学改变 K1 的输出** ⇒ **该融合关闭** ✗✗（**但测量本身是本条的收获** ✓）
 

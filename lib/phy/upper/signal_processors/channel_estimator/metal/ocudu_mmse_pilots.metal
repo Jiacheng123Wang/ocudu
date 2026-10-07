@@ -752,22 +752,27 @@ kernel void mmse_pilots_fd_smooth(device const float*          lse      [[buffer
     }
 }
 
-/// \brief The classical noise variance of the hop: one threadgroup reduces the whole hop.
+/// \brief The sigma2 reduction's whole work item, in a function.
 ///
-/// Reproduces estimate_sigma2()'s structure: the layers are processed in CDM PAIRS, each pair gives one
-/// noise energy (the difference between the received pilots and the pilots regenerated from the
-/// smoothed channel estimates, summed over the DM-RS symbols), and the caller averages the pairs.
-kernel void mmse_pilots_sigma2(device const float*          smoothed [[buffer(0)]],
-                               device const float*          ref      [[buffer(1)]],
-                               device const float*          rx       [[buffer(2)]],
-                               device const float*          cfo      [[buffer(3)]],
-                               device float*                out      [[buffer(4)]],
-                               constant mmse_sigma2_params& p        [[buffer(5)]],
-                               uint                         tid      [[thread_position_in_threadgroup]],
-                               uint                         lane     [[thread_index_in_simdgroup]],
-                               uint                         sgi      [[simdgroup_index_in_threadgroup]])
+/// A function rather than the body of the kernel below so that the fused sigma2+EPRE dispatch
+/// (RANK 4, further down) runs THIS code and not a copy of it: a fusion's only claim is that it
+/// computes what the two dispatches computed, and one implementation is the strongest form of
+/// that claim (the same rule mmse_corr_a_rhp_block() follows in ocudu_mmse_corr.metal).
+///
+/// \param red the caller's threadgroup scratch: mmse_sigma2_tg_size / 32 floats, one partial per
+///            SIMD group. Passed in rather than declared here so the fused kernel can give each
+///            phase its own array.
+static inline void mmse_pilots_sigma2_body(device const float*          smoothed,
+                                           device const float*          ref,
+                                           device const float*          rx,
+                                           device const float*          cfo,
+                                           device float*                out,
+                                           constant mmse_sigma2_params& p,
+                                           threadgroup float*           red,
+                                           uint                         tid,
+                                           uint                         lane,
+                                           uint                         sgi)
 {
-    threadgroup float red[mmse_sigma2_tg_size / 32u]; // one partial per SIMD group (see below)
 
     const mmse_sigma2_dims d         = mmse_sigma2_clamp(p);
     const float            scaling   = (d.nof_dmrs_symb != 0u) ? (p.beta / static_cast<float>(d.nof_dmrs_symb)) : 0.0F;
@@ -875,6 +880,26 @@ kernel void mmse_pilots_sigma2(device const float*          smoothed [[buffer(0)
     }
 }
 
+/// \brief The classical noise variance of the hop: one threadgroup reduces the whole hop.
+///
+/// Reproduces estimate_sigma2()'s structure: the layers are processed in CDM PAIRS, each pair gives one
+/// noise energy (the difference between the received pilots and the pilots regenerated from the
+/// smoothed channel estimates, summed over the DM-RS symbols), and the caller averages the pairs.
+kernel void mmse_pilots_sigma2(device const float*          smoothed [[buffer(0)]],
+                               device const float*          ref      [[buffer(1)]],
+                               device const float*          rx       [[buffer(2)]],
+                               device const float*          cfo      [[buffer(3)]],
+                               device float*                out      [[buffer(4)]],
+                               constant mmse_sigma2_params& p        [[buffer(5)]],
+                               uint                         tid      [[thread_position_in_threadgroup]],
+                               uint                         lane     [[thread_index_in_simdgroup]],
+                               uint                         sgi      [[simdgroup_index_in_threadgroup]])
+{
+    threadgroup float red[mmse_sigma2_tg_size / 32u]; // one partial per SIMD group (see below)
+
+    mmse_pilots_sigma2_body(smoothed, ref, rx, cfo, out, p, red, tid, lane, sgi);
+}
+
 /// Parameters of the EPRE reduction: the [symbol][CDM group][pilot] extent of the received pilots it
 /// walks. Appended as a struct of its own rather than reusing mmse_sigma2_params because the host
 /// mirror (mmse_epre_params_t in ocudu_metal_mmse_engine.mm) is then trivially small and cannot drift
@@ -903,14 +928,16 @@ struct mmse_epre_params {
 /// mmse_pilots_power(), because those two produce DATA-PATH values (the noise variance and the
 /// diagonal loading of A): adding arithmetic there moves the published estimate (see the file header
 /// and mmse_pilots_power.metal).
-kernel void mmse_pilots_epre(device const float*        rx   [[buffer(0)]], // [symb][cdm][pilot], cf32
-                             device float*              epre [[buffer(1)]], // ONE float
-                             constant mmse_epre_params& p    [[buffer(2)]],
-                             uint                       tid  [[thread_position_in_threadgroup]],
-                             uint                       lane [[thread_index_in_simdgroup]],
-                             uint                       sgi  [[simdgroup_index_in_threadgroup]])
+/// \brief The EPRE reduction's whole work item, in a function - see mmse_pilots_sigma2_body() for
+/// why these bodies are functions and what that buys the fused dispatch.
+static inline void mmse_pilots_epre_body(device const float*        rx,
+                                         device float*              epre,
+                                         constant mmse_epre_params& p,
+                                         threadgroup float*         red,
+                                         uint                       tid,
+                                         uint                       lane,
+                                         uint                       sgi)
 {
-    threadgroup float red[mmse_sigma2_tg_size / 32u]; // one partial per SIMD group (see below)
 
     // Clamped into the buffers' maxima before anything is read: a caller's mistake must be able to
     // produce a wrong number and nothing else (see the safety note above the constants).
@@ -941,4 +968,61 @@ kernel void mmse_pilots_epre(device const float*        rx   [[buffer(0)]], // [
             epre[0] = t;
         }
     }
+}
+kernel void mmse_pilots_epre(device const float*        rx   [[buffer(0)]], // [symb][cdm][pilot], cf32
+                             device float*              epre [[buffer(1)]], // ONE float
+                             constant mmse_epre_params& p    [[buffer(2)]],
+                             uint                       tid  [[thread_position_in_threadgroup]],
+                             uint                       lane [[thread_index_in_simdgroup]],
+                             uint                       sgi  [[simdgroup_index_in_threadgroup]])
+{
+    threadgroup float red[mmse_sigma2_tg_size / 32u]; // one partial per SIMD group (see below)
+
+    mmse_pilots_epre_body(rx, epre, p, red, tid, lane, sgi);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// RANK 4 (CE fusion, 2026-10-07): the noise variance and the EPRE sum in ONE dispatch.
+//
+// WHY. Both are one threadgroup of mmse_sigma2_tg_size threads reducing the hop's pilots, both are
+// dispatched at the SAME site (the extraction's own command buffer), and NOTHING passes between them:
+// sigma2 WRITES out[0] and reads smoothed / ref / rx / cfo; EPRE writes epre[0] and reads rx. The
+// received pilots are the only array they share, and only for reading. So the boundary between them
+// orders nothing - it is a dispatch because they were written as two kernels.
+//
+// WHY IT NEEDS NO REORDERING AND NO NEW BARRIER, which is what makes this pair different from the
+// others ranked in the design document: EPRE's own note says it "reads rx_buf, so it goes AFTER the
+// barrier the sigma2 block already puts between the extraction and its consumers" - and a fused kernel
+// placed where sigma2 is sits after exactly that barrier. The sigma2 site also comes BEFORE
+// mmse_pilots_power (which writes out[1] of the same buffer this kernel writes out[0] of), so no
+// consumer sees a different ordering either.
+//
+// HOW. Each phase calls the same body its own kernel calls, with its OWN threadgroup scratch, so
+// neither phase can disturb the other's published partials. Both walk `tid` with the same
+// `i += mmse_sigma2_tg_size` stride and reduce with the same simd_sum tree, over the same 256 threads:
+// the thread count and the SIMD-group layout are part of both reductions, and this dispatch has
+// exactly the geometry the two separate ones had (one threadgroup, mmse_sigma2_tg_size threads).
+//
+// \warning Dispatch ONE threadgroup of mmse_sigma2_tg_size threads. Neither phase is written for any
+//          other count: the stride, the red[] sizes and the simd_sum grouping all follow from it.
+kernel void mmse_pilots_sigma2_epre(device const float*          smoothed [[buffer(0)]],
+                                    device const float*          ref      [[buffer(1)]],
+                                    device const float*          rx       [[buffer(2)]],
+                                    device const float*          cfo      [[buffer(3)]],
+                                    device float*                out      [[buffer(4)]],
+                                    constant mmse_sigma2_params& p        [[buffer(5)]],
+                                    device float*                epre     [[buffer(6)]],
+                                    constant mmse_epre_params&   q        [[buffer(7)]],
+                                    uint                         tid      [[thread_position_in_threadgroup]],
+                                    uint                         lane     [[thread_index_in_simdgroup]],
+                                    uint                         sgi      [[simdgroup_index_in_threadgroup]])
+{
+    // One scratch array per phase. They are separate rather than shared because the two reductions
+    // publish into red[] at different points - sigma2 once per layer pair, EPRE once at the end - and a
+    // shared array would need a barrier this kernel otherwise does not have to reason about at all.
+    threadgroup float red_sigma2[mmse_sigma2_tg_size / 32u];
+    threadgroup float red_epre[mmse_sigma2_tg_size / 32u];
+
+    mmse_pilots_sigma2_body(smoothed, ref, rx, cfo, out, p, red_sigma2, tid, lane, sgi);
+    mmse_pilots_epre_body(rx, epre, q, red_epre, tid, lane, sgi);
 }
