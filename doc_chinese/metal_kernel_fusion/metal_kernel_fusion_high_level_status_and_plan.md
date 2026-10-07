@@ -1,7 +1,10 @@
 # GPU 融合 lane 的 Metal kernel 融合 —— 高层现状与规划
 
-> **状态**：2026-10-06 立项（用户），本文**可重写**（活文档）。**实施细节与 memo** 在
-> `metal_kernel_fusion_design_and_implementation.md`（追加式）；会话快照在 `session_handoff_*.md`。
+> **状态**：2026-10-06 立项（用户），本文**可重写**（活文档）。
+> ★★ **工作流的结账见 `workstream_summary_and_lessons.md`** ✓（2026-10-07 ✓，**可独立阅读** ✓ ——
+> 目标结算 ✓、**被证否的清单** ✓、坑与功课 ✓、工具遗产 ✓、未决项与重开条件 ✓）。
+> **实施细节与 memo** 在 `metal_kernel_fusion_design_and_implementation.md`（追加式，**§2.16–§2.28** ✓）；
+> 会话快照在 `session_handoff_*.md`（⚠ **均已过期** ✓，以结账文件与本文件为准 ✓）。
 >
 > **上游依据**：`../macos_thread_priority/workstream_summary_and_lessons.md`（上一工作流的结账，
 > **本文的所有"功课"都出自它**）、`../apple_silicon_heterogeneous_gnb_plan.md`（高层架构）、

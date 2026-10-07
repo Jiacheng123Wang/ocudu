@@ -12,9 +12,10 @@
 
 | 想知道 | 读 |
 |---|---|
-| 为什么做、现状什么样、目标与判据、总体架构 | **`metal_kernel_fusion_high_level_status_and_plan.md`**（活文档，**先读这个**）|
+| ★★ **这个工作流的结账：目标达成了什么、哪些被证否、留下什么功课** | ★ **`workstream_summary_and_lessons.md`**（**收尾文档，可独立阅读** ✓ —— ★ **只想看一份就读它** ✓）|
+| 为什么做、现状什么样、目标与判据、总体架构 | **`metal_kernel_fusion_high_level_status_and_plan.md`**（活文档）|
 | 具体怎么改、改哪些文件、每一步的判据、**下一步待飞什么**、未决项、memo | **`metal_kernel_fusion_design_and_implementation.md`**（追加式，**活文档**）|
-| 上一个会话干了什么、怎么接手 | `session_handoff_<日期>-<序号>.md`（快照）|
+| 上一个会话干了什么、怎么接手 | `session_handoff_<日期>-<序号>.md`（快照，⚠ **均已过期**）|
 
 ★ **`session_handoff_*.md` 只在"准备开新会话"时写** ✓（用户 2026-10-06 明确 ✓）：
 同一条对话里继续干活时，结论/现状/下一步/未决项**都写进上面两份活文档** ✓（下一步见实施文档 §2.11 ✓、未决项见 §2.12 ✓）
