@@ -958,6 +958,15 @@ private:
 ///       probe (the contract checks themselves).
 TEST_F(pusch_demodulator_deferred_chain_test, the_device_estimate_contract_arms)
 {
+#if !defined(OCUDU_METAL_STATS)
+  // THIS CASE NEEDS THE COUNTERS, SO IT NAMES THEM (M4 acceptance, 2026-10-07). The "ce device estimates" claim
+  // is decided by reading the demodulator's device/host counters, and those count only with the METAL_STATS aid -
+  // that aid is what makes the host/device split observable at all. Without it both read 0, so the claim looks
+  // broken no matter what this case does: a failure that reports a missing instrument as a product defect.
+  // Skipping says which one it is. The claim is still exercised in every build that can observe it, i.e. the
+  // configuration this workstream flies.
+  GTEST_SKIP() << "the device/host split is only observable with OCUDU_METAL_STATS (ENABLE_METAL_STATS=ON)";
+#endif
   phy_pipeline_mode_registry::set(phy_pipeline_mode::gpu);
 
   const phy_pipeline_check* ce_check = nullptr;

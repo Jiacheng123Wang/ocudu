@@ -383,7 +383,12 @@ TEST(macos_compat_sched_test, time_constraint_env_knob)
   // knob did not select, and the parameters for one it did. A field that can only ever print one of the two is
   // not an instrument - this is the reverse-arm rule every new readback field in this project has to pass.
   {
-    const auto capture_line = [](const char* spec, const char* name) {
+    // [[maybe_unused]] BECAUSE THE ONLY CALLERS ARE UNDER OCUDU_FLOW_PROBES (M4 acceptance, 2026-10-07). The
+    // block below is guarded - the [sched] readback it checks only exists with the probes on - so in a build
+    // without them this lambda is defined and never called, and -Wunused-variable under -Werror turns that into
+    // a hard failure of a test that has nothing to do with the probes. That is the DEFAULT configuration, and
+    // the one CI builds: this file is the seventh site where a declaration outlived its guard.
+    [[maybe_unused]] const auto capture_line = [](const char* spec, const char* name) {
       if (spec == nullptr) {
         ::unsetenv("OCUDU_SCHED_TIME_CONSTRAINT");
       }
