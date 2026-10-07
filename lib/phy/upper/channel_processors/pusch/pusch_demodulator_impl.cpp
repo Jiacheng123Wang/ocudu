@@ -831,7 +831,12 @@ pusch_demodulator_impl::get_ch_data_re(const resource_grid_reader&              
   return ch_re_copy;
 }
 
-#if defined(OCUDU_METAL_STATS)
+// THE COUNTERS AND THE CONTRACT CHECK BELOW ARE NOT PART OF THE STATS AID (M4 acceptance, 2026-10-07).
+// The contract is deliberately mode-independent and the test suite asserts that it is REGISTERED, so
+// it has to exist in every configuration - with the aid off it simply reports 0 device / 0 host, which
+// is the truth for a build that does not count. Keeping it inside the aid's block made this test fail
+// in the default (probes-off) configuration that CI builds. The COUNTING sites below stay guarded, so a
+// build without the aid does no counting at all.
 namespace {
 
 /// Device channel-estimate accounting (see get_ch_data_estimates()): how many per-symbol
@@ -894,7 +899,6 @@ static const bool demod_ch_est_contract_registered = []() {
 }();
 
 } // namespace
-#endif // OCUDU_METAL_STATS
 
 const channel_equalizer::ch_est_list&
 pusch_demodulator_impl::get_ch_data_estimates(const dmrs_pusch_estimator_results&      est_results,
