@@ -870,9 +870,17 @@ static bool burst_ensure_open(burst_state& s)
     if (fence_ablation_enabled()) {
       // The arm (see its own note above): the waits are CONSUMED - so the state machines that set them
       // behave exactly as in a normal run - but nothing is encoded on the command buffer.
-      if ((s.stage_wait != 0) || s.grid_wait != 0) {
-        fence_ablation_skipped().fetch_add(1, std::memory_order_relaxed);
-      }
+      //
+      // THE COUNT IS PER COMMAND BUFFER, NOT PER PENDING WAIT. The first version of this counter
+      // incremented only when \c stage_wait or \c grid_wait was non-zero here, and the first air leg
+      // with the arm printed "fences skipped: 1" for 108,428 hops - because on that route the wait is
+      // taken by the FALLBACK branch (the estimator publishes no own-generation for the burst to name,
+      // so \c backend_stage_wait() waits for the global newest) and nothing was "pending" in this
+      // variable at all. The arm had in fact removed one wait per hop; the instrument said otherwise,
+      // which is the failure mode this workstream keeps writing down: an arm whose coverage is
+      // under-reported reads as "the knob did nothing" when the answer is "the thing it removes does
+      // not cost anything" - measured on leg mkf019 and corrected here.
+      fence_ablation_skipped().fetch_add(1, std::memory_order_relaxed);
       s.stage_wait = 0;
       s.grid_wait  = 0;
     } else {
