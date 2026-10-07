@@ -828,6 +828,129 @@ static bool fence_ablation_enabled()
   return enabled;
 }
 
+/// Forward declaration: the split arm below CALLS this, and it is defined further down because the code it
+/// needs (the fence encoding, the ablation decision) lives with the buffer lifecycle. Declaring it here keeps
+/// the arm next to the fence arm it is the sibling of, instead of scattering the two measurement arms apart.
+static bool burst_ensure_open(burst_state& s);
+
+/// \brief The COMMAND-BUFFER-SPLIT arm of the lane probe (metal_kernel_fusion, 2026-10-07, B').
+///
+/// WHY IT EXISTS. Every lane hop commits ONE command buffer, and the lane probe's median says that buffer
+/// spends ~209us inside the device while its kernels total a few microseconds (M0's ablation series) and its
+/// queue time is a tail rather than a median. Four hypotheses have been falsified by four legs - the kernels,
+/// the cross-buffer stage fence (mkf019), sibling-lane contention for the device (mkf022) and the price of a
+/// dispatch boundary (~6.5us, mkf023) - and the platform will not supply a finer instrument: on this M4 Pro
+/// `supportsCounterSampling(MTLCounterSamplingPointAtDispatchBoundary)` is NO, while `atStageBoundary` says
+/// nothing new for a buffer that keeps one encoder from end to end.
+///
+/// WHAT IS LEFT TO MEASURE, AND WHY THIS ARM MEASURES IT. What remains inside that 209us is time the buffer
+/// spends not running its dispatches - and the only such structure this route does not otherwise contain is a
+/// COMMAND-BUFFER BOUNDARY. The delivery route crosses one per hop already (the estimator commits its own
+/// buffer and the lane burst waits for it), but that crossing is confounded with everything else that differs
+/// between two stages. This arm puts a second one INSIDE the lane's own burst, where nothing else changes, so
+/// the difference between the arm and its control is the boundary and only the boundary.
+///
+/// THE FIRST HALF IS COMMITTED FENCELESS, AND THAT IS CORRECT RATHER THAN MERELY CONVENIENT. The lane burst
+/// receives the estimator's stage fence and the grid-production fence when `burst_ensure_open()` creates it
+/// (see there). A split leaves the second half reading only what the FIRST half of this same burst wrote, on
+/// the same queue, where order comes from the commit order - so no new fence is owed. Encoding one anyway
+/// would measure the fence INSTEAD of the boundary, which is the confusion mkf019 exists to prevent (there,
+/// deleting the fence moved nothing on air: it is insurance, not cost).
+///
+/// IT IS A MEASUREMENT, NOT A ROUTE. Like OCUDU_LANE_ABLATE and OCUDU_LANE_ABLATE_FENCE this is structure only:
+/// it changes where the host encodes, never what the device computes, so its LLRs must still be bit-identical
+/// (checked offline) - but a delivery leg with it on is not the delivery shape, and `cbs/lane` (1.00 -> 2.00)
+/// says so in its own report.
+///
+/// THE COUNT IS THE COVERAGE READING, and it is the one this workstream has learned to demand: an arm that
+/// never fires reads exactly like an arm whose knob does nothing. A threshold larger than the burst's own
+/// dispatch count fires never, so the exit report prints the number of splits AND says so explicitly rather
+/// than leaving a zero to be interpreted.
+static std::atomic<uint64_t>& lane_split_cb_count()
+{
+  static std::atomic<uint64_t>* n = new std::atomic<uint64_t>(0);
+  return *n;
+}
+
+/// The dispatch index after which the lane's burst is split in two (0 = off). Read once, because a knob that
+/// moved mid-leg would make two halves of one leg incomparable.
+static unsigned lane_split_cb_after()
+{
+  static const unsigned after = []() {
+    const char* env = std::getenv("OCUDU_LANE_SPLIT_CB");
+    if (env == nullptr) {
+      return 0U;
+    }
+    const unsigned n = static_cast<unsigned>(std::strtoul(env, nullptr, 10));
+    if (n == 0) {
+      return 0U;
+    }
+    std::fprintf(stderr,
+                 "[metal_split_cb] OCUDU_LANE_SPLIT_CB=%u: the lane's burst is committed in TWO command "
+                 "buffers, the first carrying the first %u dispatch(es) of the hop. This run measures the "
+                 "PRICE OF A COMMAND-BUFFER BOUNDARY (one commit + one device-side buffer switch), NOT a "
+                 "working route - expect `cbs/lane` to read 2.00 instead of 1.00. The split count is printed "
+                 "at exit; if it is 0 the threshold never fired and this leg measures NOTHING (the failure "
+                 "mode this workflow writes down: an arm that does not fire looks like a knob that did "
+                 "nothing).\n",
+                 n,
+                 n);
+    std::atexit([]() {
+      const uint64_t splits = lane_split_cb_count().load(std::memory_order_relaxed);
+      std::fprintf(stderr,
+                   "[metal_split_cb] command buffers split: %llu%s\n",
+                   static_cast<unsigned long long>(splits),
+                   (splits == 0) ? "  <-- THE ARM NEVER FIRED: this leg carries no measurement of the "
+                                   "boundary, whatever else it shows"
+                                 : "");
+    });
+    return n;
+  }();
+  return after;
+}
+
+/// Splits the OPEN lane burst in two at the encoder level. Called from count_dispatch(), i.e. after exactly
+/// one encoded dispatch, which is the only place the burst's own progress is known.
+static void lane_split_cb_maybe(burst_state& bs)
+{
+  const unsigned after = lane_split_cb_after();
+  if ((after == 0) || (bs.cb == nil) || (bs.n != after)) {
+    return;
+  }
+  id<MTLCommandBuffer>         first = bs.cb;
+  id<MTLComputeCommandEncoder> enc   = bs.enc;
+  if (enc == nil) {
+    // Nothing encoded into the buffer yet, so there is no boundary to place: the caller's dispatches would
+    // have gone into a buffer with no encoder, which is a broken state this arm must not hide.
+    return;
+  }
+  [enc endEncoding];
+  // Registered under the burst's own label BEFORE the commit, exactly as the ordinary commit path does: the
+  // probe resolves a command buffer against its own commit through this list, and a buffer that was committed
+  // without being registered would be a lane holding a command buffer no reading accounts for.
+  gpu_lane_probe::register_commit(first, bs.commit_label);
+  // NO d1_trace() HERE, and that is not an omission: it is declared further down and is about the HANDED-OVER
+  // block (which buffer the lane adopted, which one it committed), not about a buffer this arm created. This
+  // arm's own coverage reading is the split counter, printed at exit.
+  [first commit];
+  burst_stats_commit();
+
+  bs.cb       = [shared_queue::backend_queue() commandBuffer];
+  bs.enc      = nil;
+  bs.pipeline = nil;
+  if (!burst_ensure_open(bs)) {
+    // The first half is already committed and cannot be taken back, so the hop is lost either way; leaving the
+    // burst closed is what makes the loss show up as a missing lane rather than as dispatches encoded into a
+    // buffer nobody commits.
+    bs.cb  = nil;
+    bs.enc = nil;
+    return;
+  }
+  // NO FENCE IS ENCODED ON THE SECOND HALF - see this arm's note. `bs.n` deliberately keeps counting, so the
+  // threshold is crossed once per burst even when both halves are added up.
+  lane_split_cb_count().fetch_add(1, std::memory_order_relaxed);
+}
+
 static bool burst_ensure_open(burst_state& s)
 {
   if (s.cb != nil) {
@@ -2136,6 +2259,10 @@ void shared_burst::count_dispatch(stage which)
   burst_state& bs = state();
   if (bs.cb != nil) {
     ++bs.n;
+    // B' (2026-10-07): the command-buffer-split arm, hung HERE because this is the one site every dispatch of
+    // the lane already passes through - so the burst's own progress is exact and the arm costs one comparison
+    // when it is off. See lane_split_cb_maybe() for why the boundary is what is left to measure.
+    lane_split_cb_maybe(bs);
   }
   // Q9-F5 (dev doc 6.162): the family name follows the dispatch, for the DEFERRED routes. A stage that
   // accumulates its dispatches hands them over later, through the flush hook, and the binding decision for
