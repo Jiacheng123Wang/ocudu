@@ -661,14 +661,32 @@ struct mmse_engine_impl {
     return (v == 0u) ? 1u : ((v > 64u) ? 64u : v);
   }
   static unsigned corr_repeat() { return stage_repeat("OCUDU_CE_CORR_REPEAT"); }
-  /// \brief Whether A and R_hp are built in ONE dispatch (OCUDU_CE_CORR_MERGED=1, dev doc 6.174).
+  /// \brief Whether A and R_hp are built in ONE dispatch (dev doc 6.174; OCUDU_CE_CORR_MERGED=0 retreats).
   ///
-  /// A knob rather than a replacement, because the two boundaries it removes are priced on air at ~39us
-  /// each (p72/p73/p74) while the same boundary costs ~1.6us off-line, and a claim that large has to be
-  /// read on a leg. The merged kernel reproduces both expressions, so only the ISSUE changes.
+  /// ON BY DEFAULT since 2026-10-07 (metal_kernel_fusion, user ruling), with `=0` as the control arm -
+  /// the same shape as OCUDU_LANE_FUSE_EQDEMOD. Three things had to be true first, and by then all were:
+  ///
+  ///   * SAME ARITHMETIC. The merged kernel reproduces both expressions, so only the ISSUE changes. Read
+  ///     off-line: 27 captures x 4 dumps, 0 differing bytes, merged against the two-dispatch route.
+  ///   * SAME BINDINGS. The merged branch bound its scalars buffer only when the pointer was non-null,
+  ///     which left the argument unbound on the hops its own comment is about; fixed before defaulting.
+  ///   * IT ACTUALLY WINS ON AIR, which is what the earlier note asked for and did not have. `mkf023`
+  ///     flew exactly this form (OCUDU_CE_CORR_MERGED=1) and the correlation segment moved 36.3-37.3 ->
+  ///     30.4 us/lane, i.e. about -6.5 us per hop, with the whole-hop `busy` following by the same
+  ///     amount. This is also the ONE fusion in the CE with no arithmetic exposure at all: it removes
+  ///     two dispatches per hop and touches no reduction, no accumulation order and no math mode (all
+  ///     three correlation kernels live in the same -fno-fast-math file).
+  ///
+  /// \note The ~39 us per boundary this note used to quote came from p72-p74 and does NOT reproduce on
+  ///       this route: mkf023 measured one dispatch boundary at ~6.5 us on air, consistent with the
+  ///       fusion's own -7.4/-7.6 us. The claim that made this a knob was therefore an order of
+  ///       magnitude too large, which is why the leg that finally priced it could also retire the knob.
   static bool corr_merged_enabled()
   {
-    static const bool value = (std::getenv("OCUDU_CE_CORR_MERGED") != nullptr);
+    static const bool value = []() {
+      const char* env = std::getenv("OCUDU_CE_CORR_MERGED");
+      return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+    }();
     return value;
   }
   /// \brief Whether K1b runs the threadgroup-memory flavor (OCUDU_CE_WEIGHTS_TILE=1, dev doc 6.168).
