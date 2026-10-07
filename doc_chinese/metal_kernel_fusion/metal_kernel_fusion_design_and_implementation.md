@@ -442,7 +442,7 @@ LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs \
 | lane **之外** | **~760 µs**（61 %）| **CPU 的 FFT + 网格打包** ✓（`gpu` 模式下 DFT 默认走 CPU ✓，代码原话在 M0 memo ✓）；M0c：**把它搬上设备更差** ✗（+197 µs 跨度 ✓）| 这是**范围问题**（用户已排除 Metal FFT ✓）⇒ 若要碰，先与用户重开 ✓，并且**不是**照 M0c 那条路重做 ✗ |
 | lane **之内** | **~380 µs**（busy 480 里除内核/dispatch/host 编码之外 ✓）| 不是内核算术 ✓（M0 ✓）；中位 CB 14 % 排队 / 86 % 设备 ✓；**不是 fence** ✓✗（mkf018/019 ✓）；★ **不是兄弟 lane 争用的主体** ✓✗（mkf022 并发 1：窗口只 −10 % ✓，但**长尾 −23 %** ✓）；一跳 `merged_hop` 有 **~6.9 个 dispatch** ✓ ⇒ 剩下的候选 = **这些 dispatch 的空口价格** ✓（空口 66 µs vs 离线 3.7 µs ⇒ 与仓里 `OCUDU_CE_CORR_MERGED` 注释记的"空口 39 / 离线 1.6 µs"同一个 20～25 倍比 ✓）| ★ **下一个测** ✓：`OCUDU_CE_CORR_MERGED=1`（一个 env ✓）⇒ **先读 `ce_sites merged=` 是否真动** ✓，再读窗口 ✓ = 直接给一个 dispatch 定价 ✓ |
 | **M2 的前提** | ★ **本工作流已证否** ✗（空口 ✓）—— 那 ~456 µs **不是跨 CB 的等待** ✓ ⇒ **折 CE 不会因为它而回本** ✗ | 只有在"争设备/串行化"被证实**且**折 CE 能改变它时才重开 ✓（§3 ✓）；**在此之前不做 M2** ✗ |
-| ★ **那 ~456 µs 信封** | **四个假设全部证否** ✗✗（M0 内核 ✓、mkf019 fence ✓、mkf022 争用 ✓、mkf023 dispatch 价 ✓）⇒ 可加起来的只有 ~7 dispatch × ~7 µs ≈ 50 µs ✗ | ★ **需要新仪器** ✓：`MTLCounterSampleBuffer` 在 **dispatch 边界**打点 ✓（仓里 0 命中 ✓）⇒ 先离线验证 `atDispatchBoundary` 采样点可用 ✓，再加一条探针臂 ✓；**在此之前不要再猜** ✗ |
+| ★ **那 ~456 µs 信封** | **四个假设全部证否** ✗✗（M0 内核 ✓、mkf019 fence ✓、mkf022 争用 ✓、mkf023 dispatch 价 ✓）⇒ 可加起来的只有 ~7 dispatch × ~7 µs ≈ 50 µs ✗；★ **且"更细的 GPU 计时"这条路本机不存在** ✗（M4 Pro `atDispatchBoundary = NO` ✓，已离线查证 ✓）| ★ **两条可选路** ✓：(a) **接受它是本平台的稳定属性** ✓（记为已知、不再追 ✗）；(b) **改为经验法** ✓ —— 只做"结构变体 + 量窗口"的腿 ✓（并发 1 的 −24 % 长尾就是这么来的 ✓），不再试图先解释再优化 ✓ |
 
 **AMC 腿的命令** ✓（`wip/gnb_amc.yml` ✓ = 钉住版去掉 `min/max_ue_mcs` ✓；★ **路线已默认开，
 所以对照臂要显式 `=0`** ✓）：
@@ -1141,14 +1141,24 @@ lane 的每条 CB 上只编了两道等待 ✓（`burst_ensure_open()` ✓）：
 **这不是失败** ✓：**四个看似合理的解释被四条腿逐个排除** ✓ —— 这本身就是可交付的知识 ✓
 （下一个会话不必再试这四个 ✗）。
 
-**④ ★ 下一步需要一台新仪器 ✓（不是又一条腿 ✓）**：仓里**从来没有**逐 dispatch 的 GPU 计时 ✗
-（`grep sampleCounters|MTLCounterSampleBuffer` 在 `lib/` 里 **0 命中** ✓），
-所以现在只能看**整条 CB** 的窗口 ✓。Apple Silicon 支持
-**`MTLCounterSampleBuffer` + `sampleCounters(sampleBuffer:sampleIndex:barrier:)`** ✓
-（在 **dispatch 边界**打点 ✓）⇒ 那正是"一条 CB 里那 ~7 个 dispatch 各自花了多少"的答案 ✓。
-**建议** ✓：给 lane 探针加一条**逐 dispatch 打点臂** ✓（默认关 ✓、只在探针打开时生效 ✓、
-不改交付路径 ✓）—— 先离线验证计数器可用（`device.counterSets` 里有没有 `atDispatchBoundary` 采样点 ✓），
-再飞一条腿 ✓。**在此之前不要再猜这个信封** ✗。
+**④ ★★ 想用的那台仪器，本机没有** ✗✓（**两分钟离线查清 ✓，省掉一整条线** ✓）：
+仓里**从来没有**逐 dispatch 的 GPU 计时 ✗（`grep sampleCounters|MTLCounterSampleBuffer` 在 `lib/` **0 命中** ✓），
+所以一切只能读**整条 CB** 的窗口 ✓。自然的下一手是 **Metal 的 `MTLCounterSampleBuffer`** ✓
+（在 **dispatch 边界**打点 ✓ = "一条 CB 里那 ~7 个 dispatch 各自花了多少" ✓）。
+**离线查证** ✓（最小 `.mm` ✓，`/tmp/cscheck.mm` ✓，不需电台 ✓）：
+```
+device: Apple M4 Pro
+atDispatchBoundary: NO        ← ★ 不支持 ✗
+atStageBoundary:    YES
+counter set: timestamp / GPUTimestamp
+```
+⇒ ★ **`MTLDevice.supportsCounterSampling(MTLCounterSamplingPointAtDispatchBoundary)` 在 M4 Pro 上是 `NO`** ✗
+⇒ **逐 dispatch 的 GPU 计时在这台机器上拿不到** ✗（而这正是那个信封唯一缺的分解 ✓）。
+**`atStageBoundary` 有** ✓，但本 lane 的 burst **一条 CB 一个 encoder** ✓（`shared_burst` 全程复用 `s.enc` ✓）
+⇒ stage 边界 ≈ CB 自己的起止 ✓ ⇒ **不比已有的 `GPUStartTime`/`GPUEndTime` 多任何信息** ✗。
+**⇒ 结论** ✓：**这个信封不能再用"更细的 GPU 计时"去归因了** ✗ —— 平台不给 ✓。
+**记账** ✓：把这条**否定的可行性**写下来 ✓，下一个会话就不必再花时间试它 ✗
+（与"四个假设已证否"同一类可交付知识 ✓）。
 
 ⚠ **本腿的环境注记** ✓：`stale=2`（>8 ms，max 15.3 ms ✓）且队列 max = **8022.7 µs** ✓
 ⇒ 该腿有一次停顿 ✓（属环境 ✓；均值仍在簇内 ✓ ⇒ 结论不受影响 ✓）。
