@@ -23,6 +23,14 @@
 > ③ 多任务头（LLR 读出 + 信道估计读出）得到**工业印证**；
 > ④ ★ **量化章更正**：cuPHY 出货 LDPC SPI **只接受 fp16**（fp8 被拒），默认 clamp **32.0**；
 > **`RANGE_LIMIT` 全仓不存在**——它是**我们的设计**，模型标度只能对准它。
+> ⑤ ★★ **零拷贝是我们可以赢的地方**：NVIDIA **没有任何一条推理路径做到零拷贝**
+> （最好的 pyAerial 也是 "pointer-in / copy-through"，引擎边界必做布局转换 D2D 拷贝；
+> cuMAC 的 DRL 干脆是每 TTI 一次主机往返）⇒ 我们的 UMA `MLMultiArray` 零拷贝**目标不变且更有价值**；
+> ★ **值得抄的抽象是 `cuphy::tensor_desc` + 前/后转换钩子这一对**（我们已有 `tensor_desc.h`，需接到 CoreML 引擎）；
+> ⑥ ★★ **唯一进生产的 learned PHY 模块是"信道估计"**（`TrtEnginePuschRxChEst`，YAML 选后端），
+> 而且它是 **drop-in**：仍喂经典均衡/解映射/译码 ⇒ **"AI-native PHY"在生产里是 1 个模块，不是一条链**；
+> ★ 而那个模块**恰好就是我们 AI CE 线做过并得到负面结论的那个** ⇒
+> **"联合"（而不是单模块替换）才是没被产品化的那一块**。
 >
 > ★ **v1.4 变更（范围澄清）**：本工作流的目标是 **"信道估计 + 均衡 + 解映射"融合成一个 net**
 > （输入网格 + 几何，输出 LLR）——这是**标准 neural receiver 形态**，也是 OCUDU dApp 的 **depth 3**

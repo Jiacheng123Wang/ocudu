@@ -188,9 +188,10 @@ BPSK/QPSK 走直接算术，16/64/256QAM 走 **mipmapped texture LUT**（逐比�
 ★ 对照我们：解扰在**解调器内部**（`pusch_demodulator_impl.cpp:730`）就做了。
 **同一个数学，不同的位置**——而位置决定了"模型输出加扰域还是解扰域"（`memo_01` §3）。
 
-### 2.4 ★★ 更正三：cuPHY 内部**没有任何神经/学习模块**
+### 2.4 ★★ 更正三：cuPHY 内部**没有"神经接收机"**——唯一的学习型模块是 TRT 信道估计
 
-- `grep -i neural cuPHY/` → **零命中**。
+- `grep -i neural cuPHY/` → **零命中**（★ 但**这不等于没有学习型模块**——
+  它叫 `TrtEnginePuschRxChEst`，不叫 "neural"。详见 §2.6）。
 - TensorRT 确实在 `cuPHY/src/cuphy/trt_engine/`，但**只接信道估计**：
   `ch_est/trtengine_chest.{hpp,cpp}` + `ch_est::IModule` + `createPuschRxChEst`
   （`chest_factory.hpp:33-58`），接口是 **DMRS-LS 估计 → 信道估计**，**不是 LLR**。
@@ -207,7 +208,46 @@ BPSK/QPSK 走直接算术，16/64/256QAM 走 **mipmapped texture LUT**（逐比�
 ⇒ 这**加强**了本工作流的价值主张（`memo_03` §6 的空白清单仍然成立），
 同时也给了我们一个**更现实的对照**：他们的生产化程度低于论文给人的印象。
 
-### 2.5 均衡—解映射是**融合**的，且噪声输入是"偏差校正后的残差方差逆"
+### 2.5 ★★ 更正四：**没有任何一条路径真正做到零拷贝**（连 NVIDIA 自己也没有）
+
+这是本次调研对**我们架构主张最有利**的一条。
+
+| 路径 | 指针 | 实际执行 | 结论 |
+|---|---|---|---|
+| **pyAerial → TensorRT** | ★ **指针零拷贝过 Python 边界**（`pybind11/cuda_array_interface.cpp:65-68` 直接取 `__cuda_array_interface__` 的 `data[0]`，不分配不拷贝） | ★ 但 `trtEngine::run` 用 `pre/postEnqueueConvert` 包住 `enqueueV3`，默认走 `cuphyConvertTensor(...)`——一次**布局转换的 device-to-device memcpy** 到引擎自有内部缓冲（`trt_engine.cpp:129-133,411-438`） | **pointer-in / copy-through** |
+| **cuPHY 内的学习型 CE** | — | 同样形状，且被**显式写明**：`TensorRT-IModule.md:97-104` 有 *"**Necessity of Copy**"* 一节；`prepareChestMlInputsKernel` complex→real 写内部缓冲，`extractChestMlOutputsKernel` 再 real→complex 写回 | D2D copy-through |
+| **cuMAC 的 DRL** | — | ★ **完整的主机往返**：host buffer（`mcsSelectionDRL.cpp:65-66`）→ H2D（`:215`）→ D2H（`:220`）→ **主机上做 argmax**（`:248-254`） | 每个 TTI 一次 host round-trip |
+
+★★ **结论**：`trt_engine.hpp:208-214` 自己把设计写明了——
+*"copy from input buffers … into internal buffers … enqueueV3 … copy from internal buffers into output buffers"*。
+
+⇒ **我们的零拷贝目标（`MLMultiArray` 用 `initWithDataPointer` 包住 GPU 缓冲，AI CE 里已跑通）
+在这一维度上会比 NVIDIA 的做法更强。** 这不是自夸，而是**对 `metal_vs_cuda_architecture.md` 的
+"离散地址空间 vs UMA" 判断的一次独立验证**：离散内存模型**必然**引入中间缓冲与布局转换拷贝，
+即使指针能零拷贝地穿过语言边界。
+
+★ 调研代理的原话值得记下来：**"真正值得抄的抽象，是 `cuphy::tensor_desc` + 前/后转换钩子这一对"**
+——而它恰好是我们**已经有的**（`tensor_desc.h`）需要**接到 CoreML/ANE 引擎上**的那一层。
+
+### 2.6 ★★ 唯一进生产的 learned PHY block 是**信道估计**——而且它是"半程"的
+
+`ch_est/chest_factory.cpp:78-94`：当 `puschrxChestFactorySettingsFilename` 为空 → 经典 `puschRxChEst`；
+否则 → `TrtEnginePuschRxChEst`（`final : public IModule`）。由**出货 YAML** 驱动。
+
+★ 但它是个 **drop-in，只替换信道估计**：输出落在 `tInfoHEst.pAddr`，
+**均衡、解映射、译码全部保持经典**。
+★ 而**学习型解映射器与完整神经接收机（`neural_rx.onnx`）只存在于 pyAerial 的 notebook 里**
+（`grep -rn neural_rx` 只命中 pyaerial 的 notebook/test/script；**C++ 侧没有任何 TRT 解映射器或均衡器**）。
+
+⇒ ★★ **两条对我们极其重要的推论**：
+
+1. **"AI-native PHY"在生产里是"1 个模块"，不是"一条链"。** 我们的空白清单（`memo_03` §6）成立。
+2. ★★ **NVIDIA 产品化的那一个模块，恰好就是我们 AI CE 线做过并得到负面结论的那个模块。**
+   这不是巧合——它说明"把 CE 单独换成 AI"是整个行业最容易想到、也最先被产品化的一步；
+   而**它仍然要给经典的均衡/解映射/译码喂数据**，所以它拿不到"联合推断"的收益。
+   ⇒ **这反过来支持我们的深度 3 主张**：**联合**（而不是单模块替换）才是没被产品化的那一块。
+
+### 2.7 均衡—解映射是**融合**的，且噪声输入是"偏差校正后的残差方差逆"
 
 `channel_eq.cu` 是**一个 equalize+demap kernel**。逐 RE 噪声输入是
 **逆残差误差方差对角 `tReeDiagInv`**，带偏差校正：`λ = 1/(1−Ree)` 上限 `MAX_BIAS_LIMIT=10`；
@@ -289,6 +329,12 @@ E3 manager + SHM descriptors ✓；**"Triton" 全仓零命中 ✗**；**GPU 推�
 | ★ **LLR buffer 布局** | 已同约定 | 他们 `[re][bit]`、bit 最快变化；我们也是。★ 差别只在**他们恒 pad 到 8**、我们不 pad |
 | ★★ **"无依赖测试台 + 漂移检查"** | ★ **强烈建议借鉴** | `e3agent-standalone/` 直接编译**生产源文件**、用 shim 摆脱全部平台依赖，并用 `scripts/check_drift.py` **守住镜像与生产的漂移**。★ 我们缺的正是"漂移检查"这一步 |
 | **均衡噪声的偏差校正** | 借鉴 | 他们把逆残差方差做偏差校正（`λ=1/(1−Ree)`，上限 10）。我们目前没有这个细节 |
+| ★★ **`TensorSpec` / `AlgorithmBase` / `MLAlgorithm`** | ★ 直接借鉴 | `algorithm_base.py:28` `TensorSpec`（`name/shape/dtype/is_dynamic/dynamic_axes`，`:56 is_complex`）与 `:66 AlgorithmBase`、`ml_algorithm.py MLAlgorithm`——**纯 numpy+torch，无 CUDA**。这是"模型 I/O 描述"的可移植形态，正对应我们需要的跨引擎描述符 |
+| ★★ **前/后转换钩子对（pre/post hooks）** | ★ 直接借鉴 | `trt_engine_interfaces.hpp:51,59,104,122,141`：**布局适配 + 捕获括号**。★ 调研代理点名：**这就是我们的 Metal↔CoreML 布局问题的对应物**，是"真正值得抄的抽象" |
+| ★ **两段式模块生命周期** | 借鉴 | `ch_est/IModule.hpp`：`init(...)`/`setup(...)`/`getDescrInfo(statDescrSizeBytes, statDescrAlignBytes, dynDescrSizeBytes, dynDescrAlignBytes)`——**静态+动态两块 opaque blob，带显式 size/alignment** ⇒ 模型描述符 + scratch arena |
+| ★ **"执行上下文句柄"** | 借鉴 | `CudaStream` 贯穿每个算法构造函数，并用 `with stream:` 作用域 ⇒ 我们的 **Metal command queue / CoreML 引擎句柄**应当用同样方式显式传递 |
+| **策略对象** | 借鉴 | `LinkAdaptationSimulator(reset(seed)/advance(outcome) ↔ SlotContext/SlotOutcome)` + `PhyAbstraction` 协议 ⇒ 与我们的 `phy_routing_policy`（`metal_vs_cuda_architecture.md` §6.3）同形 |
+| **配置选后端** | 借鉴 | `chest_factory.cpp:78-94` 用一个配置字符串在两个 `IModule` 实现间选——与我们的 `pusch_channel_equalizer_backend` 同形 |
 
 ### 3.2 ⚠️ 需要修改（我们不能照抄的）
 
@@ -308,12 +354,26 @@ E3 manager + SHM descriptors ✓；**"Triton" 全仓零命中 ✗**；**GPU 推�
 | 项 | 理由 |
 |---|---|
 | `device_vector` / `cuda_copy` / `cudaMalloc` 式离散内存模型 | 会把**离散地址空间**引入设计，与 UMA 零拷贝的核心成就冲突（`metal_vs_cuda_architecture.md` §6.4 已判） |
+| ★ **"永远 copy-through"的推理路径** | NVIDIA **每一条**路径都在引擎边界做布局转换拷贝（§2.5）。我们的 UMA 零拷贝**应当做得更好**，不要模仿 |
+| ★ **NullObject 式的"模块不可用"替换** | `trt_engine_interfaces.hpp:69,156`、`ch_est_null_graphs.hpp` 用**运行期 `if` 选一个 Null 实现**；全仓**没有** `__attribute__((weak))` 或 stub 库（清洁的负面结论）。⚠ **这与 `metal_vs_cuda_architecture.md` §6.4 把"`_unavailable.cpp` 链接期替换"列为"借鉴"并不矛盾——因为那份文档分析的是另一个代码库，见 §4.0** |
 | TensorRT / CUDA stream / NVSHMEM / CUDA-IPC | 平台专有 |
 | "永远兜底"的回退语义 | 我们的 **lane 严格性**由模式决定：`cpu_gpu` 兜底、`gpu` 报错（§1.6） |
 
 ---
 
 ## 4. ★ 可扩展性 / 可移植性（按你的要求，用高层架构原则检验）
+
+### 4.0 ⚠️ 先分清两个**不同的** CUDA 代码库
+
+| | 代码库 | 分析在哪 |
+|---|---|---|
+| (i) | **OCUDU/srsRAN 上游的 CUDA 增补**（`prach_detector_backend`、`add_cuda_test.cmake`、`device_vector`/`cuda_copy` 那一套） | `doc_chinese/metal_vs_cuda_architecture.md`（已存在） |
+| (ii) | ★ **NVIDIA Aerial**（`cuPHY` / `cuMAC` / `pyaerial`） | **本备忘** |
+
+★ 两者**有重叠也有分歧**，不能互相引用当证据。一个具体的分歧：
+`metal_vs_cuda_architecture.md` §6.4 把"**`_unavailable.cpp` 链接期替换**"列为"✅ 借鉴"，
+但 **aerial 里没有链接期替换**（是运行期 NullObject，见 §3.3）。
+⇒ 引用可移植性结论时**必须写明是哪个代码库**。
 
 ★ **核心判断：aerial 给我们的最大价值不是代码，而是"哪些是平台无关的设计决定"的答案。**
 把它们按 `metal_vs_cuda_architecture.md` 的框架分三层：
@@ -326,6 +386,9 @@ E3 manager + SHM descriptors ✓；**"Triton" 全仓零命中 ✗**；**GPU 推�
 | **张量描述符** | `TrtTensorPrms(name, dims, dtype)` | ★ 我们已有 `tensor_desc.h`（`metal_vs_cuda_architecture.md` §6.2 提到它让 GPU 输出可直接作 CoreML 输入）。**把 CoreML/ANE 引擎也接到同一个描述符上** |
 | **路由/策略对象** | 无（NVIDIA 是静态配置） | ★ 我们的 `phy_routing_policy`（§6.3）**是唯一适合与上游共享的策略层**，而且**必须能感知 ANE 负载与 `last_predict_us`** |
 | **数据集/评测协议** | 三线 BLER + parquet 记录 | 我们的 G 门禁 + `ul_capture` 五件套 |
+| ★ **模型 I/O 描述 + 算法基类** | `TensorSpec` / `AlgorithmBase` / `MLAlgorithm`（**纯 numpy+torch**） | ★ 抽成与引擎无关的层，CoreML/Metal 各接一次 |
+| ★ **管线描述与工厂** | `SlotConfig` / `PipelineConfig` / `Pipeline` / `PipelineFactory.create(config, cuda_stream, **kwargs)`——★ **只有签名提到 CUDA** | 我们的 `phy_routing_policy` + lane 选择 |
+| ★ **离线训练/仿真的策略层** | `drlTrainingFramework/`（纯 PyTorch）+ `CarrierProfile/SlotContext/SlotOutcome/LinkAdaptationSimulator` + `PhyAbstraction` | ★ 与"路由策略是独立注入的决策对象"完全同构 |
 
 ### 4.2 "形状可移植、实现平台专有"的一层（照形状重写）
 
@@ -362,7 +425,7 @@ platforms"*）/ CUDA-IPC / NVSHMEM / `cudaMalloc` 内存模型。
 | 6 | ★ **clamp 规则**：严格小于类型 max finite；fp16 上界 65504，NVIDIA 默认 clamp = **32.0** | §2.2 |
 | 6b | ★ **`RANGE_LIMIT` 是我们的设计，不是业界标准**：cuPHY 全仓无此物，它按噪声方差自然标度且不裁 ⇒ 模型输出标度**只能对准我们自己的 `range_limit`** | §2.1 |
 | 6c | ★ **LLR 布局已一致**（`[re][bit]`，bit 最快），差别只在 pad；接入时注意 stride | §2.3 |
-| 6d | ★ **均衡噪声要做偏差校正**（`λ=1/(1−Ree)`），这是我们现在没有的 | §2.5 |
+| 6d | ★ **均衡噪声要做偏差校正**（`λ=1/(1−Ree)`），这是我们现在没有的 | §2.7 |
 | 6e | ★ **测试台纪律**：无依赖测试台 + **漂移检查**——建议引入 `check_drift` 式机制 | §2bis.4 |
 | 7 | **数据流程照抄四步**（造数据 → 经典链生成标签 → 训练/导出 → 三线 BLER 评测） | §1.5 |
 
