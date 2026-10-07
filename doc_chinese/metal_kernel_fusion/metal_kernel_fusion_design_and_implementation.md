@@ -1069,6 +1069,21 @@ probes-off 34 TU ✓、全量 `cmake --build` 绿 ✓、build 树里旧路径字
 
 **⇒ 下一步** ✓：飞 **`mkf016`/`mkf017`（AMC 一对 ✓）**，读调制直方图 + `y_fused`/`y_batch` 覆盖率拆分 + CRC ✓。
 
+**★★ M3 漏掉的一处（用户一飞就撞上 ✓，2026-10-07）**：`run_leg.sh` 有一道**起飞前闸门** ✓
+（"a gpu leg without its DEVICE KERNELS is not a gpu leg" ✓）—— 它**按名字查那三个库** ✗
+（`ocudu_mmse/equalizer/demod.metallib` ✓），理由写得很对 ✓（缺库时引擎会**静默**走 host 路径 ✗，
+腿却仍自称 gpu ✗）。M3 一合并、旧文件一删 ⇒ **每一条 gpu 腿都被拒绝** ✗
+（实测：`REFUSING to run a gpu leg: 3 device kernel(s) missing …` ✓）。
+**修法** ✓：闸门改成查**两个**文件 —— `lib/phy/generic_functions/metal/ocudu_dft.metallib` ✓ +
+**`lib/phy/metal/ocudu_lane.metallib`** ✓（"一条腿一个 stage 的库"这个不变式 ✓）。
+**同一轮扫出的其它活引用** ✓（历史文档**不动** ✓ —— 那是记录 ✓）：
+`ab_replay_bins.sh` 的 metallib 配对变量 ✓、`build_macOS_note.md` 的单目标与 `ls` ✓、
+`phy_latency/wip/ce_kernel_cost.mm` 的三处加载路径 ✓、
+`phy_pipeline_gpu` 设计文档里引用的"补建命令" ✓ —— 全部指向合并后的库 ✓。
+**教训** ✓（与 §4 那条同源 ✓）：**M3 改的是"库这个交付物的边界"** ✓ ⇒
+凡是**按名字提到那三个文件**的地方（runner 闸门、工具、文档命令）都要跟着改 ✓；
+只改引擎与 CMake **不够** ✗ —— 而**闸门**正是那个"改了才不会静默降级"的地方 ✓。
+
 ## 6. 会话交接（**只在准备开新会话时**新建 ✗ 不是每段工作结束时）
 
 ★ **时机**（用户 2026-10-06 明确 ✓）：`session_handoff_*.md` **只用于新会话交接时的现状快照** ✓；

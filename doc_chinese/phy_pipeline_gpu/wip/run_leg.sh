@@ -164,19 +164,23 @@ fi
 # binaries (doc_chinese/work_tmp/README.md, "参考二进制必须带着它的 .metallib"); met here for real on
 # 2026-09-24 when a fresh worktree was prepared for the pre-merge A/B. Refuse instead of producing a
 # leg that would be evidence about the CPU path.
+# The list is the LIBRARIES THE ENGINES LOAD, which is where this gate went stale once already:
+# metal_kernel_fusion M3 merged the estimator's, the equalizer's and the demapper's three libraries into
+# ONE (lib/phy/metal/ocudu_lane.metallib, built by the target ocudu_metallib_lane), and this check kept
+# asking for the three files that no longer exist - so it refused every gpu leg (measured 2026-10-07,
+# right before the AMC pair, with the merged library sitting right there). One library per STAGE is the
+# invariant to keep: the DFT still owns its own, and the whole DFT-grid -> LLR segment shares the lane's.
 if [ "$MODE" != "cpu" ]; then
   missing=()
   for k in lib/phy/generic_functions/metal/ocudu_dft.metallib \
-           lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_mmse.metallib \
-           lib/phy/upper/channel_processors/metal/ocudu_equalizer.metallib \
-           lib/phy/upper/channel_modulation/metal/ocudu_demod.metallib; do
+           lib/phy/metal/ocudu_lane.metallib; do
     [ -f "$ROOT/$k" ] || missing+=("$k")
   done
   if [ ${#missing[@]} -ne 0 ]; then
     echo "REFUSING to run a $MODE leg: ${#missing[@]} device kernel(s) missing, so the engines would fall" >&2
     echo "back to the host paths SILENTLY while the leg still called itself $MODE:" >&2
     for m in "${missing[@]}"; do echo "  $m" >&2; done
-    echo "  Fix: cmake --build build --target ocudu_metallib_dft ocudu_metallib_demod ocudu_metallib_equalizer ocudu_mmse_metallib" >&2
+    echo "  Fix: cmake --build build --target ocudu_metallib_dft ocudu_metallib_lane" >&2
     exit 2
   fi
 fi

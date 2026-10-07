@@ -10185,7 +10185,9 @@ sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
 （引擎在 configure 时把那些绝对路径烧进二进制，再依次找"可执行文件旁"和 cwd）。
 ⇒ 缺了它们，引擎**不加载任何内核、静默走宿主路径，而腿仍然自称 `mode=gpu`**（README 早已为"拷贝参考二进制"记过这条）。
 **处置**：`run_leg.sh` 现在在 `MODE != cpu` 时**预检四个内核**（dft / mmse / equalizer / demod），缺任何一个就
-**拒绝启动**并打印补建命令（`ocudu_metallib_dft ocudu_metallib_demod ocudu_metallib_equalizer ocudu_mmse_metallib`）。
+**拒绝启动**并打印补建命令（写这条时是 `ocudu_metallib_dft ocudu_metallib_demod ocudu_metallib_equalizer ocudu_mmse_metallib`；
+★ 2026-10-07 metal_kernel_fusion M3 把后三个合并成 `lib/phy/metal/ocudu_lane.metallib`（target `ocudu_metallib_lane`）后，
+这道闸门**还在按旧名字查** ⇒ 每条 gpu 腿都被拒 ✗ —— 已随 M3 改为查 `ocudu_metallib_dft` + `ocudu_metallib_lane` 两个文件 ✓）。
 **顺带的读数**：这四份内核在 HEAD 与合并前**尺寸逐个相同** ⇒ 合并没有改动设备内核，A-5 因此少一个混淆变量。
 
 > ⚠ **同一天的自我更正（同 §5.9.121 ⑥/§5.9.122 的纪律）**：上面这条"worktree 里一个内核都没有"**是我的搜索路径错误**——

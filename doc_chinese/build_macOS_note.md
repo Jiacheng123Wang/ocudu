@@ -450,7 +450,7 @@ cmake --build build-min -j"$(sysctl -n hw.ncpu)"
 
 ```bash
 cmake --build build --target gnb                       # gNB 可执行文件
-cmake --build build --target ocudu_mmse_metallib       # 只重建 MMSE 的 .metallib
+cmake --build build --target ocudu_metallib_lane       # 重建 lane 的 .metallib（CE+EQ+DEMOD 一个库，M3 之后）
 cmake --build build --target ocudu_channel_estimator_metal
 cmake --build build --target port_channel_estimator_metal_mmse_unit_test
 ```
@@ -558,7 +558,7 @@ sudo ifconfig lo0 alias 127.0.0.101 up
 ```bash
 ls -l build/apps/gnb/gnb                                                # gNB 主程序
 # .metallib 生成在【源码树】内（不是 build 目录）：
-ls -l lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_mmse.metallib
+ls -l lib/phy/metal/ocudu_lane.metallib
 ls -l lib/phy/upper/channel_coding/ldpc/metal/*.metallib                # Metal LDPC kernels
 ls -l build/lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_unit_test
 git status --short | grep -c metallib                                   # 应为 0：.metallib 已被忽略

@@ -42,14 +42,19 @@ ROOT=/Users/jiachengwang/dev/ocudu
 GLOB=${5:-$ROOT/doc_chinese/work_tmp/corpus/*.bin}
 # The pairing marker: a line "[<marker>] ..." the reference build must NOT print and the new one must.
 MARKER=${AB_MARKER:-epoch_impl}
-# The KERNELS are a separate artifact and the engine loads them from the absolute source-tree path
-# baked in at configure time (OCUDU_MMSE_METALLIB_PATH; there is no environment override yet), so a
-# binary and its .metallib can be paired wrongly - which is the trap this port has hit more than once.
-# A and B therefore name their own metallib, and the script swaps them in AROUND each side's runs and
-# puts the original back on exit. Set both or neither.
+# The KERNELS are a separate artifact and the engines load them from the absolute source-tree paths
+# baked in at configure time (OCUDU_LANE_METALLIB_PATH for the whole estimator+equalizer+demapper
+# segment since metal_kernel_fusion M3; there is no environment override yet), so a binary and its
+# .metallib can be paired wrongly - which is the trap this port has hit more than once. A and B
+# therefore name their own metallib, and the script swaps them in AROUND each side's runs and puts
+# the original back on exit. Set both or neither.
+#
+# ONE library now, not three: the estimator's, the equalizer's and the demapper's kernels all travel
+# in the lane's (lib/phy/metal/ocudu_lane.metallib). This line named the estimator's own file, which
+# stopped existing with that merge - so the swap would have failed the "missing metallib" guard.
 ML_A=${AB_METALLIB_A:-}
 ML_B=${AB_METALLIB_B:-}
-MMSE_ML=$ROOT/lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_mmse.metallib
+MMSE_ML=$ROOT/lib/phy/metal/ocudu_lane.metallib
 for b in "$BIN_A" "$BIN_B"; do
   [ -x "$b" ] || { echo "missing $b (build it first)" >&2; exit 2; }
 done

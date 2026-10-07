@@ -34,7 +34,7 @@
 ///
 ///   clang++ -std=c++20 -fobjc-arc -framework Metal -framework Foundation -O2 \
 ///           doc_chinese/phy_latency/wip/ce_kernel_cost.mm -o /tmp/ce_kernel_cost
-///   /tmp/ce_kernel_cost [metallib-path]     # default: the checkout's ocudu_mmse.metallib
+///   /tmp/ce_kernel_cost [metallib-path]     # default: the checkout's ocudu_lane.metallib (CE+EQ+DEMOD)
 ///
 /// WHAT IT REPORTS: GPU microseconds per dispatch (the command buffer's own timestamps, over 200
 /// dispatches in ONE buffer, so the number is the dispatch and not the queue) for each kernel at the
@@ -215,7 +215,7 @@ int main(int argc, char** argv)
 {
   @autoreleasepool {
     NSString* lib_path = (argc > 1) ? @(argv[1])
-                                    : @"lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_mmse.metallib";
+                                    : @"lib/phy/metal/ocudu_lane.metallib";
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     if (device == nil) {
       std::printf("FAIL: no Metal device\n");
@@ -244,12 +244,12 @@ int main(int argc, char** argv)
     id<MTLComputePipelineState> p_corr_rhp   = pipeline("mmse_corr_r_hp");
     id<MTLComputePipelineState> p_corr_merged = pipeline("mmse_corr_a_rhp");
     id<MTLComputePipelineState> p_reformat   = pipeline("mmse_reformat");
-    // The equalizer and the demapper live in their own libraries; they are OPTIONAL here (a checkout
-    // that has not built them still gets the CE table).
-    id<MTLLibrary> eq_lib = [device newLibraryWithFile:@"lib/phy/upper/channel_processors/metal/ocudu_equalizer.metallib"
-                                                 error:&err];
-    id<MTLLibrary> dm_lib = [device newLibraryWithFile:@"lib/phy/upper/channel_modulation/metal/ocudu_demod.metallib"
-                                                 error:&err];
+    // The equalizer and the demapper are OPTIONAL here (a checkout that has not built them still gets
+    // the CE table). Since metal_kernel_fusion M3 they travel in the SAME library as the estimator's
+    // kernels - lib/phy/metal/ocudu_lane.metallib - so the three loads below name one file; opening it
+    // three times is harmless and keeps this probe's structure unchanged.
+    id<MTLLibrary> eq_lib = [device newLibraryWithFile:@"lib/phy/metal/ocudu_lane.metallib" error:&err];
+    id<MTLLibrary> dm_lib = [device newLibraryWithFile:@"lib/phy/metal/ocudu_lane.metallib" error:&err];
     const auto from_lib = [&](id<MTLLibrary> l, const char* name) -> id<MTLComputePipelineState> {
       if (l == nil) {
         return nil;
