@@ -80,6 +80,12 @@ struct ce_site_diag_t {
   /// leg and a split leg are indistinguishable (1.40/1.40 either way), so the leg could not say whether
   /// the knob it was flown for had done anything at all.
   std::atomic<uint64_t> corr_merged{0};
+  /// CE fusion (2026-10-07): dispatches that estimated the CFO AND applied it in one go
+  /// (OCUDU_CE_CFO_FUSED). Counted apart because pilots_cfo is incremented by BOTH routes - the fused
+  /// dispatch applies the CFO, so it must still answer that site's question - and without a field of its
+  /// own a fused leg and a split leg read identically, which is exactly how corr_merged earned its own
+  /// counter (see its note above).
+  std::atomic<uint64_t> cfo_fused{0};
 };
 
 ce_site_diag_t& ce_site_diag()
@@ -91,16 +97,17 @@ ce_site_diag_t& ce_site_diag()
 
 /// The site names as the report prints them, in report order.
 static const char* ce_site_names[] = {"reformat", "pilots_lse", "pilots_cfo", "corr_a", "corr_rhp", "scatter",
-                                      "merged"};
+                                      "merged", "cfo_fused"};
 
 void ce_site_report()
 {
   const ce_site_diag_t& d = ce_site_diag();
   const std::atomic<uint64_t>* const sites[] = {&d.reformat, &d.pilots_lse, &d.pilots_cfo,
-                                                &d.corr_a,   &d.corr_rhp,   &d.scatter,  &d.corr_merged};
+                                                &d.corr_a,   &d.corr_rhp,   &d.scatter,  &d.corr_merged,
+                                                &d.cfo_fused};
   uint64_t total = 0;
   std::fprintf(stderr, "[metal_stats] ce_sites");
-  for (unsigned i = 0; i != 7; ++i) {
+  for (unsigned i = 0; i != (sizeof(sites) / sizeof(sites[0])); ++i) {
     const uint64_t n = sites[i]->load(std::memory_order_relaxed);
     total += n;
     std::fprintf(stderr, " %s=%llu", ce_site_names[i], static_cast<unsigned long long>(n));
@@ -526,6 +533,10 @@ struct mmse_engine_impl {
   id<MTLComputePipelineState>    pilots_lse_pipe   = nil;
   id<MTLComputePipelineState>    pilots_cfo_pipe   = nil;
   id<MTLComputePipelineState>    pilots_apply_pipe = nil;
+  /// CE fusion (2026-10-07): mmse_pilots_cfo AND mmse_pilots_apply_cfo in ONE dispatch. Optional - a
+  /// metallib without it keeps the two, and the pair is the only fusion in the estimator whose
+  /// reduction is reproduced verbatim rather than restructured.
+  id<MTLComputePipelineState>    pilots_cfo_apply_pipe = nil;
   // S-7f-5w: the hop's noise variance (frequency smoothing + the classical estimator), optional on
   // its own so that a metallib without them keeps the host's estimate_sigma2().
   id<MTLComputePipelineState>    pilots_smooth_pipe = nil;
@@ -661,6 +672,42 @@ struct mmse_engine_impl {
     return (v == 0u) ? 1u : ((v > 64u) ? 64u : v);
   }
   static unsigned corr_repeat() { return stage_repeat("OCUDU_CE_CORR_REPEAT"); }
+  /// \brief Whether the CFO estimate and its application are ONE dispatch (CE fusion, 2026-10-07).
+  ///
+  /// They are adjacent in the extraction encoder and the second needs exactly one scalar the first
+  /// produces, so the boundary costs a whole dispatch to order a single float. The fused kernel
+  /// reproduces the reduction VERBATIM - same threadgroup array, same stride, same 8-stage tree, same
+  /// thread-0 atan2 - so the accumulation order that this pair is famous for perturbing does not move;
+  /// only the apply phase's 2-D grid becomes a flat loop over the same pairs. ON by default with
+  /// `OCUDU_CE_CFO_FUSED=0` as the retreat, which is also the control arm of its A/B.
+  ///
+  /// \note A metal library WITHOUT the fused entry point keeps the two dispatches: the check is
+  ///       `pipe != nil`, so a stale metallib degrades to the delivery behaviour instead of failing.
+  static bool cfo_fused_enabled()
+  {
+    static const bool value = []() {
+      const char* env = std::getenv("OCUDU_CE_CFO_FUSED");
+      return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+    }();
+    return value;
+  }
+  /// Whether the fused entry point is actually USABLE, printed once so a leg cannot be read without
+  /// knowing which of the two routes ran. An arm whose coverage is unstated reads as "the knob did
+  /// nothing" when the truth is "the metallib did not carry it" - the failure this workstream keeps
+  /// writing down (see the fence-ablation counter's note).
+  template <typename T>
+  static bool cfo_fused_available(T* pipe)
+  {
+    static const bool reported = [pipe]() {
+      std::fprintf(stderr,
+                   "[ce_cfo_fused] OCUDU_CE_CFO_FUSED: %s (metallib entry point %s)\n",
+                   cfo_fused_enabled() ? "ON" : "OFF (control arm)",
+                   (pipe != nil) ? "present" : "ABSENT - the two dispatches are used");
+      return true;
+    }();
+    (void)reported;
+    return pipe != nullptr;
+  }
   /// \brief Whether A and R_hp are built in ONE dispatch (dev doc 6.174; OCUDU_CE_CORR_MERGED=0 retreats).
   ///
   /// ON BY DEFAULT since 2026-10-07 (metal_kernel_fusion, user ruling), with `=0` as the control arm -
@@ -2227,6 +2274,14 @@ bool mmse_engine::init(const char* metallib_path)
       e->pilots_apply_pipe = [e->device newComputePipelineStateWithFunction:apply_fn options:MTLPipelineOptionNone
                                                                  reflection:nil error:&err];
     }
+    // CE fusion (2026-10-07): the cfo+apply pair in one dispatch, when this metallib carries it.
+    id<MTLFunction> cfo_apply_fn = [e->library newFunctionWithName:@"mmse_pilots_cfo_apply"];
+    if (cfo_apply_fn != nil) {
+      e->pilots_cfo_apply_pipe = [e->device newComputePipelineStateWithFunction:cfo_apply_fn
+                                                                       options:MTLPipelineOptionNone
+                                                                    reflection:nil
+                                                                         error:&err];
+    }
     // Glue #2 is optional on its own: a metallib that carries K0-a but not the scatter keeps the
     // host staging, and the estimator asks through scatter_available() rather than assuming.
     id<MTLFunction> scatter_fn = [e->library newFunctionWithName:@"mmse_pilots_scatter_y"];
@@ -2537,29 +2592,60 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
         threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
   }
 
-  [enc setComputePipelineState:e->pilots_cfo_pipe];
-  [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:0];
-  [enc setBuffer:cfo_buf.buf offset:cfo_buf.offset atIndex:1];
-  [enc setBytes:&p length:sizeof(p) atIndex:2];
   // The previous hop's CFO slot, so the kernel carries a value forward itself when this hop has
   // nothing to estimate (see pilots_stage::cfo_prev). Null means the caller still carries it on the
   // host, which the kernel then reproduces by writing 0 - see the branch's note.
   mmse_engine_impl::mapped cfo_prev_buf =
       (s.cfo_prev != nullptr) ? e->wrap(s.cfo_prev, sizeof(float)) : mmse_engine_impl::mapped{};
-  [enc setBuffer:cfo_prev_buf.buf offset:cfo_prev_buf.offset atIndex:3];
-  // 256 = mmse_cfo_tg_size in ocudu_mmse_pilots.metal: the reduction is a threadgroup tree now, so the
-  // dispatch has to match the array it combines (it used to be 32 with only thread 0 working).
-  for (unsigned rep = 0; rep != mmse_engine_impl::cfo_repeat(); ++rep) {
-    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-  }
 
-  [enc setComputePipelineState:e->pilots_apply_pipe];
-  [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:0];
-  [enc setBuffer:cfo_buf.buf offset:cfo_buf.offset atIndex:1];
-  [enc setBytes:&p length:sizeof(p) atIndex:2];
-  ce_site_diag().pilots_cfo.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
-  [enc dispatchThreads:MTLSizeMake(s.nof_layers * s.nof_pilots, s.nof_dmrs_symb, 1)
-      threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+  // CE fusion (2026-10-07): the CFO estimate and its application in ONE dispatch. The pair is adjacent
+  // and the consumer needs one scalar from the producer, so the boundary costs a full dispatch to order
+  // a float. What this removes is that boundary AND the inter-dispatch ordering question with it: a
+  // threadgroup barrier inside one dispatch orders both the store and the threads that must see it,
+  // where an inter-dispatch MTLBarrierScopeBuffers is recorded as not delivering that write between two
+  // dispatches of one encoder (see port_channel_estimator_metal_mmse_impl.cpp:2211-2215).
+  //
+  // The reduction is reproduced verbatim, so the published CFO cannot move - which matters because this
+  // pair's own history is that changing how that sum COMPILES moved it by 1 ulp and flipped published
+  // bf16 values (see the note above mmse_pilots_cfo in the shader).
+  const bool cfo_fused = mmse_engine_impl::cfo_fused_available(e->pilots_cfo_apply_pipe) &&
+                         mmse_engine_impl::cfo_fused_enabled();
+  if (cfo_fused) {
+    [enc setComputePipelineState:e->pilots_cfo_apply_pipe];
+    [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:0];
+    [enc setBuffer:cfo_buf.buf offset:cfo_buf.offset atIndex:1];
+    [enc setBytes:&p length:sizeof(p) atIndex:2];
+    [enc setBuffer:cfo_prev_buf.buf offset:cfo_prev_buf.offset atIndex:3];
+    // 256 = mmse_cfo_tg_size: the tree is sized by it and every thread publishes one partial, so the
+    // thread count is part of the arithmetic. The repeat knobs multiply DISPATCHES for cost probes and
+    // are meaningless for a fused pair, so only the un-repeated form is offered here.
+    //
+    // ONE count, not two: this site's meaning is "the dispatch that applies the CFO to the pilots", and
+    // after the fusion that is this dispatch. Counting it twice would make the census say the fusion
+    // removed nothing.
+    ce_site_diag().pilots_cfo.fetch_add(1, std::memory_order_relaxed);
+    ce_site_diag().cfo_fused.fetch_add(1, std::memory_order_relaxed);
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  } else {
+    [enc setComputePipelineState:e->pilots_cfo_pipe];
+    [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:0];
+    [enc setBuffer:cfo_buf.buf offset:cfo_buf.offset atIndex:1];
+    [enc setBytes:&p length:sizeof(p) atIndex:2];
+    [enc setBuffer:cfo_prev_buf.buf offset:cfo_prev_buf.offset atIndex:3];
+    // 256 = mmse_cfo_tg_size in ocudu_mmse_pilots.metal: the reduction is a threadgroup tree now, so the
+    // dispatch has to match the array it combines (it used to be 32 with only thread 0 working).
+    for (unsigned rep = 0; rep != mmse_engine_impl::cfo_repeat(); ++rep) {
+      [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    }
+
+    [enc setComputePipelineState:e->pilots_apply_pipe];
+    [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:0];
+    [enc setBuffer:cfo_buf.buf offset:cfo_buf.offset atIndex:1];
+    [enc setBytes:&p length:sizeof(p) atIndex:2];
+    ce_site_diag().pilots_cfo.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
+    [enc dispatchThreads:MTLSizeMake(s.nof_layers * s.nof_pilots, s.nof_dmrs_symb, 1)
+        threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+  }
 
   // S-7f-5w: the hop's noise variance, from the pilots this buffer just produced. It is encoded HERE
   // (and not in a command buffer of its own) because this one is already waited for, and because the

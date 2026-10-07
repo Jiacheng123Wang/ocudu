@@ -346,6 +346,113 @@ kernel void mmse_pilots_apply_cfo(device float*                lse    [[buffer(0
     lse[base + 1] = v.x * ph.y + v.y * ph.x;
 }
 
+/// \brief \c mmse_pilots_cfo AND \c mmse_pilots_apply_cfo in ONE dispatch (CE fusion, 2026-10-07).
+///
+/// WHY THIS PAIR, AND WHY IT IS SAFE. They are adjacent in the extraction encoder and the second one
+/// needs exactly one scalar the first one produces, so the intervening dispatch boundary costs a full
+/// dispatch to order a single float. The dependency analysis ranked this the best NEW fusion in the
+/// estimator: both kernels live in this file (so the per-file math mode is shared and unchanged), the
+/// consumer is element-local with a fixed expression per element, and - the part that decides it - the
+/// reduction is reproduced VERBATIM:
+///
+///   * \c red[mmse_cfo_tg_size], the same \c i += mmse_cfo_tg_size stride, the same group/layer loops,
+///     the same 8-stage tree and the same thread-0 atan2/average. The accumulation ORDER does not move,
+///     which is the property the pair is otherwise famous for breaking (see the note above
+///     mmse_pilots_cfo: changing how that sum COMPILES moved the CFO by 1 ulp and flipped published bf16
+///     values, which is why the epoch span is a parameter and why this file is strict).
+///   * the apply phase is the old 2-D grid turned into a flat loop over the same (layer*pilot, symbol)
+///     pairs, each thread doing the same cos/sin and the same complex multiply on the same element.
+///
+/// WHY THE THREADGROUP IS 256 AND WHY IT MUST STAY 256. \c mmse_pilots_cfo's tree is sized
+/// \c mmse_cfo_tg_size and every thread publishes one partial, so the thread count is part of the
+/// arithmetic, not a performance choice. The apply loop strides by the same constant.
+///
+/// THE BARRIER IS THE FUSION'S WHOLE POINT, and it is a stronger primitive than what it replaces: an
+/// inter-dispatch \c MTLBarrierScopeBuffers only orders memory, while this platform records that such a
+/// barrier "does not deliver that write" between two dispatches of one encoder (see
+/// port_channel_estimator_metal_mmse_impl.cpp:2211-2215). A threadgroup barrier inside ONE dispatch
+/// orders both the memory and the threads that must observe it.
+///
+/// \note \c cfo[0] is still WRITTEN, not merely kept in a register: mmse_pilots_sigma2 (pilots.metal),
+///       mmse_noise (reformat.metal, via cfo_dev) and the host all read this slot.
+kernel void mmse_pilots_cfo_apply(device float*                lse    [[buffer(0)]],
+                                  device float*                cfo    [[buffer(1)]], // [1]: the CFO
+                                  constant mmse_pilots_params& p      [[buffer(2)]],
+                                  device const float*          prev   [[buffer(3)]], // previous hop's slot
+                                  uint                         tid    [[thread_position_in_threadgroup]])
+{
+    threadgroup float2 red[mmse_cfo_tg_size];
+
+    // The carry branch is mmse_pilots_cfo's, verbatim - including the unconditional write - and it
+    // RETURNS: a hop with fewer than two DM-RS symbols has no phase ramp to measure, and the host's
+    // apply pass on such a hop rotates by whatever the slot holds, so there is nothing to fuse here.
+    if (p.nof_dmrs_symb < 2) {
+        if (tid == 0) {
+            cfo[0] = (prev != nullptr) ? prev[0] : 0.0F;
+        }
+        return;
+    }
+
+    const uint  nof_groups = (p.nof_layers + 1u) / 2u;
+    const ulong sym0_base  = 0;
+    const ulong sym1_base  = static_cast<ulong>(p.nof_layers) * p.nof_pilots * 2;
+    const float dt         = p.epoch_span;
+
+    float cfo_sum = 0.0F;
+    for (uint g = 0; g != nof_groups; ++g) {
+        const uint l0 = 2 * g;
+        const uint l1 = min(2 * g + 2u, p.nof_layers);
+
+        float2 acc = float2(0.0F, 0.0F);
+        for (uint l = l0; l != l1; ++l) {
+            const ulong lb = static_cast<ulong>(l) * p.nof_pilots * 2;
+            for (uint i = tid; i < p.nof_pilots; i += mmse_cfo_tg_size) {
+                const float2 a = float2(lse[sym1_base + lb + 2 * i], lse[sym1_base + lb + 2 * i + 1]);
+                const float2 b = float2(lse[sym0_base + lb + 2 * i], lse[sym0_base + lb + 2 * i + 1]);
+                acc += float2(a.x * b.x + a.y * b.y, a.y * b.x - a.x * b.y);
+            }
+        }
+
+        red[tid] = acc;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint s = mmse_cfo_tg_size / 2; s != 0u; s >>= 1) {
+            if (tid < s) {
+                red[tid] += red[tid + s];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        if (tid == 0) {
+            const float phase = atan2(red[0].y, red[0].x);
+            cfo_sum += (dt != 0.0F) ? (phase / 6.283185307179586F / dt) : 0.0F;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) {
+        cfo[0] = cfo_sum / static_cast<float>(nof_groups);
+    }
+
+    // mem_device, not mem_threadgroup: cfo[0] is DEVICE memory, and every thread of the apply phase
+    // below reads it. This one barrier carries both halves of what the removed dispatch boundary used
+    // to provide - visibility of the store, and the ordering that says it has happened.
+    threadgroup_barrier(mem_flags::mem_device);
+
+    const float cfo_now = cfo[0];
+    const uint  nof_pairs = p.nof_layers * p.nof_pilots;
+    for (uint y = 0; y != p.nof_dmrs_symb; ++y) {
+        const float  epoch = ocudu_mmse_symbol_start_epoch(p.numerology, p.cp_extended, p.dmrs_symb[y]);
+        const float  theta = -6.283185307179586F * epoch * cfo_now;
+        const float2 ph    = float2(cos(theta), sin(theta));
+        for (uint x = tid; x < nof_pairs; x += mmse_cfo_tg_size) {
+            const ulong base = (static_cast<ulong>(y) * p.nof_layers * p.nof_pilots) * 2 + static_cast<ulong>(x) * 2;
+            const float2 v   = float2(lse[base], lse[base + 1]);
+            lse[base]     = v.x * ph.x - v.y * ph.y;
+            lse[base + 1] = v.x * ph.y + v.y * ph.x;
+        }
+        // The next symbol's phasor differs, so no thread may still be reading for the previous y.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
 /// ---- Glue #2 (S-7f-5u): the device writes the engine's pilot vectors ---------------------------
 ///
 /// The engine's weights are applied to a BLOCK layout (y) that groups the hop's pilots by block,
