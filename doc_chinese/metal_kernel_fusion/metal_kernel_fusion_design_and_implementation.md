@@ -1425,6 +1425,7 @@ RANK 4 的价值同样**只在结构** ✓）；★ 或先测**严格模式下 K
 | 探针 OFF ✓ | `probes_off_syntax_check.sh build` ✓ | **114 编译 × 3 键全 OK** ✓ |
 | 全量构建 ✓ | 交付默认 ✓ | **0 error** ✓ |
 | ★ **Linux 真机** ✓ | ★ **全新 `build_ci`** ✓ = **CI 范围**（`Release` + `BUILD_TESTING=On` ✓、默认 ⇒ 探针 OFF ✓）| ★ **RC=0 / 0 error** ✓、★ **`0 failed out of 8250`** ✓（84.7 s ✓、读数在 `wip/logs/linux_verify_rank4_2026-10-07.txt` ✓）|
+| ★ **Linux 真机（转默认后复验）** ✓ | 同上 ✓、跑在 **`a1e67503bd`** ✓ | ★ **RC=0 / 0 error** ✓、★ **`0 failed out of 8250`** ✓（84.0 s ✓）|
 | ★ **加宽** ✓（腿脏之后补的 ✓）| `corpus_sparse` **25 PRB** ✓ / `corpus_strict` **25 PRB** ✓ / `corpus_narrow` **1 PRB** ✓ / `corpus_narrow_syn` **1 PRB** ✓ | ★ **全部 0 差异** ✓ ⇒ ★ **合计 90 个 capture × 4 dump = 0 差异** ✓（几何从 1 PRB 到 25 PRB ✓，覆盖比空口更宽 ✓）|
 | 库 ✓ | —— | **37 个 kernel** ✓（新增 `mmse_pilots_sigma2_epre` ✓）|
 
