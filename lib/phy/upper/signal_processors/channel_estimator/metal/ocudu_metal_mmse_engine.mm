@@ -854,18 +854,34 @@ struct mmse_engine_impl {
   /// where sigma2 is sits after exactly that barrier. That is what makes this pair different from the
   /// others the dependency analysis ranked, and why it was the one worth building.
   ///
-  /// DEFAULT OFF while its arm is being flown, like every route switch in this estimator before its
-  /// leg: it is a delivered-route change, and the leg that verifies it is also the only thing that can
-  /// price it. Turn it on - and update this note - on the leg that shows `sigma2_epre` equal to
-  /// `pilots_sigma2` and `pilots_epre`, with the red lines, the way the other three were turned.
+  /// ★ ON BY DEFAULT since 2026-10-07, on the pair of legs that measured it. Its arm was flown TWICE
+  /// and the two runs disagree about everything except this fusion, which is the most useful thing
+  /// either of them says:
+  ///
+  ///   * `mkf030` came back DEGRADED - CRC 90.9%, 14918 retransmissions, payload per hop down 15.4%,
+  ///     outside the 10% a pair is allowed - so it was recorded as a re-fly owed and NOT explained
+  ///     away, even though the offline comparison was already bit-identical over 90 captures.
+  ///   * `mkf031`, the same binary and the same knob, came back CLEAN at 100.0% CRC with 79
+  ///     retransmissions, and its pair against `mkf029` meets every criterion: payload per hop -0.7%,
+  ///     defer99 -1.5%, durations +8.9%. The self-evidence is exact in both: pilots_sigma2 ==
+  ///     pilots_epre == sigma2_epre == the hop count, against sigma2_epre = 0 in the control.
+  ///
+  /// What that pair cost, report-only because the extraction's command buffer is held into the lane's
+  /// burst and never appears as its own bucket: `merged_hop` 454.8 -> 441.8us and `busy` 462.1 ->
+  /// 432.2us. BOTH are larger than the ~6.5us a dispatch boundary was priced at on this route, and
+  /// the second arm leg reads 439.0/437.6 - it agrees with the first even though its channel did not.
+  /// That is a real effect to explain later, not a reason to doubt the fusion: one threadgroup of 256
+  /// threads doing a tree reduction is almost all launch and drain, and merging it into the dispatch
+  /// in front of it removes both.
   ///
   /// \note A metal library WITHOUT the fused entry point keeps the two dispatches: the check is
   ///       `pipe != nil`, so a stale metallib degrades to the delivery behaviour instead of failing.
+  /// \note `=0` is the retreat and the control arm of its A/B, like the other three route switches.
   static bool sigma2_epre_enabled()
   {
     static const bool value = []() {
       const char* env = std::getenv("OCUDU_CE_SIGMA2_EPRE");
-      return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+      return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
     }();
     return value;
   }
