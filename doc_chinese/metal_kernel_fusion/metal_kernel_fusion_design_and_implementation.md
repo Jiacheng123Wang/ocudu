@@ -1209,6 +1209,13 @@ merged - corr_pair                  # 该跳的相关派发数（两种路线都
 | 单测 ✓ | —— | **5/5 PASS** ✓ |
 | 探针 OFF ✓ | `probes_off_syntax_check.sh build` ✓ | **114 编译 × 3 键全 OK** ✓ |
 | 全量构建 ✓ | 交付默认 ✓ | **0 error** ✓ |
+| ★ **全新构建（CI 范围）** ✓ | 探针 OFF + `BUILD_TESTING=On` ✓、**全新 configure** ✓ | ★ **0 error** ✓（`RC=0` ✓）|
+| ★ **库的可复现性** ✓ | 两种配置各自 link `ocudu_lane.metallib` ✓ | ★ **md5 完全相同** ✓（`9153a954…` ✓、**36 kernel** ✓）|
+
+★ **为什么单列"库的可复现性"** ✓：`ocudu_add_metallib` 的 `OUTPUT` 是**源码树里的路径** ✓
+（`lib/phy/metal/CMakeLists.txt:40` ✓）⇒ ★ **两个构建目录共用同一个 `ocudu_lane.metallib`** ✗✗ ——
+即**任何一个构建目录重编 Metal，都在改交付物** ✓。已实测两配置产物**逐字节相同** ✓，
+但这是**必须记下来的形状** ✓：★ **腿之前若在别的目录里编过 Metal，要重新核对这个库** ✓。
 
 ★ **对照臂显式写 `=0`** ✓；两臂**都带 `OCUDU_UL_REPLAY_NO_EVM=1`** ✓。
 
