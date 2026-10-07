@@ -1133,16 +1133,38 @@ lane 的每条 CB 上只编了两道等待 ✓（`burst_ensure_open()` ✓）：
 * 唯一的异常 ✓：mkf021 的**设备中位数 373.4 µs** ✓（其余三条 221–223 ✓），而它的**均值 246.2 正常** ✓
   ⇒ 该腿设备分布的形状变了（双峰？✓）⇒ **记下** ✓，引用"设备中位数"时避开这一条 ✓。
 
-**③ 下一步** ✓（命令已按 ① 改正 ✓）：并发 1 那条腿**还没飞** ✓ ——
+**③ 第二处我自己的错 ✗：选项路径少了一层** ✓（★ **同样是"被响亮的拒绝"接住的** ✓，
+没有浪费电台 ✓ —— `run_leg.sh` 的 **dry run** 在起飞前就把它挡下了 ✓）：
+先写 `--expert_execution.max_pusch_and_srs_concurrency` ✗ ⇒ gNB 报
+`The following argument was not expected` ✓。**正确的路径是三层** ✓：
+
+```
+--expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=1
+      └──────┬──────┘ └──┬──┘ └──┬───┘ └──────────────┬──────────────┘
+        expert_execution  threads  upper_phy        选项本体
+```
+（出处 ✓：`du_low_config_cli11_schema.cpp` 里 `configure_cli11_upper_phy_threads_args()` 挂在
+`threads → upper_phy` 之下 ✓；**查法** ✓：`./build/apps/gnb/gnb --help expert_execution.threads.upper_phy` ✓，
+比猜快 ✓。另：**配置里本来就写着 `max_pusch_and_srs_concurrency: 2`** ✓ ——
+所以 `[ul_lane_exec]` 打的是 "configured" 而不是 "auto-derived" ✓，而 **CLI 覆盖 YAML** ✓。）
+
+**离线自验** ✓（dry run + 真起一次 ✓，都不用电台 ✓）：
+`--expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=1` ⇒ dry run **exit 0** ✓、
+实起时打印 `[ul_lane_exec] PUSCH/SRS concurrency = 1 … a serialising STRAND: ONE PUSCH hop at a time` ✓✓
+（对照：两层那个路径 dry run **exit 109 / not expected** ✓）。
+
+**③ 下一步** ✓（命令已按 ① 与本节改正 ✓）：并发 1 那条腿**还没飞** ✓ ——
 
 ```bash
 cd /Users/jiachengwang/dev/ocudu
 export LEG_CFG=$PWD/doc_chinese/macos_thread_priority/wip/gnb_pinned_mcs13.yml
 export LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs
 # ★ gNB 选项走 EXTRA_KNOBS（run_leg.sh 按前缀分流到 argv），不要当位置参数 ✗
-EXTRA_KNOBS="--expert_execution.max_pusch_and_srs_concurrency=1" \
+# ★ 路径是三层的：expert_execution.threads.upper_phy.<option>（少一层会被 dry run 拒绝 ✓）
+EXTRA_KNOBS="--expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=1" \
 sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh mkf022-m1-conc1 dual quiet gpu
 ```
+（`mkf022` 这个号**还没被占用** ✓ —— 被拒的那次没有产生任何日志文件 ✓。）
 **判读** ✓：先看 `gNB options` 那行**有没有它** ✓、再看 `[ul_lane_exec] PUSCH/SRS concurrency = 1` ✓
 （**这一步不能省** ✗ —— 本轮就是没读它 ✗）；然后比 `merged_hop`（456 µs ✓）：
 **减半 ⇒ 与并发 lane 争设备** ✓、**不动 ⇒ 排除争用** ✓，转查"一条 CB 里多个小 dispatch 的串行化" ✓。
