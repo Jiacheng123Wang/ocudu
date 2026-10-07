@@ -298,6 +298,9 @@ void channel_equalizer_metal::submit_batch_run(span<const group_symbol> run, con
 /// Only the modulations supports_fused_demapping() accepts ever reach this call.
 static unsigned mod_id_of(modulation_scheme mod)
 {
+  if (mod == modulation_scheme::QPSK) {
+    return 0u;
+  }
   return (mod == modulation_scheme::QAM64) ? 2u : 1u;
 }
 
@@ -305,20 +308,25 @@ bool channel_equalizer_metal::supports_fused_demapping(modulation_scheme mod,
                                                        unsigned         nof_ports,
                                                        unsigned         nof_layers) const
 {
-  // 16QAM, 64QAM and one layer are the fused kernel's scope (see ocudu_lane_fused.metal) and the
-  // kernel has to be in the shader library the engine loaded. Nothing else is a property of the
-  // symbol, so the answer is final: the caller uses it to decide whether the demapper is called.
+  // QPSK, 16QAM, 64QAM and one layer are the fused kernel's scope (see ocudu_lane_fused.metal) and
+  // the kernel has to be in the shader library the engine loaded. Nothing else is a property of the
+  // symbol, so the answer is final: the caller uses it to decide whether the demapper is called -
+  // PER HOP, so a leg whose link adaptation walks the MCS table fuses the hops of these three
+  // modulations and keeps the rest (256QAM, several layers) on the two-stage route.
   //
-  // WHY 64QAM IS IN SCOPE (it was not in M1.1's): the first air pair measured that the PUSCH runs
-  // MCS table 2, where the pinned "MCS 13" is 64QAM - so the 16QAM-only kernel covered 0.009% of the
-  // traffic and could not be judged at all. The demapper's own 64QAM branch is now copied into the
-  // fused kernel, which is the same "copy verbatim" rule the 16QAM one follows.
+  // WHY THE SCOPE GREW TWICE. 16QAM alone was M1.1's, on the belief that the judging legs were
+  // MCS 13 = 16QAM; the first air pair measured that the PUSCH runs MCS table 2, where index 13 is
+  // 64QAM, and the route covered 0.009% of the traffic. 64QAM then joined, and the AMC arm (the MCS
+  // pin removed) is what showed the remaining hole: the link adaptation walks QPSK at the cell edge,
+  // and every one of those hops fell back. Each addition is the demapper's own branch copied
+  // verbatim, under the same rule.
   //
   // The TOPOLOGY is deliberately not checked here (is_supported() is not a const interface member):
   // this backend is reached through the composite factory, which ANDs this answer with its own
   // routing decision - and run_fused() asserts is_supported() on the plan it resolves anyway.
   (void)nof_ports;
-  const bool mod_ok = (mod == modulation_scheme::QAM16) || (mod == modulation_scheme::QAM64);
+  const bool mod_ok = (mod == modulation_scheme::QPSK) || (mod == modulation_scheme::QAM16) ||
+                      (mod == modulation_scheme::QAM64);
   return mod_ok && (nof_layers == 1) && metal::equalizer_metal_engine::supports_fused();
 }
 
@@ -374,8 +382,8 @@ bool channel_equalizer_metal::run_fused(span<log_likelihood_ratio>       llrs,
   ocudu_assert(eq_noise_vars.size() == nof_re * nof_layers, "Invalid equalized noise variances size.");
   ocudu_assert(tx_scaling > 0, "Tx scaling factor must be positive.");
   // The destination must hold exactly what the kernel will write: one modulation order per resource
-  // element (4 bits for 16QAM, 6 for 64QAM - see llr_bytes_per_re() in the engine).
-  const unsigned bits_per_re = (mod_id == 2u) ? 6u : 4u;
+  // element (2 bits for QPSK, 4 for 16QAM, 6 for 64QAM - see llr_bytes_per_re() in the engine).
+  const unsigned bits_per_re = (mod_id == 0u) ? 2u : ((mod_id == 2u) ? 6u : 4u);
   ocudu_assert(llrs.size() == nof_re * bits_per_re, "Invalid soft bit destination size.");
 
   // The device slice of the estimates, exactly as run_equalize() picks it: the fused kernel reads the

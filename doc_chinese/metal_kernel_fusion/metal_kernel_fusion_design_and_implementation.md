@@ -442,6 +442,21 @@ LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs \
 | lane **之外** | **~760 µs**（61 %）| **CPU 的 FFT + 网格打包** ✓（`gpu` 模式下 DFT 默认走 CPU ✓，代码原话在 M0 memo ✓）；M0c：**把它搬上设备更差** ✗（+197 µs 跨度 ✓）| 这是**范围问题**（用户已排除 Metal FFT ✓）⇒ 若要碰，先与用户重开 ✓，并且**不是**照 M0c 那条路重做 ✗ |
 | lane **之内** | **~380 µs**（busy 480 里除内核/dispatch/host 编码之外 ✓）| 不是内核 ✓（M0 消去法 ✓）、不是 CB 数/栅栏 ✓（M0b ✓）；**四腿旁证：主体在"提交→完成"的等待里** ✓（本轮 memo ✓）| ★ **把 commit→start / start→end 的**中位数**打出来** ✓（Q9-B 目前只印最慢 8 个 ✗）⇒ 若中位也是排队 ⇒ **靶子是每条 hop 的 CB 数与串行依赖** ✓ |
 
+**AMC 腿的命令** ✓（`wip/gnb_amc.yml` ✓ = 钉住版去掉 `min/max_ue_mcs` ✓；★ **路线已默认开，
+所以对照臂要显式 `=0`** ✓）：
+
+```bash
+cd /Users/jiachengwang/dev/ocudu
+export LEG_CFG=$PWD/doc_chinese/metal_kernel_fusion/wip/gnb_amc.yml
+export LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs
+sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh mkf016-m1-amc-fused-off dual quiet gpu
+EXTRA_KNOBS="OCUDU_LANE_FUSE_EQDEMOD=0" \
+sudo -E bash doc_chinese/macos_thread_priority/wip/fly_leg.sh mkf017-m1-amc-fused-on dual quiet gpu
+```
+**判读** ✓：调制直方图（`PUSCH: rnti` 的 `mod=` ✓）→ `sites(y_fused / y_batch)` ✓（覆盖率拆分 ✓）
+→ CRC / `gaps` ✓（红线 ✓）→ 再看 `busy` / `ul_pipeline` ✓。
+**预期** ✓（kernel 现在三支都有 ✓）：**16QAM/64QAM/QPSK 的跳都融合** ✓，只剩 **256QAM 与多层**退回两步 ✓。
+
 **⇒ 建议的顺序** ✓（每步可停 ✓，一条腿一个变量 ✓）：
 1. **（零成本，本会话已完成 ✓）** 归属读数：`ocudu_metal_lane_probe.mm` 新增两条 **全样本**序列 ✓
    —— `commit -> start (Q9-B, the queue)` 与 `start -> end (Q9-B, the device)` ✓
@@ -454,6 +469,34 @@ LEG_LOGDIR=$PWD/doc_chinese/metal_kernel_fusion/wip/logs \
 4. **M2（折 CE）**：**前提要按 M0 的结论重写** ✓ —— 不是"`ch_wt` 那 36.8 µs 值不值" ✗，
    而是"**去掉 CE↔lane 的边界能不能动那 ~380 µs**" ✓；M2 的试点仍应是
    "只折权重计算 + 自己的旋钮 ✓"（§3 ✓）。**在 (1) 给出读数之前不做** ✗。
+
+### 2.15 ★ M1.6：把 **QPSK** 也补进融合 kernel（2026-10-07，**已实现并离线验证 ✓**，待 AMC 腿 ✓）
+
+**为什么** ✓：AMC 腿（把 MCS 钉住取消 ✓）里链路自适应会在**边缘走 QPSK** ✓；
+kernel 没有这一支时，那些跳**全部退回两步路线** ✗ ⇒ 覆盖率会在最需要的地方掉下去 ✓。
+这也是"覆盖面要跟着调度器实际给的调制走"的最后一块 ✓
+（剩下的 256QAM 与多层仍按 §2.12 的重开条件处理 ✓）。
+
+**改动** ✓（**照抄 demapper 的 QPSK 分支** ✓，与前两支同一纪律 ✓）：
+
+| 层 | 改动 |
+|---|---|
+| kernel ✓ | `MOD_QPSK = 0` ✓、`GAIN_QPSK = 2.82842708f` ✓、`if (mod == MOD_QPSK) { 2 个 LLR }` ✓ —— ★ **range limit 是 `24.0f` 而不是 QAM 的 `20.0f`** ✓（demapper 对两种星座的缩放不同 ✓），这一行最容易抄错 ✓ |
+| 引擎 ✓ | `llr_bytes_per_re()` 改成 `switch`（QPSK **2** / 16QAM 4 / 64QAM 6 ✓）；`enqueue_fused` 的第二道闸从"只放 1/2"改成"`mod <= 2`" ✓ |
+| 后端 ✓ | `supports_fused_demapping()` 接受 **QPSK/QAM16/QAM64** ✓；`mod_id_of()` 加 QPSK → 0 ✓；`run_fused()` 的 LLR 尺寸断言按调制算 ✓ |
+| 调用方 ✓ | **不改** ✓（它本来就是逐跳拿 `config.modulation` 去问 ✓）|
+| 测试 ✓ | `[fused]` 段从两调制改成**三调制各跑一遍** ✓（谓词：QPSK/16QAM/64QAM = 是 ✓、256QAM = 否 ✓、2 层 = 否 ✓）|
+
+**离线验证** ✓（**全部通过 ✓**）：
+1. `xcrun metal -c` **exit 0** ✓（9 344 B AIR ✓）；
+2. 单元测试 **QPSK / 16QAM / 64QAM 三支都与两步路线逐位一致** ✓（LLR 与 nv ✓、`eq` 不被写 ✓）⇒ **ALL OK** ✓；
+3. ★ **离线对拍用上了真正的 QPSK 语料** ✓✓ —— 原来的 27 个 capture **本来就是 QPSK** ✓
+   （前两轮之所以要"标注"是因为 kernel 当时只做 QAM ✓）⇒ 现在 **QPSK / 16QAM / 64QAM 三份语料
+   各 27 capture、四个 dump 全部 0/0/0/0** ✓；
+4. ★ **注意 A/B 的对照臂写法变了** ✓：路线默认开之后，对照必须是
+   `OCUDU_UL_REPLAY_NO_EVM=1 OCUDU_LANE_FUSE_EQDEMOD=0` ✓、臂是 `OCUDU_UL_REPLAY_NO_EVM=1` ✓
+   —— 第一次跑成"两边都默认开"⇒ 那是**自己跟自己比** ✗（工具不报错 ✓，只有读 `y_fused` 才看得出来 ✓）；
+5. probes-off **34 TU** ✓、全量构建绿 ✓、指纹重戳 ✓。
 
 ### 2.4 M1 的执行顺序（每步可停 ✓）
 
@@ -1012,6 +1055,19 @@ metallib **35 479 B 且含 `lane_grid_to_llr`** ✓。
 ⇒ 假失败（SEGFAULT/Failed ✗），**全量重编后 5/5 PASS** ✓（教训写进 §4 ✓）。
 **离线验证** ✓：`ctest` 5/5 ✓、**全链路对拍（CE+EQ+DEMAP 同一个库 ✓）两份语料 × 27 capture = 0/0/0/0** ✓、
 probes-off 34 TU ✓、全量 `cmake --build` 绿 ✓、build 树里旧路径字符串清零 ✓。
+
+### 2026-10-07 · ★ QPSK 补进融合 kernel：三种调制的覆盖率补齐 ✓（离线三份语料全 0/0/0/0 ✓）
+
+**用户裁决** ✓：先补 QPSK ✓，再飞 AMC ✓。**做了什么** ✓：kernel 加 `MOD_QPSK` 分支 ✓
+（照抄 demapper ✓，★ **range limit 24 ✓ 不是 20** ✓）、引擎/后端的 bits-per-RE 与谓词各放一支 ✓、
+单测改成三调制各跑一遍 ✓。**调用方一行没改** ✓（逐跳路由本来就是它做的 ✓）。
+
+**验证** ✓：`metal -c` exit 0 ✓；单测三支**逐位一致** ✓；**离线对拍三份语料 × 27 capture = 0/0/0/0** ✓
+—— 其中 **QPSK 那份是真正的原始语料** ✓（前两轮要"标注"是因为当时只做 QAM ✓）。
+**顺手记一个坑** ✓：路线默认开之后，`ab_dumps.sh` 的**对照臂必须写 `OCUDU_LANE_FUSE_EQDEMOD=0`** ✓；
+第一次两边都不带 ⇒ **融合 vs 融合** ✗，工具**不报错** ✓，只有读 `y_fused` 才看得出来 ✗。
+
+**⇒ 下一步** ✓：飞 **`mkf016`/`mkf017`（AMC 一对 ✓）**，读调制直方图 + `y_fused`/`y_batch` 覆盖率拆分 + CRC ✓。
 
 ## 6. 会话交接（**只在准备开新会话时**新建 ✗ 不是每段工作结束时）
 

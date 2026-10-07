@@ -1059,13 +1059,20 @@ static id<MTLComputePipelineState> eq_encode_batch_dispatch(id<MTLComputeCommand
 
 /// \brief Soft bits one resource element produces, i.e. the modulation order of a fused symbol.
 ///
-/// The fused kernel implements 16QAM and 64QAM (see ocudu_lane_fused.metal), and the two differ in
-/// exactly this: how many bytes of the caller's LLR slot one resource element fills. Named in ONE
-/// place so the run-bound check in the flush hook, the span the encoder maps and the kernel's own
-/// branch cannot drift apart.
+/// The fused kernel implements QPSK, 16QAM and 64QAM (see ocudu_lane_fused.metal), and the three
+/// differ in exactly this: how many bytes of the caller's LLR slot one resource element fills. Named
+/// in ONE place so the run-bound check in the flush hook, the span the encoder maps and the kernel's
+/// own branch cannot drift apart. The ids are the DEMAPPER ENGINE's (see mod_id_of()).
 static unsigned llr_bytes_per_re(unsigned mod)
 {
-  return (mod == 2u) ? 6u : 4u; // MOD_QAM64 : MOD_QAM16
+  switch (mod) {
+    case 0u:
+      return 2u; // MOD_QPSK
+    case 2u:
+      return 6u; // MOD_QAM64
+    default:
+      return 4u; // MOD_QAM16
+  }
 }
 
 /// \brief Encodes the FUSED dispatch (metal_kernel_fusion M1): the same run, the same grid and the
@@ -2223,10 +2230,10 @@ bool equalizer_metal_engine::enqueue_fused(const ch_est_binding& h,
   if ((nof_layers != 1) || (nof_ports == 0) || (nof_ports > equalizer_metal_engine::max_ports)) {
     return false;
   }
-  // The kernel implements 16QAM and 64QAM (the demapper engine's ids: 1 and 2). The caller's
-  // predicate already refused everything else; this is the cheap second gate, because the run's
-  // bits-per-RE accounting and the kernel's own branch have to agree on the modulation.
-  if ((mod != 1u) && (mod != 2u)) {
+  // The kernel implements QPSK, 16QAM and 64QAM (the demapper engine's ids: 0, 1 and 2). The
+  // caller's predicate already refused everything else; this is the cheap second gate, because the
+  // run's bits-per-RE accounting and the kernel's own branch have to agree on the modulation.
+  if (mod > 2u) {
     return false;
   }
   // A thread can accumulate for several engines over its lifetime; hand the previous engine's work

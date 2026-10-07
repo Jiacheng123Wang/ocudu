@@ -728,10 +728,13 @@ int main()
     const unsigned nof_sym = 4;
     const unsigned ports   = 1;
     const unsigned layers  = 1;
-    // The two modulations the fused kernel has branches for. 64QAM is not decoration: the first air
-    // pair measured that the PUSCH carries 64QAM (MCS table 2, index 13), so it is the one the legs
-    // judge - see the implementation doc's memo.
-    const modulation_scheme mods[2] = {modulation_scheme::QAM16, modulation_scheme::QAM64};
+    // The three modulations the fused kernel has branches for, i.e. the ones the PUSCH carries in
+    // practice: 64QAM is what the pinned legs run (MCS table 2, index 13), 16QAM is what the earlier
+    // pair was built around, and QPSK is what the link adaptation walks at the cell edge once the MCS
+    // pin is removed (the AMC arm) - see the implementation doc's memo. Each has its own bits per
+    // resource element (2/4/6) and QPSK its own LLR range limit (24 against 20), which is exactly
+    // what this loop checks against the demapper.
+    const modulation_scheme mods[3] = {modulation_scheme::QPSK, modulation_scheme::QAM16, modulation_scheme::QAM64};
 
     std::normal_distribution<float>   dist(0.0F, 0.01F);
     std::vector<std::vector<cbf16_t>> y_sym(nof_sym, std::vector<cbf16_t>(ports * nof_re));
@@ -752,12 +755,12 @@ int main()
     std::shared_ptr<demodulation_mapper_factory> demapper_factory = create_demodulation_mapper_metal_factory();
     std::unique_ptr<demodulation_mapper>         demapper         = demapper_factory->create();
 
-    const bool route_ok = composite->supports_fused_demapping(modulation_scheme::QAM16, ports, layers) &&
+    const bool route_ok = composite->supports_fused_demapping(modulation_scheme::QPSK, ports, layers) &&
+                          composite->supports_fused_demapping(modulation_scheme::QAM16, ports, layers) &&
                           composite->supports_fused_demapping(modulation_scheme::QAM64, ports, layers) &&
-                          !composite->supports_fused_demapping(modulation_scheme::QPSK, ports, layers) &&
                           !composite->supports_fused_demapping(modulation_scheme::QAM256, ports, layers) &&
                           !composite->supports_fused_demapping(modulation_scheme::QAM16, ports, layers + 1);
-    std::printf("[fused] composite factory offers the fused route for 16QAM/64QAM at 1 layer only: %s\n",
+    std::printf("[fused] composite factory offers the fused route for QPSK/16QAM/64QAM at 1 layer only: %s\n",
                 route_ok ? "OK" : "NO");
     if (!route_ok) {
       std::fprintf(stderr, "FAIL: the composite equalizer factory hides the fused route\n");

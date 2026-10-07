@@ -63,9 +63,10 @@ public:
   /// dispatch, the equalized symbol in registers.
   ///
   /// Offered for exactly the shape the fused kernel implements - one transmission layer (the single
-  /// layer path is the only one it has) and the modulations it has branches for, 16QAM and 64QAM (see
-  /// ocudu_lane_fused.metal; 64QAM joined after the first air pair measured that the PUSCH carries
-  /// it, not 16QAM) - and only while the kernel is actually in the loaded shader library (see
+  /// layer path is the only one it has) and the modulations it has branches for, QPSK, 16QAM and
+  /// 64QAM (see ocudu_lane_fused.metal; 64QAM joined after the first air pair measured that the PUSCH
+  /// carries it rather than 16QAM, and QPSK after the AMC arm showed the link adaptation walking it at
+  /// the cell edge) - and only while the kernel is actually in the loaded shader library (see
   /// equalizer_metal_engine::supports_fused()). Both halves matter: the route is all-or-nothing, so
   /// the answer has to be final before the caller commits a group to it.
   bool supports_fused_demapping(modulation_scheme mod, unsigned nof_ports, unsigned nof_layers) const override;

@@ -13,13 +13,14 @@
 // `p.h_offset`) and the demapper's output addressing (`llr_stride`), and the per-element math is copied verbatim
 // from the two originals.
 //
-// SCOPE (M1.1 decision, plan doc §2.8, extended by the mkf010/mkf011 finding): the modulations the
-// flights actually carry. 16QAM was the first version's scope because the judging legs were believed
-// to be MCS 13 = 16QAM; the first pair measured that they are 64QAM (the PUSCH runs MCS table 2,
-// where index 13 is 64QAM - see the implementation doc's memo), which left the fused route covering
-// 0.009% of the traffic. 64QAM is therefore added, and the two branches below are the demapper's own
-// branches copied verbatim. Other modulations stay on the existing two-stage route, which the caller
-// selects.
+// SCOPE: the three modulations the PUSCH actually carries, each branch copied verbatim from the
+// demapper. 16QAM was the first version's scope because the judging legs were believed to be
+// MCS 13 = 16QAM; the first pair measured that they are 64QAM (the PUSCH runs MCS table 2, where
+// index 13 is 64QAM - see the implementation doc's memo), so 64QAM was added. QPSK is the last one
+// the scheduler reaches in practice: with the MCS pin removed (the AMC arm) the link adaptation
+// walks QPSK/16QAM/64QAM, and without this branch every cell-edge hop fell back to the two-stage
+// route. What is left out - 256QAM, and any topology with more than one layer - stays on that route,
+// which the caller selects per hop (see channel_equalizer::supports_fused_demapping()).
 //
 // WHY THE HELPERS BELOW ARE COPIES. Factoring them into a shared header would rewrite the two kernels that are
 // part of the shipped delivery shape, and this workstream's rules require its own A/B for that. A copy inside a
@@ -32,11 +33,15 @@ using namespace metal;
 
 // ---- verbatim from ocudu_demod.metal ---------------------------------------------------------------
 // Modulation ids: the SAME numbering the demapper engine passes to demod_soft (see its run_demodulate).
+constant uint MOD_QPSK  = 0;
 constant uint MOD_QAM16 = 1;
 constant uint MOD_QAM64 = 2;
 
 constant float LLR_MAX_F = 120.0f;
 constant float NEAR_ZERO = 1e-9f;
+
+// ---- QPSK (range limit 24: see its branch below, which is NOT 20 like the QAM ones) ----
+constant float GAIN_QPSK = 2.82842708f; // 2 * M_SQRT2f32
 
 constant float GAIN_FIRST_16 = 1.26491106f;  // 4 * M_SQRT1_10
 constant float THR_16        = 0.632455528f; // 2 * M_SQRT1_10
@@ -220,6 +225,15 @@ kernel void lane_grid_to_llr(device const ushort2* h [[buffer(0)]],  // cbf16 [s
     const float  rcp  = rcp_noise_safe(nvar);
     device char* llrs = llrs_base + sym * llr_stride;
 
+    if (mod == MOD_QPSK) {
+        // Two soft bits per resource element, one per component, and a RANGE LIMIT OF 24 rather than
+        // the QAM branches' 20 (the demapper scales the two constellations differently).
+        const float l0 = (GAIN_QPSK * x_hat.x) * rcp;
+        const float l1 = (GAIN_QPSK * x_hat.y) * rcp;
+        llrs[2 * re + 0] = quantize_llr(l0, 24.0f);
+        llrs[2 * re + 1] = quantize_llr(l1, 24.0f);
+        return;
+    }
     if (mod == MOD_QAM16) {
         llrs[4 * re + 0] = quantize_llr(qam16_01(x_hat.x, rcp), 20.0f);
         llrs[4 * re + 1] = quantize_llr(qam16_01(x_hat.y, rcp), 20.0f);
