@@ -2897,6 +2897,11 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
       [enc setBytes:&epre_params length:sizeof(epre_params) atIndex:7];
     }
     // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (both reduction trees are written for it).
+    //
+    // \note The repeat knob here is sigma2's, and it multiplies DISPATCHES for cost probes. A fused
+    //       dispatch cannot honour two of them at once, so OCUDU_CE_EPRE_REPEAT keeps its meaning for
+    //       the standalone form only - the same limitation the CFO pair records. Repeating the fused
+    //       dispatch is value-preserving for the same reason repeating either original was.
     for (unsigned rep = 0; rep != mmse_engine_impl::sigma2_repeat(); ++rep) {
       ce_site_diag().pilots_sigma2.fetch_add(1, std::memory_order_relaxed);
       if (epre_fused) {
