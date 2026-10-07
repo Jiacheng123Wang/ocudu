@@ -92,6 +92,28 @@ typedef struct {
 而平台的解法是**把这些量做成"可选 + 有效位标记"的输出张量**，而不是强制。
 ⇒ 我们的规划路线 (a)（net 附带输出信道估计与噪声）**与该契约同形**，可直接对齐。
 
+### 1.3bis ★★★★ 张量级输入契约（SDK 侧准入检查，`class_a_cuda_contract.cuh:120-180`）
+
+★★ **这就是"网格 + 几何"的逐字段形态**，也是用户描述的"哪些是 DMRS RE、哪些是 data RE、
+它们之间的相对几何关系"的**官方编码方式**：
+
+| 张量 | 元素类型 | rank | 布局 | 含义 |
+|---|---|---|---|---|
+| `input.rx_grid` | ★ **`CBF16`（复数 bf16，4 B 打包对）** | 3 | **`[port, symbol, subcarrier]`** | 接收网格 |
+| `dmrs->reference_symbols` | **CF32** | 2 | **`[layer, pilot]`** | ★ **已知的 DM-RS 符号值**（即 DeepRx 用的"已知星座点"） |
+| ★ `dmrs->coordinates` | **U16** | 2 | **`[pilot, 2]` = (symbol, subcarrier)** | ★★ **每个导频的时频坐标——这就是"几何"** |
+| ★ `pusch->data_re_indices` | **U32** | 1 | `..._PUSCH_DATA_RE_INDICES_U32_V1` | ★★ **要出 LLR 的 data RE 索引** |
+
+**准入包络**（同处 `:123-133`）：1–2 层、1–64 端口、DM-RS type 1/2、`nof_pilots ≤ 4096`、
+data-RE 选择必须完整、必需 flags `LAYER_COMPLETE | COORDINATES_SHARED_ACROSS_LAYERS`。
+
+★ 三个独立来源在此**完全收敛**：dApp 论文的 *"explicit DM-RS pilot tensor with bounded coordinates,
+compact ordered data-RE indices"*、本契约的 `coordinates` + `data_re_indices`、
+以及 NVIDIA `neural_rx.onnx` 的 `dmrs_ofdm_pos` + `dmrs_subcarrier_pos`。
+⇒ **"网格 + 导频坐标 + 数据 RE 索引"是跨平台的共同输入形态**，我们照此冻结即可。
+
+★ 另注意 `rx_grid` 的元素类型是 **CBF16**——与我们链上 `cbf16_t` 的信道估计**同精度**。
+
 ### 1.4 C ABI（`:81-88`）
 
 ```c
@@ -104,6 +126,17 @@ typedef struct {
   uint64_t                      reserved[8];
 } ocudu_dapp_receiver_interface_v1;
 ```
+
+---
+
+### 1.5 ★★ 输出侧的其余字段（SDK 侧核对）
+
+- `output.llrs`：**F16, rank 3, `[data_re, layer, bit]`**，`ACCESS_WRITE`，
+  布局 `OCUDU_DAPP_LAYOUT_PUSCH_LLR_DATA_RE_LAYER_BIT_V1`（`algorithm.cu:246-250`）。
+- `output.metrics.post_equalization_noise`：**F32 rank 2**，布局 `..._POST_EQ_NOISE_DATA_RE_LAYER_V1`。
+- `output.metrics.equalized_symbols`：可选 **CF32 rank 2**，`device_ordinal` 必须与 llrs 相同，且**做了不相交检查**。
+- `output.reserved0`：承载 `..._METRICS_VALID_V1` / `..._EQUALIZED_SYMBOLS_VALID_V1`。
+- `output.confidence_q16`：**存在，但参考实现根本不写它**（`abi_layout_v1.lp64.txt:125` 有偏移 360）。
 
 ---
 
@@ -200,6 +233,76 @@ std::shared_ptr<pusch_demodulator_factory> create_pusch_dapp_demodulator_factory
 
 ---
 
+## 2bis. ★★★ 完成/fence 语义（SDK 侧代码级，我们最该抄的部分）
+
+**两道不同的 fence**：
+
+**(a) lane 内的模块 fence**（`reference/common/module_support.cpp:342-354`）——
+`invoke` **即使算法返回失败或抛异常，也仍然** `cudaEventRecord(lane->completion[slot], execution_stream)`。
+理由逐字：
+
+> *"A failed or throwing implementation may **already have enqueued work**. Fence every admitted call so
+> model retirement cannot recycle its device state while such work still references it."*
+
+★ 记录失败会**毒化该 slot**，并把 OK 结果降级为 `INTERNAL_ERROR`。
+**迟到检测**用 `cudaEventQuery`：`cudaErrorNotReady` ⇒ 暂不可复用；**其它任何错误 ⇒ 永久毒化**。
+WARM/RETIRE 在有未完成调用时返回 `CONFLICT`。
+
+**(b) 面向上主机的 completion 扩展**（`docs/receiver_completion.md`）——
+独立的导出查询；`host_supports_receiver_completion` 要求 `struct_size`/`abi_major`/能力位匹配；
+invoke 发布一个**非零不透明 receipt**：
+
+> *"A partial submission is **DEVICE_ERROR**, never BYPASS/RESOURCE/INVALID_INPUT/UNSUPPORTED"*；
+> *"Inspect is nonblocking and non-acknowledging. Only OK/ready/valid authorizes… **do not use learned
+> confidence as proof of execution or as a physical SINR/noise measurement**"*。
+
+★★ **生产主机目前还没有宣告支持 completion** ⇒ 查询被拒是预期行为。
+
+★★ **迟到 ≠ 回退**：主机只把 module+continuation 包在计时事件里，增加
+`class_a.completion.deadline_misses` 与一条 E3 incident（带 `observedLatencyNs`/`deadlineNs`），
+**不会**增加 `class_a.fallback.deadline`。**连续 8 次 miss 才 latch**。
+⇒ 与 `known_limitations.md` 的 *"deadlines are **advisory** … the breaker does not open on
+deadline misses alone"* 一致，也**修正了 dApp 论文给人的"8 次迟到打开 breaker"的印象**。
+
+⚠ **一处数值不一致待核实**：SDK 文档写 CE 预算 **~300 µs**（`validation_ladder.md:49`），
+而平台头文件 `pusch_dapp_demodulator.h` 里 `channel_estimator_deadline` 默认 **800 µs**。
+两者可能是"文档示例 vs 平台默认"，但**引用前必须核实**。
+
+---
+
+## 2ter. ★★★ 模型生命周期：逐字段的代码机制（最可复用的一段）
+
+ABI：`management->manage_model(context, const ocudu_dapp_model_request_v1*, uint64_t* generation)`；
+请求 = `{struct_size, action, model_id, model_version, expected_generation, artifact(blob view), dry_run}`。
+
+★★ **generation 是乐观并发令牌**（`reference/common/module_support.cpp:179-181`）：
+
+```c
+if (request->expected_generation != state.model_generation) return OCUDU_DAPP_CONFLICT_V1;
+// 成功且非 dry-run 时：
+*generation = ++state.model_generation;
+```
+
+动作：`STAGE → VALIDATE → WARM → ACTIVATE → ROLLBACK | RETIRE`，每个动作由 `phase` 门控
+（STAGE→1、VALIDATE→2、WARM→3）。ACTIVATE 把 staged→active、active→previous；
+ROLLBACK 交换 active↔previous；**RETIRE 拒绝退休当前 active 的模型**。
+
+★★★ **发布的是"准备好的设备状态"，不是权重 blob**（`module_support.cpp:23-30,202-241`）：
+- 实例持有 `std::array<receiver_cuda_state,2> slots` + **`std::atomic<uint32_t> active_slot`**；
+- **WARM 在调用委托之前**就解码+校验产物（magic/version/count、有限且两两不同的电平），
+  并用 `cudaMalloc`+H2D 建好 `receiver_cuda_state`；
+- ACTIVATE 用 **`active_slot.exchange(next, acq_rel)`** 发布；worker 每次调用读取。
+
+⇒ ★ 这就是 dApp 论文说的"两个预分配权重 bank + 单次原子交换"的**代码本体**，
+也是我们 CoreML 引擎需要补的"模型代际 + 无热路分配切换"。
+
+⚠ **权重体积限制**：模型 blob 被拷进 `std::vector<uint8_t>` 且**上限 1 MiB**，
+参考实现的 `decode_model` 硬性要求 **264 字节**。文档明确邀请替换
+（*"a commercial receiver should replace the artifact definition, validation, and prepared device state
+with its own bounded weights"*）。★ 我们的 1.45e5 参数 fp16 ≈ 290 KB，**在 1 MiB 之内**；更大的模型就会撞墙。
+
+---
+
 ## 3. ★★ SDK：官方把"可替换的算法核心"直接点名到我们的用例
 
 `ocudu-dapp-sdk/docs/extension_model.md` 逐字：
@@ -288,6 +391,40 @@ ocudu-dappctl model stage --instance INSTANCE --model receiver-levels \
 
 ---
 
+## 4bis. ★★★★ 两条**无法绕开**的硬约束（直接改我们的架构）
+
+### (1) ★★★ 网络**必须**输出逐 RE 的噪声/不确定度，不能只出 LLR
+
+主机**只从我们的逐 RE 后均衡噪声**推导调度器 SINR：
+
+```
+SINR_dB = -10 · log10( mean(σ²_post) )
+```
+（`class_a_cuda_authoring.md:285-295`），而**常规 CSI 核在这条路径上已经被跳过**
+（`known_limitations.md:33-38`）。
+
+⇒ ★★ **我在规划 §2.3 里设计的"辅助头 1：后均衡噪声方差"不是可选优化，而是硬需求。**
+只出 LLR 的神经接收机会让**上行链路自适应失去输入**。
+★ 并且文档给出一个具体的坑（逐字）：*"Do not leave a constant near-zero floor that would
+**invent huge SINR**"* —— 常数近零底噪会被算成极大 SINR，直接把调度器带偏。
+
+⇒ **规划据此修改**：把"后均衡噪声头"从"辅助头"提升为**与 LLR 头并列的必需输出**，
+并把"噪声头在低噪声区不得输出近零常数"写成 G3 的一个**数值判据**。
+
+### (2) 模型产物体积被限制在 **1 MiB** 且**带内拷贝**
+
+模型 blob 会被拷进 `std::vector<uint8_t>` 且**上限 1 MiB**（`reference/common/module_support.cpp:173,220`）。
+⇒ 我们的 1.45e5 参数 fp16 ≈ **290 KB，在限内**；但更大的模型必须**抬高上限或改用带外资源**。
+★ 这是一条**现在就要记下、否则会在 P4 撞墙**的约束。
+
+### (3) 后端枚举在本树里是**封闭的**
+
+全树只有 `OCUDU_DAPP_BACKEND_CUDA_V1` 与 `..._HOST_V1`（`class_a_cuda_contract.cuh:48`、
+`class_c_algorithms.h:21`）。⇒ ★ **新增一个 Metal 后端 id 需要同时改 OCUDU 主机侧头文件**，
+不是"只写一个模块"就能接上的。这是**采用平台 ABI 路线的真实成本**。
+
+---
+
 ## 5. 可以重用 / 需要修改
 
 ### 5.1 ✅ 可以直接重用（契约与工程纪律）
@@ -311,6 +448,9 @@ ocudu-dappctl model stage --instance INSTANCE --model receiver-levels \
 | ★★ **LLR 表示** | 契约规定 **host = I8**、**accelerator-resident = F16**；**我们的链是 int8（`LLR_MAX=120`）** | 必须显式决策：① 保持 int8 并说明我们走的是 host 同族表示；② 采用 F16 并加一级转换。**这是一个要在 P4 之前定下来的接口点** |
 | ★ **引擎后端** | SDK 参考是 CUDA；契约**在 CPU 上也已实现**（`create_..._factory` 的 CPU 适配器） | ★ **这给我们信心**：契约不假设 CUDA。我们做的是**第三个后端**（Metal/CoreML），而不是"逆着契约来" |
 | **`invocation.execution_stream`** | 概念是 CUDA stream | 映射到 Metal command queue / CoreML 引擎句柄。★ 注意 `memo_03` §1.5：**自定义 Metal kernel 不能进 ANE 常驻图** |
+| ★ **模型产物 1 MiB 上限 + 带内拷贝** | 硬约束（§4bis.2） | 现模型 290 KB 放得下；更大的必须抬高上限或走带外 |
+| ★★ **逐 RE 后均衡噪声是必需输出** | 硬约束（§4bis.1）：主机只从这里推 SINR | 噪声头从"辅助"升为"必需"，并加"不得近零常数"的数值判据 |
+| ★ **后端枚举封闭** | 新增 Metal backend id 要改主机头（§4bis.3） | 决定"采用平台 ABI"时把这项成本算进去 |
 | **"never synchronize that stream"** | 与 ANE 的同步模型不同（CoreML 的 predict 是阻塞调用） | ★ 这是我们**最需要设计的**一处：要么用专用 worker 线程把 predict 变成异步（AI CE 已有这个模式），要么显式声明一个新的同步点 |
 | **`confidence_q16` 不被平台用于 gate** | 平台的信任/回滚没有用上它 | 我们的 §1.4 逐槽信任/回滚**要自己做**，并如实报告它与平台的关系 |
 | **死线默认值** | 2000 µs（实测 500/1000 太紧） | ★ 我们的 G5 判据**必须写明争用条件**，不能只写一个 µs 数 |
@@ -337,6 +477,12 @@ ocudu-dappctl model stage --instance INSTANCE --model receiver-levels \
 | 6 | ★ **信任/回滚要自己做**：平台的 `confidence_q16` 明确"不用于 gate 译码" | §4 |
 | 7 | ★ **路由策略对齐 `pusch_route_table` 的 per-UE 粒度** | §2.4 |
 | 8 | ★ **验证阶梯 + ABI 稳定性门禁**（编译矩阵 / 布局指纹）值得引入 | §5.1 |
+| 9 | ★★ **噪声头是必需输出**（主机 SINR 的唯一来源），且**禁止近零常数底噪** | §4bis.1 |
+| 10 | ★ **模型产物体积上限 1 MiB** ⇒ 尺寸预算多了一条外部约束 | §4bis.2 |
+| 11 | ★ **模型生命周期采纳"乐观并发 + 预准备状态原子发布"**：`expected_generation` 令牌 + `atomic` slot 交换 + WARM 先建后换 | §2ter |
+| 12 | ★ **fence 纪律**：**失败/抛异常也必须记 fence**（可能已入队工作）、**失败毒化 slot**、迟到用事件查询而非等待 | §2bis |
+| 13 | ★ **"迟到 ≠ 回退"**：平台把 deadline miss 计入 `completion.deadline_misses` 与 incident，但**不进 fallback 计数**；连续 8 次才 latch | §2bis |
+| 14 | ★ **官方承认深度 3 的对比证据不在开放阶梯内**：*"Vendor-only (not in open ladder): a proprietary neural receiver vs the conventional receiver, side-by-side SER."* ⇒ **这份证据要我们自己做**（正是我们的 G6） | §5.1 |
 
 ---
 
