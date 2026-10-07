@@ -303,6 +303,80 @@ with its own bounded weights"*）。★ 我们的 1.45e5 参数 fp16 ≈ 290 KB�
 
 ---
 
+## 2quater. ★★★★ 调用链已在代码里确认：**接收机接缝是真的**（平台侧）
+
+**结论先行**：平台**不只是**有信道估计或均衡钩子——**它有一个完整的"接收机"接缝**。
+
+### 调用点（`lib/phy/upper/channel_processors/pusch/pusch_demodulator_gpu_impl.cpp:3049-3075`）
+
+```cpp
+} else if (resident_mode == pusch_resident_dapp_mode::receiver) {
+  const auto invoked = resident_dapp_->invoke_receiver(buffers, config);        // :3050
+  ...
+  status = scrambler_descramble_llr_half_inplace(                                // :3061
+      scr_handle_, d_llrs_half_[buf_idx], static_cast<int>(num_llrs), stream_);
+  dapp_inline_used = status == NR_LDPC_SUCCESS;                                  // :3064
+```
+
+★★★ **这条链把 `memo_01` §3 的分析逐字证实了**：模型交出**解扰前**的 FP16 LLR ⇒
+**主机在同一个 stream 上就地解扰** ⇒ 之后才进 LDPC。
+模式互斥：`{inactive, channel_estimator, equalizer, receiver, conflict}`
+（`include/ocudu/phy/upper/dapp/pusch_resident_dapp.h:21`；`equalizer` 分支 `:3035`、`channel_estimator` `:2982`）。
+
+### LLR 去向（★ 主机侧完全绕开常规路径）
+
+```
+就地解扰(:3061) → last_resident_llrs_ (:3527) → get_resident_softbits() (pusch_demodulator_gpu_impl.h:113)
+→ pusch_processor_impl.cpp:223 → pusch_decoder_impl.cpp:839
+   gpu_decoder->decode_resident_softbits(..., nullptr,  // ★ "No scrambling needed - already descrambled by E2E kernel"
+```
+常规路径被跳过：`if (!dapp_inline_used && ...)`（`:3141,:3153,:3156`）。
+
+### 缓冲区结构体（`pusch_resident_dapp.h:25-42`）
+
+`grid_cbf16`、`data_re_indices`、`equalized_cf32`、`post_eq_noise_f32`、`llrs_f16`、
+网格维度、**`execution_stream`**、`codeword`、`consumer_streams[3]`。
+签名：`invoke_receiver(const pusch_resident_dapp_buffers&, const pusch_demodulator::configuration&)`。
+
+### 与论文的**五处偏差**（代码为准）
+
+| 论文说 | 代码事实 |
+|---|---|
+| 网格 complex BF16 ✓ | `OCUDU_DAPP_ELEMENT_CBF16_V1`，rank 3，`..._RESOURCE_GRID_PORT_SYMBOL_SUBCARRIER_V1`，**整个 slot** `{ports, symbols, subcarriers}` ✓ |
+| DM-RS pilot tensor | ★ DM-RS **参考符号是 CF32**（不是 BF16），形状 `{nof_tx_layers, nof_pilots}`；另有 `coordinates` U16 `{nof_pilots,2}`，以及 **`reserved[0]` 里的 OFDM 符号掩码** |
+| 模块持有网格 | ★ 模块拿到的是**借来的 lease**（`abi/v1/memory.h:76-90`），**不是所有权** |
+| — | ★ ABI 另有**host 版** LLR 输出 `I8 [data_re × Qm]`；只有 accelerator 版是 F16 rank-3 |
+| — | ★ bit 最快变化已由 `view.byte_strides[2] == sizeof(uint16_t)` **强制** |
+
+### ★★ breaker 的真实语义（修正论文的印象）
+
+`lib/dapp/runtime/circuit_breaker.h:14-19`：`breaker_policy{ recoverable_failure_threshold{8} }`，
+**第 8 次**连续可恢复失败时打开（`circuit_breaker.cpp:23`）。
+- ★ **迟到**确实会喂它：`native_worker.cpp:932` 在 `report_completion_deadline` 里
+  `breaker.observe(OCUDU_DAPP_DEADLINE_V1)` ⇒ 论文的"连续 8 次迟到"**方向正确**；
+- ★ **但计数器是共享的**：invalid-input / invalid-output / resource / deadline 都递增**同一个** latch
+  ⇒ **任意 8 次混合失败**都会打开，不是"8 次迟到"；
+- **按 lane 独立**（每个 slot 有自己的 worker + breaker）；
+- **恢复只能靠运维探针**（`begin_authorized_probe()` → half_open → `close_after_successful_probe()`）；
+- 打开期间 `guarded_call.h:29` 返回 `OCUDU_DAPP_BYPASS_V1`。
+
+### ★★★ 两个决定性的**负面结论**（照我们的规划）
+
+1. ★★ **没有 shadow / 对比模式，也没有基于 LLR 置信度的门控。**
+   回退**严格只在失败或 profile 被拒时**发生。
+   ⇒ ★ **这修正了我们的规划 §1.4**：我此前根据 calibration-drift 论文写了"改为逐时隙神经+经典**并行仲裁**"——
+   **平台并不是这么做的**。准确表述应是：
+   (a) 文献（arXiv 2605.26157）**建议**并行仲裁；
+   (b) 平台**只实现"失败即回退"**；
+   (c) **shadow 模式要我们自己建**。
+2. ★★ **`OCUDU_DAPP_HOST_CAP_RECEIVER_COMPLETION_V1` 在生产里从不宣告**——
+   `apps/services/dapp/dapp_service.h:190 host_capabilities{}` **从未被填充**，唯一的 setter 是**测试夹具**
+   （`tests/integrationtests/.../pusch_test_dapp_fixture.h:42`）。
+   `module_loader.cpp:157-160` 因此**拒绝需要 completion 的接收机**。
+   ⇒ **生产路径是 invoke-only**；那套延迟/completion 契约**目前只存在于测试里**。
+
+---
+
 ## 3. ★★ SDK：官方把"可替换的算法核心"直接点名到我们的用例
 
 `ocudu-dapp-sdk/docs/extension_model.md` 逐字：
@@ -425,6 +499,34 @@ SINR_dB = -10 · log10( mean(σ²_post) )
 
 ---
 
+## 4ter. ★★★ 后端可移植性：ABI 是中立的，**运行时不是**
+
+### (1) ★★ ABI 早已枚举了非 CUDA 加速器
+
+`include/ocudu/dapp/abi/v1/memory.h:36-43` **显式列出 `HOST / CUDA / HIP / SYCL`**，
+并自述为 backend-neutral。⇒ ★ **dApp ABI 在设计上就是后端中立的**——
+Metal 不是"逆着契约来"，而是"**第五个 id**"。
+
+### (2) ★★★ 但有两处**结构性阻塞**（不是接线问题）
+
+| # | 阻塞 | 后果 |
+|---|---|---|
+| 1 | `include/ocudu/dapp/management/types.h:29`：`enum class backend : uint8_t { cpu, cuda, other_accelerator };`，**但** `lib/dapp/runtime/instance_manager_helpers.inc:42-43` 把 `other_accelerator → std::nullopt`；`instance_manager_lifecycle.cpp:66` 在 `!abi_backend(selected_backend)` 时**拒绝 in-process 放置** | ★ Class A **只能 in-process** ⇒ **Metal 后端的 Class A 包当前无法加载** |
+| 2 | `class_a_l1_path_incompatibility`（`instance_manager_helpers.inc:284-293`）把"加速 L1"与"CUDA"**当成同义词**（`selected == cpu && cuda_l1` 直接拒绝） | 同上 |
+
+⇒ ★ **采用平台 ABI 的真实成本**：不是"写一个模块"，而是**改运行时的后端枚举与放置校验**。
+
+### (3) 可原样复用 vs 必须重写
+
+| | 文件 |
+|---|---|
+| ✅ **原样复用** | **全部** `include/ocudu/dapp/abi/v1/*.h` 与 `use_cases/v1/*.h`（**纯 C**）；`circuit_breaker.cpp`、`incident*.cpp`、`guarded_call.h`、`instance_runtime.h`；`module_loader.cpp`、`abi_validation.cpp`、`native_worker.cpp`、`native_hook_point.cpp`、`native_hook_slot.cpp`、`native_instance.cpp`、`instance_manager*.cpp`、`package_*.cpp`、`artifact_verifier.cpp`、`lifecycle.cpp`；`pusch_dapp_demodulator.cpp`、`native_pusch_dapp_demodulator_target.cpp`、`pusch_route_table.cpp`、`upper_phy_dapp_*.cpp` |
+| ❌ **必须重写** | `lib/phy/upper/dapp/pusch_resident_dapp.cpp`（**1401 行热适配器**：stream 转 `cudaStream_t`、`cudaMemcpyAsync`、`cudaEventRecord`，整体在 `#ifdef ENABLE_CUDA` 下）；`native_receiver_resident_adapter.cpp:59-67`（硬编码 `MEM_ACCELERATOR_DEVICE_V1` + `BACKEND_CUDA_V1`）；`pusch_resident_dapp_cuda.cu/.h`、`srs_*_cuda.cu`、`class_c_cuda_export_pool.cpp`、`native_cuda_control_context.cpp`；`pusch_demodulator_gpu_impl.cpp`（**4058 行**） |
+
+★ 构建门：`CMakeLists.txt:95 option(ENABLE_CUDA ... OFF)`、`lib/phy/upper/dapp/CMakeLists.txt:26-36`。
+
+---
+
 ## 5. 可以重用 / 需要修改
 
 ### 5.1 ✅ 可以直接重用（契约与工程纪律）
@@ -482,6 +584,10 @@ SINR_dB = -10 · log10( mean(σ²_post) )
 | 11 | ★ **模型生命周期采纳"乐观并发 + 预准备状态原子发布"**：`expected_generation` 令牌 + `atomic` slot 交换 + WARM 先建后换 | §2ter |
 | 12 | ★ **fence 纪律**：**失败/抛异常也必须记 fence**（可能已入队工作）、**失败毒化 slot**、迟到用事件查询而非等待 | §2bis |
 | 13 | ★ **"迟到 ≠ 回退"**：平台把 deadline miss 计入 `completion.deadline_misses` 与 incident，但**不进 fallback 计数**；连续 8 次才 latch | §2bis |
+| 14b | ★★ **修正 §1.4**：平台**没有 shadow/并行仲裁**，只有"失败即回退"；★ **shadow 要我们自己建**（文献建议 vs 平台实现的差别必须写清） | §2quater |
+| 14c | ★★ **completion 契约在生产里未启用**（能力位从不宣告，加载器拒绝）⇒ 生产是 **invoke-only** | §2quater |
+| 14d | ★★ **Metal 后端的两个结构性阻塞**（`other_accelerator → nullopt`、加速 L1 ≡ CUDA）⇒ 采用平台 ABI 需改运行时，不只是写模块 | §4ter |
+| 14e | ★ **ABI 已枚举 HOST/CUDA/HIP/SYCL** ⇒ Metal 是"第五个 id"，方向正确 | §4ter |
 | 14 | ★ **官方承认深度 3 的对比证据不在开放阶梯内**：*"Vendor-only (not in open ladder): a proprietary neural receiver vs the conventional receiver, side-by-side SER."* ⇒ **这份证据要我们自己做**（正是我们的 G6） | §5.1 |
 
 ---
