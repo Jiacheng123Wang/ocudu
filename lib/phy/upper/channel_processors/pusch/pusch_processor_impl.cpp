@@ -552,8 +552,13 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
     }
   }
 
+  // ★ The interior split of the eqdem phase segment (metal_kernel_fusion 2.31): this call is where the hop's
+  // LLRs are produced, and the segment that ends at the first codeblock decode is otherwise one 647us number
+  // with ~2.7us of arithmetic in it. Both landmarks are free while OCUDU_UL_PHASE_INTERIOR is unset.
+  ul_pipeline_probe::get().record_demod_enter(pdu.slot.count());
   dependencies->get_demodulator().demodulate(
       demodulator_buffer, notifier_adaptor.get_demodulator_notifier(), grid, est_results, demod_config);
+  ul_pipeline_probe::get().record_demod_return(pdu.slot.count());
 
   // The demodulation is done: complete the channel estimation and merge its measurements into the
   // reported Channel State Information. Reading them any earlier would put the whole demodulation

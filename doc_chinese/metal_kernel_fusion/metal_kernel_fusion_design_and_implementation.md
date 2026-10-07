@@ -1825,6 +1825,123 @@ O1 ✓（corr 内部 ✓）、CFO ✓（同文件同 256 ✓ 无 RAW ✓）、�
 ⇒ ★ 而 **RANK 4 实测一个派发边界 = 13 µs** ✓ ⇒ ★ **若 burst 里有 ~7–13 个派发，边界本身就是 90–170 µs** ✓
 （★ 可用重复旋钮的斜率法继续量 ✓，与 `mkf023` 同一手法 ✓）。
 
+### 2.31 ★★ 追 `eqdem` 那 647 µs：**第 0 步（零成本）已经把方向改了一半** ✓（2026-10-07 ✓）
+
+> ★ **第 0 步 = 不飞腿、不用新仪器，先把已有读数榨干** ✓。★ 结果**推翻了我原先的倾向** ✓（我原以为那一段是"等 GPU" ✓）。
+
+#### (1) ★★ 先说一条**已确定**的 ✓：那一跳的设备活在 `record_ce_end` 之前就全干完了 ✓
+
+| 证据 ✓ | 出处 ✓ |
+|---|---|
+| ★ "The channel estimator **has finished** … End timestamp of the channel estimation phase segment (**and start of the equalization+demodulation one**)" ✓ | `pusch_processor_impl.cpp:355-357` ✓ |
+| ★ **一跳只有 2 条 CB** ✓ | `burst commits=108455` ✓（1/跳 ✓）+ `mmse_ce commits=108462` ✓（1/跳 ✓）|
+| ★ **均衡与解映射在那条 burst 里** ✓ | `burst dispatches (equalizer=108455 demapper=0 channel_estimator=216908)` ✓ —— `demapper=0` 说明它已融进均衡那一段 ✓ |
+
+⇒ ★ **`eqdem` 段的两端之间没有本跳的设备工作** ✓（★ 除非均衡是**另一次提交** —— ★ 而这正是第 1 步要判定的一句 ✓）。
+
+#### (2) ★★ 再给一个**改变方向**的数 ✓：宿主每跳烧 **~680 µs CPU** ✓
+
+| 量 ✓ | 值 ✓ | 算法 ✓ |
+|---|---|---|
+| `main_pool#0..#4` 的窗口数 ✓ | 各 ~21 500 ✓ | —— ✓ |
+| 5 线程合计 ✓ | **107 500** ✓ | ≈ 跳数 **108 592** ✓ ⇒ ★ **每跳约 1 个窗口** ✓ |
+| 每窗口 CPU mean ✓ | **680 µs** ✓ | `[ul_thread_cpu]` ✓ |
+| 每窗口 wall mean ✓ | **9.4 ms** ✓ | 同上 ✓ |
+| ★ **每跳的宿主 CPU 上界** ✓ | ★ **≈680 µs** ✓ | ★ **= 一跳墙钟（1220 µs）的 56 %** ✗ |
+| `duty` ✓ | **7.2 %** ✓ | ⇒ 窗口里其余时间线程**不在 CPU 上** ✓ |
+
+★★ **⇒ 一跳的时间里有很大一块是宿主在 CPU 上干活** ✓，**不是"在等 GPU"** ✗ ——
+★ 而 **680 µs 与 `eqdem` 段的 647 µs 同量级** ✓。
+
+#### (3) ★ 但第 0 步**定位不了** ✗（所以第 1 步不能省 ✓）
+
+★ 一个窗口 **9.4 ms**、`duty` **7.2 %** ⇒ ★ **那 680 µs 的 CPU 摊在整个窗口里** ✓，
+★ **不能断定它落在 647 µs 那一段内** ✗。★ 而且 `[ul_thread_cpu]` 自己的注释就警告过 ✓：
+> "READ THE WINDOW, NOT JUST THE CPU: the window AGGREGATES every activation in between … so `max` is a
+> BACKLOG reading and NOT the CPU one activation needs" ✓
+
+★★ 所以第 0 步的产出是**两条** ✓：★ **① "宿主空闲、在等 GPU"这个画面是错的** ✗；
+★ **② 每跳有 ~680 µs 的宿主 CPU 需要被归位** ✓ —— ★ 而这就是第 1 步要回答的**具体问题** ✓：
+
+> ★★ **一跳的 680 µs 宿主 CPU，花在哪个函数、哪个线程上？它落在 `eqdem` 那 647 µs 里吗？**
+
+★ **两侧的后果完全不同** ✓：
+- ★ 若**落在里面** ⇒ ★ **一跳时延的瓶颈是宿主 CPU，不是 GPU** ✗✗ ⇒ ★ "性能目标关闭"的**时延那一半要整体重写** ✓；
+- ★ 若**不在里面** ⇒ 那 647 µs 是**等待/交接** ⇒ 回到编排那条线 ✓。
+
+#### (4) ★ 第 1 步的仪器设计 ✓（**已修订** ✓：原来的"降地板"方案是错的 ✗）
+
+★ **原方案作废** ✗：相位事件表是 **worst-K** ✓（`/// \brief Keeps \ev if it is among the **worst**
+timing_events_limit() events of its phase series` ✓）⇒ ★ **降地板只会让我更仔细地看尾部** ✓，
+★ **而问题住在中位数里** ✗（`eqdem` median 647.4 ✓ / min 236.3 ✓）。
+
+★ **改为在段内加两个宿主 landmark** ✓（与 `iq2ce` 当年用三个 landmark 拆出三段是同一手法 ✓）：
+
+```
+record_ce_end                    ← 段首（PUSCH processor 线程 ✓）
+   ↓ A：等均衡+解映射 / LLR 就绪
+[新] demod 返回                  ← 新 landmark
+   ↓ B：LLR 装配 + 码块切分 + 任务投递 + 调度
+[新] codeblock task 开始执行      ← 新 landmark
+   ↓ C：到解码器被调用
+record_ldpc_start                ← 段尾（codeblock task 线程 ✓）
+```
+
+★ 它一次回答两件事 ✓：① ★ **均衡/解映射到底在不在那条已完成的 burst 里** ✓（**A≈0 就是在** ✓）；
+② ★ **B + C 占多少** ✓（那部分全是宿主编排/调度 ✓）。
+
+★ **读数怎么读** ✓（预登记的决策树 ✓）：每个新 landmark 带**线程 + 该窗口的 CPU**
+（机制已有 ✓：相位事件已带 `cpu=` / `tcpu=` / `ivcsw_rate` ✓）⇒
+- ★ `A≈0` 且 `B` 的 `tcpu` 高 ⇒ ★ **是宿主自己的活** ✓（那 680 µs 在这里 ✓）；
+- ★ `B` 的 `tcpu` 低而 `ivcsw_rate` 高 ⇒ ★ **被抢占** ✓；
+- ★ 两端落在**不同的 main_pool 线程** ⇒ ★ **同池内的跨线程投递 + 排队** ✓。
+
+★ **默认值必须不变** ✓：新 landmark 走**开关** ✓（不设 ⇒ 逐字节回到今天 ✓）。
+★ 理由不是谨慎 ✓：`run_leg.sh` 会核对 `build/hashes.h` == HEAD **且该字符串真在二进制里** ✓，
+★ **未提交的实验根本不能诚实地起飞** ✗ ⇒ 只能是"**提交一个默认关的旋钮**" ✓。
+
+#### (5) ★ 第 1 步的**实现与验证** ✓（2026-10-07 ✓）
+
+★ **已实现** ✓：`OCUDU_UL_PHASE_INTERIOR`（**默认关** ✓）+ 两个 landmark（`record_demod_enter` / `record_demod_return` ✓）
++ 一段报告（`[ul_phase_interior]` ✓，与相位段并列 ✓）。
+
+| 验证 ✓ | 结果 ✓ |
+|---|---|
+| ★ **默认关时零成本** ✓ | 两个 recorder **在取时钟之前就返回** ✓（`if (!phase_interior_enabled() \|\| !records_phase_segments()) return;` ✓）|
+| ★ **交付路线逐字节不变** ✓ | 三份语料之一 27 capture × 4 dump = **0 差异** ✓（关 vs 显式 `=0` ✓）|
+| **全量构建** ✓ | **0 error** ✓ |
+| **相关单测** ✓ | **134/134 PASS** ✓（含 pusch 全组 ✓）|
+| ★★ **探针 OFF** ✓ | ★ **第一次 FAIL，抓到 2 处** ✗ ⇒ **已修** ✓ ⇒ **114 编译 × 3 键全 OK** ✓ |
+
+★★ **而"探针 OFF"那一处值得单独记** ✓：★ **我在 `pusch_processor_impl.cpp` 里无守卫地调用了两个新方法** ✗，
+★ 而 no-op 版没有 stub ✗ ⇒ ★ **这正是 M4 验收抓到的那一类缺陷的第 9 个实例** ✓
+（"运行时调用点在探针块外、而 stub 缺失" ✓）—— ★ **区别是这次工具在构建前就拦住了** ✓：
+`probes_off_syntax_check.sh` 报 `pusch_processor_impl.cpp FAIL` ✓ —— ★ **M4 修好的那个工具第一次真正救了场** ✓。
+
+★ **离线的一处限制，如实标注** ✓：★ `report()` 在 `ul_chain_replay` 里**不被调用** ✗ ⇒
+★ **离线看不到 `[ul_phase_interior]` 的输出** ✓；★ 但 `gnb` 会调 ✓（腿上的 `[ul_pipeline]`/`[ul_time_frequency]` 就是它印的 ✓），
+且 `ul_phase_interior` 的 7 处字符串**已确认在 `gnb` 二进制里** ✓。
+
+#### (6) ★★ 预登记 ✓（腿 `mkf033` ✓，`EXTRA_KNOBS="OCUDU_UL_PHASE_INTERIOR=1"` ✓；`mkf032` = 对照 ✓）
+
+★ **腿的标准旋钮集已含 `OCUDU_UL_PHASE_SEGMENTS=1`** ✓（`fly_leg.sh` 的 KNOBS ✓）⇒ 无需另加 ✓。
+
+| 判据 ✓ | 对照 `mkf032` ✓ | 臂 `mkf033` ✓ |
+|---|---|---|
+| ★ **旋钮进了进程** ✓ | ★ **不得出现任何 `[ul_phase_interior]` 行** ✓ | ★ 必须出现 ✓ **且** `assembled` ≈ 跳数 ✓ |
+| ★★ **自证（防"空对拍"）** ✓ | —— ✓ | ★ **三个计数都必须读**：`assembled` ✓ / `missing-landmarks` ✓ / `mismatched` ✓ —— ★ `A/B/C` 三段各自的 `samples` **必须与 `assembled` 一致** ✓，否则按空读数处理 ✗ |
+| **红线** ✓ | CRC 同档 ✓ + `gaps=0` ✓ + `stale=0` ✓ | 同左（与同轮对照比 ✓）|
+| ★ **零成本** ✓ | —— ✓ | ★ **对照腿不得出现 `ul_phase_interior`** ✓ ⇒ 证明默认关是真空的 ✓ |
+
+★★ **判读决策树** ✓（**飞之前写死** ✓）：
+| 观测 ✓ | 结论 ✓ |
+|---|---|
+| ★ **B ≈ 0** ✓ | ★ **均衡+解映射确实在那条已完成的 burst 里** ✓ ⇒ 那 647 µs 与 GPU 无关 ✓ |
+| ★ **B 大** ✓ | ★ **均衡是另一次提交** ✗ ⇒ 是**第二次设备等待** ✓ ⇒ 转去量那条 CB 的边界价 ✓ |
+| ★ **A 大** ✓ | ★ **宿主自己的 setup** ✓（含 `decoder->new_data` 武装解码器 ✓）⇒ 与第 0 步那 680 µs 对得上 ✓ |
+| ★ **C 大** ✓ | ★ **投递/调度** ✓ ⇒ 看 codeblock task 落在哪个线程、`ivcsw` 高不高 ✓ |
+| ★ **A+B+C ≠ `eqdem`** ✓ | ★ **有采样缺口** ✗ ⇒ 先修配对，**不许解释** ✓ |
+
 ### 2.25 ★★ M4 的"**Linux 不变**"从**静态核验**升级为**真机实测** ✓✓（2026-10-07 ✓）
 
 > ★ **为什么这条重要** ✓：M4 验收（§2.18 ✓）里"Linux 不变"一项当时**只能做静态核验** ✗

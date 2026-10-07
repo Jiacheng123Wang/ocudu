@@ -375,6 +375,34 @@ public:
         const int64_t ce_end_ns         = want_phase_events ? to_ns(ce_it->second.tp) : 0;
         const int64_t now_ns            = want_phase_events ? to_ns(now) : 0;
         pending_phases[slot] = {now, t2f_ns, ce_ns, eqdem_ns, t2f_begin_ns, t2f_end_ns, ce_end_ns, next_start_seq++};
+        // ★ The interior split of eqdem (phase_interior_enabled()): the two landmarks were recorded on the
+        // PUSCH processor's thread and this pairing runs on the codeblock task's, so they are matched by slot.
+        // A hop whose landmarks never arrived (the first slot of a process, a route that skips them) simply
+        // contributes nothing - and the COUNT of those is printed with the series, so "no samples" can never
+        // read as "the parts are zero".
+        if (phase_interior_enabled()) {
+          const auto de_it = pending_demod_enters.find(slot);
+          const auto dr_it = pending_demod_returns.find(slot);
+          if ((de_it != pending_demod_enters.end()) && (dr_it != pending_demod_returns.end())) {
+            const double setup_us =
+                std::chrono::duration<double, std::micro>(de_it->second.tp - ce_it->second.tp).count();
+            const double demod_us =
+                std::chrono::duration<double, std::micro>(dr_it->second.tp - de_it->second.tp).count();
+            const double handoff_us = std::chrono::duration<double, std::micro>(now - dr_it->second.tp).count();
+            if ((setup_us >= 0.0) && (demod_us >= 0.0) && (handoff_us >= 0.0)) {
+              interior_setup_us.push_back(setup_us);
+              interior_demod_us.push_back(demod_us);
+              interior_handoff_us.push_back(handoff_us);
+              interior_seen++;
+            } else {
+              interior_mismatched++;
+            }
+            pending_demod_enters.erase(de_it);
+            pending_demod_returns.erase(dr_it);
+          } else {
+            interior_missing++;
+          }
+        }
         evict_oldest(pending_phases);
         // ... and the three segments that END here are recorded as tail events immediately: their durations are
         // final at this instant (t2f ends at the FFT completion, ce at the channel-estimation completion, and
@@ -820,6 +848,32 @@ public:
     trace_slot(slot, slot_trace_what::ce, now);
   }
 
+  /// \brief Marks the instant the demodulator is entered, for the interior split (phase_interior_enabled()).
+  /// \param[in] slot Slot number of the PUSCH.
+  void record_demod_enter(uint64_t slot)
+  {
+    if (!phase_interior_enabled() || !records_phase_segments()) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto now = std::chrono::high_resolution_clock::now();
+    pending_demod_enters[slot] = {now, next_start_seq++, phase_baseline_for(to_ns(now))};
+    evict_oldest(pending_demod_enters);
+  }
+
+  /// \brief Marks the instant the demodulator returned, i.e. the hop's LLRs are ready.
+  /// \param[in] slot Slot number of the PUSCH.
+  void record_demod_return(uint64_t slot)
+  {
+    if (!phase_interior_enabled() || !records_phase_segments()) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto now = std::chrono::high_resolution_clock::now();
+    pending_demod_returns[slot] = {now, next_start_seq++, phase_baseline_for(to_ns(now))};
+    evict_oldest(pending_demod_returns);
+  }
+
   /// Returns the phase-segment durations assembled for a PUSCH (see record_ldpc_start()), if any.
   /// \param[in] slot Slot number of the PUSCH (same reference as record_ldpc_start()).
   std::optional<ul_phase_durations> get_phase_durations(uint64_t slot)
@@ -1105,6 +1159,34 @@ public:
   ///   eqdem         898.3 .. 913.6 us  3157 .. 20977 us     3 ms
   ///   ldpc          115 .. 148 us      441 .. 961 us        500 us
   static constexpr int64_t timing_event_phase_floor_us[4] = {2000, 1000, 3000, 500};
+
+  /// \brief Whether the equalization+demodulation segment is split into its three INTERIOR parts.
+  ///
+  /// WHY IT EXISTS (metal_kernel_fusion 2.31). That segment's median is 647.4us on air and its arithmetic is
+  /// about 2.7us, and its own minimum is 236.3us - so no hop gets through it quickly, and "where did the time
+  /// go" is a question about the MEDIAN, not the tail. The worst-K lists above cannot answer it: they keep the
+  /// K worst samples of a series, so lowering their floor only looks harder at the tail. This splits the
+  /// segment instead, at two landmarks that already exist in the flow:
+  ///
+  ///   record_ce_end -> demod_enter       the host's own setup, including arming the decoder
+  ///   demod_enter   -> demod_return      the equalizer + demapper, and any device wait inside them
+  ///   demod_return  -> record_ldpc_start the handoff to the codeblock task, and its scheduling
+  ///
+  /// The middle one is the question: the estimator's device work is complete by record_ce_end, so if the
+  /// equalization and demapping ride the same command buffer the middle part is small and the time is on the
+  /// host; if they are a separate submission it is a second device wait.
+  ///
+  /// OFF BY DEFAULT, and free when off: both recorders return before taking the clock, the same
+  /// "unset = no clock, no cost" rule the worst-K instants follow. It also requires the phase segments, since
+  /// the interior parts are assembled with them.
+  static bool phase_interior_enabled()
+  {
+    static const bool value = []() {
+      const char* env = std::getenv("OCUDU_UL_PHASE_INTERIOR");
+      return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+    }();
+    return value;
+  }
   std::vector<timing_event> worst_rx_events{};
   std::vector<timing_event> worst_tx_events{};
   /// One worst-K list per phase series, indexed by timing_event_kind minus phase_t2f (see the floors above).
@@ -2699,6 +2781,55 @@ public:
                    stale_max);
     };
 
+    // ---- ★ the INTERIOR split of the equalization+demodulation segment (metal_kernel_fusion 2.31) -----------
+    // WHY IT IS PRINTED HERE AND NOT AS A WORST-K EVENT. That segment's median is 647.4us against ~2.7us of
+    // arithmetic, and its minimum is 236.3us - the question is about the typical hop, and the worst-K lists
+    // keep the K worst of a series by construction. So this is a full SERIES with a median, printed next to
+    // the phase segments it decomposes, and it costs nothing while OCUDU_UL_PHASE_INTERIOR is unset.
+    //
+    // ★ A MISSING SAMPLE IS COUNTED, NEVER DROPPED. The interior series can legitimately be shorter than the
+    // phase series (the first slot of a process has no landmarks), and the three counts below are what keeps
+    // "no data" from reading as "the parts are zero" - the failure this workstream has recorded three times.
+    if (phase_interior_enabled()) {
+      auto print_interior = [](const char* name, std::vector<double>& vals) {
+        if (vals.empty()) {
+          std::fprintf(stderr, "[ul_phase_interior] %s: no samples\n", name);
+          return;
+        }
+        std::sort(vals.begin(), vals.end());
+        const size_t n = vals.size();
+        double       sum = 0;
+        for (double v : vals) {
+          sum += v;
+        }
+        std::fprintf(stderr,
+                     "[ul_phase_interior] %s samples=%zu mean=%.1fus median=%.1fus min=%.1fus p95=%.1fus p99=%.1fus max=%.1fus\n",
+                     name,
+                     n,
+                     sum / static_cast<double>(n),
+                     vals[n / 2],
+                     vals.front(),
+                     vals[(n * 95) / 100],
+                     vals[(n * 99) / 100],
+                     vals.back());
+      };
+      std::fprintf(stderr,
+                   "[ul_phase_interior] OCUDU_UL_PHASE_INTERIOR=1: the eqdem segment split at the demodulator's "
+                   "two edges; assembled=%llu missing-landmarks=%llu mismatched=%llu\n",
+                   static_cast<unsigned long long>(interior_seen),
+                   static_cast<unsigned long long>(interior_missing),
+                   static_cast<unsigned long long>(interior_mismatched));
+      std::fprintf(stderr,
+                   "[ul_phase_interior]   A = record_ce_end -> demod_enter   (the host's own setup)\n");
+      print_interior("A_setup  ", interior_setup_us);
+      std::fprintf(stderr,
+                   "[ul_phase_interior]   B = demod_enter -> demod_return   (equalizer+demapper, and any device wait)\n");
+      print_interior("B_demod  ", interior_demod_us);
+      std::fprintf(stderr,
+                   "[ul_phase_interior]   C = demod_return -> record_ldpc_start (the handoff to the codeblock task)\n");
+      print_interior("C_handoff", interior_handoff_us);
+    }
+
     // ---- the WITHIN-RUN stability view (dev doc 10.20) --------------------------------------------------------
     // WHAT THE USER MEANS BY "running stability" (2026-10-01, and it is a definition, not a preference): when the
     // PHY threads run THE SAME TASK the time it takes should barely change - and because DIFFERENT RUNS may
@@ -3321,6 +3452,21 @@ private:
   start_registry   pending_t2f_ends;
   /// Slot-keyed timestamps of the PUSCH channel estimation completions (see record_ce_end()).
   start_registry   pending_ce_ends;
+  /// ★ The two interior landmarks of the equalization+demodulation segment (see
+  /// phase_interior_enabled()). Slot-keyed like pending_ce_ends, because the two ends are recorded on
+  /// DIFFERENT threads: the entry and the return on the PUSCH processor's, the segment's own end on the
+  /// codeblock task's.
+  start_registry   pending_demod_enters;
+  start_registry   pending_demod_returns;
+  /// ★ The three interior parts of that segment, per hop, pushed when the segment is assembled at
+  /// record_ldpc_start(). Reported next to the phase segments; empty (and free) while the knob is off.
+  std::vector<double> interior_setup_us;   ///< record_ce_end -> demod_enter
+  std::vector<double> interior_demod_us;   ///< demod_enter -> demod_return
+  std::vector<double> interior_handoff_us; ///< demod_return -> record_ldpc_start
+  /// Why an interior series has fewer samples than the phase series: never silently.
+  uint64_t interior_seen       = 0; ///< hops whose three parts were assembled
+  uint64_t interior_missing    = 0; ///< hops whose landmarks never arrived
+  uint64_t interior_mismatched = 0; ///< hops whose pairing produced a negative part (a shifted slot)
   /// Slot-keyed timestamps of the CRC-OK completions (see record_end_crc_ok()); consumed by
   /// record_fapi_mac_end() to produce the FAPI->MAC tail-latency series.
   start_registry   pending_crc_ok_ends;
@@ -3473,6 +3619,13 @@ public:
   void record_ldpc_start(uint64_t /*slot*/) {}
   void record_t2f_end(uint64_t /*slot*/) {}
   void record_ce_end(uint64_t /*slot*/) {}
+  // ★ The two interior landmarks of the eqdem segment (metal_kernel_fusion 2.31). Their call sites are NOT
+  // inside a probe guard - they are plain runtime lines in pusch_processor_impl.cpp, exactly like the
+  // record_ce_end above them - so the no-op arm has to carry both, with the same signatures and defaults.
+  // They are the 9th instance of the class of defect the M4 acceptance found, and this time the checker
+  // caught it before the build: see wip/probes_off_syntax_check.sh.
+  void record_demod_enter(uint64_t /*slot*/) {}
+  void record_demod_return(uint64_t /*slot*/) {}
   void record_end_crc_ok(uint64_t /*slot*/, size_t /*mac_pdu_bytes*/) {}
   void record_fapi_mac_end(uint64_t /*slot*/) {}
   void record_rx_wait(int64_t /*wait_ns*/, bool /*spans_stream_start*/ = false, int64_t /*begin_ns*/ = 0,
