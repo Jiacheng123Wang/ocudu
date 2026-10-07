@@ -60,7 +60,20 @@ ocudu_add_metallib(
     IEEE_MATH_SOURCES
         ../upper/signal_processors/channel_estimator/metal/ocudu_mmse_corr.metal
         ../upper/signal_processors/channel_estimator/metal/ocudu_mmse_pilots_power.metal
-        ../upper/signal_processors/channel_estimator/metal/ocudu_mmse_apply_lse.metal)
+        ../upper/signal_processors/channel_estimator/metal/ocudu_mmse_apply_lse.metal
+        # ocudu_mmse_weights.metal BELONGS HERE AND WAS MISSING (metal_kernel_fusion, 2026-10-07).
+        #
+        # The kernel's own comment states the contract this list implements: "`acc += rp[k] * a_smem[...]`,
+        # NOT fma(): the kernel above and the CPU reference both round the multiply and then the add, and
+        # the metallib is compiled with -fno-fast-math exactly so the contraction does not happen behind
+        # our back ... Writing fma() here would be a deliberate difference in the last bit of every
+        # element." That was the claim; this list did not carry it, so mmse_weights and mmse_weights_tile
+        # compiled under Metal's default fast math and their bit-exactness with the CPU reference rested
+        # on the compiler happening not to contract `acc += rp[k]*a`. Found while planning a CE fusion:
+        # a fusion moves kernels into a NEW compilation context, so bits that are an artifact of the
+        # present one cannot be assumed to survive - the claim has to be enforced by the build, not by
+        # the compiler's mood.
+        ../upper/signal_processors/channel_estimator/metal/ocudu_mmse_weights.metal)
 # The three engine CMakeLists read this instead of naming the path themselves (the directory is
 # entered before theirs, so it is set by the time they run).
 set(OCUDU_LANE_METALLIB_PATH "${CMAKE_CURRENT_SOURCE_DIR}/ocudu_lane.metallib" CACHE INTERNAL

@@ -848,7 +848,12 @@ CRC 该腿 **95.6 %（marginal）** ✗，但**同轮的 `mkf023` 是 93.1 %（D
 
 | # | 融合什么 | 障碍 | 预期 |
 |---|---|---|---|
-| **P1-a** ✓ | `mmse_reformat` + `mmse_pilots_lse` + `mmse_pilots_apply_cfo` ✓（都是**逐 RE / 逐导频**的局部算子 ✓，无跨组协作 ✓）| 无 ✓（同一几何 ✓）| **最稳的第一步** ✓ |
+| ~~**P1-a**~~ ✗ | ~~`mmse_reformat` + `mmse_pilots_lse` + `mmse_pilots_apply_cfo`~~ ✗ —— ★★ **这一条写错了** ✗✗（**读码阶段抓到 ✓**）：`mmse_reformat` 读的是 **`gpu_h`** ✓，而 `gpu_h` 由 **`mmse_apply_lse`** 产出 ✓ ⇒ ★ **reformat 在 apply 的下游、属于"权重"阶段** ✓，与 `pilots_*`（**抽取**阶段 ✓）之间隔着 `pilots_apply_cfo → fd_smooth → sigma2 → power → corr_a → inv → weights → apply_lse` **一整条链** ✗ ⇒ **根本不能融合** ✗。★ **教训** ✓：**"在同一个 CB 里" ≠ "相邻" ≠ "无依赖"** ✓ —— 我把三条**读取不同上游**的 kernel 当成了可合并 ✗ | — |
+
+★ **⇒ P1-a 的更正版本** ✓（**只合并"同阶段 + 真相邻 + 无中间依赖"的** ✓，待依赖分析定稿 ✓）：
+候选 = **`pilots_lse` + `pilots_cfo`** ✓（同在抽取阶段的头部 ✓）、**`apply_lse` + `reformat`** ✓（同在权重阶段尾部 ✓）、
+**`reformat` + `rsrp`** ✓（**同读 `gpu_h`、互不读对方输出** ✓ —— 引擎注释自己写着"K3 与 K4 写读不相交的缓冲，所以次序自由" ✓）。
+★ **而凡是"读上游输出"的相邻对都不能合并** ✗ —— 这正是 P1-a 初版犯的错 ✓。
 | **P1-b** ✓ | `mmse_corr_a` + `mmse_corr_r_hp` ✓（同位置、同几何 ✓；★ **`OCUDU_CE_CORR_MERGED` 已经做过** ✓ ⇒ **直接复用** ✓）| 无 ✓（已有实现 ✓）| **零新代码** ✓（`mkf023` 已实测 −6.5 µs ✓）|
 | **P1-c** ✓ | `corr` + `inv` + `weights` + `apply` 折进**一个** kernel ✓ | ★ **矩阵求逆需要 threadgroup 协作** ✗（每 system 一个 threadgroup ✓、矩阵在 **threadgroup memory** ✓、受 `MAX_N` / 32 KB 限制 ✓）| **需新 kernel** ✓：`mmse_inv` → `mmse_weights` 可直接续跑 ✓（**同一 threadgroup、同一矩阵 ✓**）；`apply` 的网格不同 ✗（`nout` vs 矩阵组 ✓）⇒ 要分叉 ✓ |
 | **P1-d** ✓ | CE 折进 **lane burst**（CB 2.00 → 1.00 ✓）| 网格/编码次序 ✓；**且 M2 的前提已被 `mkf018/019` 证否** ✗（那道 fence 不花钱 ✓）⇒ ★ **收益只剩"少一条 CB"** ✓（≈边界账 ✓）| **优先级最低** ✗ |
@@ -1065,6 +1070,91 @@ kernel **cannot be dispatched at all**" ✓ ⇒ ★ **是内核容量，不是�
 ★ **`C1+半槽` 已结清 ✓、P1-b 已完成 ✓** ⇒ **下一个真正可做的是 P1-a** ✓
 （`reformat + pilots_lse + pilots_cfo` 合一 ✓，局部算子 ✓、可保逐位一致 ✓）。
 ★ **而"那 ~550 µs"这个问题本身可以关掉了** ✓ —— 它不是缺陷 ✓，是**一跳的固定成本** ✓（其中 73 % 是设备驻留 ✓）。
+
+### 2.21 ★★ CE 融合的依赖分析结果与施工顺序（2026-10-07 ✓，**静态分析，未改 kernel** ✓）
+
+用户裁决继续推进 CE 整合后 ✓，先做了**一次严格的依赖分析** ✓（逐 kernel 的读写缓冲/局部性/网格/归约锁 ✓），
+**没有凭猜测定接缝** ✗ —— ★ **这个决定当场救了一次** ✓：本工作流原写的 **P1-a（`reformat`+`pilots_lse`+`pilots_cfo` 合一）是错的** ✗
+（§2.20 已标 ✗），因为 `reformat` 读 `gpu_h`、而 `gpu_h` 由 `apply_lse` 产出 ⇒ **它在 apply 的下游、属"权重"阶段** ✓。
+
+#### (1) ★ 真正的锁是"**每文件一个数学模式**"，不是"每文件一个 kernel" ✓✓
+
+| 文件 | 在 `IEEE_MATH_SOURCES`（`-fno-fast-math`）| 含义 |
+|---|---|---|
+| `ocudu_mmse_corr.metal` ✓ | **是** ✓（**三个** kernel ✓）| 相关 kernel **彼此可融** ✓（O1 已这么做 ✓）|
+| `ocudu_mmse_pilots_power.metal` ✓ | **是** ✓（**一个** kernel ✓）| ★ **双向锁死** ✗（`:23-27` 原文"flag 是按文件的，所以该 kernel 必须单独在这里" ✓）|
+| `ocudu_mmse_apply_lse.metal` ✓ | **是** ✓（**一个** kernel ✓）| ★ **双向锁死** ✗（`:20-42` ✓）|
+| `ocudu_mmse_reformat.metal` ✓ | 否 ✗（**两个** kernel ✓ `reformat`+`noise` ✓）| ★ **"每文件一 kernel"不是规则 ✓，"每文件一数学模式"才是** ✓ |
+
+⇒ ★ **硬墙** ✓：`pilots_power` 与 `apply_lse` **与任何 kernel 都不能融** ✗（跨过严格边界会改浮点语义 ✓，
+且两处都有实测：`pilots_power` 的记录是 **298151/2²⁰ 个商的舍入不同、27/27 capture 的 LLR 翻转** ✓；
+`apply_lse` 是 **13/27 capture 的 `_ce.txt` 动了 40 字节** ✓）。
+
+#### (2) ★★ 而分析顺手抓出一个**必须先修的真缺陷** ✓✗（F1 ✓）
+
+★ `ocudu_mmse_weights.metal:126-136` 的注释写着 ✓：
+> "`acc += rp[k] * a_smem[...]`, **NOT fma()** … the metallib **is compiled with -fno-fast-math** exactly so
+> the contraction does not happen behind our back … Writing fma() here would be a deliberate difference in
+> **the last bit of every element**" ✓
+
+★ **而这句话在构建上是假的** ✗：`IEEE_MATH_SOURCES` **只列了三个文件 ✓、没有 weights** ✗
+⇒ `mmse_weights` / `mmse_weights_tile` 一直在 **Metal 默认快数学**下编译 ✓
+⇒ ★ **那句"与 CPU 参考逐位一致"的合同，靠的是"编译器恰好没做 fma 收缩"** ✗。
+
+★ **已修** ✓（`lib/phy/metal/CMakeLists.txt` ✓：把 `ocudu_mmse_weights.metal` 加进严格清单 ✓，注释写明原因 ✓）：
+
+| 验证 | 结果 |
+|---|---|
+| metallib 重建 ✓ | **201 148 → 200 988 B** ✓（**标志确实影响了产物** ✓）|
+| ★ **数值对拍** ✓ | ★ **6 个 capture × 5 个 dump = 30 个 dump，0 差异** ✓（`OCUDU_LANE_METALLIB_PATH` 切换两版库 ✓）|
+
+⇒ ★ **结论** ✓：**当前编译器恰好没收缩** ✓ ⇒ 加标志**不改变任何输出** ✓，
+但把"恰好"变成"**由构建保证**" ✓ —— ★ 而这**对融合是前提** ✓：
+**融合会把 kernel 放进新的编译上下文 ✓，靠现状产物"恰好一致"的位不能假设能活下来** ✗。
+
+#### (3) ★ 可融合清单（按"能保逐位一致"的置信度 ✓，**全部已核对依赖** ✓）
+
+| # | 合并什么 | 省派发 | 几何 | 归约顺序 | 置信度 |
+|---|---|---|---|---|---|
+| **1** ✓ | `corr_a` + `corr_r_hp`（**每组** ✓）| **2** | `tgs_wide*2*nof_systems` × 256 ✓ | ★ **不碰任何归约** ✓ | ★ **最高** ✓ —— ★ **代码已存在** ✓（`mmse_corr_a_rhp` ✓，`OCUDU_CE_CORR_MERGED` 背后 ✓）⇒ ★ **把它转默认** ✓、**先修 F2** ✗ |
+| **2** ✓ | `cfo` + `apply_cfo` ✓ | **1** | 1 tg × 256 ✓ | ★ **不变** ✓（cfo 保 256 线程/`i+=256`/同一 8 级树 ✓）| **高** ✓（同文件同快数学 ✓）|
+| **3** ✓ | ★ **四个相关派发 → 1** ✓ | **3** | 一个 1-D 网格 + (group,matrix,system) 解码 ✓ | 不碰归约 ✓ | **高**（算术）/ **中高**（工程）✓ |
+| 4–6 | cfo+apply_cfo+(fd_smooth)+(sigma2)+(epre) ✓ | 2–5 | 1 tg × 256 ✓ | ★ **只有恰好 256 线程时才不变** ✗（改线程数会重划 SIMD 组 ✓）| 中 ✓；★ **第 6 档大概净亏** ✗（LSE 的并行度就在这里 ✓）|
+| 7–9 | rsrp/ta_chain/noise/reformat 的各种组合 ✓ | 1–2 | 需重排 ✓ | noise **必须钉在 256** ✗ | 中 ✓ |
+| 10 | `inv` + `weights` ✓ | 1 | `nof_systems` × (64,16) ✓ | 不变 ✓ | ★ **被 F1 挡住过** ✓ ⇒ **F1 修好后可重新评估** ✓ |
+
+#### (4) ★ "看着能融其实不能"的对 ✓（**D 组，这是本次分析最有价值的部分** ✓）
+
+| 对 | 为什么不能 |
+|---|---|
+| **`sigma2` + `power`** ✗ | 最诱人（相邻 ✓ 同 1×256 ✓ 同参数块 ✓）但：① **真 RAW 依赖** ✓；② ★ **跨严格边界** ✗ —— 合进 `pilots.metal` ⇒ 除法走快数学 ✓（27/27 LLR 翻转 ✓）；合进严格文件 ⇒ **数据路径的归约被重舍入** ✓（27/27 capture 动过 ✓）|
+| **`pilots_power` + `epre`** ✗ | 无依赖但同样撞严格边界 ✓ |
+| ★ **`apply_lse` + `reformat`** ✗ | 最"显然"的一个（"直接从 K2 写 bf16" ✓）但：`round(round(lse*inv_beta)*w)` 的两次舍入**必须在原处** ✓ ⇒ 换文件会重结合 ✓（实测 **13/27 capture 动 40 字节** ✓）|
+| **`apply_lse` + `weights`** ✗ | 同严格边界 + `weights` 的 no-fma 合同（F1 ✓）|
+| **`corr_r_hp`(edge) + `pilots_lse`** ✗ | 无依赖 ✓ 但**不同命令缓冲** ✗ **且不同数学模式** ✗（重舍入相关矩阵会被 cond₂≈2e4 放大成 W/h 的 ~1% ✓）|
+| ★ **`corr_a` + `inv`** ✗ | ★ **结构上最有趣的一对** ✓（能把那个 **27% 失败率的"地雷"边界** ✓ 变成**一个 threadgroup barrier** ✓）但需要把 K1 的消元放在 `corr.metal` 的 `-fno-fast-math` 下编译 ✓ ⇒ **未测** ✗ |
+
+#### (5) ★ 三条附带发现 ✓（都会影响后续施工 ✓）
+
+* **F2** ✗：`encode_corr` 的 merged 分支**只在 `sigma2_dev != nullptr` 时绑 buffer(3)** ✓，
+  而**注释与 kernel 都要求"即使不用也必须绑"** ✓（"an unbound device pointer is undefined in MSL" ✓）
+  ⇒ ★ **今天潜伏** ✓（只在 `sigma2_from_device != 0` 时解引用 ✓）⇒ ★ **把 O1 转默认前必须修** ✗。
+* **F3** ✓：★ **cb#2 里有几对"生产者→消费者"之间没有 barrier** ✗（`lse→cfo` ✓、非 burst 模式下
+  `weights→apply_lse` 与 `apply_lse→reformat` ✓），而 `fd_smooth→sigma2`、`sigma2→power`、`epre` **都编了** ✓。
+  ★ 结合 `impl.cpp:2211-2215` 的记录（"**一个 encoder 内两次派发之间的 barrier 在这个平台上不交付那次写**" ✓）
+  ⇒ ★ **这些无 barrier 的对正是"融合能治"的形状** ✓ —— **一个 dispatch 内的 threadgroup barrier
+  比跨派发的 `MTLBarrierScopeBuffers` 更强也更便宜** ✓ ⇒ ★ **这是"支持融合"的论据** ✓（未实测 ✓）。
+* **O1 的空口收益没有记录在案** ✗（`corr.metal:268-271` 记着它**曾测得比两个派发更慢** ✓，
+  在 `my_tgs` guard 加上之前 ✓）⇒ ★ **把它转默认之前要先确认它在空口上真的赢** ✓。
+
+#### (6) ⇒ 施工顺序（据本次分析定稿 ✓）
+
+1. ★ **F1 已修 ✓**（`weights` 进严格清单 ✓、30 dump 对拍 0 差异 ✓）；
+2. ★ **修 F2** ✓（merged 分支必须绑 buffer(3) ✓）—— ★ **这是 O1 转默认的前置** ✓；
+3. ★ **RANK 1：把 O1 转默认** ✓（省 2 派发 ✓、**零算术暴露** ✓、代码已存在 ✓）——
+   ★ 但**先离线对拍 + 一条腿确认它真的赢** ✓（因为历史上曾测得更慢 ✗）；
+4. ★ **RANK 2：`cfo` + `apply_cfo` 新 kernel** ✓（省 1 派发 ✓、同文件同快数学 ✓、归约顺序不变 ✓）；
+5. 之后才考虑 RANK 3（四个相关派发合一 ✓）与 `corr_a`+`inv`（★ **需要先测严格模式下的 K1** ✓）。
 
 ### 2.4 M1 的执行顺序（每步可停 ✓）
 
