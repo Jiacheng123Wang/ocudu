@@ -1248,8 +1248,8 @@ pair kernel **本身就是合并构建** ✓，O1 的回退必须能一起退 �
 
 ### 2.23 ★ 下一步：`mkf027` + `mkf028` 两条腿（**用户 2026-10-07 裁决：两条腿** ✓）
 
-★ **交付形态** ✓ = **HEAD `2b58ccf273`** ✓（指纹 = HEAD ✓、**已在二进制里** ✓、工作树干净 ✓）；
-库 = `ocudu_lane.metallib` **36 kernel** ✓。
+★ **交付形态** ✓ = **飞腿时的 HEAD** ✓（`run_leg.sh` 会核对 `build/hashes.h` 指纹 == HEAD ✓
+**且该字符串必须真在二进制里** ✓，不符**直接拒绝起飞** ✓）；库 = `ocudu_lane.metallib` **36 kernel** ✓。
 
 ```bash
 cd /Users/jiachengwang/dev/ocudu
@@ -1277,7 +1277,7 @@ grep -o "ce_sites.*" $LEG_LOGDIR/gnb_gpu_mkf028-rank3_*.log.stderr
 
 | # | 判据 ✓ | 对照腿 `mkf027` ✓ | 臂腿 `mkf028` ✓ |
 |---|---|---|---|
-| ★ **旋钮真的进了进程** ✓ | —— | ★ 日志里必须有 `OCUDU_CE_CORR_PAIR: ON` 之类的**自报** ✓ **且** `corr_pair` ≠ 0 ✓（**否则整条腿作废** ✗）|
+| ★ **旋钮真的进了进程** ✓ | ★ 日志里必须有 `[ce_corr_pair] OCUDU_CE_CORR_PAIR: OFF (…)` ✓ | ★ 必须有 `[ce_corr_pair] OCUDU_CE_CORR_PAIR: ON (metallib entry point present)` ✓ **且** `corr_pair` ≠ 0 ✓（**否则整条腿作废** ✗）|
 | ★ **计数不变式** ✓ | `corr_pair = 0` ✓、`merged == corr_a == corr_rhp` ✓ | ★ **`merged == 2 * corr_pair`** ✓（**精确相等** ✓，因为每条 pair 派发恰好两个组 ✓）|
 | ★ **RANK 2 红线** ✓ | ★ **`stale=0` ✓ + CRC ≥ 99 % ✓ + `cfo_fused` ≠ 0 ✓ + `gaps=0` ✓ ⇒ RANK 2 结清** ✓ | 同左 ✓ |
 | ★ **RANK 3 红线** ✓ | —— | ❓ **同左 ⇒ RANK 3 结清** ✓ |
