@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_metal_burst.h"
+
 #include "ocudu_metal_lane_clock.h"
 #include "ocudu_metal_lane_probe.h"
 #include "ocudu_metal_queue.h"
@@ -779,6 +780,54 @@ void burst_stats_wait() {}
 
 /// Creates the command buffer and its encoder when the burst is not open yet. Returns false when
 /// the queue or the encoder could not be created; leaves the pipeline/number of dispatches alone.
+/// \brief The FENCE-ABLATION arm of the lane probe (metal_kernel_fusion, 2026-10-07).
+///
+/// WHY IT EXISTS. Two air pairs and the whole M0 ablation series agree that a lane command buffer's
+/// device window (`start -> end`) is hundreds of microseconds while the kernels inside it total a few
+/// - and the series added to the lane probe on 2026-10-07 finally said WHICH hundreds: the MEDIAN
+/// command buffer spends ~34 us in the queue and ~209 us inside the device. Removing the kernels does
+/// not move that window (M0), so it is not arithmetic; the queue is a tail, not the median, so it is
+/// not submission either. What is left is what the buffer WAITS FOR once it is running, and the one
+/// thing every lane buffer waits for is encoded right here: the estimator's stage fence and the grid
+/// production fence. This arm deletes exactly those two waits and nothing else, so the answer is a
+/// difference of two windows measured by the same probe.
+///
+/// IT IS A MEASUREMENT, NOT A ROUTE. Without the stage fence the equalizer may read the estimator's
+/// memory before it is written, so a run with this knob on is NOT a working radio and its CRCs mean
+/// nothing - the same contract as OCUDU_LANE_ABLATE. Off by default, and the delivery path is
+/// untouched: with the knob unset the two blocks below execute exactly as before.
+///
+/// The skipped fences are COUNTED and reported at exit: an arm that fires and is never counted is how
+/// "the knob was on" gets believed without a reading.
+static std::atomic<uint64_t>& fence_ablation_skipped()
+{
+  static std::atomic<uint64_t>* n = new std::atomic<uint64_t>(0);
+  return *n;
+}
+
+static bool fence_ablation_enabled()
+{
+  static const bool enabled = []() {
+    const char* env = std::getenv("OCUDU_LANE_ABLATE_FENCE");
+    if ((env == nullptr) || (std::strtoul(env, nullptr, 10) == 0)) {
+      return false;
+    }
+    std::fprintf(stderr,
+                 "[metal_ablate_fence] OCUDU_LANE_ABLATE_FENCE=1: the lane's command buffers are committed "
+                 "WITHOUT the estimator and grid-production waits. This run measures STRUCTURE (where a "
+                 "buffer's device window goes), NOT a working link - the equalizer may read the estimator's "
+                 "memory before it is written, so expect every CRC to fail.\n");
+    std::atexit([]() {
+      std::fprintf(stderr,
+                   "[metal_ablate_fence] fences skipped: %llu command buffer(s) were committed without their "
+                   "waits\n",
+                   static_cast<unsigned long long>(fence_ablation_skipped().load(std::memory_order_relaxed)));
+    });
+    return true;
+  }();
+  return enabled;
+}
+
 static bool burst_ensure_open(burst_state& s)
 {
   if (s.cb != nil) {
@@ -818,27 +867,37 @@ static bool burst_ensure_open(burst_state& s)
     // the routes that commit early - see mmse_engine: the signal and set_stage_wait() are issued together,
     // immediately before the commit that puts it ahead of this burst on the same queue). The global newest is
     // only the fallback for a route whose estimator ran synchronously on another thread or not at all.
-    {
-      const uint64_t own_generation = s.stage_wait;
-      s.stage_wait                  = 0;
-      if (own_generation != 0) {
-        const bool crossed = shared_queue::backend_stage_generation() != own_generation;
-        (void)shared_queue::backend_stage_wait_generation(s.cb, own_generation);
-        shared_queue::note_stage_fence_wait(/*own_generation=*/true, crossed);
-      } else {
-        (void)shared_queue::backend_stage_wait(s.cb);
-        shared_queue::note_stage_fence_wait(/*own_generation=*/false, /*crossed=*/false);
+    if (fence_ablation_enabled()) {
+      // The arm (see its own note above): the waits are CONSUMED - so the state machines that set them
+      // behave exactly as in a normal run - but nothing is encoded on the command buffer.
+      if ((s.stage_wait != 0) || s.grid_wait != 0) {
+        fence_ablation_skipped().fetch_add(1, std::memory_order_relaxed);
       }
-    }
-    // Grid production (D1): this burst may belong to a hop that MISSED the hand-over, in which case the
-    // resource grid it is about to read is produced by a block committed by SOMEONE ELSE (another
-    // consumer's fallback, or the registry's sweep) and the two are only ordered if the commit happens
-    // first (see shared_burst::grid_production_generation()). Encoded here, where the buffer is created and
-    // before any dispatch, because a command-buffer-level wait cannot be expressed inside an encoder - and
-    // because the CPU thread must NOT wait for it (that is the stall of design document 5.9.23).
-    if (s.grid_wait != 0) {
-      (void)shared_queue::grid_ready_encode_wait(s.cb, s.grid_wait);
-      s.grid_wait = 0;
+      s.stage_wait = 0;
+      s.grid_wait  = 0;
+    } else {
+      {
+        const uint64_t own_generation = s.stage_wait;
+        s.stage_wait                  = 0;
+        if (own_generation != 0) {
+          const bool crossed = shared_queue::backend_stage_generation() != own_generation;
+          (void)shared_queue::backend_stage_wait_generation(s.cb, own_generation);
+          shared_queue::note_stage_fence_wait(/*own_generation=*/true, crossed);
+        } else {
+          (void)shared_queue::backend_stage_wait(s.cb);
+          shared_queue::note_stage_fence_wait(/*own_generation=*/false, /*crossed=*/false);
+        }
+      }
+      // Grid production (D1): this burst may belong to a hop that MISSED the hand-over, in which case the
+      // resource grid it is about to read is produced by a block committed by SOMEONE ELSE (another
+      // consumer's fallback, or the registry's sweep) and the two are only ordered if the commit happens
+      // first (see shared_burst::grid_production_generation()). Encoded here, where the buffer is created
+      // and before any dispatch, because a command-buffer-level wait cannot be expressed inside an
+      // encoder - and because the CPU thread must NOT wait for it (design document 5.9.23).
+      if (s.grid_wait != 0) {
+        (void)shared_queue::grid_ready_encode_wait(s.cb, s.grid_wait);
+        s.grid_wait = 0;
+      }
     }
   }
   s.enc = (s.cb != nil) ? [s.cb computeCommandEncoder] : nil;
