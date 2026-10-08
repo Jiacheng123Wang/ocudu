@@ -147,7 +147,7 @@ mkf033 实测中位 **449.8 µs**，它**已经**把 **CE 抽取 + CE 权重 + �
 是因为设备侧已经把这几步合在一起了；换成 AI net 时若拆成"CE 网络 + EQ/DEM 网络"，
 等于**把一个已经融合的单元重新切开**，还会多付一次 dispatch 地板
 （mkf023：一个边界 ≈6.5 µs；ANE：单次 dispatch 地板 70–230 µs，见 `memo_03` §1）。
-⇒ 主规划 §2.1 给出"必须是一个网络"的四条理由。
+⇒ 设计文档 §2.1 给出"必须是一个网络"的四条理由。
 
 ## 2. LLR 契约（模型输出必须逐条满足）
 
@@ -288,4 +288,4 @@ AI 路径必须换成**统计门**，且在飞行前预登记判据：
 | 论文 2503.16594v1 逐节读书笔记 | `memo_02_paper_2503.16594_reading.md` |
 | 公开文献调研（架构/数据/损失/部署） | `memo_03_literature_survey.md` |
 | 数据与标签工程细节 | `memo_04_data_labels_and_operating_point.md` |
-| 主规划（阶段、门禁、风险、工时） | `AI_LLR_detection_master_plan.md` |
+| 设计文档（阶段、门禁、风险、工时） | `AI_LLR_detection_master_plan.md` |
