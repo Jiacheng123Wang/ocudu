@@ -194,8 +194,116 @@ cmake --build build -j --target dft_processor_metal_unit_test && \
 
 | # | 事项 | 状态 |
 |---|---|---|
-| 1 | M2 全套 `cmake --build build --target test` 的最终结果 | 🟡 运行中（`/tmp/m2_full_after.log`）；已确认 DFT 一项由红转绿 |
+| 1 | M2 全套 `cmake --build build --target test` 的最终结果 | ✅ 见 §7.3：**10302 中 2 个失败**（原为 9 个） |
 | 2 | M2 上 Metal DFT 单次往返 191 µs vs CPU 1.3 µs —— **M2 是否应该默认关闭 Metal DFT？** | ⬜ 待裁定。这是一个"能力开关"问题，按 I6（开关按能力而非平台）应做成**按机型/实测**的默认值，而不是编译期开关 |
-| 3 | 其余 8 个在 M2 上失败的测试，是否全为本根因 | 🟡 待全套日志确认 |
+| 3 | 其余 8 个在 M2 上失败的测试，是否全为本根因 | ✅ 见 §7.3：8 个全是"**Not Run**"（二进制从未构建），重编后 5 个通过、3 个暴露新问题、其中 2 个已修 |
 | 4 | `platform_portability_design_rules.md` 是否采纳 §4 的候选规则 | ⬜ 待用户裁定 |
 | 5 | `memo_08`（P0 设计）加入"下发配置需在 pipeline 上查询"的检查项 | ⬜ 随 `memo_08` 正文一起 |
+| 6 | ★ **M2 的 MMSE 估计器出现非确定性 NaN** | ⬜ **待排查**，见 §7.4。已证明与本工作流改动无关 |
+
+---
+
+## 7. 补充（2026-10-08 晚）：产物有效性，与两个合并回归
+
+§1–§5 讲的是"能力查错了对象"。这一节讲同一类错误的**第三张脸**：
+**你测的那个数，可能不描述你以为在测的那份产物。**
+
+### 7.1 ★★ `--target test` 不构建，所以"100% 通过"可以先是一个假象
+
+M4 Pro 上曾出现一次 `10302 个测试 100% 通过`。同一份源码、同一台机器，
+随后**重新构建**再跑却出现 1 个失败。原因不是 flaky：
+
+- `cmake --build <dir> --target test` **只跑 ctest，不构建**；
+- `.metallib` 是 **gitignored 的源码树内产物**，运行时按路径加载；
+- 于是磁盘上的 metallib 可以来自**另一棵树或另一个分支**，而测试二进制也可以是旧的。
+
+★ 实证：一次 `cmake --build build -j 14`（全量）**重编了 26 个 Metal 产物**——
+说明此前磁盘上的 metallib 集合与源码并不同步。
+
+★★ 同一机制的第二个受害者是 **M2**：它那 8 个"失败"其实全是 `Could not find executable`
+（二进制从未构建），ctest 报的是 **Not Run**，不是 Fail。**"9 个失败"里有 8 个根本不是失败。**
+
+⇒ **操作规则（本文档的产出）**：
+1. **任何要写进记录的测试数字，前面必须有一次全量构建**；
+2. `metallib_freshness_*` 只能覆盖"metallib 相对源码陈旧"，**覆盖不了"二进制相对源码陈旧"**——
+   后者靠"先构建再跑"这条纪律，不靠检查；
+3. 日志里 `Not Run` 与 `Failed` 必须分开读（本次两者混在一张 FAILED 表里）。
+
+### 7.2 ★★★ 两个合并回归：自动化测试当时并没有在跑
+
+`d784ea5711`（merge main into apple-silicon）当天的结论是"两边 build 和 test 都过"。
+本次全量验证发现**两个真实回归**，都是**合并解冲突时保留了本分支的旧侧**：
+
+| 回归 | 症状 | 为什么当时没发现 |
+|---|---|---|
+| **OFH 集成测试** | `ofh_integration_test` 0.01 s 失败：`unexpected arguments: '{0,1}' -d` | 该测试名在 M4（macOS）上被注册为 **Disabled**，只有 Linux 会真跑；而 Ubuntu 那次全程没跑完（内存尖峰中止） |
+| ★ **OFDM 相位补偿位置** | 设备侧 grid 与 host grid 在 **2/4200**（5 MHz 小区）或 **10/17808**（20 MHz）个 RE 上不一致，打印到 6 位小数完全相同 = **bf16 末位差** | 唯一能看见它的 `ofdm_demodulator_metal_batch_test`，在 M4 上跑的是**陈旧二进制**（见 §7.1），一直"通过" |
+
+**OFH**：上游 `9e1f79afa7` 已把 `-d '{0,1}'` 改成 `--dl_port_id 0 1`，`f10e91102d` 又整个删掉了这个裸测试
+（覆盖面并入 `ofh_integration_test_non_rt`）。本分支 fork 早于两者，合并时保留了旧行。修法：按上游删除。
+
+**OFDM 相位补偿**：上游把相位补偿**折进 FFT 之前的输入**（`fill_dft_input`），
+而本分支的设备侧 grid 写入是**在 kernel 里、FFT 之后**乘同一个系数（`dft_grid_write_params::coefficient`）。
+同一个算式换个顺序，在 bf16 舍入下就不再逐位相同——而"设备 grid == host grid，逐位相同"
+是本分支显式测试的不变量。更糟的是**环形输入路径会补偿两次**。
+
+修法：把补偿移回 FFT 之后（`process_dft_output`），恢复合并时被删掉的 `compensated_output` 缓冲，
+并同步改上游的 `ofdm_demodulator_unittest` 断言。**这是一条与上游的有意分歧**，
+理由写在 `fill_dft_input()` 的注释里，因为下一次合并还会被递上上游的版本。
+
+★ 两条教训都指向同一件事：
+**"测试通过"只有在"测试真的跑了、而且跑的是当前源码"时才是证据。**
+本工作流的纪律（判据预登记、每个数字可追溯到 leg/commit）必须补上这两条前提。
+
+### 7.3 三台机器的最终状态（提交 `2685bc75fa`）
+
+| 机器 | 结果 | 说明 |
+|---|---|---|
+| **M4 Pro**（飞行机） | ✅ **10302 / 10302 = 100%**，319 s | 全量重建后运行，含 `metallib_freshness` 6 项 |
+| **Ubuntu** `192.168.100.131` | ✅ **10299 / 10299 = 100%**，160 s | `CTEST_PARALLEL_LEVEL=4`；此前 `-j 12/-j 6` 都在 10299/10300 处 `std::bad_alloc` 中止 |
+| **M2** `192.168.100.105` | 🟡 **10302 中 2 个失败**（原 9 个） | 见下 |
+
+★ Ubuntu 的 `std::bad_alloc` 结论：**不是测试失败，是并行度问题**。
+`CTEST_PARALLEL_LEVEL=4` 下全程跑完、零失败。31 GB 内存 + 12 核，`-j 6` 都会撞上峰值——
+所以该机器上的全套验证应固定用 `-j 4`。
+
+M2 的 9 → 2 的分解：
+
+| 原有 | 真实性质 | 结果 |
+|---|---|---|
+| `dft_processor_metal_unit_test` | pipeline 上限 896（§1） | ✅ 修好（按尺寸降级） |
+| 其余 8 个 | **二进制从未构建**（Not Run） | 重编后 **5 个通过** |
+| ├ `ofdm_demodulator_metal_batch_test` | 其中 2 个 RE 的差来自 §7.2 的相位补偿回归 | ✅ 修好（0/4200） |
+| ├ `port_channel_estimator_..._ta_chain` | `S12 [2048]` 被正确拒绝却被判失败 | ✅ 修好（显式 SKIP） |
+| └ `port_channel_estimator_metal_mmse_unit_test` | ★ **非确定性 NaN** | ⬜ 见 §7.4 |
+
+### 7.4 ★ 未决：M2 的 MMSE 估计器非确定性 NaN
+
+**症状**（M2，5 次连续运行）：
+
+```
+run 1  Test 13 FAIL (51 PRB 2 DMRS): the burst-order hop completed after the lane's commit
+       does not match the synchronous route (noise variance nan vs 2.465811372e-01)
+run 2  Test  7 FAIL: NaN at rep 139 (52 PRB, 2 sym)
+run 3  Test 13 FAIL (...): the event-order hop does not match ... (..., nan, completion 1)
+run 4  Test 13 FAIL (...): the burst-order hop completed after the lane's commit ...
+run 5  Test 13 FAIL (...): the event-order hop does not match ...
+```
+
+- 5 次里 4 次落在 Test 13（lane 三种顺序）、1 次落在 Test 7（25/52 PRB 的 NaN），**rep 号每次不同**；
+- 共同指纹是 **NaN 噪声方差**（`0/0` 或读到了未初始化内存）；
+- M4 Pro 上**同一二进制、同一 metallib 源码、同样次数全部通过**。
+
+**已证明与本工作流改动无关**（三条独立证据）：
+1. `git diff ccad6ac47b..HEAD` 只碰了该测试的**测试文件**，MMSE 实现与其 shader 一字未改；
+2. 与 MMSE 的 TA kernel 共享的 `ocudu_dft_butterflies.h`，相对 `ccad6ac47b` **只有注释改动**（已用 diff 过滤验证）；
+3. Test 7 / Test 13 走的是 MMSE 引擎自己的 lane，不使用 DFT 引擎。
+
+**下一步（未做）**：Test 13 的注释本身写着这三种顺序"can fail SILENTLY"，
+所以这很可能是**该机制在 M2 的时序下真的失效**，而不是测试的问题。
+建议方向：先看 Test 7 的 NaN 是否与 Test 13 同源（同一个 hop 的噪声方差），
+若是，则从 MMSE 噪声方差归约 kernel 的初始化与归约顺序入手。
+
+★ 这条**不影响任何飞行结论**（M2 从不是飞行机），但它说明
+"同一份产物在两台 Apple Silicon 上行为不同"——正是 §4 候选规则要防的东西。
+
