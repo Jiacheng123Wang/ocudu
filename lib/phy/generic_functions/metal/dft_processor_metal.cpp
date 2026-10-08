@@ -23,6 +23,11 @@ bool dft_processor_metal::is_supported_size(unsigned size)
   return size == 1;
 }
 
+bool dft_processor_metal::is_supported_size_on_this_device(unsigned size)
+{
+  return is_supported_size(size) && metal::dft_metal_engine::is_size_runnable(size);
+}
+
 dft_processor_metal::dft_processor_metal(const configuration& config) : cfg(config), dir(config.dir)
 {
   if (!is_supported_size(config.size)) {

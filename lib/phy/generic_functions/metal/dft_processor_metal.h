@@ -35,6 +35,16 @@ public:
   /// 2..max_size). The factory falls back to the default DFT implementation otherwise.
   static bool is_supported_size(unsigned size);
 
+  /// \brief Whether THIS machine runs \c size on the Metal engine.
+  ///
+  /// is_supported_size() answers for the kernel; this answers for the hardware as well. The pipeline is the
+  /// object a dispatch is validated against, and one that accepts fewer threads per threadgroup than the
+  /// device advertises refuses the dispatch WITHOUT an error - the kernel never runs and the output keeps
+  /// whatever it held. False means the factory delegates this size to the default DFT implementation, which
+  /// is a supported outcome: a machine that cannot take the largest transforms keeps the Metal engine for
+  /// every size it can take.
+  static bool is_supported_size_on_this_device(unsigned size);
+
   /// \brief Constructs a Metal DFT processor.
   /// \param[in] config DFT processor configuration parameters.
   explicit dft_processor_metal(const configuration& config);

@@ -34,6 +34,22 @@ public:
   /// Maximum transform size supported by the kernel (the threadgroup memory budget).
   static constexpr unsigned max_size = 4096;
 
+  /// \brief Whether THIS device's pipeline accepts the threadgroup the kernel runs `size` with.
+  ///
+  /// \c max_size and the 2^k * 3^m family are properties of the kernel; this is a property of the machine.
+  /// The kernel derives its ownership stride from the parameters as \c min(size, 1024), so the engine has
+  /// to dispatch with that many threads - and a pipeline can accept fewer than the device advertises. An
+  /// Apple M2 advertises 1024 threads per threadgroup but caps this kernel at 896, because its 32 KiB of
+  /// static threadgroup memory bounds what fits, and a dispatch past the cap is refused WITHOUT an error:
+  /// the kernel never runs and the output buffer keeps whatever it held. \c init() therefore refuses such a
+  /// size and the factory delegates it to the default DFT implementation.
+  ///
+  /// \param[in] size Transform size.
+  /// \return True when this device runs \c size on the Metal engine.
+  /// \note Creates the process-wide device/queue/pipeline on the first call, so the answer is exact rather
+  ///       than an estimate: the pipeline is the object a dispatch is validated against.
+  static bool is_size_runnable(unsigned size);
+
   /// \brief One-shot setup: shared device/queue/pipeline, host-side twiddle table, the
   /// mixed-radix digit-reversal permutation table and the warm-up dispatch.
   /// \param[in] size    Transform size (2^k * 3^m, 2..max_size).

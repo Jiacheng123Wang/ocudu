@@ -54,7 +54,9 @@ inline void ocudu_dft_butterflies(threadgroup float2*         buf,
     // Twiddle-table lookups below use the N/2-table wrap: the table stores the first N/2
     // roots of unity, and exp(-2*pi*i*(j+N/2)/N) = -exp(-2*pi*i*j/N) for any j >= N/2.
 
-    // Per-element stage state: at most ceil(4096/1024) = 4 owned elements per thread.
+    // Per-element stage state: at most ceil(4096/1024) = 4 owned elements per thread. The engine refuses
+    // any size whose threadgroup would leave a thread owning more than that (see dft_threads_fit()), so
+    // these bounds hold on every device the kernel is dispatched on.
     float2 a[4];
     float2 b[4];
     float2 c[4];

@@ -234,7 +234,18 @@ int main()
       }
     }
 
-    constexpr unsigned k_size  = 1536; // the mixed-radix size the rest of this file measures with
+    // The arms drive the engine's OWN counter bookkeeping, which is size-independent, so they run whatever
+    // mixed-radix size THIS device dispatches - 1536 where it fits, the next size down otherwise. Pinning
+    // 1536 made three arms fail on a machine whose pipeline cannot take that threadgroup, for a reason that
+    // has nothing to do with what they check.
+    const unsigned k_size = []() {
+      for (unsigned candidate : {1536U, 1024U, 768U, 512U}) {
+        if (dft_processor_metal::is_supported_size_on_this_device(candidate)) {
+          return candidate;
+        }
+      }
+      return 512U; // nothing smaller is worth driving the arms with; a device that refuses this has no engine
+    }();
     constexpr unsigned k_batch = 16;   // dft_processor_metal::max_batch: the engine wraps the WHOLE batch
     const std::size_t  page    = compat::page_size(); // 16 KiB on Apple Silicon, NOT 4 KiB
     // wrap_buffer() is asked for the whole BATCH, not for the transforms this call submits (measured:
@@ -357,11 +368,52 @@ int main()
   }
 
 
+  // The factory entry point production uses: the delegation checks below need it too.
+  std::shared_ptr<dft_processor_factory> metal_factory = create_dft_processor_factory_metal();
+  if (metal_factory == nullptr) {
+    std::fprintf(stderr, "FAIL: Metal DFT factory unavailable (built without OCUDU_METAL_DFT?)\n");
+    return 1;
+  }
+
   // A/B comparison over the OFDM-relevant 2^k * 3^m sizes, both directions.
-  const unsigned sizes[] = {128, 384, 512, 768, 1024, 1536, 2048, 3072, 4096};
+  const unsigned sizes[]       = {128, 384, 512, 768, 1024, 1536, 2048, 3072, 4096};
+  unsigned       nof_delegated = 0;
   for (unsigned size : sizes) {
     for (auto dir : {dft_processor::direction::DIRECT, dft_processor::direction::INVERSE}) {
       const dft_processor::configuration config{size, dir};
+
+      // is_supported_size() is the KERNEL's answer and is machine-independent. Whether THIS machine runs
+      // the transform is not: the pipeline, not the device, caps the threadgroup, and a dispatch past the
+      // cap is refused without an error - the kernel never runs and the output keeps whatever it held. So a
+      // size this machine cannot take is DELEGATED, and the contract asserted here is that the factory
+      // still hands back a working processor that still matches the reference. Failing instead would
+      // demand that every machine run every size.
+      if (!dft_processor_metal::is_supported_size_on_this_device(size)) {
+        ++nof_delegated;
+        std::printf("[DEL] size=%4u dir=%-7s beyond this device's pipeline -> delegated to the default DFT",
+                    size,
+                    dft_processor::direction_to_string(dir).c_str());
+        std::shared_ptr<dft_processor> delegated = metal_factory->create(config);
+        auto                           ref_del   = ref_factory->create(config);
+        if ((delegated == nullptr) || (ref_del == nullptr)) {
+          std::printf("  -> FAIL (the factory returned no processor)\n");
+          ok = false;
+          continue;
+        }
+        for (unsigned i = 0; i != size; ++i) {
+          const cf_t sample{dist(rng), dist(rng)};
+          delegated->get_input()[i] = sample;
+          ref_del->get_input()[i]   = sample;
+        }
+        const double nmse_del = nmse_db(ref_del->run(), delegated->run());
+        if (nmse_del > -60.0) {
+          std::printf("  -> FAIL (nmse=%.2f dB, gate: <= -60 dB)\n", nmse_del);
+          ok = false;
+        } else {
+          std::printf("  -> OK (nmse=%.2f dB)\n", nmse_del);
+        }
+        continue;
+      }
 
       dft_processor_metal metal(config);
       if (!metal.is_valid()) {
@@ -424,16 +476,17 @@ int main()
       }
     }
   }
+  // Counted, not silent: which sizes run on the GPU here and which are delegated is the number a reader of
+  // this log needs, and a machine that delegates nothing prints the zero. The unit is the size/direction
+  // check, which is what the loop above performs.
+  std::printf("[DEL] %u of %zu size/direction checks delegated to the default DFT on this device\n",
+              nof_delegated,
+              2 * sizeof(sizes) / sizeof(sizes[0]));
 
   // Unsupported-size semantics: the static predicate rejects sizes outside the 2^k*3^m
   // family (or beyond the kernel maximum), and the metal factory falls back transparently
   // (never returns null).
   {
-    std::shared_ptr<dft_processor_factory> metal_factory = create_dft_processor_factory_metal();
-    if (metal_factory == nullptr) {
-      std::fprintf(stderr, "FAIL: Metal DFT factory unavailable (built without OCUDU_METAL_DFT?)\n");
-      return 1;
-    }
     for (unsigned bad : {1U, 5U, 1000U, 5000U, 8192U, 12288U}) {
       if (dft_processor_metal::is_supported_size(bad)) {
         std::fprintf(stderr, "FAIL: is_supported_size(%u) returned true\n", bad);
@@ -455,6 +508,7 @@ int main()
     constexpr unsigned nof_transforms = 14; // OFDM symbols per slot
     auto               metal          = dft_processor_metal({size, dft_processor::direction::DIRECT});
     if (!metal.is_valid()) {
+      std::printf("[DEL] size=%4u batch: delegated to the default DFT on this device\n", size);
       continue;
     }
     if (metal.get_max_batch() < nof_transforms) {
@@ -526,6 +580,7 @@ int main()
     constexpr unsigned nof_transforms = 8; // ring depth (<= max_batch)
     auto               metal          = dft_processor_metal({size, dft_processor::direction::DIRECT});
     if (!metal.is_valid()) {
+      std::printf("[DEL] size=%4u pipelined: delegated to the default DFT on this device\n", size);
       continue;
     }
 
@@ -806,58 +861,62 @@ int main()
     constexpr unsigned nof_subc = 1272;
     dft_processor_metal metal({size, dft_processor::direction::DIRECT});
     if (!metal.is_valid()) {
-      std::fprintf(stderr, "FAIL: Metal DFT invalid for the grid-write cost probe (size=%u)\n", size);
-      return 1;
-    }
-    auto       grid = create_resource_grid_factory()->create(1, 14, nof_subc);
-    const auto view = grid->get_writer().get_device_view();
-    auto*      gw   = static_cast<dft_processor_grid_write*>(&metal);
-    if (!gw->supports_grid_write(view) || !gw->set_grid_write_window({})) {
-      std::fprintf(stderr, "FAIL: the Metal DFT cannot write the resource grid\n");
-      return 1;
-    }
+      // A Metal-engine measurement: on a device that delegates this size there is no engine here to time.
+      // Which sizes those are is reported by the A/B loop above, so this says so instead of failing.
+      std::printf("[DEL] the grid-write cost probe needs the Metal engine at size %u - skipped on this device\n",
+                  size);
+    } else {
+      auto       grid = create_resource_grid_factory()->create(1, 14, nof_subc);
+      const auto view = grid->get_writer().get_device_view();
+      auto*      gw   = static_cast<dft_processor_grid_write*>(&metal);
+      if (!gw->supports_grid_write(view) || !gw->set_grid_write_window({})) {
+        std::fprintf(stderr, "FAIL: the Metal DFT cannot write the resource grid\n");
+        return 1;
+      }
 
-    dft_grid_write_params params;
-    params.view        = view;
-    params.nof_subc    = nof_subc;
-    params.map_offset  = size - nof_subc / 2;
-    params.coefficient = cf_t(0.9F, -0.3F);
+      dft_grid_write_params params;
+      params.view        = view;
+      params.nof_subc    = nof_subc;
+      params.map_offset  = size - nof_subc / 2;
+      params.coefficient = cf_t(0.9F, -0.3F);
 
-    constexpr unsigned iters   = 200;
-    constexpr unsigned nof_warmup = 8;
-    for (unsigned i = 0; i != nof_warmup; ++i) {
-      metal.run_async(0);
-      metal.wait_slot(0);
-      gw->submit_grid_write(0, params);
-      metal.wait_slot(0);
-    }
+      constexpr unsigned iters   = 200;
+      constexpr unsigned nof_warmup = 8;
+      for (unsigned i = 0; i != nof_warmup; ++i) {
+        metal.run_async(0);
+        metal.wait_slot(0);
+        gw->submit_grid_write(0, params);
+        metal.wait_slot(0);
+      }
 
-    auto t0 = std::chrono::steady_clock::now();
-    for (unsigned i = 0; i != iters; ++i) {
-      metal.run_async(0);
-      metal.wait_slot(0);
+      auto t0 = std::chrono::steady_clock::now();
+      for (unsigned i = 0; i != iters; ++i) {
+        metal.run_async(0);
+        metal.wait_slot(0);
+      }
+      auto         t1        = std::chrono::steady_clock::now();
+      const double plain_gpu = metal.engine_gpu_wait_us();
+      for (unsigned i = 0; i != iters; ++i) {
+        gw->submit_grid_write(0, params);
+        metal.wait_slot(0);
+      }
+      auto         t2       = std::chrono::steady_clock::now();
+      const double grid_gpu = metal.engine_gpu_wait_us();
+      std::printf("[grid-time] size=%u subcarriers=%u plain=%.1fus/transform (gpu %.1f) with-grid=%.1fus/transform (gpu %.1f)\n",
+                  size,
+                  nof_subc,
+                  std::chrono::duration<double, std::micro>(t1 - t0).count() / iters,
+                  plain_gpu,
+                  std::chrono::duration<double, std::micro>(t2 - t1).count() / iters,
+                  grid_gpu);
     }
-    auto         t1        = std::chrono::steady_clock::now();
-    const double plain_gpu = metal.engine_gpu_wait_us();
-    for (unsigned i = 0; i != iters; ++i) {
-      gw->submit_grid_write(0, params);
-      metal.wait_slot(0);
-    }
-    auto         t2       = std::chrono::steady_clock::now();
-    const double grid_gpu = metal.engine_gpu_wait_us();
-    std::printf("[grid-time] size=%u subcarriers=%u plain=%.1fus/transform (gpu %.1f) with-grid=%.1fus/transform (gpu %.1f)\n",
-                size,
-                nof_subc,
-                std::chrono::duration<double, std::micro>(t1 - t0).count() / iters,
-                plain_gpu,
-                std::chrono::duration<double, std::micro>(t2 - t1).count() / iters,
-                grid_gpu);
   }
 
   // Steady-state latency (audit data): 100 runs per backend at the OFDM sizes.
   for (unsigned size : {512U, 768U, 1024U, 2048U}) {
     dft_processor_metal metal({size, dft_processor::direction::DIRECT});
     if (!metal.is_valid()) {
+      std::printf("[DEL] size=%4u latency: delegated to the default DFT on this device\n", size);
       continue;
     }
     auto ref = ref_factory->create({size, dft_processor::direction::DIRECT});
@@ -893,32 +952,39 @@ int main()
   {
     const unsigned  size = 1024;
     dft_processor_metal metal({size, dft_processor::direction::DIRECT});
-    std::vector<cf_t> input(size);
-    for (cf_t& v : input) {
-      v = cf_t{dist(rng), dist(rng)};
-    }
-    std::printf("per-command-buffer cost (size=%u):\n", size);
-    for (unsigned n : {1u, 2u, 4u, 14u}) {
-      if (n > metal.get_max_batch()) {
-        continue;
+    if (!metal.is_valid()) {
+      // A capacity measurement of the Metal engine: a device that delegates this size has none to measure.
+      std::printf("[DEL] the per-command-buffer cost measurement needs the Metal engine at size %u - skipped "
+                  "on this device\n",
+                  size);
+    } else {
+      std::vector<cf_t> input(size);
+      for (cf_t& v : input) {
+        v = cf_t{dist(rng), dist(rng)};
       }
-      for (unsigned i = 0; i != n; ++i) {
-        std::copy(input.begin(), input.end(), metal.get_input().begin() + static_cast<size_t>(i) * size);
-      }
-      // Warm up (pipeline creation, first commit), then measure the steady state of `iters` runs.
-      (void)metal.run_batch(n);
-      const unsigned iters = 20;
-      const auto     t0    = std::chrono::steady_clock::now();
-      for (unsigned i = 0; i != iters; ++i) {
+      std::printf("per-command-buffer cost (size=%u):\n", size);
+      for (unsigned n : {1u, 2u, 4u, 14u}) {
+        if (n > metal.get_max_batch()) {
+          continue;
+        }
+        for (unsigned i = 0; i != n; ++i) {
+          std::copy(input.begin(), input.end(), metal.get_input().begin() + static_cast<size_t>(i) * size);
+        }
+        // Warm up (pipeline creation, first commit), then measure the steady state of `iters` runs.
         (void)metal.run_batch(n);
+        const unsigned iters = 20;
+        const auto     t0    = std::chrono::steady_clock::now();
+        for (unsigned i = 0; i != iters; ++i) {
+          (void)metal.run_batch(n);
+        }
+        const auto   t1      = std::chrono::steady_clock::now();
+        const double host_us = std::chrono::duration<double, std::micro>(t1 - t0).count() / static_cast<double>(iters);
+        std::printf("  n=%2u: host %.1fus total, last command buffer %.1fus on the GPU -> %.1fus per transform in it\n",
+                    n,
+                    host_us,
+                    metal.engine_gpu_wait_us(),
+                    metal.engine_gpu_wait_us() / static_cast<double>(n));
       }
-      const auto   t1      = std::chrono::steady_clock::now();
-      const double host_us = std::chrono::duration<double, std::micro>(t1 - t0).count() / static_cast<double>(iters);
-      std::printf("  n=%2u: host %.1fus total, last command buffer %.1fus on the GPU -> %.1fus per transform in it\n",
-                  n,
-                  host_us,
-                  metal.engine_gpu_wait_us(),
-                  metal.engine_gpu_wait_us() / static_cast<double>(n));
     }
   }
 

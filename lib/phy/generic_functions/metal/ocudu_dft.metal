@@ -156,8 +156,11 @@ kernel void dft_dit(device const float2* in      [[buffer(0)]],
         n3 *= 3u;
     }
     const uint n       = (1u << radix2) * n3;
+    // The ownership stride, and the threadgroup size the engine dispatches: a COMPILE-TIME function of the
+    // parameters, never a [[threads_per_threadgroup]] read (see ocudu_mmse_ta.metal, where such a read
+    // ended in a dispatch that never returned). The engine duplicates this expression and REFUSES the size
+    // when the pipeline cannot take that many threads, so the two cannot disagree.
     const uint threads = min(n, 1024u);
-    const uint half_n  = n >> 1u;
 
     // One threadgroup per transform: independent transforms are batched by dispatching several
     // threadgroups, each working on its own slice of the input/output buffers.

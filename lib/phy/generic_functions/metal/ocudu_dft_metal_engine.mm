@@ -858,12 +858,37 @@ struct dft_resources_t {
   id<MTLDevice>              device   = nil;
   id<MTLCommandQueue>        queue    = nil;
   id<MTLComputePipelineState> pipeline = nil;
+  /// Threads per threadgroup this device's pipeline accepts, 0 until the pipeline exists.
+  NSUInteger max_tg_threads = 0;
 };
 
 static dft_resources_t& dft_resources()
 {
   static dft_resources_t r;
   return r;
+}
+
+/// \brief Threadgroup size one transform is dispatched with: the kernel's own ownership stride.
+///
+/// The kernel derives that stride from the parameters (`min(n, 1024)` in ocudu_dft.metal) because a
+/// [[threads_per_threadgroup]] read is what once ended in a dispatch that never returned
+/// (ocudu_mmse_ta.metal). The count is therefore fixed by `n`, and the engine's job is to dispatch with
+/// exactly it - or not at all.
+static NSUInteger dft_threads_for(uint32_t n)
+{
+  return std::min(static_cast<NSUInteger>(n), static_cast<NSUInteger>(1024));
+}
+
+/// \brief Whether this device's pipeline accepts the threadgroup dft_dit asks for.
+///
+/// The DEVICE is not the authority on that: the pipeline is. An M2 caps this kernel at 896 threads per
+/// threadgroup while advertising the device-wide 1024, because the kernel's 32 KiB of static threadgroup
+/// memory bounds what fits. A dispatch past the cap is refused without an error and leaves the output
+/// untouched - a silent zero - so a size the pipeline cannot take is refused HERE, where the factory still
+/// falls back to the default DFT implementation for that size.
+static bool dft_threads_fit(uint32_t n)
+{
+  return dft_threads_for(n) <= dft_resources().max_tg_threads;
 }
 
 static std::mutex& dft_resources_mutex()
@@ -1102,7 +1127,7 @@ static void encode_grid_write_dispatch(dft_engine_impl*                       e,
   [enc setBytes:ip length:sizeof(dft_input_block) * nof_transforms atIndex:12];
 
   [enc dispatchThreadgroups:MTLSizeMake(nof_transforms, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(std::min(e->n, 1024u), 1, 1)];
+      threadsPerThreadgroup:MTLSizeMake(dft_threads_for(e->n), 1, 1)];
 }
 
 /// \brief Drops the deferred transforms without encoding them (the block is being discarded).
@@ -1812,9 +1837,27 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
         impl = nullptr;
         return false;
       }
+      // The pipeline, not the device, is the authority on the threadgroup size (see dft_threads_fit()).
+      res.max_tg_threads = res.pipeline.maxTotalThreadsPerThreadgroup;
 
       ocudulog::fetch_basic_logger("PHY").debug("Metal DFT: loaded pre-compiled shader library {}", lib_path.UTF8String);
     }
+  }
+
+  // The pipeline is the authority on the threadgroup size, so the size is accepted only if it takes the
+  // threadgroup the kernel will run with (see dft_threads_fit()). Nothing is allocated yet on this path,
+  // so refusing costs nothing but the engine object. The factory falls back for THIS size only: a device
+  // whose pipeline caps below 1024 keeps the Metal transform for every smaller size.
+  if (!dft_threads_fit(size)) {
+    ocudulog::fetch_basic_logger("PHY").warning(
+        "Metal DFT: size {} needs a threadgroup of {} threads but this device's pipeline accepts at most {} - "
+        "using the default DFT implementation for this size",
+        size,
+        dft_threads_for(size),
+        dft_resources().max_tg_threads);
+    delete engine;
+    impl = nullptr;
+    return false;
   }
 
   // Host-side twiddle table: N/2 entries of exp(-2*pi*i*k/N), page-aligned, zero-copy wrapped. The
@@ -1902,6 +1945,17 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
   }
 
   return true;
+}
+
+bool dft_metal_engine::is_size_runnable(unsigned size)
+{
+  // Deliberately the SAME predicate init() applies, run on a scratch engine: a second copy of the rule
+  // would be one more place for the query and the dispatch to disagree, which is the failure this method
+  // exists to expose. init() sets up the process-wide device/queue/pipeline on the first call and reuses
+  // them afterwards, so the cost is the size's own tables - and they are exactly what init() needs to
+  // answer.
+  dft_metal_engine probe;
+  return probe.init(size, /*inverse=*/false);
 }
 
 bool dft_metal_engine::submit_slot(const void* in, void* out, unsigned slot)
@@ -2553,7 +2607,7 @@ bool dft_metal_engine::submit_at(
   [enc setBuffer:engine->buf_tw offset:0 atIndex:9];
   [enc setBytes:&no_grid_write length:sizeof(no_grid_write) atIndex:10];
   [enc dispatchThreadgroups:MTLSizeMake(nof_transforms, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(std::min(engine->n, 1024u), 1, 1)];
+      threadsPerThreadgroup:MTLSizeMake(dft_threads_for(engine->n), 1, 1)];
   if (block_accumulating(engine)) {
     // Part of a block: the encoder stays OPEN with the command buffer until the block ends (see
     // commit_open() - ending it here would close the buffer the next transform still has to encode
