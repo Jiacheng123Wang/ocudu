@@ -307,3 +307,80 @@ run 5  Test 13 FAIL (...): the event-order hop does not match ...
 ★ 这条**不影响任何飞行结论**（M2 从不是飞行机），但它说明
 "同一份产物在两台 Apple Silicon 上行为不同"——正是 §4 候选规则要防的东西。
 
+
+---
+
+## 8. 补充（2026-10-08 深夜）：Ctrl+C 不能优雅退出 —— 又一个 macOS 移植回归
+
+用户报告：M4 Pro 上跑 gNB，Ctrl+C 后打印 `[phy_pipeline] contract MET` 就 `Killed: 9`。
+
+### 8.1 复现（真硬件 B210，三次三次）
+
+| | 退出耗时 | 结果 |
+|---|---|---|
+| 修复前 | **5.20 / 5.11 / 5.10 s** | 每次都被 SIGKILL，`Could not stop application after 5 seconds. Forcing exit.` |
+| 修复后 | **0.54 / 0.34 / 0.33 s** | exit=0，无强制退出行 |
+
+`sample` 抓到的现场（真机，非 ZMQ）：
+
+```
+main
+ └ cu_cp_impl::stop()                      ← DU / CU-UP 都已正常停完
+   └ amf_connection_manager::stop()
+     └ sync_event::wait()                  ← 永久阻塞
+io_broker_epoll 线程：空闲在 kevent         ← SCTP socket 上再无任何事件
+```
+
+### 8.2 根因：Linux 靠 `::shutdown()` 顺带完成的"本地唤醒"，macOS 移植时丢了
+
+链路是 `ngap_connection_handler::handle_tnl_association_removal()`：
+
+```cpp
+tx_pdu_notifier.reset();            // 销毁发送端 → close()
+CORO_AWAIT(rx_path_disconnected);   // 等接收路径上报断连
+```
+
+`tx_pdu_notifier.reset()` 走到发送端 `close()`，两个平台在这里分岔：
+
+| | `close()` 的动作 | 本地会发生什么 |
+|---|---|---|
+| **Linux** | `::shutdown(内核 SCTP fd, SHUT_RDWR)` | 本地 socket **立即** EOF ⇒ `receive_available` ⇒ `handle_connection_terminated()` ⇒ `recv_handler.reset()` ⇒ **`rx_path_disconnected` 置位** ⇒ 协程结束 |
+| **macOS** | `::sctp_sendmsg(..., SCTP_EOF, ...)` | ★ **只请求对端关闭**。本地要等 `SHUTDOWN_COMP` 才动 |
+
+★★ macOS 不能直接 `::shutdown()` 关联，因为 `fd` 是 **usrsctp shim 的桥接 socketpair**
+（`sctp_socket_usrsctp.cpp:9`）——shim 本身就写着"桥接不能被碰"。于是当初移植时用 `SCTP_EOF` 替代，
+**对端语义对了，本地唤醒丢了**。
+
+★★★ 压垮它的是对端行为：实验室 AMF **接受 SCTP 但从不回应 NGAP**
+（`tests/... : "NG Setup Procedure" timed out after 5000ms` → `Failed to connect to AMF`），
+所以 `SHUTDOWN_COMP` 永不到来。而 `ngap_connection_handler::is_connected()` 返回的是
+`connected_flag` —— 它在 **SCTP 建连**时就置真（`connect_to_amf()`），与 NG setup 成败无关，
+**所以这条等待路径一定会走到**。
+
+### 8.3 修法（`786cb61a2c`）
+
+**两者都做**：关联仍收 `SCTP_EOF`（对端的优雅关闭），**桥接也 shutdown**（本地的唤醒）。
+macOS 上 `::shutdown(bridge_fd)` 正是 Linux 从内核 socket 免费得到的那一步。
+shim 对桥接的写是非阻塞且**已忽略失败**的（`sctp_socket_usrsctp.cpp:211-213`），所以关掉它不丢东西。
+
+★ 客户端析构函数里那个"等 2 秒握手"的有界等待**不需要改**：本地 EOF 已经把 `server_addr` 清掉，
+实测总退出 0.33–0.54 s，那 2 秒根本没被用上。
+
+### 8.4 同一症状的**第二个**独立缺陷（未修）
+
+用 `configs/gnb_zmq.yaml`（无发送端，RX 永远收不到样本）复现时也是 5.1 s + SIGKILL，
+但卡点**完全不同**：
+
+```
+phy_worker → ul_process() → receiver.receive() → radio_zmq_rx_channel::receive()
+           → zmq_circ_buffer_backoff()  ← 环形缓冲为空，无限重试
+main       → lower_phy_baseband_processor::stop() → rx_state.wait_stop()  ← 永远等不到
+```
+
+`rx_state` 的计数**只在任务下一次调用 `on_process()` 时推进**（`lower_phy_baseband_processor.h:135-149`），
+所以任何"长时间阻塞在 `receive()` 里"的任务都会让 `stop()` 挂死。
+
+- **与本节的 SCTP 回归无关**，`cpu` 与 `gpu` 两种 pipeline 都一样（实测都是 5.10/5.11 s）；
+- 触发条件是 **radio 完全不送数据**；B210 正常出数时不会走到；
+- ⬜ **待修**：`lower_phy_baseband_processor::stop()` 需要一个上界，或接收路径需要观察停止请求。
+  这是本分支**独有**的结构（上游用同一套 FSM，但 macOS 的 `on_process_end()` 延迟完成是本分支加的）。
