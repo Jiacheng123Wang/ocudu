@@ -51,6 +51,17 @@ public:
                           }
                           return producers;
                         }(metrics_info)),
+                        ([](span<metrics_config> metrics_info_cfg) {
+                          std::vector<std::string> names;
+                          for (auto& metric : metrics_info_cfg) {
+                            for (auto& producer : metric.producers) {
+                              (void)producer;
+                              names.push_back(metric.metric_name);
+                            }
+                          }
+                          return names;
+                        }(metrics_info)),
+                        logger_,
                         timers,
                         executor_,
                         report_period)

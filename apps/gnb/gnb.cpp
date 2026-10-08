@@ -679,29 +679,44 @@ int main(int argc, char** argv)
   // 2026-09-17, intra_slice_scheduler::update_used_dl_vrbs, with the lower PHY already idle), and a crash
   // takes every report with it - including the atexit ones - leaving a leg with no evidence at all except
   // its logfile. Printing here costs nothing and cannot be lost to a later failure.
-  ocudu::ul_pipeline_probe::get().report();
-  ocudu::report_phy_pipeline_contract();
+  // Timed step by step, because this is where a shutdown spends its budget and a step that overruns the
+  // 5-second alarm is SIGKILLed with no clue about which one it was. The reports below walk statistics that a
+  // long run with traffic grows, and the pipeline contract's own check count depends on the PHY mode - so the
+  // step that hangs is a property of the run, not a constant.
+  auto shutdown_step = [](const char* what, auto&& step) {
+    // Logged BEFORE the step as well: a step that never returns is the answer, and without this line the log
+    // ends on the previous step's timing and names nothing.
+    ocudulog::fetch_basic_logger("GNB").info("shutdown: {} ...", what);
+    const auto t0 = std::chrono::steady_clock::now();
+    step();
+    const auto ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    ocudulog::fetch_basic_logger("GNB").info("shutdown: {} took {} ms", what, ms);
+  };
+
+  shutdown_step("ul_pipeline_probe report", []() { ocudu::ul_pipeline_probe::get().report(); });
+  shutdown_step("phy_pipeline contract report", []() { ocudu::report_phy_pipeline_contract(); });
   // These two also join the ON-DEMAND dump (dev doc 6.24): a stall that holds the shutdown would otherwise take
   // the [ul_gpu_pipeline] series (the V1 reading) and the contract with it.
   ocudu::register_p0_report(ocudu::report_ul_pipeline_probe);
   ocudu::register_p0_report(ocudu::report_phy_pipeline_contract);
 
   // Stop metrics manager.
-  metrics_mngr.stop();
+  shutdown_step("metrics manager stop", [&]() { metrics_mngr.stop(); });
 
   // Stop remote control server.
   if (remote_control_server) {
-    remote_control_server->get_operation_controller().stop();
+    shutdown_step("remote control stop", [&]() { remote_control_server->get_operation_controller().stop(); });
   }
 
   // Stop DU activity.
-  o_du_obj.get_operation_controller().stop();
+  shutdown_step("DU stop", [&]() { o_du_obj.get_operation_controller().stop(); });
 
   // Stop O-CU-UP activity.
-  o_cuup_obj.get_operation_controller().stop();
+  shutdown_step("CU-UP stop", [&]() { o_cuup_obj.get_operation_controller().stop(); });
 
   // Stop O-CU-CP activity.
-  o_cucp_obj.get_operation_controller().stop();
+  shutdown_step("CU-CP stop", [&]() { o_cucp_obj.get_operation_controller().stop(); });
 
   // Stop gateway SCTP servers.
   f1c_gw->stop();

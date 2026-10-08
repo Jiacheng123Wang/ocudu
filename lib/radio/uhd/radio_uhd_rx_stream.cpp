@@ -9,6 +9,9 @@ using namespace ocudu;
 
 /// Receive timeout in seconds.
 static constexpr double RECEIVE_TIMEOUT_S = 0.2f;
+
+/// Receive calls in a row that may deliver no sample before the block is abandoned (see no_progress_trials).
+static constexpr unsigned MAX_NO_PROGRESS_TRIALS = 10;
 /// Set to true for receiving data in a single packet.
 static constexpr bool ONE_PACKET = false;
 
@@ -110,13 +113,27 @@ baseband_gateway_receiver::metadata radio_uhd_rx_stream::receive(baseband_gatewa
   unsigned nsamples            = buffs[0].size();
   unsigned rxd_samples_total   = 0;
   unsigned timeout_trial_count = 0;
+  /// Receive calls in a row that delivered NO sample, whatever their error code.
+  ///
+  /// The timeout counter above bounds one error code, and it is not the one a struggling host sees: a receive
+  /// ring that fills because the host cannot drain it fast enough comes back as OVERFLOW, a late command as
+  /// LATE_COMMAND, and both of those went back to the top of this loop with \c rxd_samples_total untouched. A
+  /// stream that keeps answering that way spins here forever, and the task spinning is the one the lower PHY's
+  /// stop waits for - so the gNB never stops and an interrupt ends in the 5-second alarm and SIGKILL.
+  ///
+  /// Measured on a B210 with `--expert_phy.phy_pipeline cpu`, whose log was full of `Real-time failure in RF:
+  /// underflow` and `late`: with the PHY on the host the receive ring is drained slower than the radio fills
+  /// it, so the block arrives as OVERFLOW and this loop never advances. The GPU pipeline keeps up and shuts
+  /// down cleanly on the same radio, which is why the mode mattered.
+  unsigned no_progress_trials = 0;
 
   // The radio receive is the call the whole uplink waits on, and the one a USB/driver stall would hold.
   ocudu::stall_site_scope waiting("radio.rx");
 
   // Receive stream in multiple blocks.
   while (rxd_samples_total < nsamples) {
-    unsigned rxd_samples = 0;
+    const unsigned samples_before_call = rxd_samples_total;
+    unsigned       rxd_samples         = 0;
     if (!receive_block(rxd_samples, buffs, rxd_samples_total, md)) {
       fmt::println("Error: failed receiving packet. {}.", get_error_message().c_str());
       return {};
@@ -178,6 +195,25 @@ baseband_gateway_receiver::metadata radio_uhd_rx_stream::receive(baseband_gatewa
     // Notify if the event type was set.
     if (event.type != radio_event_type::UNDEFINED) {
       notifier.on_radio_rt_event(event);
+    }
+
+    // Bound the calls that deliver nothing, whatever their error code (see no_progress_trials). A healthy
+    // stream always advances the total, so the counter resets on every block that carries samples and this
+    // fires only when the radio has stopped answering with data.
+    if (rxd_samples_total == samples_before_call) {
+      if (++no_progress_trials >= MAX_NO_PROGRESS_TRIALS) {
+        fmt::println("Error: {} receive calls in a row delivered no sample (last error code {}); giving up on "
+                     "this block.",
+                     MAX_NO_PROGRESS_TRIALS,
+                     static_cast<int>(md.error_code));
+        // The block did not arrive: say so rather than passing off whatever the buffer holds as a delivery.
+        // The lower PHY drops a block carrying this code, exactly as it drops one that arrives while it is
+        // stopping (see baseband_gateway_receiver::rx_error::no_data).
+        ret.error = baseband_gateway_receiver::rx_error::no_data;
+        return ret;
+      }
+    } else {
+      no_progress_trials = 0;
     }
   }
 
