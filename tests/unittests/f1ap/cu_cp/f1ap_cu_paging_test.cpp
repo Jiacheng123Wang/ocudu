@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "f1ap_cu_test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/f1ap_pdu_contents.h"
 #include <gtest/gtest.h>
@@ -181,6 +182,8 @@ protected:
 /// Test paging message handling.
 TEST_F(f1ap_paging_test, when_paging_message_received_message_is_forwarded)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BAS-16-1-a");
+
   // Inject paging message.
   cu_cp_paging_message paging_msg = generate_paging_message();
   f1ap->handle_paging(paging_msg);

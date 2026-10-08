@@ -39,7 +39,8 @@ void positioning_information_exchange_procedure::operator()(coro_context<async_t
 
   logger.info("ue={}: \"{}\" initialized", pos_info_request.ue_index, name());
 
-  // Sanity check.
+  // The DU serving the UE may have disconnected between the arrival of the NRPPa PDU and this task
+  // running on the UE task loop.
   if (!du_ctxt_list.contains(du_index)) {
     logger.error("DU context not found for UE {}", pos_info_request.ue_index);
     logger.info("ue={}: \"{}\" failed", pos_info_request.ue_index, name());

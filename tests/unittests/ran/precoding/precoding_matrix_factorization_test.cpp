@@ -8,6 +8,8 @@
 #include "ocudu/ran/beamforming/beam_weights_codebook.h"
 #include "ocudu/ran/beamforming/beam_weights_codebook_generator.h"
 #include "ocudu/ran/precoding/precoding_codebooks.h"
+#include "ocudu/ran/precoding/precoding_weight_matrix_formatters.h"
+#include "fmt/format.h"
 #include <gtest/gtest.h>
 
 using namespace ocudu;
@@ -57,17 +59,6 @@ TEST_P(PrecodingMatrixFactorizationFixture, PrecodingMatrixFactorization)
   }
 }
 
-static constexpr std::array<antenna_topology, 3> topologies = {antenna_topology::single_panel_two_one,
-                                                               antenna_topology::single_panel_four_one,
-                                                               antenna_topology::single_panel_two_two};
-
-static constexpr std::array<pmi_codebook_typeI_single_panel, 3> panels = {
-    pmi_codebook_typeI_single_panel{pmi_codebook_single_panel_config::two_one, pmi_codebook_typeI_mode::one},
-    pmi_codebook_typeI_single_panel{pmi_codebook_single_panel_config::four_one, pmi_codebook_typeI_mode::one},
-    pmi_codebook_typeI_single_panel{pmi_codebook_single_panel_config::two_two, pmi_codebook_typeI_mode::one}};
-
-static const std::vector<test_case_t> test_cases = generate_precoding_matrix_test_cases(topologies, panels);
-
 INSTANTIATE_TEST_SUITE_P(PrecodingMatrixFactorizationTest,
                          PrecodingMatrixFactorizationFixture,
-                         ::testing::ValuesIn(test_cases));
+                         ::testing::ValuesIn(generate_precoding_matrix_test_cases()));

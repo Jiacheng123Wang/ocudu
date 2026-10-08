@@ -49,6 +49,17 @@ static fapi::carrier_config generate_carrier_config_tlv(const odu::du_cell_confi
   return fapi_config;
 }
 
+/// Returns the NTN k_mac of the cell in slots, or zero if not configured.
+static unsigned get_ntn_k_mac_slots(const odu::du_cell_config& cell)
+{
+  const auto& ntn_params = cell.ran.ntn_params;
+  if (!ntn_params.has_value() || !ntn_params->ntn_cfg.k_mac.has_value()) {
+    return 0;
+  }
+  return static_cast<unsigned>(ntn_params->ntn_cfg.k_mac->count()) *
+         get_nof_slots_per_subframe(cell.ran.dl_cfg_common.init_dl_bwp.generic_params.scs);
+}
+
 static o_du_low_unit_config generate_o_du_low_config(const du_low_unit_config&            du_low_unit_cfg,
                                                      float                                rx_gain_dB,
                                                      span<const odu::du_cell_config>      cells,
@@ -70,13 +81,15 @@ static o_du_low_unit_config generate_o_du_low_config(const du_low_unit_config&  
         .scs                           = scs_common,
         .scs_common                    = scs_common,
         .carrier_cfg                   = generate_carrier_config_tlv(cell),
+        .tx_ant_topology               = cell.ran.dl_carrier.topology,
         .prach_cfg                     = *cell.ran.ul_cfg_common.init_ul_bwp.rach_cfg_common,
         .prach_ports                   = du_hi_cell.cell.prach_cfg.ports,
         // The SDR Radio Unit gain is known to this application unit, so it is subtracted from the configured
         // '--dbfs_to_dbm_conversion_factor' here. For Open Fronthaul, the receive gain is applied by the externalis
         // applied (rx_gain_dB is 0).
         .dbfs_to_dbm_conversion_factor = du_low_unit_cfg.power_calibration.dbfs_to_dbm_conversion_factor - rx_gain_dB,
-        .db_to_dbfs_conversion_factor  = du_low_unit_cfg.power_calibration.db_to_dbfs_conversion_factor};
+        .db_to_dbfs_conversion_factor  = du_low_unit_cfg.power_calibration.db_to_dbfs_conversion_factor,
+        .ntn_k_mac_slots               = get_ntn_k_mac_slots(cell)};
 
     odu_low_cfg.fapi_cfg.sectors.push_back({.p5_config = p5_cfg, .p7_config = p7_cfg});
 
@@ -91,6 +104,7 @@ static o_du_low_unit_config generate_o_du_low_config(const du_low_unit_config&  
         band_helper::get_n_rbs_from_bw(cell.ran.dl_carrier.carrier_bw, scs_common, du_low_cell.freq_range);
     du_low_cell.nof_rx_antennas = cell.ran.ul_carrier.nof_ant;
     du_low_cell.nof_tx_antennas = cell.ran.dl_carrier.nof_ant;
+    du_low_cell.tx_ant_topology = cell.ran.dl_carrier.topology;
     du_low_cell.prach_ports     = du_hi_cell.cell.prach_cfg.ports;
     du_low_cell.scs_common      = scs_common;
     du_low_cell.prach_config_index =
@@ -100,6 +114,7 @@ static o_du_low_unit_config generate_o_du_low_config(const du_low_unit_config&  
     du_low_cell.tdd_pattern          = cell.ran.tdd_cfg;
     if (du_hi_cell.cell.ntn_cfg && du_hi_cell.cell.ntn_cfg->serving) {
       du_low_cell.ntn_cs_koffset = du_hi_cell.cell.ntn_cfg->serving->cell_specific_koffset;
+      du_low_cell.ntn_k_mac      = du_hi_cell.cell.ntn_cfg->serving->k_mac;
     }
   }
 
@@ -122,6 +137,7 @@ static flexible_o_du_ru_config generate_o_du_ru_config(span<const odu::du_cell_c
     auto&                    out_cell   = out_cfg.cells.emplace_back();
     const subcarrier_spacing scs_common = cell.ran.dl_cfg_common.init_dl_bwp.generic_params.scs;
     out_cell.nof_tx_antennas            = cell.ran.dl_carrier.nof_ant;
+    out_cell.tx_ant_topology            = cell.ran.dl_carrier.topology;
     out_cell.nof_rx_antennas            = cell.ran.ul_carrier.nof_ant;
     out_cell.scs                        = scs_common;
     out_cell.dl_arfcn                   = cell.ran.dl_carrier.arfcn_f_ref.value();

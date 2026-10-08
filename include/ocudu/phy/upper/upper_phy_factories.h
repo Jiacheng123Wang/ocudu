@@ -210,8 +210,8 @@ std::unique_ptr<downlink_processor_pool> create_dl_processor_pool(downlink_proce
 struct upper_phy_configuration {
   /// Sector identifier.
   unsigned sector;
-  /// Number of transmit antenna ports.
-  unsigned nof_tx_ports;
+  /// Transmit antenna topology.
+  antenna_topology tx_ant_topology;
   /// Number of receive antenna ports.
   unsigned nof_rx_ports;
   /// Number of downlink resource grids. Downlink resource grids minimum reuse time is \c dl_rg_expire_timeout_slots
@@ -395,6 +395,14 @@ struct upper_phy_factory_configuration {
   unsigned ul_bw_rb;
   /// Maximum number of layers for PUSCH transmissions.
   unsigned pusch_max_nof_layers;
+  /// Enable DOA features.
+  bool doa_enabled = false;
+  /// Distance between antenna elements, normalized with respect to the wavelength. Only meaningful if \ref doa_enabled
+  /// is set to true.
+  float doa_antenna_distance_over_wavelength = 0.5F;
+  /// Cross-polarization flag: set to true if the array elements consist of two collocated antennas with orthogonal
+  /// polarizations. Only meaningful if \ref doa_enabled is set to true.
+  bool doa_cross_polarized = false;
   /// \brief PDSCH processor type.
   ///
   /// Use of these options:

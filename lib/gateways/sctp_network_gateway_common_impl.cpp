@@ -84,7 +84,7 @@ expected<sctp_socket> sctp_network_gateway_common_impl::create_socket(int ai_fam
 }
 
 /// \brief Create and bind socket to given address.
-bool sctp_network_gateway_common_impl::create_and_bind_common()
+bool sctp_network_gateway_common_impl::create_and_bind_common(int sock_type)
 {
   // Resolve all bind addresses, remove duplicates and determine required socket family.
   bool                          has_ipv6_bind_addr = false;
@@ -116,7 +116,7 @@ bool sctp_network_gateway_common_impl::create_and_bind_common()
   // Create socket using the determined socket family.
   int socket_family = has_ipv6_bind_addr ? AF_INET6 : AF_INET;
 
-  auto outcome = this->create_socket(socket_family, SOCK_SEQPACKET);
+  auto outcome = this->create_socket(socket_family, sock_type);
   if (not outcome.has_value()) {
     logger.error("Failed to create SCTP socket");
     return false;
@@ -146,6 +146,7 @@ bool sctp_network_gateway_common_impl::validate_and_log_sctp_notification(span<c
 {
   const auto* notif             = reinterpret_cast<const union sctp_notification*>(payload.data());
   uint32_t    notif_header_size = sizeof(notif->sn_header);
+
   if (notif_header_size > payload.size_bytes()) {
     logger.error("{}: Received SCTP notification size ({} B) is smaller than required notification header size ({} B)",
                  node_cfg.if_name,
@@ -191,9 +192,15 @@ bool sctp_network_gateway_common_impl::validate_and_log_sctp_notification(span<c
       const struct sctp_shutdown_event* n = &notif->sn_shutdown_event;
       logger.debug("{}: Rx SCTP_SHUTDOWN_EVENT: assoc={}", node_cfg.if_name, n->sse_assoc_id);
     } break;
+    case SCTP_SENDER_DRY_EVENT: {
+      logger.debug("{}: Received SCTP notification of type {} is not handled, ignoring.",
+                   node_cfg.if_name,
+                   static_cast<sctp_sn_type>(notif->sn_header.sn_type));
+    } break;
     default:
-      logger.warning("{}: Received SCTP notification of type {} was not handled, ignoring",
+      logger.warning("{}: Received SCTP notification of type {}({}) was not handled, terminating connection",
                      node_cfg.if_name,
+                     static_cast<sctp_sn_type>(notif->sn_header.sn_type),
                      notif->sn_header.sn_type);
       return false;
   }

@@ -14,6 +14,7 @@
 #include <cstring> // strerror()
 #include <endian.h> // (undef'd below: the glibc le16toh-style macros must not collide with any compat name)
 #include <sched.h> // sched_getcpu(), cpu_set_t, CPU_*(), pthread_setaffinity_np()
+#include <poll.h>  // pollfd, ppoll()/select()
 #include <time.h>  // clock_gettime(), CLOCK_MONOTONIC
 #include "fmt/format.h"
 #include "ocudu/support/cpu_architecture_info.h"
@@ -1542,6 +1543,39 @@ size_t recommended_zmq_io_buf_bytes()
   return 8u * 1024u * 1024u;
 #else
   return 0;
+#endif
+}
+
+bool wait_readable(int fd, std::chrono::microseconds timeout)
+{
+  if (fd < 0) {
+    return false;
+  }
+
+#if defined(__APPLE__)
+  // select() carries microsecond resolution, which poll() cannot express.
+  fd_set read_set;
+  FD_ZERO(&read_set);
+  FD_SET(fd, &read_set);
+
+  timeval tv = {};
+  tv.tv_sec  = static_cast<time_t>(timeout.count() / 1000000);
+  tv.tv_usec = static_cast<suseconds_t>(timeout.count() % 1000000);
+
+  const int ret = ::select(fd + 1, &read_set, nullptr, nullptr, &tv);
+  return (ret > 0) && (FD_ISSET(fd, &read_set) != 0);
+#else
+  struct pollfd pfd = {};
+  pfd.fd            = fd;
+  pfd.events        = POLLIN;
+
+  const auto      secs = std::chrono::duration_cast<std::chrono::seconds>(timeout);
+  struct timespec ts   = {};
+  ts.tv_sec            = secs.count();
+  ts.tv_nsec           = std::chrono::duration_cast<std::chrono::nanoseconds>(timeout - secs).count();
+
+  const int ret = ::ppoll(&pfd, 1, &ts, nullptr);
+  return (ret > 0) && ((pfd.revents & POLLIN) != 0);
 #endif
 }
 

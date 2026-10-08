@@ -63,6 +63,8 @@ public:
   /// keeps writing from the host.
   void set_device_view(const resource_grid_device_view& view) { device_view = view; }
 
+  span<cbf16_t> get_buffer() override { return data.get_data(); }
+
 private:
   storage_type&                  data;
   resource_grid_allocation_info& alloc_mask;

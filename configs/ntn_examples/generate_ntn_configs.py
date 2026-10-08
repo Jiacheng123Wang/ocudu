@@ -28,6 +28,55 @@ def make_nr_cell_id(gnb_id, gnb_id_bit_length, cell_id):
     """Build a 36-bit NR Cell Identity: gNB ID in the top bits, cell ID in the low bits."""
     return HexInt((gnb_id << (36 - gnb_id_bit_length)) | cell_id)
 
+# Geometry of the generated coarse location areas. Each TAC takes one latitude band, and every band spans the same
+# longitude window centred on the UE.
+COARSE_LOCATION_BAND_HEIGHT_DEG = 2.0
+COARSE_LOCATION_LON_SPAN_DEG = 3.0
+def make_ntn_location_mapping(nr_cell_id, ue_lat, ue_lon, tacs, ue_tac, mapped_cell_id_base=None):
+    """Map coarse UE locations to the TACs a cell broadcasts, placing the UE in the area of ue_tac.
+
+    One latitude band per TAC, stacked south to north in the order the TACs are broadcast. The band of ue_tac is
+    centred on the UE, so the UE sits in it while the remaining bands stay reachable by moving the reported position.
+
+    With mapped_cell_id_base, each band also names a Mapped Cell ID, counting up from the base in the same order, so
+    that the cell identity reported to the core changes with the band the UE is in.
+    """
+    ue_idx = tacs.index(ue_tac)
+
+    # The bands span half a band height below the first TAC and above the last one, measured from the UE.
+    if ue_lat - (ue_idx + 0.5) * COARSE_LOCATION_BAND_HEIGHT_DEG < -90.0 or \
+       ue_lat + (len(tacs) - ue_idx - 0.5) * COARSE_LOCATION_BAND_HEIGHT_DEG > 90.0:
+        raise ValueError(f"UE latitude {ue_lat} leaves no room for {len(tacs)} latitude bands below the poles.")
+    lon_min = ue_lon - COARSE_LOCATION_LON_SPAN_DEG / 2
+    lon_max = ue_lon + COARSE_LOCATION_LON_SPAN_DEG / 2
+    # An area crossing the antimeridian cannot be expressed as a single lon_min < lon_max rectangle.
+    if lon_min < -180.0 or lon_max > 180.0:
+        raise ValueError(f"UE longitude {ue_lon} places the areas across the antimeridian.")
+
+    location_areas = []
+    for i, tac in enumerate(tacs):
+        area = {"tac": tac}
+        if mapped_cell_id_base is not None:
+            area["mapped_nr_cell_id"] = HexInt(mapped_cell_id_base + i)
+        area.update({
+            "lat_min": round(ue_lat + (i - ue_idx - 0.5) * COARSE_LOCATION_BAND_HEIGHT_DEG, 6),
+            "lat_max": round(ue_lat + (i - ue_idx + 0.5) * COARSE_LOCATION_BAND_HEIGHT_DEG, 6),
+            "lon_min": round(lon_min, 6),
+            "lon_max": round(lon_max, 6),
+        })
+        location_areas.append(area)
+
+    return {
+        "cu_cp": {
+            "ntn_location_mapping": [
+                {
+                    "nr_cell_id": nr_cell_id,
+                    "location_areas": location_areas,
+                }
+            ]
+        }
+    }
+
 ### Converters ###
 class ReferenceFrameConverter:
     """Converter between ECEF and ECI reference frames.
@@ -579,6 +628,10 @@ if __name__ == "__main__":
     parser.add_argument("--ta-report-sr-enabled", action="store_true", help="Let UEs request an uplink grant for a timing advance report. Requires --ta-report-offset-threshold.")
     parser.add_argument("--gnb-id", type=lambda x: int(x, 0), default=411, help="gNB ID of this CU-CP, used to build the internal serving nr_cell_id (decimal or 0x hex).")
     parser.add_argument("--gnb-id-bit-length", type=int, default=22, help="gNB ID bit length (NR Cell Identity is 36 bits).")
+    parser.add_argument("--coarse-location", action="store_true", help="Generate coarse_location.yml, mapping the coarse UE location to one of the TACs the cell broadcasts.")
+    parser.add_argument("--coarse-location-tacs", type=str, default="7,8,9", help="TACs the cell broadcasts, in broadcast order. Must match the TACs of the multi-TAC overlay.")
+    parser.add_argument("--coarse-location-ue-tac", type=int, default=8, help="TAC of the area holding the UE. Pick one other than the cell TAC, so that the derived TAC differs from the TAI.")
+    parser.add_argument("--coarse-location-mapped-cell-id-base", type=lambda v: int(v, 0), default=None, help="Give each coarse location area a Mapped Cell ID, TS 38.300 sec. 16.14.5, counting up from this 36-bit identity. Omitted, every area reports the Uu Cell ID of the serving cell.")
     cfg = parser.parse_args()
 
     if (cfg.ta_report_offset_threshold is not None and cfg.ta_report_offset_threshold != 0.5
@@ -586,6 +639,9 @@ if __name__ == "__main__":
         parser.error("--ta-report-offset-threshold must be 0.5 or an integer from 1 to 15.")
     if (cfg.ta_report_sr_enabled and cfg.ta_report_offset_threshold is None):
         parser.error("--ta-report-sr-enabled requires --ta-report-offset-threshold.")
+    coarse_location_tacs = [int(tac) for tac in cfg.coarse_location_tacs.split(",") if tac.strip()]
+    if cfg.coarse_location and cfg.coarse_location_ue_tac not in coarse_location_tacs:
+        parser.error("--coarse-location-ue-tac must be one of --coarse-location-tacs.")
 
     # Find real time NTN scenario.
     ts = load.timescale()
@@ -715,6 +771,11 @@ if __name__ == "__main__":
     # (e.g. -c sat.yml).
     sat_cfg = {"ntn": {"satellites": satellites}}
 
+    # sr-ProhibitTimer: the smallest value covering the round trip, so the UE sends one SR per round trip. Values above
+    # 128ms are signalled via sr-ProhibitTimer-v1700.
+    sr_prohibit_timer_values = [1, 2, 4, 8, 16, 32, 64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 1082]
+    sr_prohibit_timer = next(v for v in sr_prohibit_timer_values if v >= serving["cell_specific_koffset"])
+
     # DU/cell config: references satellites from sat.yml by satellite_idx.
     ntn_cell_cfg = {
         "cell_cfg": {
@@ -724,6 +785,11 @@ if __name__ == "__main__":
                 "ta_measurement_slot_period": 1000,
                 "ta_cmd_offset_threshold": 1,
                 "ta_outlier_detection_zscore_threshold": 0.0,
+            },
+            "mac_cell_group": {
+                "sr_cfg": {
+                    "sr_prohibit_timer": sr_prohibit_timer,
+                },
             },
             "ntn": cell_ntn,
         }
@@ -836,6 +902,12 @@ if __name__ == "__main__":
     cu_ntn_cfg = "ntn_cu.yml"
     save_gnb_ntn_config(cu_ntn_cfg, cu_config)
     print("Saved CU NTN config to file:", cu_ntn_cfg)
+
+    if cfg.coarse_location:
+        coarse_location_cfg = make_ntn_location_mapping(serving_nr_cell_id, cell_lat, cell_lon, coarse_location_tacs, cfg.coarse_location_ue_tac, cfg.coarse_location_mapped_cell_id_base)
+        coarse_location_cfg_fn = "coarse_location.yml"
+        save_gnb_ntn_config(coarse_location_cfg_fn, coarse_location_cfg)
+        print("Saved coarse location mapping to file:", coarse_location_cfg_fn)
 
     ue_position_cfg_fn = "ue-position.cfg"
     save_ground_position_cfg(ue_position_cfg_fn, ue_location)

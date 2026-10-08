@@ -153,6 +153,14 @@ struct du_low_unit_expert_upper_phy_config {
   /// PRACH demodulator; the downlink transmit path (the OFDM modulator behind PDSCH/PDCCH/SSB)
   /// always keeps the CPU implementation.
   std::string pusch_dft_type = "auto";
+  /// Enable DOA features.
+  bool doa_enabled = false;
+  /// Distance between antenna elements, normalized with respect to the wavelength. Only meaningful if \ref doa_enabled
+  /// is set to true.
+  float doa_antenna_distance_over_wavelength = 0.5F;
+  /// Cross-polarization flag: set to true if the array elements consist of two collocated antennas with orthogonal
+  /// polarizations. Only meaningful if \ref doa_enabled is set to true.
+  bool doa_cross_polarized = false;
   /// \brief Request headroom size in slots.
   ///
   /// The request headroom size is the number of delayed slots that the upper physical layer will accept, ie, if the
@@ -185,6 +193,12 @@ struct du_low_unit_rx_symbol_trigger_config {
   /// Saves the uplink resource grid in the file when a PUSCH SINR for a slot is below the given threshold. Set to
   /// minus infinity for disabling this trigger.
   float pusch_threshold_sinr_dB = -std::numeric_limits<float>::infinity();
+  /// \brief UL resource grid print trigger: save the uplink grid when the number of decoder iterations is above the
+  /// threshold.
+  ///
+  /// Saves the uplink resource grid in the file when a PUSCH transmission in a slot required more decoder iterations
+  /// than the given threshold. Set to infinity for disabling this trigger.
+  float pusch_threshold_iter = std::numeric_limits<float>::infinity();
 };
 
 /// DU low receive symbols printer configuration.

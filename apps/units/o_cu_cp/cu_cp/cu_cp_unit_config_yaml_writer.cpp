@@ -46,6 +46,9 @@ static YAML::Node build_cu_cp_supported_tas_section(const cu_cp_unit_supported_t
   for (const auto& plmn_item : config.plmn_list) {
     plmn_node.push_back(build_cu_cp_plmn_list_section(plmn_item));
   }
+  if (config.satellite_rat.has_value()) {
+    node["satellite_rat"] = *config.satellite_rat;
+  }
 
   return node;
 }
@@ -134,7 +137,7 @@ static YAML::Node build_cu_cp_mobility_ncells_section(const cu_cp_unit_neighbor_
 
   node["nr_cell_id"] = config.nr_cell_id;
   for (auto report_id : config.report_cfg_ids) {
-    node["report_configs"] = report_id;
+    node["report_configs"].push_back(report_id);
   }
   node["report_configs"].SetStyle(YAML::EmitterStyle::Flow);
 
@@ -191,7 +194,7 @@ static YAML::Node build_cu_cp_mobility_cells_section(const cu_cp_unit_cell_confi
   }
 
   for (const auto& ncell : config.ncells) {
-    node["ncells"] = build_cu_cp_mobility_ncells_section(ncell);
+    node["ncells"].push_back(build_cu_cp_mobility_ncells_section(ncell));
   }
 
   return node;
@@ -222,9 +225,15 @@ static YAML::Node build_cu_cp_mobility_report_section(const cu_cp_unit_report_co
 
   node["report_cfg_id"] = config.report_cfg_id;
   node["report_type"]   = config.report_type;
-  // Cond-trigger report configs do not have report interval semantics.
+  // A cond-trigger report config has no report interval semantics, and carries no coarse location request.
   if (config.report_type != "cond_trigger") {
-    node["report_interval_ms"] = config.report_interval_ms;
+    node["report_interval_ms"]      = config.report_interval_ms;
+    node["coarse_location_request"] = config.coarse_location_request;
+  }
+
+  // Emit only when handover from periodic measurements is enabled (non-default).
+  if (config.report_type == "periodical" && config.periodic_ho_rsrp_offset != -1) {
+    node["periodic_ho_rsrp_offset_db"] = config.periodic_ho_rsrp_offset;
   }
 
   if (!config.event_triggered_report_type) {
@@ -245,7 +254,7 @@ static YAML::Node build_cu_cp_mobility_report_section(const cu_cp_unit_report_co
   add_opt("meas_trigger_quantity", config.meas_trigger_quantity);
   add_opt("hysteresis_db", config.hysteresis_db);
   add_opt("time_to_trigger_ms", config.time_to_trigger_ms);
-  add_opt("t312_ms", config.t312_ms);
+  add_opt("t312", config.t312_ms);
 
   // A1, A2, A4, A5 - absolute threshold on one measurement quantity.
   if (ev == ocucp::rrc_event_id::event_id_t::a1 or ev == ocucp::rrc_event_id::event_id_t::a2 or
@@ -290,6 +299,29 @@ static YAML::Node build_cu_cp_mobility_report_section(const cu_cp_unit_report_co
     if (config.duration.has_value()) {
       node["duration_s"] = config.duration->count();
     }
+  }
+
+  return node;
+}
+
+static YAML::Node build_cu_cp_ntn_location_mapping_section(const cu_cp_unit_ntn_location_mapping_item& config)
+{
+  YAML::Node node;
+
+  node["nr_cell_id"] = config.nr_cell_id;
+  for (const auto& area : config.location_areas) {
+    YAML::Node area_node;
+    if (area.tac.has_value()) {
+      area_node["tac"] = area.tac.value();
+    }
+    if (area.mapped_nr_cell_id.has_value()) {
+      area_node["mapped_nr_cell_id"] = area.mapped_nr_cell_id.value();
+    }
+    area_node["lat_min"] = area.lat_min;
+    area_node["lat_max"] = area.lat_max;
+    area_node["lon_min"] = area.lon_min;
+    area_node["lon_max"] = area.lon_max;
+    node["location_areas"].push_back(area_node);
   }
 
   return node;
@@ -362,6 +394,9 @@ static void fill_cu_cp_section(YAML::Node node, const cu_cp_unit_config& config)
     node["xnap"] = build_cu_cp_xnap_section(config.xnap_config);
   }
   node["mobility"] = build_cu_cp_mobility_section(config.mobility_config);
+  for (const auto& cell_mapping : config.ntn_location_mapping) {
+    node["ntn_location_mapping"].push_back(build_cu_cp_ntn_location_mapping_section(cell_mapping));
+  }
   node["rrc"]      = build_cu_cp_rrc_section(config.rrc_config);
   node["security"] = build_cu_cp_security_section(config.security_config);
   // Merge into any existing F1AP/E1AP nodes the appconfig writer may have populated (bind_addrs, sctp...).

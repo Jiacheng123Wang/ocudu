@@ -3,8 +3,9 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "e1ap_cu_cp_test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
+#include "tests/test_doubles/e1ap/e1ap_cu_cp_test_messages.h"
 #include "tests/test_doubles/utils/test_rng.h"
-#include "tests/unittests/e1ap/common/e1ap_cu_cp_test_messages.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/cu_cp/cu_cp_configuration_helpers.h"
 #include "ocudu/e1ap/cu_cp/e1ap_cu_cp_factory.h"
@@ -35,6 +36,8 @@ e1ap_cu_cp_test::e1ap_cu_cp_test() :
         .timers = timers, .cu_cp_executor = ctrl_worker, .logger = ocudulog::fetch_basic_logger("CU-CP")};
   }())
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-11");
+
   test_logger.set_level(ocudulog::basic_levels::debug);
   e1ap_logger.set_level(ocudulog::basic_levels::debug);
   ocudulog::init();

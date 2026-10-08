@@ -4,11 +4,13 @@
 
 #include "lib/scheduler/rrm/srs_resource_manager_helpers.h"
 #include "lib/scheduler/rrm/srs_resource_manager_periodic.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/scheduler/cell_config_builder_profiles.h"
 #include "tests/test_doubles/utils/test_rng.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/du/du_cell_config_helpers.h"
 #include "ocudu/ran/srs/srs_bandwidth_configuration.h"
+#include "ocudu/ran/srs/srs_configuration_helpers.h"
 #include "ocudu/scheduler/config/pucch_guardbands.h"
 #include "ocudu/scheduler/config/serving_cell_config_factory.h"
 #include "fmt/ostream.h"
@@ -249,9 +251,7 @@ protected:
     explicit srs_res_params(const srs_config::srs_resource& srs_res) :
       offset(srs_res.periodicity_and_offset->offset),
       tx_comb_offset(srs_res.tx_comb.tx_comb_offset),
-      symbols(ofdm_symbol_range{NOF_OFDM_SYM_PER_SLOT_NORMAL_CP - srs_res.res_mapping.start_pos - 1,
-                                NOF_OFDM_SYM_PER_SLOT_NORMAL_CP - srs_res.res_mapping.start_pos - 1 +
-                                    srs_res.res_mapping.nof_symb}),
+      symbols(get_srs_symbol_range(srs_res, cyclic_prefix::NORMAL)),
       sequence_id(srs_res.sequence_id),
       cs(srs_res.tx_comb.tx_comb_cyclic_shift)
     {
@@ -315,6 +315,8 @@ protected:
 
 TEST_P(srs_resource_manager_periodic_tester, ue_are_assigned_orthogonal_srs_resources)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-PHY-16-3", "MVP-FUNC-PHY-16-5", "MVP-FUNC-PHY-16-6");
+
   // Keeps track of which SRS resources have been assigned to the UEs.
   std::vector<srs_res_params> used_srs_resources;
   // > Created UEs have unique SRS resources.
@@ -365,6 +367,8 @@ TEST_P(srs_resource_manager_periodic_tester, ue_are_assigned_orthogonal_srs_reso
 
 TEST_P(srs_resource_manager_periodic_tester, srs_resources_parameters_are_valid)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-PHY-16-3", "MVP-FUNC-PHY-16-5", "MVP-FUNC-PHY-16-6");
+
   // > Created UEs have unique SRS resources.
   for (unsigned i = 0; i != MAX_NOF_DU_UES; ++i) {
     std::optional<ue_cell_config> ue = add_ue(to_du_ue_index(i));
@@ -600,6 +604,8 @@ protected:
 
 TEST_P(srs_resource_manager_periodic_tester_optimality, srs_are_assigned_according_to_class_policy)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-PHY-16-3");
+
   // > Created UEs have unique SRS resources.
   for (unsigned i = 0; i != MAX_NOF_DU_UES; ++i) {
     std::optional<ue_cell_config> ue = add_ue(to_du_ue_index(i));

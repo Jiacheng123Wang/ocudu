@@ -16,6 +16,8 @@ struct du_reported_cell {
   nr_cell_global_id_t cgi;
   /// PCI of the reported cell, if provided.
   std::optional<pci_t> pci;
+  /// Whether the CU-CP is connected to an AMF that serves at least one PLMN of the cell.
+  bool amf_connected = false;
 };
 
 } // namespace ocudu::ocucp

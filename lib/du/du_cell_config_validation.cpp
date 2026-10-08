@@ -17,6 +17,7 @@
 #include "ocudu/ran/prs/prs_constants.h"
 #include "ocudu/ran/srs/srs_bandwidth_configuration.h"
 #include "ocudu/ran/ssb/ssb_mapping.h"
+#include "ocudu/scheduler/config/periodic_resource_sched_validator.h"
 #include "ocudu/scheduler/config/pucch_guardbands.h"
 #include "ocudu/scheduler/config/pucch_resource_generator.h"
 #include "ocudu/scheduler/config/sched_cell_config_helpers.h"
@@ -930,6 +931,7 @@ static check_outcome check_prs_resource_set(const prs_resource_set&             
   const unsigned nof_symbols       = static_cast<unsigned>(res_set.nof_symbols);
   const unsigned repetition_factor = static_cast<unsigned>(res_set.repetition_factor);
   const unsigned time_gap          = static_cast<unsigned>(res_set.time_gap);
+  const unsigned mu                = to_numerology_value(dl_carrier.scs);
 
   CHECK_TRUE(is_one_of(comb_size, prs_constants::VALID_COMB_SIZES),
              "Invalid comb size ({}) of PRS resource set {}",
@@ -947,10 +949,11 @@ static check_outcome check_prs_resource_set(const prs_resource_set&             
              "Invalid time gap ({} slots) of PRS resource set {}",
              time_gap,
              set_id);
-  CHECK_TRUE(is_one_of(res_set.periodicity_slots, prs_constants::VALID_PERIODICITIES),
-             "Invalid periodicity ({} slots) of PRS resource set {}",
+  CHECK_TRUE(prs_valid_periodicity(res_set.periodicity_slots, mu),
+             "Invalid periodicity ({} slots) of PRS resource set {} for numerology {}",
              res_set.periodicity_slots,
-             set_id);
+             set_id,
+             mu);
 
   // The valid combinations are given in TS 38.211, Section 7.4.1.7.3.
   CHECK_TRUE(prs_valid_num_symbols_and_comb_size(res_set.nof_symbols, res_set.comb_size),
@@ -1006,6 +1009,43 @@ static check_outcome check_prs_resource_set(const prs_resource_set&             
                tdd_period_slots);
   }
 
+  if (res_set.muting_option1.has_value()) {
+    const prs_muting_option1& muting_opt1           = res_set.muting_option1.value();
+    const unsigned            muting_pattern_size   = muting_opt1.muting_pattern.size();
+    const unsigned            muting_bit_rep_factor = static_cast<unsigned>(muting_opt1.muting_bit_repetition_factor);
+
+    CHECK_TRUE(is_one_of(muting_pattern_size, prs_constants::VALID_MUTING_PATTERN_SIZES),
+               "Invalid muting pattern size ({} bits) of Muting Option 1 of PRS resource set {}",
+               muting_pattern_size,
+               set_id);
+
+    // As per TS 38.214, Section 5.1.6.5, the UE does not expect the product of the periodicity, the muting bit
+    // repetition factor and the muting pattern size of Muting Option 1 to exceed 2^mu x 10240.
+    CHECK_EQ_OR_BELOW(res_set.periodicity_slots * muting_bit_rep_factor * muting_pattern_size,
+                      (1U << mu) * prs_constants::MAX_MUTING_OPTION1_PRODUCT_NUMEROLOGY_0,
+                      "product of the periodicity, the muting bit repetition factor and the muting pattern size of "
+                      "Muting Option 1 of PRS resource set {}",
+                      set_id);
+
+    CHECK_TRUE(res_set.muting_option1->muting_pattern.any(),
+               "Every instance of PRS resource set {} is disabled by Muting Option 1",
+               set_id);
+  }
+
+  if (res_set.muting_option2.has_value()) {
+    const unsigned muting_pattern_size = res_set.muting_option2.value().muting_pattern.size();
+
+    CHECK_EQ(muting_pattern_size,
+             repetition_factor,
+             "muting pattern size of Muting Option 2 of PRS resource set {}. It must be equal to the resource "
+             "repetition factor",
+             set_id);
+
+    CHECK_TRUE(res_set.muting_option2->muting_pattern.any(),
+               "Every repetition in PRS resource set {} is disabled by Muting Option 2.",
+               set_id);
+  }
+
   CHECK_TRUE(not res_set.resources.empty(), "No PRS resource configured in PRS resource set {}", set_id);
   CHECK_EQ_OR_BELOW(res_set.resources.size(),
                     prs_constants::MAX_NOF_RESOURCES_PER_SET,
@@ -1039,22 +1079,6 @@ static check_outcome check_prs_resource_set(const prs_resource_set&             
                 "slot offset of the last repetition of PRS resource {} of resource set {}",
                 res_id,
                 set_id);
-
-    if (not tdd_cfg.has_value()) {
-      continue;
-    }
-
-    // In TDD, all the repetitions of the resource must fall in slots with enough DL symbols.
-    for (unsigned rep = 0; rep != repetition_factor; ++rep) {
-      const unsigned slot_offset = res_set.slot_offset + res.slot_offset + rep * time_gap;
-      const unsigned nof_dl_symbols =
-          get_active_tdd_dl_symbols(tdd_cfg.value(), slot_offset, cyclic_prefix::NORMAL).length();
-      CHECK_TRUE(res.symbol_offset + nof_symbols <= nof_dl_symbols,
-                 "PRS resource {} of resource set {} does not fit in the DL symbols of slot {} of the TDD pattern",
-                 res_id,
-                 set_id,
-                 slot_offset % nof_slots_per_tdd_period(tdd_cfg.value()));
-    }
   }
 
   // Two resources of the same set that share the slot offset, the symbol offset and the comb offset are mapped onto
@@ -1075,7 +1099,7 @@ static check_outcome check_prs_resource_set(const prs_resource_set&             
 
 static check_outcome check_prs_config(const du_cell_config& cell_cfg)
 {
-  const prs_config& prs_cfg = cell_cfg.prs_cfg;
+  const prs_config& prs_cfg = cell_cfg.ran.prs_cfg;
 
   // DL-PRS is disabled when no resource set is configured.
   if (prs_cfg.resource_sets.empty()) {
@@ -1122,6 +1146,7 @@ check_outcome odu::is_du_cell_config_valid(const du_cell_config& cell_cfg)
   HANDLE_ERROR(check_ntn_config(cell_cfg));
   HANDLE_ERROR(check_tac_list(cell_cfg));
   HANDLE_ERROR(check_prs_config(cell_cfg));
+  HANDLE_ERROR(check_periodic_resource_collisions(cell_cfg.ran));
   // TODO: Remaining.
   return {};
 }

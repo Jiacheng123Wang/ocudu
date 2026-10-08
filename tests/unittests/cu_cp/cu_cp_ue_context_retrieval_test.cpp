@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "lib/cu_cp/routines/mobility/ue_context_retrieval_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/unittests/cu_cp/test_helpers.h"
 #include "tests/unittests/rrc/rrc_ue_test_helpers.h"
 #include "ocudu/cu_cp/cu_cp_configuration_helpers.h"
@@ -138,6 +139,8 @@ protected:
 
 TEST_F(cu_cp_ue_context_retrieval_test, when_ue_context_is_retrievable_then_context_is_collected)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   cu_cp_ue* ue = create_attached_ue();
 
   const xnap_retrieve_ue_context_response response = collect_ue_context_for_retrieval(
@@ -155,6 +158,8 @@ TEST_F(cu_cp_ue_context_retrieval_test, when_ue_context_is_retrievable_then_cont
 
 TEST_F(cu_cp_ue_context_retrieval_test, when_ue_context_is_retrieved_then_local_ue_keys_are_left_untouched)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   cu_cp_ue* ue = create_attached_ue();
 
   const security::security_context sec_context_before = ue->get_security_manager().get_security_context();
@@ -176,6 +181,8 @@ TEST_F(cu_cp_ue_context_retrieval_test, when_ue_context_is_retrieved_then_local_
 
 TEST_F(cu_cp_ue_context_retrieval_test, when_mac_i_verification_fails_then_retrieval_is_rejected)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   cu_cp_ue* ue = create_attached_ue();
 
   rrc_ue.mac_i_valid = false;
@@ -189,6 +196,8 @@ TEST_F(cu_cp_ue_context_retrieval_test, when_mac_i_verification_fails_then_retri
 
 TEST_F(cu_cp_ue_context_retrieval_test, when_ue_context_id_identifies_a_resume_then_context_is_collected)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-10");
+
   cu_cp_ue* ue = create_attached_ue();
 
   const xnap_retrieve_ue_context_response response = collect_ue_context_for_retrieval(
@@ -205,6 +214,8 @@ TEST_F(cu_cp_ue_context_retrieval_test, when_ue_context_id_identifies_a_resume_t
 
 TEST_F(cu_cp_ue_context_retrieval_test, when_resume_mac_i_verification_fails_then_retrieval_is_rejected)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-10");
+
   cu_cp_ue* ue = create_attached_ue();
 
   rrc_ue.mac_i_valid = false;
@@ -219,6 +230,8 @@ TEST_F(cu_cp_ue_context_retrieval_test, when_resume_mac_i_verification_fails_the
 
 TEST_F(cu_cp_ue_context_retrieval_test, when_ue_has_no_pdu_sessions_then_retrieval_is_rejected)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   cu_cp_ue* ue = create_attached_ue();
 
   // A UE that is not fully attached has no context worth transferring.
@@ -233,6 +246,8 @@ TEST_F(cu_cp_ue_context_retrieval_test, when_ue_has_no_pdu_sessions_then_retriev
 
 TEST_F(cu_cp_ue_context_retrieval_test, when_ue_has_no_amf_ue_id_then_retrieval_is_rejected)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   cu_cp_ue* ue = create_attached_ue();
 
   const xnap_retrieve_ue_context_response response = collect_ue_context_for_retrieval(
@@ -244,6 +259,8 @@ TEST_F(cu_cp_ue_context_retrieval_test, when_ue_has_no_amf_ue_id_then_retrieval_
 
 TEST_F(cu_cp_ue_context_retrieval_test, when_target_cell_ssb_arfcn_is_unknown_then_retrieval_is_rejected)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   cu_cp_ue* ue = create_attached_ue();
 
   // Deriving KgNB* takes the ARFCN of the target cell, so an unknown one is rejected (TS 33.501 section 6.11).
@@ -256,6 +273,8 @@ TEST_F(cu_cp_ue_context_retrieval_test, when_target_cell_ssb_arfcn_is_unknown_th
 
 TEST_F(cu_cp_ue_context_retrieval_test, when_target_cell_is_not_served_by_the_peer_then_retrieval_is_rejected)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   cu_cp_ue* ue = create_attached_ue();
 
   // Deriving KgNB* takes the PCI of the target cell, so a cell the peer did not advertise is rejected.

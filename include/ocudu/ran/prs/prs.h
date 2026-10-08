@@ -7,7 +7,11 @@
 
 #pragma once
 
+#include "ocudu/adt/bounded_bitset.h"
+#include "ocudu/ran/prs/prs_constants.h"
+#include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace ocudu {
@@ -32,15 +36,50 @@ enum class prs_num_symbols : uint8_t { two = 2, four = 4, six = 6, twelve = 12 }
 /// PRS resource time gap between repetitions, in slots.
 enum class prs_time_gap : uint8_t { one = 1, two = 2, four = 4, eight = 8, sixteen = 16, thirtytwo = 32 };
 
+/// \brief Muting bit repetition factor of a DL-PRS muting Option 1 pattern, or \f$T_{muting}^{PRS}\f$.
+enum class prs_muting_bit_repetition_factor : uint8_t { one = 1, two = 2, four = 4, eight = 8 };
+
+/// \brief DL-PRS Muting Option 1 configuration of a PRS resource set.
+///
+/// Muting Option 1 mutes whole instances of the resource set. Each bit of \c muting_pattern corresponds to \c
+/// muting_bit_repetition_factor consecutive resource set instances, with a bit value of 0 indicating that those
+/// instances are muted.
+///
+/// \remark See TS 38.211, Section 7.4.1.7.4, and TS 37.355, Section 6.4.3, "DL-PRS-MutingOption1".
+struct prs_muting_option1 {
+  /// Muting pattern bitmap. Size: {2, 4, 6, 8, 16, 32}.
+  bounded_bitset<prs_constants::VALID_MUTING_PATTERN_SIZES.back()> muting_pattern;
+  /// Muting bit repetition factor, or \f$T_{muting}^{PRS}\f$.
+  prs_muting_bit_repetition_factor muting_bit_repetition_factor = prs_muting_bit_repetition_factor::one;
+};
+
+/// \brief DL-PRS Muting Option 2 configuration of a PRS resource set.
+///
+/// Muting Option 2 mutes selected repetitions within a resource set instance. Each bit of \c muting_pattern corresponds
+/// to a repetition index, with a bit value of 0 indicating that the repetition is muted.
+///
+/// \remark See TS 38.211, Section 7.4.1.7.4, and TS 37.355, Section 6.4.3, "DL-PRS-MutingOption2".
+struct prs_muting_option2 {
+  /// \brief Muting pattern bitmap.
+  ///
+  /// Its size equals \ref prs_resource_set::repetition_factor.
+  bounded_bitset<prs_constants::VALID_MUTING_PATTERN_SIZES.back()> muting_pattern;
+};
+
 /// \brief Determines whether the combination of time domain duration and comb size is valid.
 ///
 /// The valid combinations are given in TS38.211 Section 7.4.1.7.3.
-inline bool prs_valid_num_symbols_and_comb_size(prs_num_symbols nsymb, prs_comb_size comb_sz)
-{
-  uint8_t nsymb_u8   = static_cast<uint8_t>(nsymb);
-  uint8_t comb_sz_u8 = static_cast<uint8_t>(comb_sz);
-  return (nsymb_u8 >= comb_sz_u8) && (nsymb_u8 % comb_sz_u8 == 0);
-}
+bool prs_valid_num_symbols_and_comb_size(prs_num_symbols nsymb, prs_comb_size comb_sz);
+
+/// \brief Determines whether a PRS resource set periodicity, in slots, is valid for the given numerology.
+bool prs_valid_periodicity(unsigned periodicity_slots, unsigned numerology);
+
+/// \brief Frequency offset \f$k^{\prime}\f$ of a downlink PRS resource, as a function of the symbol index within the
+/// resource, \f$l - l_{start}^{PRS}\f$.
+///
+/// \remark See TS 38.211, Table 7.4.1.7.3-1. The pattern is periodic with period \c comb_sz, so it is defined here
+/// only for one period and indexed modulo it.
+unsigned get_prs_freq_offset(prs_comb_size comb_sz, unsigned l_minus_lstart);
 
 /// \brief Configuration of a single DL-PRS resource within a PRS resource set.
 ///
@@ -92,7 +131,11 @@ struct prs_resource_set {
   ///
   /// The PRS Resource ID of a resource is its index in this list.
   std::vector<prs_resource> resources;
-  // TODO: Muting (Options 1 and 2) and QCL information.
+  /// \brief DL-PRS Muting Option 1 configuration, if enabled.
+  std::optional<prs_muting_option1> muting_option1;
+  /// \brief DL-PRS Muting Option 2 configuration, if enabled.
+  std::optional<prs_muting_option2> muting_option2;
+  // TODO: QCL information.
 };
 
 /// DL-PRS configuration of a cell.

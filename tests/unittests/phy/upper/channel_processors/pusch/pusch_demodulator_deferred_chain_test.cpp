@@ -89,6 +89,8 @@ public:
     return span<const cbf16_t>(data).subspan(offset(port, l), nof_subc);
   }
 
+  span<const cbf16_t> get_buffer() const override { return data; }
+
   span<cf_t> get(span<cf_t>                                 symbols,
                  unsigned                                   port,
                  unsigned                                   l,

@@ -367,12 +367,24 @@ void ra_scheduler::handle_msg1_occasion(const rach_indication_message::occasion&
 {
   const rnti_t ra_rnti = ra_helper::get_ra_rnti(occ.slot_index, occ.start_symbol, occ.frequency_index);
 
+  // The RAR is a single PDSCH, so it can only be carried by the beam of one SS/PBCH block. The configuration validator
+  // rejects the RACH configurations that would multiplex several of them into one occasion, so any preamble resolves
+  // the SS/PBCH block of the whole occasion. Resolved before the RAR is registered, so that a pending RAR always
+  // carries the beam it has to be transmitted on, even when every preamble is later dropped.
+  const std::optional<ssb_id_t> ssb_index =
+      get_preamble_ssb_index(prach_slot_rx, occ.frequency_index, preambles.front().preamble_id);
+  if (not ssb_index.has_value()) {
+    logger.info("pci={} ra-rnti={}: Discarding PRACH occasion. Cause: It is associated with no SS/PBCH block",
+                cell_cfg.params.pci,
+                ra_rnti);
+    return;
+  }
+
   // Search for pending RAR with matching RA-RNTI and Rx Slot.
-  auto               rar_it = std::find_if(pending_rars.begin(), pending_rars.end(), [&](const pending_rar_alloc& rar) {
+  auto rar_it = std::find_if(pending_rars.begin(), pending_rars.end(), [&](const pending_rar_alloc& rar) {
     return rar.ra_rnti == ra_rnti and rar.prach_slot_rx == prach_slot_rx;
   });
-  pending_rar_alloc* rar_req = rar_it != pending_rars.end() ? &*rar_it : nullptr;
-  if (rar_req == nullptr) {
+  if (rar_it == pending_rars.end()) {
     // No match was found. Create new pending RAR.
     if (pending_rars.capacity() == pending_rars.size()) {
       logger.warning("pci={} ra-rnti={}: Discarding PRACH occasion. Cause: Pending RARs queue is full",
@@ -380,11 +392,11 @@ void ra_scheduler::handle_msg1_occasion(const rach_indication_message::occasion&
                      ra_rnti);
       return;
     }
-    pending_rars.emplace_back();
-    rar_req                = &pending_rars.back();
-    rar_req->ra_rnti       = ra_rnti;
-    rar_req->prach_slot_rx = prach_slot_rx;
+    pending_rars.emplace_back(ra_rnti, prach_slot_rx, *ssb_index);
+    rar_it = std::prev(pending_rars.end());
   }
+  pending_rar_alloc* rar_req = &*rar_it;
+  ocudu_sanity_check(rar_req->ssb_index == *ssb_index, "PRACH occasion maps to several SS/PBCH blocks");
 
   // Set RAR window. First slot after PRACH with active DL slot represents the start of the RAR window.
   if (cell_cfg.is_tdd()) {
@@ -445,16 +457,6 @@ void ra_scheduler::handle_msg1_occasion(const rach_indication_message::occasion&
   for (unsigned idx = 0; idx != preambles.size(); ++idx) {
     const auto& preamble = preambles[idx];
 
-    const std::optional<ssb_id_t> ssb_index =
-        get_preamble_ssb_index(prach_slot_rx, occ.frequency_index, preamble.preamble_id);
-    if (not ssb_index.has_value()) {
-      logger.info("pci={} ra-rnti={}: Discarding PRACH preamble. Cause: Its PRACH occasion is associated with no "
-                  "SS/PBCH block",
-                  cell_cfg.params.pci,
-                  ra_rnti);
-      continue;
-    }
-
     // Log event.
     ev_logger.enqueue(scheduler_event_logger::prach_event{
         prach_slot_rx,
@@ -494,6 +496,11 @@ void ra_scheduler::handle_msg1_occasion(const rach_indication_message::occasion&
 
     // Store TC-RNTI of the preamble.
     rar_req->tc_rntis.emplace_back(preamble.tc_rnti);
+  }
+
+  // No preamble was registered and no Backoff Indicator has to be sent, so the RAR would carry nothing.
+  if (rar_req->tc_rntis.empty() and not rar_req->send_backoff_indicator) {
+    pending_rars.erase(rar_it);
   }
 }
 
@@ -1305,7 +1312,8 @@ auto ra_scheduler::schedule_rar(std::vector<pending_rar_alloc>::iterator rar_it,
   // > Find space in PDCCH for RAR.
   static constexpr aggregation_level aggr_lvl = aggregation_level::n4;
   const search_space_id              ss_id = cell_cfg.params.dl_cfg_common.init_dl_bwp.pdcch_common.ra_search_space_id;
-  pdcch_dl_information*              pdcch = pdcch_sch.alloc_dl_pdcch_common(pdcch_alloc, rar.ra_rnti, ss_id, aggr_lvl);
+  const beam_identifier              beam  = cell_cfg.params.ssb_cfg.ssb_beams.get_beam(rar.ssb_index.value());
+  pdcch_dl_information* pdcch = pdcch_sch.alloc_dl_pdcch_common(pdcch_alloc, rar.ra_rnti, ss_id, aggr_lvl, beam);
   if (pdcch == nullptr) {
     log_postponed_rar(rar, "No PDCCH space for RAR", pdcch_slot);
     ++rar.failed_attempts.pdcch;
@@ -1315,7 +1323,8 @@ auto ra_scheduler::schedule_rar(std::vector<pending_rar_alloc>::iterator rar_it,
   // Status: RAR allocation is successful.
 
   // > Fill RAR and Msg3 PDSCH, PUSCH and DCI.
-  fill_rar_grant(res_alloc, pdcch_slot, rar_crbs, pdsch_time_res_index, msg3_candidates, rar.send_backoff_indicator);
+  fill_rar_grant(
+      res_alloc, pdcch_slot, rar_crbs, pdsch_time_res_index, msg3_candidates, rar.send_backoff_indicator, beam);
 
   // The UEs left in remaining_ues are those whose Msg3 was not allocated; they stay pending in the RAR. Reverse
   // back so tc_rntis keeps its original order (remaining_ues is held in reverse order).
@@ -1380,7 +1389,8 @@ auto ra_scheduler::schedule_backoff_only_rar(std::vector<pending_rar_alloc>::ite
   // > Find space in PDCCH for RAR.
   static constexpr aggregation_level aggr_lvl = aggregation_level::n4;
   const search_space_id              ss_id = cell_cfg.params.dl_cfg_common.init_dl_bwp.pdcch_common.ra_search_space_id;
-  pdcch_dl_information*              pdcch = pdcch_sch.alloc_dl_pdcch_common(pdcch_alloc, rar.ra_rnti, ss_id, aggr_lvl);
+  const beam_identifier              beam  = cell_cfg.params.ssb_cfg.ssb_beams.get_beam(rar.ssb_index.value());
+  pdcch_dl_information* pdcch = pdcch_sch.alloc_dl_pdcch_common(pdcch_alloc, rar.ra_rnti, ss_id, aggr_lvl, beam);
   if (pdcch == nullptr) {
     log_postponed_rar(rar, "No PDCCH space for Backoff Indicator-only RAR", pdcch_slot);
     ++rar.failed_attempts.pdcch;
@@ -1389,7 +1399,7 @@ auto ra_scheduler::schedule_backoff_only_rar(std::vector<pending_rar_alloc>::ite
 
   // Status: Backoff Indicator-only RAR allocation is successful.
   static_vector<msg3_alloc_candidate, MAX_GRANTS_PER_RAR> no_msg3_candidates;
-  fill_rar_grant(res_alloc, pdcch_slot, rar_crbs, pdsch_time_res_index, no_msg3_candidates, true);
+  fill_rar_grant(res_alloc, pdcch_slot, rar_crbs, pdsch_time_res_index, no_msg3_candidates, true, beam);
 
   return pending_rars.erase(rar_it);
 }
@@ -1399,7 +1409,8 @@ void ra_scheduler::fill_rar_grant(cell_resource_allocator&         res_alloc,
                                   crb_interval                     rar_crbs,
                                   unsigned                         pdsch_time_res_index,
                                   span<const msg3_alloc_candidate> msg3_candidates,
-                                  bool                             send_backoff_indicator)
+                                  bool                             send_backoff_indicator,
+                                  beam_identifier                  beam)
 {
   const auto& init_dl_bwp             = cell_cfg.params.dl_cfg_common.init_dl_bwp;
   const auto  pdsch_td_res_alloc_list = get_ra_pdsch_td_list(cell_cfg);
@@ -1426,6 +1437,7 @@ void ra_scheduler::fill_rar_grant(cell_resource_allocator&         res_alloc,
       pdcch.dci.as_ra_rnti_f1_0(),
       rar_crbs,
       rar_data[pdsch_time_res_index].dmrs_info);
+  rar.pdsch_cfg.precoding_and_beamforming = make_single_beam_precoding(beam);
 
   const auto& init_ul_bwp         = cell_cfg.params.ul_cfg_common.init_ul_bwp;
   const auto  pusch_td_alloc_list = get_pusch_td_list(cell_cfg);
@@ -1621,7 +1633,11 @@ void ra_scheduler::schedule_msg3_retx(cell_resource_allocator& res_alloc, ra_ue_
     //  - a Type1-PDCCH CSS set configured by ra-SearchSpace in PDCCH-ConfigCommon for a DCI format with
     //    CRC scrambled by a RA-RNTI, a MsgB-RNTI, or a TC-RNTI on the primary cell.
     pdcch_ul_information* pdcch =
-        pdcch_sch.alloc_ul_pdcch_common(pdcch_alloc, msg3_ctx.preamble.tc_rnti, ss_cfg.get_id(), aggregation_level::n4);
+        pdcch_sch.alloc_ul_pdcch_common(pdcch_alloc,
+                                        msg3_ctx.preamble.tc_rnti,
+                                        ss_cfg.get_id(),
+                                        aggregation_level::n4,
+                                        cell_cfg.params.ssb_cfg.ssb_beams.get_beam(msg3_ctx.ssb_index.value()));
     if (pdcch == nullptr) {
       // Early exit. No point in continuing iteration if PDCCH fails to allocate.
       log_failed_msg3_retx(
@@ -1870,9 +1886,17 @@ void ra_scheduler::schedule_pending_msgbs(cell_resource_allocator& res_alloc, sl
       continue;
     }
 
+    // The association is immutable, so the SS/PBCH block resolved when the preambles were detected is recovered
+    // here rather than carried on the pending MsgB. They all share one occasion, hence one SS/PBCH block.
+    const std::optional<ssb_id_t> msgb_ssb_index =
+        get_preamble_ssb_index(msgb.prach_slot_rx, msgb.frequency_index, msgb.preambles.front().info.preamble_id);
+    ocudu_sanity_check(msgb_ssb_index.has_value(), "MsgA preamble accepted in an occasion with no SS/PBCH block");
+    const beam_identifier msgb_beam = cell_cfg.params.ssb_cfg.ssb_beams.get_beam(msgb_ssb_index->value());
+
     // -- Allocate PDCCH for MsgB-RNTI --
     cell_slot_resource_allocator& pdcch_alloc = res_alloc[pdcch_slot];
-    pdcch_dl_information*         pdcch = pdcch_sch.alloc_dl_pdcch_common(pdcch_alloc, msgb.msgb_rnti, ss_id, aggr_lvl);
+    pdcch_dl_information*         pdcch =
+        pdcch_sch.alloc_dl_pdcch_common(pdcch_alloc, msgb.msgb_rnti, ss_id, aggr_lvl, msgb_beam);
     if (pdcch == nullptr) {
       logger.debug("msgb-rnti={}: MsgB postponed. Cause: No PDCCH space available", msgb.msgb_rnti);
       ++msgb_it;
@@ -1961,6 +1985,7 @@ void ra_scheduler::schedule_pending_msgbs(cell_resource_allocator& res_alloc, sl
                              pdcch->dci.as_ra_rnti_f1_0(),
                              msgb_crbs,
                              rar_data[pdsch_time_res_index].dmrs_info);
+    msgb_rar.pdsch_cfg.precoding_and_beamforming = make_single_beam_precoding(msgb_beam);
 
     // -- Fill per-preamble grants --
     // SuccessRAR: UE's MsgA PUSCH decoded — 2-step RACH completes, no Msg3 needed. Already secured a PUCCH

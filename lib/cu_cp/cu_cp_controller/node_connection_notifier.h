@@ -15,9 +15,10 @@ class du_connection_notifier
 public:
   virtual ~du_connection_notifier() = default;
 
-  /// \brief Notifies the CU-CP about a DU setup request.
-  /// \return True if CU-CP accepts the request.
-  virtual bool on_du_setup_request(const std::set<plmn_identity>& plmn_ids) = 0;
+  /// \brief Asks the CU-CP which of the PLMNs of a DU have a connected AMF.
+  /// \param[in] plmn_ids The PLMNs served by the cells of the DU.
+  /// \return The subset of \c plmn_ids for which the CU-CP has a connected AMF.
+  virtual std::set<plmn_identity> on_connected_plmns_required(const std::set<plmn_identity>& plmn_ids) = 0;
 };
 
 } // namespace ocudu::ocucp

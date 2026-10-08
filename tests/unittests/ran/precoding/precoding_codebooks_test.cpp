@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
+#include "lib/ran/precoding/two_port/precoding_codebooks.h"
+#include "lib/ran/precoding/type1_sp/precoding_codebooks.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ran/precoding/precoding_codebook_configuration.h"
 #include "ocudu/ran/precoding/precoding_codebooks.h"
@@ -220,7 +222,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_OneLayerFourPorts)
 
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-      precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+      pmi_typeI_single_panel pmi = {
           .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = std::nullopt, .i_1_3 = std::nullopt, .i_2 = i_2};
 
       precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 1);
@@ -268,7 +270,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_TwoLayerFourPorts)
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_1_3 = 0; i_1_3 != nof_offsets; ++i_1_3) {
       for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-        precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+        pmi_typeI_single_panel pmi = {
             .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = std::nullopt, .i_1_3 = i_1_3, .i_2 = i_2};
 
         precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 2);
@@ -318,7 +320,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_ThreeLayerFourPorts)
 
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-      precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+      pmi_typeI_single_panel pmi = {
           .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = std::nullopt, .i_1_3 = std::nullopt, .i_2 = i_2};
 
       precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 3);
@@ -367,7 +369,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_FourLayerFourPorts)
 
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-      precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+      pmi_typeI_single_panel pmi = {
           .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = std::nullopt, .i_1_3 = std::nullopt, .i_2 = i_2};
 
       precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 4);
@@ -414,7 +416,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_OneLayer_4x1)
 
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-      precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+      pmi_typeI_single_panel pmi = {
           .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = std::nullopt, .i_1_3 = std::nullopt, .i_2 = i_2};
       precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 1);
 
@@ -457,7 +459,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_TwoLayer_4x1)
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_1_3 = 0; i_1_3 != nof_offsets; ++i_1_3) {
       for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-        precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+        pmi_typeI_single_panel pmi = {
             .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = std::nullopt, .i_1_3 = i_1_3, .i_2 = i_2};
         precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 2);
 
@@ -507,7 +509,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_ThreeLayer_4x1)
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_1_3 = 0; i_1_3 != nof_offsets; ++i_1_3) {
       for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-        precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+        pmi_typeI_single_panel pmi = {
             .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = std::nullopt, .i_1_3 = i_1_3, .i_2 = i_2};
         precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 3);
 
@@ -557,7 +559,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_FourLayer_4x1)
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_1_3 = 0; i_1_3 != nof_offsets; ++i_1_3) {
       for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-        precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+        pmi_typeI_single_panel pmi = {
             .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = std::nullopt, .i_1_3 = i_1_3, .i_2 = i_2};
         precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 4);
 
@@ -605,7 +607,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_FiveLayer_4x1)
 
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-      precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+      pmi_typeI_single_panel pmi = {
           .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = std::nullopt, .i_1_3 = std::nullopt, .i_2 = i_2};
       precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 5);
 
@@ -651,7 +653,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_SixLayer_4x1)
 
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-      precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+      pmi_typeI_single_panel pmi = {
           .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = std::nullopt, .i_1_3 = std::nullopt, .i_2 = i_2};
       precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 6);
 
@@ -697,7 +699,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_SevenLayer_4x1)
 
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-      precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+      pmi_typeI_single_panel pmi = {
           .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = std::nullopt, .i_1_3 = std::nullopt, .i_2 = i_2};
       precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 7);
 
@@ -744,7 +746,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_EightLayer_4x1)
 
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-      precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+      pmi_typeI_single_panel pmi = {
           .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = std::nullopt, .i_1_3 = std::nullopt, .i_2 = i_2};
       precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 8);
 
@@ -788,7 +790,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_OneLayer_2x2)
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_1_2 = 0; i_1_2 != nof_beams; ++i_1_2) {
       for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-        precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+        pmi_typeI_single_panel pmi = {
             .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = i_1_2, .i_1_3 = std::nullopt, .i_2 = i_2};
         precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 1);
 
@@ -830,7 +832,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_TwoLayer_2x2)
     for (uint8_t i_1_2 = 0; i_1_2 != nof_beams; ++i_1_2) {
       for (uint8_t i_1_3 = 0; i_1_3 != nof_offsets; ++i_1_3) {
         for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-          precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+          pmi_typeI_single_panel pmi = {
               .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = i_1_2, .i_1_3 = i_1_3, .i_2 = i_2};
           precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 2);
 
@@ -881,7 +883,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_ThreeLayer_2x2)
     for (uint8_t i_1_2 = 0; i_1_2 != nof_beams; ++i_1_2) {
       for (uint8_t i_1_3 = 0; i_1_3 != nof_offsets; ++i_1_3) {
         for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-          precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+          pmi_typeI_single_panel pmi = {
               .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = i_1_2, .i_1_3 = i_1_3, .i_2 = i_2};
           precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 3);
 
@@ -932,7 +934,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_FourLayer_2x2)
     for (uint8_t i_1_2 = 0; i_1_2 != nof_beams; ++i_1_2) {
       for (uint8_t i_1_3 = 0; i_1_3 != nof_offsets; ++i_1_3) {
         for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-          precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+          pmi_typeI_single_panel pmi = {
               .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = i_1_2, .i_1_3 = i_1_3, .i_2 = i_2};
           precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 4);
 
@@ -981,7 +983,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_FiveLayer_2x2)
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_1_2 = 0; i_1_2 != nof_beams; ++i_1_2) {
       for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-        precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+        pmi_typeI_single_panel pmi = {
             .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = i_1_2, .i_1_3 = std::nullopt, .i_2 = i_2};
         precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 5);
 
@@ -1027,7 +1029,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_SixLayer_2x2)
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_1_2 = 0; i_1_2 != nof_beams; ++i_1_2) {
       for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-        precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+        pmi_typeI_single_panel pmi = {
             .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = i_1_2, .i_1_3 = std::nullopt, .i_2 = i_2};
         precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 6);
 
@@ -1073,7 +1075,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_SevenLayer_2x2)
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_1_2 = 0; i_1_2 != nof_beams; ++i_1_2) {
       for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-        precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+        pmi_typeI_single_panel pmi = {
             .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = i_1_2, .i_1_3 = std::nullopt, .i_2 = i_2};
         precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 7);
 
@@ -1119,7 +1121,7 @@ TEST(precoding_codebooks_test, Type1SinglePanelMode1_EightLayer_2x2)
   for (uint8_t i_1_1 = 0; i_1_1 != nof_beams; ++i_1_1) {
     for (uint8_t i_1_2 = 0; i_1_2 != nof_beams; ++i_1_2) {
       for (uint8_t i_2 = 0; i_2 != nof_pol_shifts; ++i_2) {
-        precoding_matrix_indicator pmi = pmi_typeI_single_panel{
+        pmi_typeI_single_panel pmi = {
             .panel_config = panel_config, .i_1_1 = i_1_1, .i_1_2 = i_1_2, .i_1_3 = std::nullopt, .i_2 = i_2};
         precoding_weight_matrix precoding = make_type1_sp_mode1(pmi, 8);
 

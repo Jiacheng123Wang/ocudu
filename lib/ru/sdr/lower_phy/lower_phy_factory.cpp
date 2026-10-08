@@ -57,6 +57,9 @@ static std::shared_ptr<lower_phy_factory> create_lower_phy_factory(const lower_p
       config.dft_processor_type,
       create_dft_processor_factory_backend_name());
 
+  // Deduce the number of transmit ports from the antenna topology.
+  unsigned nof_tx_ports = get_total_nof_ports(config.tx_ant_topology);
+
   // Create OFDM modulator factory (TX path: CPU DFT, untouched by the Metal knob).
   ofdm_factory_generic_configuration tx_ofdm_common_config = {.dft_factory = tx_dft_factory};
   std::shared_ptr<ofdm_modulator_factory> modulator_factory =
@@ -65,7 +68,7 @@ static std::shared_ptr<lower_phy_factory> create_lower_phy_factory(const lower_p
 
   // Wrap the OFDM modulator factory with a pool factory.
   modulator_factory =
-      create_ofdm_modulator_pool_factory(std::move(modulator_factory), MAX_NSYMB_PER_SLOT * config.nof_tx_ports);
+      create_ofdm_modulator_pool_factory(std::move(modulator_factory), MAX_NSYMB_PER_SLOT * nof_tx_ports);
   report_fatal_error_if_not(modulator_factory, "Failed to create OFDM modulator pool factory.");
 
   // Create OFDM demodulator factory (RX path: the Metal knob applies here).

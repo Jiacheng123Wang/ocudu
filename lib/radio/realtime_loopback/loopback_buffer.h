@@ -28,7 +28,7 @@ public:
     buffer(nof_channels, nof_samples),
     last_tx_timestamp(0),
     last_rx_timestamp(0),
-    logger(ocudulog::fetch_basic_logger("LOOPBACK"))
+    logger(ocudulog::fetch_basic_logger("RF"))
   {
     for (unsigned i_channel = 0; i_channel != nof_channels; ++i_channel) {
       ocuduvec::zero(buffer.get_writer().get_channel_buffer(i_channel));

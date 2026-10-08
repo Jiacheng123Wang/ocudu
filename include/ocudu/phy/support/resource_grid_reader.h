@@ -49,7 +49,7 @@ public:
   ///
   /// \param[in] port   Port index.
   /// \param[in] symbol OFDM symbol index.
-  /// \return The allocated CRB range, or an empty interval if the given symbol is empty.
+  /// \return The allocated CRB range or an empty interval if the given symbol is empty.
   virtual crb_interval get_allocation_range(unsigned port, unsigned symbol) const = 0;
 
   /// \brief Gets a number of resource elements in the resource grid at the given port and symbol using a bounded bitset
@@ -59,7 +59,7 @@ public:
   /// \param[in]  port    Port index.
   /// \param[in]  l       OFDM symbol index.
   /// \param[in]  k_init  Initial subcarrier index.
-  /// \param[in]  mask    Boolean mask denoting the subcarriers to be read (if \c true), starting from \c k_init.
+  /// \param[in]  mask    Boolean mask denoting the subcarriers to be read (if \c true) starting from \c k_init.
   /// \return A view to the unused entries of \c symbols.
   /// \note The initial subcarrier plus the number of elements of \c mask shall not exceed the number of resource grid
   ///       subcarriers.
@@ -78,7 +78,7 @@ public:
   /// \param[in]  port    Port index.
   /// \param[in]  l       OFDM symbol index.
   /// \param[in]  k_init  Initial subcarrier index.
-  /// \param[in] mask     Boolean mask denoting the subcarriers to be read (if \c true), starting from \c k_init.
+  /// \param[in] mask     Boolean mask denoting the subcarriers to be read (if \c true) starting from \c k_init.
   /// \return A view to the unused entries of \c symbols.
   /// \note The initial subcarrier plus the number of elements of \c mask shall not exceed the number of resource grid
   ///       subcarriers.
@@ -131,6 +131,14 @@ public:
   ///
   /// \return The device view, invalid (see resource_grid_device_view::is_valid()) when unavailable.
   virtual resource_grid_device_view get_device_view() const { return {}; }
+
+  /// \brief Gets a read-only view of the whole grid.
+  ///
+  /// The resource elements are \c cbf16_t laid out as `(port * nof_symbols * nof_subc + symbol *
+  /// nof_subc + subcarrier)`, each holding the real and imaginary parts as a pair of BF16 words.
+  ///
+  /// \return A read-only span containing the entire data of the resource grid.
+  virtual span<const cbf16_t> get_buffer() const = 0;
 };
 
 } // namespace ocudu

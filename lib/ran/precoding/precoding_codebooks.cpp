@@ -3,6 +3,9 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ocudu/ran/precoding/precoding_codebooks.h"
+#include "two_port/precoding_codebooks.h"
+#include "type1_sp/precoding_codebooks.h"
+#include "type2/precoding_codebooks.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/adt/interval.h"
 
@@ -72,4 +75,95 @@ precoding_weight_matrix ocudu::make_identity(unsigned nof_streams)
     }
   }
   return result;
+}
+
+antenna_topology ocudu::get_single_panel_topology(pmi_codebook_single_panel_config n1_n2)
+{
+  switch (n1_n2) {
+    case pmi_codebook_single_panel_config::two_one:
+      return antenna_topology::single_panel_two_one;
+    case pmi_codebook_single_panel_config::four_one:
+      return antenna_topology::single_panel_four_one;
+    case pmi_codebook_single_panel_config::two_two:
+      return antenna_topology::single_panel_two_two;
+    default:
+      break;
+  }
+  report_error("No supported antenna topology realizes the single-panel configuration {}.",
+               static_cast<unsigned>(n1_n2));
+}
+
+namespace {
+
+/// MIMO precoding matrix calculator from a given Precoding Matrix Indicator (PMI).
+struct mimo_matrix_calculator {
+  /// Number of transmission layers.
+  unsigned nof_layers;
+
+  precoding_beamforming_composite operator()(std::monostate) const
+  {
+    ocudu_assertion_failure("Unsupported PMI codebook configuration");
+    return {};
+  }
+
+  precoding_beamforming_composite operator()(const pmi_two_antenna_port&) const
+  {
+    ocudu_assertion_failure("Unsupported PMI codebook configuration");
+    return {};
+  }
+
+  precoding_beamforming_composite operator()(const pmi_typeI_single_panel& pmi) const
+  {
+    return calculate_mimo_matrix(pmi, nof_layers);
+  }
+
+  precoding_beamforming_composite operator()(const pmi_typeII& pmi) const
+  {
+    return calculate_mimo_matrix(pmi, nof_layers);
+  }
+};
+
+/// Precoding weight matrix calculator from a given PMI.
+struct precoding_calculator {
+  /// Number of transmission layers.
+  unsigned nof_layers;
+
+  precoding_weight_matrix operator()(std::monostate) const
+  {
+    ocudu_assertion_failure("Unsupported PMI codebook configuration");
+    return {};
+  }
+
+  precoding_weight_matrix operator()(const pmi_two_antenna_port& pmi) const
+  {
+    switch (nof_layers) {
+      case 1:
+        return make_one_layer_two_ports(pmi.pmi);
+      case 2:
+        return make_two_layer_two_ports(pmi.pmi);
+      default:
+        ocudu_assertion_failure("Unsupported PMI codebook configuration");
+    }
+    return {};
+  }
+
+  precoding_weight_matrix operator()(const pmi_typeI_single_panel& pmi) const
+  {
+    return make_type1_sp_mode1(pmi, nof_layers);
+  }
+
+  precoding_weight_matrix operator()(const pmi_typeII& pmi) const { return make_type2(pmi, nof_layers); }
+};
+
+} // namespace
+
+precoding_beamforming_composite ocudu::get_mimo_matrix_from_pmi(const precoding_matrix_indicator& pmi,
+                                                                unsigned                          nof_layers)
+{
+  return std::visit(mimo_matrix_calculator{nof_layers}, pmi);
+}
+
+precoding_weight_matrix ocudu::make_precoding(const precoding_matrix_indicator& pmi, unsigned nof_layers)
+{
+  return std::visit(precoding_calculator{nof_layers}, pmi);
 }

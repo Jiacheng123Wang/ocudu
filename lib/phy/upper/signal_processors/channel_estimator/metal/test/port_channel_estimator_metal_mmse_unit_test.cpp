@@ -80,6 +80,8 @@ public:
   }
   span<const cbf16_t> get_view(unsigned, unsigned) const override { return symbols; }
 
+  span<const cbf16_t> get_buffer() const override { return symbols; }
+
 private:
   std::vector<cbf16_t> symbols;
   bool                 has_symbol = false;

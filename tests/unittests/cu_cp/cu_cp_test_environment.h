@@ -5,16 +5,17 @@
 #pragma once
 
 #include "../../../lib/cu_cp/cu_cp_controller/amf_connection_manager.h"
-#include "../e1ap/common/e1ap_cu_cp_test_messages.h"
 #include "test_doubles/mock_amf.h"
 #include "test_doubles/mock_cu_up.h"
 #include "test_doubles/mock_du.h"
+#include "tests/test_doubles/e1ap/e1ap_cu_cp_test_messages.h"
 #include "tests/test_doubles/f1ap/f1ap_test_messages.h"
 #include "tests/test_doubles/rrc/rrc_test_messages.h"
 #include "tests/unittests/cu_cp/test_doubles/mock_xnc_cu_cp.h"
 #include "ocudu/cu_cp/cu_cp.h"
 #include "ocudu/cu_cp/cu_cp_configuration.h"
 #include "ocudu/ran/cu_cp_location_reporting_types.h"
+#include "ocudu/ran/ntn_location_mapping.h"
 #include "ocudu/ran/plmn_identity.h"
 #include "ocudu/support/async/async_test_utils.h"
 #include "ocudu/xnap/xnap_message.h"
@@ -81,6 +82,8 @@ struct cu_cp_test_env_params {
   uint32_t pws_max_warning_message_segment_size = 150;
   /// Operator-declared logical cells passed to the CU-CP configuration.
   std::vector<ocucp::cu_cp_logical_cell_config> logical_cells;
+  /// Coarse UE location to TAC and Mapped Cell ID mapping, per NTN cell.
+  std::vector<ntn_cell_location_mapping> ntn_location_mappings;
 };
 
 class cu_cp_test_environment

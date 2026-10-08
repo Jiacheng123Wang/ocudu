@@ -99,6 +99,16 @@ public:
                  get_max_nof_symbols());
     return data.get_view({i_symbol, i_fd_occasion, i_td_occasion, i_port});
   }
+
+  // See interface for documentation.
+  span<const cbf16_t> get_buffer() const override { return data.get_data(); }
+
+  // See interface for documentation.
+  unsigned
+  get_symbol_offset(unsigned i_port, unsigned i_td_occasion, unsigned i_fd_occasion, unsigned i_symbol) const override
+  {
+    return data.template get_view_offset<1>({i_symbol, i_fd_occasion, i_td_occasion, i_port});
+  }
 };
 
 } // namespace ocudu

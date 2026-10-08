@@ -63,10 +63,17 @@ private:
   };
   /// RAR grant pending to be scheduled.
   struct pending_rar_alloc {
+    pending_rar_alloc(rnti_t ra_rnti_, slot_point prach_slot_rx_, ssb_id_t ssb_index_) :
+      ra_rnti(ra_rnti_), prach_slot_rx(prach_slot_rx_), ssb_index(ssb_index_)
+    {
+    }
+
     /// RA-RNTI generated for a given group of detected RACH preambles.
-    rnti_t ra_rnti = rnti_t::INVALID_RNTI;
+    rnti_t ra_rnti;
     /// Slot at which PRACH preambles were detected.
     slot_point prach_slot_rx;
+    /// Index of the SS/PBCH block associated with the PRACH occasion, as per TS 38.213, Section 8.1.
+    ssb_id_t ssb_index;
     /// Last slot at which the scheduler attempted to allocated this RAR grant.
     slot_point last_sched_try_slot;
     /// Range of slots valid for RAR transmission.
@@ -219,7 +226,8 @@ private:
                       crb_interval                     rar_crbs,
                       unsigned                         pdsch_time_res_index,
                       span<const msg3_alloc_candidate> msg3_candidates,
-                      bool                             send_backoff_indicator = false);
+                      bool                             send_backoff_indicator,
+                      beam_identifier                  beam);
 
   /// Schedule retransmission of Msg3.
   void schedule_msg3_retx(cell_resource_allocator& res_alloc, ra_ue_context& msg3_ctx) const;

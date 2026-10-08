@@ -903,6 +903,11 @@ ocudu::ocucp::periodical_report_cfg_to_rrc_asn1(const rrc_periodical_report_cfg&
   // Fill use allowed cell list.
   asn1_periodical_report_cfg.use_allowed_cell_list = periodical_report_cfg.use_allowed_cell_list;
 
+  if (periodical_report_cfg.coarse_location_request) {
+    asn1_periodical_report_cfg.ext                                 = true;
+    asn1_periodical_report_cfg.coarse_location_request_r17_present = true;
+  }
+
   return asn1_periodical_report_cfg;
 }
 
@@ -1007,6 +1012,28 @@ ocudu::ocucp::event_triggered_report_cfg_to_rrc_asn1(const rrc_event_trigger_cfg
     }
   }
 
+  // Fill event D1. TS 38.331 sec. 5.5.4.15 defines it under EventTriggerConfig and notes the definition also applies
+  // to CondEvent D1, so the same distance pair triggers a measurement report and not only a conditional handover.
+  if (event_id.id == rrc_event_id::event_id_t::d1) {
+    auto& asn1_event_d1 = asn1_event_trigger_cfg.event_id.set_event_d1_r17();
+    // Convert meters with 50 m steps (round-down).
+    asn1_event_d1.distance_thresh_from_ref1_r17 =
+        static_cast<uint16_t>(event_id.distance_thresh_from_ref1.value() / 50);
+    asn1_event_d1.distance_thresh_from_ref2_r17 =
+        static_cast<uint16_t>(event_id.distance_thresh_from_ref2.value() / 50);
+    asn1_event_d1.ref_location1_r17   = lpp::pack_reference_location(event_id.ref_location1.value());
+    asn1_event_d1.ref_location2_r17   = lpp::pack_reference_location(event_id.ref_location2.value());
+    asn1_event_d1.report_on_leave_r17 = event_id.report_on_leave;
+    // Convert meters with 10 m steps (round-down).
+    asn1_event_d1.hysteresis_location_r17 = static_cast<uint16_t>(event_id.hysteresis_location.value() / 10);
+    asn1::number_to_enum(asn1_event_d1.time_to_trigger_r17, event_id.time_to_trigger);
+  }
+
+  // An event whose identifier reaches here unhandled would leave the choice unset and pack as another event.
+  report_error_if_not(asn1_event_trigger_cfg.event_id.type().value !=
+                          asn1::rrc_nr::event_trigger_cfg_s::event_id_c_::types_opts::nulltype,
+                      "Unhandled event-triggered report event id");
+
   // Fill rs type.
   asn1_event_trigger_cfg.rs_type = rrc_nr_rs_type_to_asn1(event_trigger_cfg.rs_type);
 
@@ -1047,6 +1074,11 @@ ocudu::ocucp::event_triggered_report_cfg_to_rrc_asn1(const rrc_event_trigger_cfg
     asn1_event_trigger_cfg.ext                  = true;
     asn1_event_trigger_cfg.use_t312_r16_present = true;
     asn1_event_trigger_cfg.use_t312_r16         = true;
+  }
+
+  if (event_trigger_cfg.coarse_location_request) {
+    asn1_event_trigger_cfg.ext                                 = true;
+    asn1_event_trigger_cfg.coarse_location_request_r17_present = true;
   }
 
   return asn1_event_trigger_cfg;
@@ -1121,6 +1153,11 @@ ocudu::ocucp::cond_trigger_cfg_to_rrc_asn1(const rrc_cond_trigger_cfg& cond_trig
     ev.hysteresis_location_r18 = static_cast<uint16_t>(cond_event.hysteresis_location.value() / 10);
     asn1::number_to_enum(ev.time_to_trigger_r18, cond_event.time_to_trigger);
   }
+
+  // An event whose identifier reaches here unhandled would leave the choice unset and pack as another event.
+  report_error_if_not(asn1_cond_trigger_cfg.cond_event_id.type().value !=
+                          asn1::rrc_nr::cond_trigger_cfg_r16_s::cond_event_id_c_::types_opts::nulltype,
+                      "Unhandled conditional trigger event id");
 
   // Set RS type.
   asn1_cond_trigger_cfg.rs_type_r16 = rrc_nr_rs_type_to_asn1(cond_trigger_cfg.rs_type);

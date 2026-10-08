@@ -3,13 +3,14 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "cu_cp_test_environment.h"
+#include "tests/ocudu_test_requirements.h"
+#include "tests/test_doubles/e1ap/e1ap_cu_cp_test_messages.h"
 #include "tests/test_doubles/e1ap/e1ap_test_message_validators.h"
 #include "tests/test_doubles/f1ap/f1ap_test_message_validators.h"
 #include "tests/test_doubles/f1ap/f1ap_test_messages.h"
 #include "tests/test_doubles/ngap/ngap_test_message_validators.h"
 #include "tests/test_doubles/rrc/rrc_test_message_validators.h"
 #include "tests/test_doubles/utils/test_rng.h"
-#include "tests/unittests/e1ap/common/e1ap_cu_cp_test_messages.h"
 #include "tests/unittests/ngap/ngap_test_messages.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/common.h"
@@ -34,6 +35,8 @@ public:
       const std::optional<location_report_request>& location_reporting_request = std::nullopt) :
     cu_cp_test_environment(cu_cp_test_env_params{})
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-1-c");
+
     // Run NG setup to completion.
     run_ng_setup();
 

@@ -131,6 +131,9 @@ private:
   /// \brief Handle POSITIONING INFORMATION REQUEST as per TS 38.473, Section 8.13.9.
   void handle_positioning_information_request(const asn1::f1ap::positioning_info_request_s& msg);
 
+  /// \brief Handle E-CID MEASUREMENT INITIATION REQUEST as per TS 38.473, Section 8.13.12.
+  void handle_e_cid_measurement_initiation_request(const asn1::f1ap::e_c_id_meas_initiation_request_s& msg);
+
   /// \brief Handle REFERENCE TIME INFORMATION REPORTING CONTROL as per TS 38.473, Section 8.12.1.
   void handle_ref_time_info_report_ctrl(const asn1::f1ap::ref_time_info_report_ctrl_s& msg);
 

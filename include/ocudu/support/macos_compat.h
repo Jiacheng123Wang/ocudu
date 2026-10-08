@@ -7,6 +7,7 @@
 #include "ocudu/support/executors/unique_thread.h" // os_thread_realtime_priority, os_sched_affinity_bitmask
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <future>
 #include <pthread.h>
 #include <string>
@@ -101,6 +102,14 @@ size_t page_size();
 ///
 /// \return Monotonic time in microseconds, or 0 if the clock is unavailable.
 uint64_t get_monotonic_time_us();
+
+/// Waits until fd becomes readable, up to timeout.
+///
+/// Uses ppoll() on Linux and select() on macOS: poll() stops at millisecond granularity, which is
+/// the whole budget of a 1 ms slot.
+///
+/// Returns true when the descriptor is readable, false on timeout or error.
+bool wait_readable(int fd, std::chrono::microseconds timeout);
 
 // 3. CPU locality.
 

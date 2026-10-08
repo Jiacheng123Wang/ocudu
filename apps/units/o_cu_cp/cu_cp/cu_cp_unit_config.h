@@ -5,6 +5,7 @@
 #pragma once
 
 #include "apps/helpers/metrics/metrics_config.h"
+#include "apps/helpers/network/dtls_appconfig.h"
 #include "apps/helpers/network/sctp_appconfig.h"
 #include "apps/helpers/ntn/ntn_satellite_config.h"
 #include "apps/units/o_cu_cp/cu_cp/cu_cp_unit_pcap_config.h"
@@ -23,8 +24,10 @@
 #include "ocudu/ran/qos/five_qi.h"
 #include "ocudu/ran/rlc_mode.h"
 #include "ocudu/ran/s_nssai.h"
+#include "ocudu/ran/supported_tracking_area.h"
 #include "ocudu/ran/tac.h"
 #include "ocudu/security/security.h"
+#include <algorithm>
 #include <chrono>
 #include <optional>
 #include <vector>
@@ -45,6 +48,8 @@ struct cu_cp_unit_plmn_item {
 struct cu_cp_unit_supported_ta_item {
   tac_t                             tac;
   std::vector<cu_cp_unit_plmn_item> plmn_list;
+  /// Satellite RAT type signalled to the AMF for an NTN tracking area. Left empty for a terrestrial tracking area.
+  std::optional<std::string> satellite_rat;
 };
 
 struct cu_cp_unit_amf_config_item {
@@ -75,6 +80,9 @@ struct cu_cp_unit_report_config {
   unsigned    report_cfg_id;
   std::string report_type;
   unsigned    report_interval_ms;
+  /// Whether the UE includes its coarse location in every report, \c coarseLocationRequest, TS 38.331 sec. 5.5.5.
+  /// Only an NTN UE is expected to have one, and it reports one only if available.
+  bool coarse_location_request = false;
 
   std::optional<ocucp::rrc_event_id::event_id_t> event_triggered_report_type;
   /// "rsrp", "rsrq", "sinr".
@@ -122,6 +130,28 @@ struct cu_cp_unit_cell_ntn_config {
   std::optional<geodetic_coordinates_t> reference_location;
   /// Service link DL/UL polarization (ntn-PolarizationDL/UL-r17). Optional.
   std::optional<ntn_polarization_t> polarization;
+};
+
+/// One geographic area of an NTN cell, mapped to a TAC for the UE Location Derived TAC in NR NTN IE of TS 38.413, to
+/// a Mapped Cell ID of TS 38.300 sec. 16.14.5, or to both. A TAC may be repeated to cover an area that is not a single
+/// rectangle.
+struct cu_cp_unit_ntn_location_area {
+  /// TAC reported for a UE inside this area. Absent to derive no TAC, leaving the AMF the broadcast TAI.
+  std::optional<tac_t> tac;
+  /// Mapped Cell ID reported for a UE inside this area. Absent to report the Uu Cell ID of the serving cell.
+  std::optional<uint64_t> mapped_nr_cell_id;
+  double                  lat_min = 0.0;
+  double                  lat_max = 0.0;
+  double                  lon_min = 0.0;
+  double                  lon_max = 0.0;
+};
+
+/// Coarse UE location to TAC mapping of one NTN cell.
+struct cu_cp_unit_ntn_location_mapping_item {
+  /// Cell id.
+  uint64_t nr_cell_id = 0;
+  /// Areas in configuration order. The first area containing the position wins.
+  std::vector<cu_cp_unit_ntn_location_area> location_areas;
 };
 
 struct cu_cp_unit_neighbor_cell_config_item {
@@ -229,10 +259,17 @@ struct cu_cp_unit_security_config {
 };
 
 /// Converts a ciphering algorithm preference list to its "nea0,nea1,..." string representation.
+///
+/// The parser pads any slots beyond the configured ones by repeating the highest-priority configured
+/// algorithm (see configure_cli11_security_args), rather than leaving them unconfigured, so a slot that
+/// repeats an earlier entry marks the end of the actually configured list and is not written back.
 inline std::string to_string(const security::preferred_ciphering_algorithms& algos)
 {
   std::string out;
   for (unsigned i = 0; i != algos.size(); ++i) {
+    if (std::find(algos.begin(), algos.begin() + i, algos[i]) != algos.begin() + i) {
+      break;
+    }
     out += fmt::format("{}nea{}", i == 0 ? "" : ",", security::to_number(algos[i]));
   }
   return out;
@@ -240,12 +277,18 @@ inline std::string to_string(const security::preferred_ciphering_algorithms& alg
 
 /// Converts an integrity algorithm preference list to its "nia1,nia2,..." string representation.
 ///
-/// NIA0 is implicit/mandatory and is used by the parser to pad any unspecified trailing slots, so it is never
-/// written back explicitly: the string stops at the first NIA0 slot, wherever it occurs.
+/// NIA0 cannot be explicitly selected, so a NIA0 slot is always an unconfigured/default one and stops the
+/// string. In addition, the parser pads any slots beyond the configured ones by repeating the
+/// highest-priority configured algorithm (see configure_cli11_security_args) rather than leaving them
+/// unconfigured, so a slot that repeats an earlier entry also marks the end of the actually configured list.
 inline std::string to_string(const security::preferred_integrity_algorithms& algos)
 {
   std::string out;
-  for (unsigned i = 0; i != algos.size() && algos[i] != security::integrity_algorithm::nia0; ++i) {
+  for (unsigned i = 0; i != algos.size(); ++i) {
+    if (algos[i] == security::integrity_algorithm::nia0 ||
+        std::find(algos.begin(), algos.begin() + i, algos[i]) != algos.begin() + i) {
+      break;
+    }
     out += fmt::format("{}nia{}", i == 0 ? "" : ",", security::to_number(algos[i]));
   }
   return out;
@@ -292,6 +335,7 @@ struct cu_cp_unit_xnap_gateway_config {
   std::vector<std::string>                 bind_addrs = {"127.0.30.1"};
   std::vector<cu_cp_unit_xnap_peer_config> connections;
   sctp_appconfig                           sctp;
+  dtls_appconfig                           dtls;
 };
 
 struct cu_cp_unit_xnap_config {
@@ -509,6 +553,8 @@ struct cu_cp_unit_config {
   cu_cp_unit_xnap_config xnap_config;
   /// Mobility configuration.
   cu_cp_unit_mobility_config mobility_config;
+  /// Coarse UE location to TAC mappings, one entry per NTN cell.
+  std::vector<cu_cp_unit_ntn_location_mapping_item> ntn_location_mapping;
   /// RRC configuration.
   cu_cp_unit_rrc_config rrc_config;
   /// Security configuration.

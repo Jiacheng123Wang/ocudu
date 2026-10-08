@@ -73,6 +73,8 @@ public:
   /// reader's addressable storage, which the grid is the one to know.
   void set_device_storage(span<cbf16_t> storage_) { storage = storage_; }
 
+  span<const cbf16_t> get_buffer() const override { return data.get_data(); }
+
 private:
   const storage_type&                  data;
   const resource_grid_allocation_info& alloc_mask;

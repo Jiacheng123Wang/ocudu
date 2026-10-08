@@ -244,7 +244,8 @@ int main(int argc, char** argv)
   if (du_cfg.hal_config) {
     // Prepend the application name in argv[0] as it is expected by EAL.
     eal = dpdk::create_dpdk_eal(std::string(argv[0]) + " " + du_cfg.hal_config->eal_args,
-                                ocudulog::fetch_basic_logger("EAL", false));
+                                ocudulog::fetch_basic_logger("EAL", false),
+                                du_cfg.hal_config->enable_pdump_init);
   }
 #endif
 
@@ -314,15 +315,22 @@ int main(int argc, char** argv)
                             workers.get_trace_executor());
   }
 
+  // The F1-C TNL connection belongs to the application, so the DU-high is told from here whether its setup is to be
+  // retried.
+  o_du_app_unit->get_o_du_high_unit_config().du_high_cfg.config.retry_f1c_connection = du_cfg.f1ap_cfg.retry_connection;
+
   // Instantiate F1-C client gateway.
   // In test mode, bypass the SCTP connection and use a stub CU-CP that auto-responds to F1AP procedures.
   std::unique_ptr<odu::f1c_connection_client> f1c_gw;
   if (o_du_app_unit->get_o_du_high_unit_config().du_high_cfg.config.is_testmode_enabled()) {
     f1c_gw = make_test_mode_f1c_connection_client();
   } else {
+    // TODO get DTLS config from CLI11.
     f1c_gw = create_f1c_client_gateway(du_cfg.f1ap_cfg.cu_cp_addresses,
                                        du_cfg.f1ap_cfg.bind_addresses,
                                        du_cfg.f1ap_cfg.sctp,
+                                       du_cfg.f1ap_cfg.dtls,
+                                       du_cfg.f1ap_cfg.retry_connection,
                                        *epoll_broker,
                                        workers.get_du_high_executor_mapper().f1c_rx_executor(),
                                        *du_pcaps.f1ap);

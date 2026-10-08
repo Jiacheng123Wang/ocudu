@@ -5,6 +5,7 @@
 #include "cu_cp_unit_config_cli11_schema.h"
 #include "apps/helpers/logger/logger_appconfig_cli11_utils.h"
 #include "apps/helpers/metrics/metrics_config_cli11_schema.h"
+#include "apps/helpers/network/dtls_cli11_schema.h"
 #include "apps/helpers/network/sctp_cli11_schema.h"
 #include "apps/helpers/ntn/ntn_config_cli11_schema.h"
 #include "cu_cp_unit_config.h"
@@ -15,6 +16,7 @@
 #include <algorithm>
 #include <istream>
 #include <map>
+#include <set>
 
 using namespace ocudu;
 
@@ -109,6 +111,13 @@ static void configure_cli11_supported_ta_args(CLI::App& app, cu_cp_unit_supporte
                                                config.plmn_list,
                                                configure_cli11_plmn_item_args,
                                                "Sets the list of PLMN items for this tracking area");
+
+  add_option(app,
+             "--satellite_rat",
+             config.satellite_rat,
+             "Satellite RAT type signalled to the AMF for an NTN tracking area (TS 23.501, Section 5.4.10). Leave "
+             "unset for a terrestrial tracking area")
+      ->enum_values({"nr_leo", "nr_meo", "nr_geo", "nr_othersat"});
 }
 
 /// Configures the CLI11 AMF item arguments.
@@ -198,6 +207,8 @@ static void configure_cli11_xnap_gateway_args(CLI::App& app, cu_cp_unit_xnap_gat
   // SCTP socket parameters specific to this gateway, nested under `sctp:`.
   CLI::App* sctp_subcmd = add_subcommand(app, "sctp", "SCTP socket options");
   configure_cli11_sctp_socket_args(*sctp_subcmd, config.sctp);
+  CLI::App* dtls_subcmd = add_subcommand(app, "dtls", "DTLS options");
+  configure_cli11_dtls_peer_args(*dtls_subcmd, config.dtls);
 
   add_option_object_list<cu_cp_unit_xnap_peer_config>(
       app,
@@ -252,6 +263,11 @@ static void configure_cli11_report_args(CLI::App& app, cu_cp_unit_report_config&
       ->enum_values({"a1", "a2", "a3", "a4", "a5", "a6", "d1", "t1", "d2"});
   add_option(app, "--report_interval_ms", report_params.report_interval_ms, "Report interval in ms")
       ->enum_values({120, 240, 480, 640, 1024, 2048, 5120, 10240, 20480, 40960, 60000, 360000, 720000, 1800000});
+  add_option(app,
+             "--coarse_location_request",
+             report_params.coarse_location_request,
+             "Ask an NTN UE to include its coarse location, if available, in every report of this configuration")
+      ->capture_default_str();
   add_option(app,
              "--periodic_ho_rsrp_offset_db",
              report_params.periodic_ho_rsrp_offset,
@@ -426,6 +442,34 @@ static void configure_cli11_cells_args(CLI::App& app, cu_cp_unit_cell_config_ite
       app, "--ncells", config.ncells, configure_cli11_ncell_args, "Sets the list of neighbor cells known to the CU-CP");
 }
 
+/// Configures the CLI11 NTN location area arguments.
+static void configure_cli11_ntn_location_area_args(CLI::App& app, cu_cp_unit_ntn_location_area& config)
+{
+  add_option(app, "--tac", config.tac, "TAC to report for a UE inside this area. Unset to derive no TAC")
+      ->range(0U, 0xffffffU);
+  add_option(app,
+             "--mapped_nr_cell_id",
+             config.mapped_nr_cell_id,
+             "Mapped Cell ID reported for a UE inside this area, instead of the cell id of the serving cell")
+      ->range(static_cast<uint64_t>(0U), nr_cell_identity::max().value());
+  add_option(app, "--lat_min", config.lat_min, "Southern edge of the area, in degrees")->range(-90.0, 90.0);
+  add_option(app, "--lat_max", config.lat_max, "Northern edge of the area, in degrees")->range(-90.0, 90.0);
+  add_option(app, "--lon_min", config.lon_min, "Western edge of the area, in degrees")->range(-180.0, 180.0);
+  add_option(app, "--lon_max", config.lon_max, "Eastern edge of the area, in degrees")->range(-180.0, 180.0);
+}
+
+/// Configures the CLI11 NTN location mapping arguments.
+static void configure_cli11_ntn_location_mapping_args(CLI::App& app, cu_cp_unit_ntn_location_mapping_item& config)
+{
+  add_option(app, "--nr_cell_id", config.nr_cell_id, "Cell the mapping applies to")
+      ->range(static_cast<uint64_t>(0U), nr_cell_identity::max().value());
+  add_option_object_list<cu_cp_unit_ntn_location_area>(app,
+                                                       "--location_areas",
+                                                       config.location_areas,
+                                                       configure_cli11_ntn_location_area_args,
+                                                       "Sets the areas a coarse UE location is mapped to");
+}
+
 /// Configures the CLI11 mobility arguments.
 static void configure_cli11_mobility_args(CLI::App& app, cu_cp_unit_mobility_config& config)
 {
@@ -540,9 +584,10 @@ static void configure_cli11_security_args(CLI::App& app, cu_cp_unit_security_con
       app,
       "--nea_pref_list",
       [&config](const std::string& value) {
-        config.nea_preference_list = {};
-        unsigned idx               = 0;
-        for (const std::string& algo : split_algo_pref_list(value)) {
+        config.nea_preference_list      = {};
+        std::vector<std::string> tokens = split_algo_pref_list(value);
+        unsigned                 idx    = 0;
+        for (const std::string& algo : tokens) {
           if (algo == "nea0") {
             config.nea_preference_list[idx] = security::ciphering_algorithm::nea0;
           } else if (algo == "nea1") {
@@ -554,19 +599,35 @@ static void configure_cli11_security_args(CLI::App& app, cu_cp_unit_security_con
           }
           ++idx;
         }
+        // The ->check() validator below guarantees tokens is non-empty and has at most nof_pref_algos entries. Pad
+        // any remaining slots by repeating the lowest-priority configured algorithm, instead of leaving them
+        // default/zero-initialized. Zero-initialized slots would evaluate to NEA0 (ciphering_algorithm::nea0 == 0),
+        // which would silently and unintentionally re-introduce null ciphering as a fallback even for deployments
+        // whose nea_pref_list deliberately omits "nea0" to disable it.
+        for (; idx < security::nof_pref_algos; ++idx) {
+          config.nea_preference_list[idx] = config.nea_preference_list[0];
+        }
       },
       "Ordered preference list for the selection of encryption algorithm (NEA) (default: NEA0, NEA2, NEA1)")
       ->default_str(to_string(config.nea_preference_list))
       ->transform(normalize_algo_pref_list)
       ->check([](const std::string& value) -> std::string {
         std::vector<std::string> tokens = split_algo_pref_list(value);
+        if (tokens.empty()) {
+          return "No ciphering algorithm specified; at least one of \"nea0\", \"nea1\", \"nea2\" or \"nea3\" is "
+                 "required.";
+        }
         if (tokens.size() > 4) {
           return fmt::format("Too many ciphering algorithms specified ({}); at most 4 are allowed.", tokens.size());
         }
+        std::set<std::string> unique_algos;
         for (const std::string& algo : tokens) {
           if (algo != "nea0" && algo != "nea1" && algo != "nea2" && algo != "nea3") {
             return fmt::format(
                 R"(Invalid ciphering algorithm. Valid values are "nea0", "nea1", "nea2" and "nea3". algo={})", algo);
+          }
+          if (!unique_algos.insert(algo).second) {
+            return fmt::format("Duplicate ciphering algorithm {} specified.", algo);
           }
         }
         return {};
@@ -576,9 +637,10 @@ static void configure_cli11_security_args(CLI::App& app, cu_cp_unit_security_con
       app,
       "--nia_pref_list",
       [&config](const std::string& value) {
-        config.nia_preference_list = {};
-        unsigned idx               = 0;
-        for (const std::string& algo : split_algo_pref_list(value)) {
+        config.nia_preference_list      = {};
+        std::vector<std::string> tokens = split_algo_pref_list(value);
+        unsigned                 idx    = 0;
+        for (const std::string& algo : tokens) {
           if (algo == "nia1") {
             config.nia_preference_list[idx] = security::integrity_algorithm::nia1;
           } else if (algo == "nia2") {
@@ -588,16 +650,26 @@ static void configure_cli11_security_args(CLI::App& app, cu_cp_unit_security_con
           }
           ++idx;
         }
+        // The ->check() validator below guarantees tokens is non-empty and has at most 3 entries (NIA0 cannot be
+        // selected). Pad any remaining slots by repeating the lowest-priority configured algorithm, instead of
+        // leaving them default/zero-initialized (which would evaluate to NIA0).
+        for (; idx < security::nof_pref_algos; ++idx) {
+          config.nia_preference_list[idx] = config.nia_preference_list[0];
+        }
       },
       "Ordered preference list for the selection of encryption algorithm (NIA) (default: NIA2, NIA1)")
       ->default_str(to_string(config.nia_preference_list))
       ->transform(normalize_algo_pref_list)
       ->check([](const std::string& value) -> std::string {
         std::vector<std::string> tokens = split_algo_pref_list(value);
+        if (tokens.empty()) {
+          return "No integrity algorithm specified; at least one of \"nia1\", \"nia2\" or \"nia3\" is required.";
+        }
         if (tokens.size() > 3) {
           return fmt::format("Too many integrity algorithms specified ({}); at most 3 are allowed (NIA0 is implicit).",
                              tokens.size());
         }
+        std::set<std::string> unique_algos;
         for (const std::string& algo : tokens) {
           if (algo == "nia0") {
             return "NIA0 cannot be selected in the algorithm preferences.";
@@ -605,6 +677,9 @@ static void configure_cli11_security_args(CLI::App& app, cu_cp_unit_security_con
           if (algo != "nia1" && algo != "nia2" && algo != "nia3") {
             return fmt::format(R"(Invalid integrity algorithm. Valid values are "nia1", "nia2" and "nia3". algo={})",
                                algo);
+          }
+          if (!unique_algos.insert(algo).second) {
+            return fmt::format("Duplicate integrity algorithm {} specified.", algo);
           }
         }
         return {};
@@ -780,6 +855,13 @@ static void configure_cli11_cu_cp_args(CLI::App& app, cu_cp_unit_config& cu_cp_p
 
   CLI::App* mobility_subcmd = add_subcommand(app, "mobility", "Mobility configuration");
   configure_cli11_mobility_args(*mobility_subcmd, cu_cp_params.mobility_config);
+
+  // Coarse UE location to TAC mapping, TS 38.413 UE Location Derived TAC in NR NTN.
+  add_option_object_list<cu_cp_unit_ntn_location_mapping_item>(app,
+                                                               "--ntn_location_mapping",
+                                                               cu_cp_params.ntn_location_mapping,
+                                                               configure_cli11_ntn_location_mapping_args,
+                                                               "Sets the coarse UE location to TAC mapping per cell");
 
   CLI::App* rrc_subcmd = add_subcommand(app, "rrc", "RRC specific configuration");
   configure_cli11_rrc_args(*rrc_subcmd, cu_cp_params.rrc_config);

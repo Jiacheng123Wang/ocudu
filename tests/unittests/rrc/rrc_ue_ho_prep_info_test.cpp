@@ -4,6 +4,7 @@
 
 #include "rrc_ue_test_helpers.h"
 #include "rrc_ue_test_messages.h"
+#include "tests/ocudu_test_requirements.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/rrc_nr.h"
 #include "ocudu/support/async/async_test_utils.h"
@@ -96,6 +97,8 @@ protected:
 /// procedure. TS 38.331 Section 11.2.3 requires all fields reflecting the current AS configuration to be included.
 TEST_F(rrc_ue_ho_prep_info_test, when_ue_has_multiple_pdu_sessions_then_as_config_contains_all_drbs)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-3", "MVP-FUNC-MOB-4");
+
   // Two PDU sessions, set up at different points in time, each with its own DRB.
   add_drb_to_up_context(pdu_session_id_t::min, drb_id_t::drb1, {qos_flow_id_t::min});
   add_drb_to_up_context(uint_to_pdu_session_id(2), drb_id_t::drb2, {uint_to_qos_flow_id(2)});
@@ -131,6 +134,8 @@ TEST_F(rrc_ue_ho_prep_info_test, when_ue_has_multiple_pdu_sessions_then_as_confi
 /// A UE without any established DRB has no radio bearer configuration to report, so AS-Config is omitted.
 TEST_F(rrc_ue_ho_prep_info_test, when_ue_has_no_drbs_then_as_config_is_absent)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-3", "MVP-FUNC-MOB-4");
+
   byte_buffer packed_ho_prep = get_rrc_ue_control_message_handler()->get_packed_handover_preparation_message();
   ASSERT_FALSE(packed_ho_prep.empty());
 

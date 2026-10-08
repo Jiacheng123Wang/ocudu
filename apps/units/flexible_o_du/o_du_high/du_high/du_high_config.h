@@ -8,6 +8,7 @@
 #include "apps/helpers/ntn/ntn_satellite_config.h"
 #include "ntn/du_high_unit_cell_ntn_config.h"
 #include "ocudu/ocudulog/logger.h"
+#include "ocudu/ran/antenna_topology.h"
 #include "ocudu/ran/band_helper.h"
 #include "ocudu/ran/bs_channel_bandwidth.h"
 #include "ocudu/ran/csi_report/csi_report_configuration.h"
@@ -135,13 +136,34 @@ struct du_high_unit_drx_config {
   unsigned long_cycle = 0;
 };
 
+/// \brief Beam that the reference signals of a cell can be transmitted on.
+///
+/// The beam is a position within the beam grid that the antenna topology of the cell defines, as per TS 38.214
+/// Section 5.2.2.2.
+///
+/// \remark An accepted beam is not a guarantee that the RU is able to form it.
+struct du_high_unit_ref_beam_config {
+  /// \brief Identifier that the reference signals of the cell use to select this beam.
+  /// \remark Not to be confused with \c beam_identifier, the beam that the RAN and PHY layers transmit on.
+  unsigned ref_beam_id = 0;
+  /// Index of the antenna panel that forms the beam.
+  unsigned i_panel = 0;
+  /// Beam polarization index.
+  unsigned i_pol = 0;
+  /// First dimension beam index, parameter \f$l\f$ of TS 38.214 Section 5.2.2.2.
+  unsigned i_beam_dim1 = 0;
+  /// Second dimension beam index, parameter \f$m\f$ of TS 38.214 Section 5.2.2.2.
+  unsigned i_beam_dim2 = 0;
+};
+
 /// Beam assigned to one transmitted SSB candidate.
 struct du_high_unit_ssb_beam_config {
   /// Index of the SSB candidate within the SSB burst, as per TS 38.213 Section 4.1.
   unsigned ssb_index = 0;
-  /// Beam that carries the SSB candidate.
-  /// \remark An accepted beam ID is not a guarantee that the RU is able to form that beam.
-  unsigned beam_id = 0;
+  /// \brief Cell reference beam for this SSB.
+  ///
+  /// The DU assigns one automatically if not present, sweeping the beam grid over the transmitted SSB candidates.
+  std::optional<unsigned> ref_beam_id;
 };
 
 struct du_high_unit_ssb_config {
@@ -286,8 +308,13 @@ struct du_high_unit_pusch_config {
   pusch_mcs_table mcs_table = pusch_mcs_table::qam256;
   /// \brief Maximum number of PUSCH repetitions offered in the dedicated Rel-16 TDRA list of supporting UEs. Value 1
   /// disables dynamic PUSCH repetitions. Values: {1, 2, 3, 4, 7, 8, 12, 16}.
-  /// \note Not currently exposed via CLI11/YAML; PUSCH repetitions are not yet handled by the scheduler.
   unsigned max_nof_rep = 1;
+  /// \brief SINR threshold, in dB, below which the scheduler uses PUSCH repetitions for supporting UEs. The
+  /// effective SINR is compared against this value. If not set, SINR-triggered repetitions are disabled.
+  std::optional<float> sinr_rep_threshold;
+  /// \brief If true, PUSCH repetitions are used for all supporting UEs regardless of the estimated SINR. Intended
+  /// for testing in setups without RF impairments, where the SINR never drops below \c sinr_rep_threshold.
+  bool force_rep = false;
   /// \c msg3-DeltaPreamble, TS 38.331. Values: {-1,...,6}.
   int msg3_delta_preamble = 6;
   /// \c p0-NominalWithGrant, TS 38.331. Value in dBm. Only even values allowed within {-202,...,24}.
@@ -433,8 +460,8 @@ struct du_high_unit_pucch_config {
   unsigned nof_cell_csi_resources = 8;
 
   /// \brief \c SR period in milliseconds.
-  /// Among all values given in \c periodicityAndOffset, part of \c \SchedulingRequestResourceConfig, TS 38.331,
-  /// these are the only ones supported. Values: {1, 2, 2.5, 4, 5, 8, 10, 16, 20, 40, 80, 160, 320}.
+  /// Among all values given in \c periodicityAndOffset, part of \c SchedulingRequestResourceConfig, TS 38.331,
+  /// these are the only ones supported. Values: {1, 2, 2.5, 4, 5, 8, 10, 16, 20, 40, 80}.
   float sr_period_msec = 20.0F;
 
   /// PUCCH F0 resource parameter.
@@ -1089,6 +1116,10 @@ struct du_high_unit_csi_config {
   int pwr_ctrl_offset = 0;
   /// \brief Type of CSI reporting configuration to use.
   csi_report_type report_type = csi_report_type::periodic;
+  /// \brief Enable Type-II CSI reporting in the cell for UEs that support Type-II codebook.
+  ///
+  /// Note the use of precoding Type-II codebooks limits the maximum number of layer per UE to 2.
+  bool type2_codebook_enabled = false;
 };
 
 /// \brief Configuration of a single DL-PRS resource within a PRS Resource Set.
@@ -1165,7 +1196,8 @@ struct mac_phr_unit_config {
 /// MAC Scheduler Request configuration.
 struct mac_sr_unit_config {
   /// \brief \c sr-ProhibitTimer, or timer for SR transmission on PUCCH.
-  /// Values are in ms. Values: {1, 2, 4, 8, 16, 32, 64, 128}. When the field is absent, the UE applies the value 0.
+  /// Values are in ms. Values: {1, 2, 4, 8, 16, 32, 64, 128}, and {192, 256, 320, 384, 448, 512, 576, 640, 1082} for
+  /// NTN (\c sr-ProhibitTimer-v1700). When the field is absent, the UE applies the value 0.
   std::optional<unsigned> sr_prohibit_timer;
   /// \brief \c sr-TransMax possible values, or maximum number of SR transmissions.
   /// Values: {4, 8, 16, 32, 64}.
@@ -1326,6 +1358,11 @@ struct du_high_unit_base_cell_config {
   bs_channel_bandwidth channel_bw_mhz = bs_channel_bandwidth::MHz20;
   /// Number of antennas in downlink.
   unsigned nof_antennas_dl = 1;
+  /// \brief Topology of the downlink antennas.
+  ///
+  /// The number of downlink antennas gives the topology. It is derived once, so that all stack components of a
+  /// cell/sector use the same topology.
+  antenna_topology tx_ant_topology = antenna_topology::one_port;
   /// Number of antennas in uplink.
   unsigned nof_antennas_ul = 1;
   /// Human readable full PLMN (without possible filler digit).
@@ -1352,6 +1389,10 @@ struct du_high_unit_base_cell_config {
   int q_qual_min = -20;
   /// SSB parameters.
   du_high_unit_ssb_config ssb_cfg;
+  /// \brief List of beams for transmitting the reference signals of the cell.
+  ///
+  /// Leave empty for letting the DU select the beams automatically.
+  std::vector<du_high_unit_ref_beam_config> ref_beams;
   /// SIB parameters.
   du_high_unit_sib_config sib_cfg;
   /// UL common configuration parameters.
@@ -1675,6 +1716,11 @@ struct du_high_unit_config {
   std::vector<ntn_satellite_config> ntn_satellites;
   /// RLC configuration.
   du_high_unit_rlc_config rlc_cfg;
+  /// \brief Whether a failed F1-C TNL connection is retried indefinitely on startup.
+  ///
+  /// \note It is not part of the DU-high CLI schema. Only the applications that connect to a remote CU-CP own an F1-C
+  /// TNL connection, so the option lives in their own F1AP section and is copied here before the unit is created.
+  bool retry_f1c_connection = false;
 
   /// Returns true if testmode is enabled, false otherwise.
   bool is_testmode_enabled() const { return test_mode_cfg.test_ue.rnti != rnti_t::INVALID_RNTI; }

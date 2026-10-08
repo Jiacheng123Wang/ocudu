@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/utils/test_rng.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/adt/span.h"
@@ -141,6 +142,58 @@ TEST(test_arfcn_freq_conversion, arfcn_to_freq_corner_cases)
 
   // Max ARFCN is 3279165 at almost 10 GHz.
   ASSERT_DOUBLE_EQ(99.99996e9, nr_arfcn_to_freq(max_valid_nr_arfcn));
+}
+
+TEST(test_ntn_bands, rel17_satellite_bands_are_ntn_bands)
+{
+  OCUDU_TEST_REQUIREMENTS("DU-NTN-DEP-3");
+
+  // TS 38.101-5: n255 (L-band) and n256 (S-band) are the Rel-17 satellite bands.
+  for (nr_band b : {nr_band::n255, nr_band::n256}) {
+    ASSERT_TRUE(is_ntn_band(b)) << "n" << static_cast<unsigned>(b) << " must be an NTN band";
+  }
+  for (nr_band b : {nr_band::n1, nr_band::n3, nr_band::n65, nr_band::n78}) {
+    ASSERT_FALSE(is_ntn_band(b)) << "n" << static_cast<unsigned>(b) << " must not be an NTN band";
+  }
+}
+
+TEST(test_ntn_bands, every_ntn_band_is_a_licensed_paired_fr1_band)
+{
+  OCUDU_TEST_REQUIREMENTS("DU-NTN-DEP-3");
+
+  unsigned nof_ntn_bands = 0;
+  for (nr_band b : all_nr_bands_fr1) {
+    if (not is_ntn_band(b)) {
+      continue;
+    }
+    ++nof_ntn_bands;
+    const unsigned n = static_cast<unsigned>(b);
+    ASSERT_TRUE(is_band_known(b)) << "n" << n;
+    ASSERT_EQ(duplex_mode::FDD, get_duplex_mode(b)) << "n" << n;
+    ASSERT_TRUE(is_paired_spectrum(b)) << "n" << n;
+    ASSERT_EQ(frequency_range::FR1, get_freq_range(b)) << "n" << n;
+    ASSERT_FALSE(is_unlicensed_band(b)) << "n" << n;
+    ASSERT_FALSE(is_band_for_shared_spectrum(b)) << "n" << n;
+    ASSERT_NE(ssb_pattern_case::invalid, get_ssb_pattern(b, subcarrier_spacing::kHz15)) << "n" << n;
+    ASSERT_NE(min_channel_bandwidth::invalid, get_min_channel_bw(b, subcarrier_spacing::kHz15)) << "n" << n;
+  }
+  ASSERT_GE(nof_ntn_bands, 2U);
+}
+
+TEST(test_ntn_bands, n256_carrier_of_the_ntn_e2e_tests_is_valid_and_paired)
+{
+  OCUDU_TEST_REQUIREMENTS("DU-NTN-DEP-3");
+
+  // Carrier used by the NTN e2e tests: DL 2185 MHz and UL 1995 MHz in n256.
+  const arfcn_t dl_arfcn = freq_to_nr_arfcn(2185e6);
+  const arfcn_t ul_arfcn = freq_to_nr_arfcn(1995e6);
+
+  ASSERT_TRUE(is_dl_arfcn_valid_given_band(nr_band::n256, dl_arfcn, subcarrier_spacing::kHz15).has_value());
+  ASSERT_TRUE(is_ul_arfcn_valid_given_band(nr_band::n256, ul_arfcn).has_value());
+  ASSERT_EQ(ul_arfcn, get_ul_arfcn_from_dl_arfcn(dl_arfcn, nr_band::n256));
+
+  // The DL of n256 overlaps the terrestrial n65, so the NTN band cannot be derived from the ARFCN and is always given.
+  ASSERT_NE(nr_band::n256, get_band_from_dl_arfcn(dl_arfcn));
 }
 
 TEST(test_band_duplexing, all_bands)
@@ -447,6 +500,8 @@ TEST(test_get_f_req_from_f_req_point_a, scs_kHz60)
 
 TEST(test_get_n_rbs_from_bw, scs_15kHz)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BW-16-1");
+
   ASSERT_EQ(25, get_n_rbs_from_bw(bs_channel_bandwidth::MHz5, subcarrier_spacing::kHz15, frequency_range::FR1));
   ASSERT_EQ(52, get_n_rbs_from_bw(bs_channel_bandwidth::MHz10, subcarrier_spacing::kHz15, frequency_range::FR1));
   ASSERT_EQ(79, get_n_rbs_from_bw(bs_channel_bandwidth::MHz15, subcarrier_spacing::kHz15, frequency_range::FR1));
@@ -462,6 +517,8 @@ TEST(test_get_n_rbs_from_bw, scs_15kHz)
 
 TEST(test_get_n_rbs_from_bw, scs_30kHz)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BW-16-1");
+
   ASSERT_EQ(11, get_n_rbs_from_bw(bs_channel_bandwidth::MHz5, subcarrier_spacing::kHz30, frequency_range::FR1));
   ASSERT_EQ(24, get_n_rbs_from_bw(bs_channel_bandwidth::MHz10, subcarrier_spacing::kHz30, frequency_range::FR1));
   ASSERT_EQ(38, get_n_rbs_from_bw(bs_channel_bandwidth::MHz15, subcarrier_spacing::kHz30, frequency_range::FR1));
@@ -481,6 +538,8 @@ TEST(test_get_n_rbs_from_bw, scs_30kHz)
 
 TEST(test_get_n_rbs_from_bw, scs_60kHz)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BW-16-1");
+
   ASSERT_EQ(0, get_n_rbs_from_bw(bs_channel_bandwidth::MHz5, subcarrier_spacing::kHz60, frequency_range::FR1));
   ASSERT_EQ(11, get_n_rbs_from_bw(bs_channel_bandwidth::MHz10, subcarrier_spacing::kHz60, frequency_range::FR1));
   ASSERT_EQ(18, get_n_rbs_from_bw(bs_channel_bandwidth::MHz15, subcarrier_spacing::kHz60, frequency_range::FR1));
@@ -500,6 +559,8 @@ TEST(test_get_n_rbs_from_bw, scs_60kHz)
 
 TEST(test_get_n_rbs_from_bw, scs_120kHz_fr2)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BW-16-1");
+
   ASSERT_EQ(66, get_n_rbs_from_bw(bs_channel_bandwidth::MHz50, subcarrier_spacing::kHz60, frequency_range::FR2));
   ASSERT_EQ(132, get_n_rbs_from_bw(bs_channel_bandwidth::MHz100, subcarrier_spacing::kHz60, frequency_range::FR2));
   ASSERT_EQ(264, get_n_rbs_from_bw(bs_channel_bandwidth::MHz200, subcarrier_spacing::kHz60, frequency_range::FR2));
@@ -507,6 +568,8 @@ TEST(test_get_n_rbs_from_bw, scs_120kHz_fr2)
 
 TEST(test_get_n_rbs_from_bw, scs_120kHz)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BW-16-1");
+
   ASSERT_EQ(32, get_n_rbs_from_bw(bs_channel_bandwidth::MHz50, subcarrier_spacing::kHz120, frequency_range::FR2));
   ASSERT_EQ(66, get_n_rbs_from_bw(bs_channel_bandwidth::MHz100, subcarrier_spacing::kHz120, frequency_range::FR2));
   ASSERT_EQ(132, get_n_rbs_from_bw(bs_channel_bandwidth::MHz200, subcarrier_spacing::kHz120, frequency_range::FR2));
@@ -515,6 +578,8 @@ TEST(test_get_n_rbs_from_bw, scs_120kHz)
 
 TEST(test_get_n_rbs_from_bw, invalid_cases)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-BW-16-1");
+
   ASSERT_EQ(0, get_n_rbs_from_bw(bs_channel_bandwidth::MHz200, subcarrier_spacing::kHz60, frequency_range::FR1));
   ASSERT_EQ(0, get_n_rbs_from_bw(bs_channel_bandwidth::MHz400, subcarrier_spacing::kHz60, frequency_range::FR2));
   ASSERT_EQ(0, get_n_rbs_from_bw(bs_channel_bandwidth::MHz400, subcarrier_spacing::kHz15, frequency_range::FR2));

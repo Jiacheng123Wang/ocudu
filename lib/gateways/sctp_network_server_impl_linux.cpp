@@ -93,8 +93,17 @@ void sctp_network_server_impl::sctp_associaton_context::receive_dtls()
     return;
   }
 
-  expected<byte_buffer> plain = ssl->receive();
+  expected<byte_buffer, dtls_ssl_read_error> plain = ssl->receive();
   if (not plain.has_value()) {
+    dtls_ssl_read_error err = plain.error();
+    if (err == dtls_ssl_read_error::shutdown) {
+      parent.logger.debug("Got read error due to DTLS shutdown. Attempting plain read to handle notifications.");
+      receive_plain();
+    } else if (err == dtls_ssl_read_error::not_connected) {
+      parent.logger.debug("Got read error due to connection already terminated.");
+    } else {
+      parent.logger.error("Got read error in DTLS read");
+    }
     return;
   }
 

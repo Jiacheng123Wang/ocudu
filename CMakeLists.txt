@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
 # SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
-
 ########################################################################
 # Prevent in-tree builds
 ########################################################################
@@ -202,6 +201,7 @@ option(ENABLE_GPROF          "Enable gprof"                                 OFF)
 option(FORCE_DEBUG_INFO      "Add debug information to Release build"       OFF)
 option(ENABLE_OCUDU_TRACY   "Enable using the tracy profiler if available" OFF)
 option(ENABLE_SPLIT_DWARF    "Emit split DWARF (.dwo) objects to cut linker memory use" OFF)
+option(ENABLE_RELATIVE_PATHS "Remap source dir to . in debug info and __FILE__" OFF)
 if (BUILD_TESTING)
     if (${CMAKE_BUILD_TYPE} STREQUAL "Debug")
         option(TEST_GDB_PRINTERS  "Enable tests for GDB pretty printers"  OFF)
@@ -233,9 +233,10 @@ set(EXIT_TIMEOUT "AUTO" CACHE STRING "Timer to wait for a clean exit")
 
 if (ENABLE_WERROR)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
-    # Disable gcc's maybe uninitialized analysis as it raises false positives
+    # Add GCC-specific flags
     if (CMAKE_COMPILER_IS_GNUCXX)
         include(CheckCXXCompilerFlag)
+        # Disable GCC's maybe uninitialized analysis as it raises false positives
         check_cxx_compiler_flag("-Wstringop-overflow" HAS_STRINGOP_OVERFLOW)
         if (HAS_STRINGOP_OVERFLOW)
             set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=stringop-overflow")
@@ -244,6 +245,14 @@ if (ENABLE_WERROR)
             check_cxx_compiler_flag("-Warray-bounds" HAS_ARRAY_BOUNDS)
             if (HAS_ARRAY_BOUNDS)
                 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=array-bounds")
+            endif()
+        endif()
+        # Disable GCC's noisy reports on ABI changes on ARM such as
+        # "parameter passing for argument of type ... when C++17 is enabled changed to match C++14 in GCC 10.1".
+        if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
+            check_cxx_compiler_flag("-Wno-psabi" HAS_NO_PSABI)
+            if (HAS_NO_PSABI)
+                set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-psabi")
             endif()
         endif()
     endif()
@@ -385,6 +394,18 @@ if (ENABLE_SPLIT_DWARF)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -gsplit-dwarf")
 endif (ENABLE_SPLIT_DWARF)
 
+# Keep absolute source paths out of objects so ccache can share them across checkouts.
+if (ENABLE_RELATIVE_PATHS)
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-ffile-prefix-map=${PROJECT_SOURCE_DIR}=." HAVE_FILE_PREFIX_MAP)
+    if (HAVE_FILE_PREFIX_MAP)
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffile-prefix-map=${PROJECT_SOURCE_DIR}=.")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffile-prefix-map=${PROJECT_SOURCE_DIR}=.")
+    else ()
+        message(WARNING "ENABLE_RELATIVE_PATHS requested but -ffile-prefix-map is not supported by the compiler")
+    endif ()
+endif (ENABLE_RELATIVE_PATHS)
+
 if (ENABLE_GCOV)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fprofile-arcs -ftest-coverage")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-arcs -ftest-coverage")
@@ -433,12 +454,13 @@ include(copyright)
 include(GNUInstallDirs)
 
 sbom_generate(
-    OUTPUT       "${CMAKE_INSTALL_PREFIX}/share/ocudu.spdx"
-    PROJECT      "OCUDU 5G CU DU"
-    SUPPLIER     "OCUDU Project"
-    SUPPLIER_URL "https://ocudu.org"
-    DOWNLOAD_URL "https://gitlab.com/ocudu/ocudu.git"
-    LICENSE      "LicenseRef-OCUDU"
+    OUTPUT            "${CMAKE_INSTALL_PREFIX}/share/ocudu.spdx"
+    INSTALL_COMPONENT SBOM
+    PROJECT           "OCUDU 5G CU DU"
+    SUPPLIER          "OCUDU Project"
+    SUPPLIER_URL      "https://ocudu.org"
+    DOWNLOAD_URL      "https://gitlab.com/ocudu/ocudu.git"
+    LICENSE           "LicenseRef-OCUDU"
 )
 
 ########################################################################
@@ -619,9 +641,14 @@ if (BUILD_TESTING)
         _gtest_discover_tests(
             ${ARGV}
             DISCOVERY_MODE PRE_TEST
+            # Keep ctest names equal to the gtest names, so the recorded test requirements match.
+            NO_PRETTY_VALUES
             DISCOVERY_TIMEOUT ${GTEST_DISCOVERY_TIMEOUT_VALUE}
         )
     endfunction()
+
+    # Collection of the requirement tags that the tests record. Set before any test target exists.
+    include(gtest_requirements)
 else()
     message(STATUS "Skipping Tests. Set BUILD_TESTING to On to compile tests.")
 endif (BUILD_TESTING)
@@ -731,16 +758,6 @@ else (ENABLE_DPDK)
     unset(DPDK_FOUND CACHE)
 endif (ENABLE_DPDK)
 
-if(SCTP_FOUND)
-    sbom_add(
-        PACKAGE            "SCTP"
-        DOWNLOAD_LOCATION  "https://www.sctp.org/"
-        SUPPLIER           "SCTP project"
-        LICENSE            "BSD-3-Clause"
-        VERSION            ${PC_SCTP_VERSION}
-    )
-endif (SCTP_FOUND)
-
 # FlatBuffers, fetched at build time by the scheduler event tracer. Being fetched, it has no entry in
 # COPYRIGHTS.txt for parse_copyright_file() to pick up, so it is added to the SBOM here.
 if (ENABLE_SCHEDTRACE)
@@ -753,6 +770,20 @@ if (ENABLE_SCHEDTRACE)
         VERSION            ${FLATBUFFERS_VERSION}
     )
 endif (ENABLE_SCHEDTRACE)
+
+find_package(Eigen3 NO_MODULE)
+if (Eigen3_FOUND)
+    message("-- Found Eigen3")
+    sbom_add(
+        PACKAGE            "Eigen3"
+        DOWNLOAD_LOCATION  "https://libeigen.gitlab.io/"
+        SUPPLIER           "The Eigen Authors"
+        LICENSE            "MPL-2.0"
+        VERSION            ${Eigen3_VERSION}
+    )
+else (Eigen3_FOUND)
+    message("-- Could not find Eigen3")
+endif (Eigen3_FOUND)
 
 ########################################################################
 # Instruction Set Architecture setup
@@ -829,12 +860,19 @@ add_custom_target(all_ocudu_headers SOURCES ${ALL_HEADER_FILES})
 # Simple function to notify binary targets + Add target to SBOM
 ########################################################################
 
-function(notify_binary_target)
-    message(STATUS "Adding binary target: ${ARGV}")
-    sbom_add(
-        TARGET       ${ARGV}
-        LICENSE      "LicenseRef-OCUDU"
-    )
+function(notify_binary_target TARGET)
+    set(oneValueArgs FILENAME)
+    cmake_parse_arguments(NOTIFY_BINARY "" "${oneValueArgs}" "" ${ARGN})
+    if(NOTIFY_BINARY_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "Unknown arguments: ${NOTIFY_BINARY_UNPARSED_ARGUMENTS}")
+    endif()
+
+    message(STATUS "Adding binary target: ${TARGET}")
+    set(SBOM_ARGS TARGET ${TARGET} OPTIONAL LICENSE "LicenseRef-OCUDU")
+    if(NOT "${NOTIFY_BINARY_FILENAME}" STREQUAL "")
+        list(APPEND SBOM_ARGS FILENAME "${NOTIFY_BINARY_FILENAME}")
+    endif()
+    sbom_add(${SBOM_ARGS})
 endfunction()
 
 ########################################################################

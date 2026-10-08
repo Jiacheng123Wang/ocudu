@@ -4,7 +4,9 @@
 
 add_library(ocudu_radio STATIC
         plugin_radio_factory.cpp
-        radio_factory.cpp)
+        radio_factory.cpp
+        metrics_decorator/radio_metrics_decorator_factory.cpp
+        metrics_decorator/radio_metrics_decorator_impl.cpp)
 
 set(OCUDU_RADIO_DEFINITIONS "")
 set(OCUDU_RADIO_LIBRARIES "")

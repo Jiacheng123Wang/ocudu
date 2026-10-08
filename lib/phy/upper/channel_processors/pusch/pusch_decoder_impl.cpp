@@ -104,6 +104,8 @@ pusch_decoder_buffer& pusch_decoder_impl::new_data(span<uint8_t>                
   // Reset the Metal library total call duration accumulator: the codeblock tasks add to it when the decoder
   // reports a Metal GPU-side duration for the current transport block.
   metal_decode_elapsed_ns.store(0, std::memory_order_relaxed);
+  // Reset the number of iterations per codeblock.
+  ocuduvec::zero(cb_stats);
 
   // Unset the expected number of UL-SCH softbits.
   nof_ulsch_softbits.reset();

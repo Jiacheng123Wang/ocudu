@@ -176,6 +176,12 @@ public:
   ///
   /// \param[in] security_mode_present Indicates whether the UE is already in security mode or not (yet).
   virtual void on_new_as_security_context(bool security_mode_active) = 0;
+
+  /// \brief Notify that AS security is active on a UE the procedure brought back on a new RRC UE.
+  ///
+  /// Resume and re-establishment activate security without a Security Mode Command, so this is what tells the RRC UE
+  /// that anything gated on AS security may now run.
+  virtual void on_as_security_activated() = 0;
 };
 
 /// Interface to notify about NGAP messages.
@@ -304,6 +310,14 @@ public:
   /// \brief Initiate the UE capability transfer procedure.
   virtual async_task<bool> handle_rrc_ue_capability_transfer_request(const rrc_ue_capability_transfer_request& msg) = 0;
 
+  /// \brief Fills what this gNB derived from the coarse position the UE reported, TS 38.300 sec. 16.14.5.
+  virtual void fill_ue_derived_location(cu_cp_user_location_info_nr& user_location_info) const = 0;
+
+  /// \brief Asks the UE for its coarse location, if the serving cell is one whose location is worth asking for.
+  ///
+  /// TS 38.331 sec. 5.7.10.2 allows the request from AS security onwards, leaving the caller to pick the point.
+  virtual void request_coarse_ue_location() = 0;
+
   /// \brief Get the RRC UE release context.
   /// \returns The release context of the UE. If SRB1 is not created yet, a RrcReject message is contained in the
   /// release context, see section 5.3.15 in TS 38.331. Otherwise, a RrcRelease message is contained in the release
@@ -341,6 +355,9 @@ public:
   /// Call this after the UE acknowledges an RRCReconfiguration that carried a measConfig (e.g. the
   /// outer CHO RRCReconfiguration), so that context.meas_cfg stays in sync with VarMeasConfig.
   virtual void update_meas_config(const rrc_meas_cfg& cfg) = 0;
+
+  /// \brief Get the measurement config currently stored for the UE, if any.
+  virtual std::optional<rrc_meas_cfg> get_meas_config() = 0;
 
   /// \brief Get the serving cell measurement object for the current serving cell of the UE.
   virtual std::optional<uint8_t> get_serving_cell_mo() = 0;
@@ -549,6 +566,10 @@ public:
   /// \brief Notify the CU-CP to setup an UP context.
   /// \param[in] ctxt The UP context to setup.
   virtual void on_up_context_setup_required(const up_context& ctxt) = 0;
+
+  /// \brief Notifies the CU-CP that the location the UE reports has changed, so that a Location Report is sent when
+  /// the AMF configured location reporting.
+  virtual void on_ue_location_update() = 0;
 
   /// \brief Get the UP context of the UE.
   /// \returns The UP context of the UE.

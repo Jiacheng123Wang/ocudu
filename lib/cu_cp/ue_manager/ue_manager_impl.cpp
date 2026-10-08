@@ -70,11 +70,12 @@ bool ue_manager::ue_admission_limit_reached() const
   return ues.size() > max_nof_ues;
 }
 
-bool ue_manager::update_ue_context(cu_cp_ue_index_t ue_index,
-                                   gnb_du_id_t      du_id,
-                                   pci_t            pci,
-                                   rnti_t           rnti,
-                                   du_cell_index_t  pcell_index)
+bool ue_manager::update_ue_context(cu_cp_ue_index_t                   ue_index,
+                                   gnb_du_id_t                        du_id,
+                                   pci_t                              pci,
+                                   rnti_t                             rnti,
+                                   du_cell_index_t                    pcell_index,
+                                   std::optional<nr_cell_global_id_t> cgi)
 {
   if (ue_index == cu_cp_ue_index_t::invalid) {
     logger.warning("Can't update UE with invalid UE index");
@@ -113,7 +114,7 @@ bool ue_manager::update_ue_context(cu_cp_ue_index_t ue_index,
   }
 
   auto& ue = ues.at(ue_index);
-  ue.update_du_ue(du_id, pci, rnti, pcell_index);
+  ue.update_du_ue(du_id, pci, rnti, pcell_index, cgi);
 
   // Add PCI and RNTI to lookup.
   pci_rnti_to_ue_index.emplace(std::make_tuple(pci, rnti), ue_index);

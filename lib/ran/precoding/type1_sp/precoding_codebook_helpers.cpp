@@ -5,6 +5,7 @@
 #include "ocudu/adt/to_array.h"
 #include "ocudu/ran/precoding/precoding_codebook_configuration.h"
 #include "ocudu/ran/precoding/precoding_codebook_type1_helpers.h"
+#include "ocudu/support/error_handling.h"
 #include "ocudu/support/math/math_utils.h"
 
 using namespace ocudu;

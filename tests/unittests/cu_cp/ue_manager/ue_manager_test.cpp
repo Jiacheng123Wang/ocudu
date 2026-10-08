@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
+#include "tests/ocudu_test_requirements.h"
 #include "tests/unittests/cu_cp/test_helpers.h"
 #include "ue_manager_test_helpers.h"
 #include "ocudu/adt/format.h"
@@ -305,6 +306,8 @@ TEST_F(ue_manager_test, when_more_than_max_ues_added_then_ue_created_but_not_ser
 /// Test inactive and i-rnti handling.
 TEST_F(ue_manager_test, when_ue_is_set_inactive_then_i_rnti_returned)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-10");
+
   cu_cp_du_index_t du_index    = cu_cp_du_index_t::min;
   rnti_t           rnti        = to_rnti(0x4601);
   du_cell_index_t  pcell_index = MIN_DU_CELL_INDEX;
@@ -327,6 +330,8 @@ TEST_F(ue_manager_test, when_ue_is_set_inactive_then_i_rnti_returned)
 
 TEST_F(ue_manager_test, when_ue_is_set_inactive_then_its_found_by_i_rnti)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-10");
+
   cu_cp_du_index_t du_index    = cu_cp_du_index_t::min;
   rnti_t           rnti        = to_rnti(0x4601);
   du_cell_index_t  pcell_index = MIN_DU_CELL_INDEX;
@@ -356,6 +361,8 @@ TEST_F(ue_manager_test, when_ue_is_set_inactive_then_its_found_by_i_rnti)
 /// successful RRC Resume) also cleans up its I-RNTI lookup entries, instead of leaking them.
 TEST_F(ue_manager_test, when_inactive_ue_is_removed_then_i_rnti_lookups_are_cleared)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-10");
+
   cu_cp_du_index_t du_index    = cu_cp_du_index_t::min;
   rnti_t           rnti        = to_rnti(0x4601);
   du_cell_index_t  pcell_index = MIN_DU_CELL_INDEX;
@@ -386,7 +393,10 @@ TEST_F(ue_manager_test, when_inactive_ue_is_removed_then_i_rnti_lookups_are_clea
 class ue_manager_wide_gnb_id_test : public ue_manager_test
 {
 protected:
-  ue_manager_wide_gnb_id_test() : ue_manager_test(gnb_id_t{0x1abcde, 22}) {}
+  ue_manager_wide_gnb_id_test() : ue_manager_test(gnb_id_t{0x1abcde, 22})
+  {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-10");
+  }
 };
 
 TEST_F(ue_manager_wide_gnb_id_test, when_several_ues_are_suspended_then_each_gets_its_own_i_rnti)

@@ -41,6 +41,12 @@ public:
     return cu_cp_handler->handle_du_cells_reported(du_index, cells);
   }
 
+  void on_du_cells_removed(span<const nr_cell_identity> cells) override
+  {
+    ocudu_assert(cu_cp_handler != nullptr, "CU-CP handler must not be nullptr");
+    cu_cp_handler->handle_du_cells_removed(cells);
+  }
+
   void on_rrc_ue_created(cu_cp_ue_index_t ue_index, rrc_ue_interface& rrc_ue) override
   {
     ocudu_assert(cu_cp_handler != nullptr, "CU-CP handler must not be nullptr");
@@ -95,10 +101,10 @@ class du_processor_cu_cp_connection_adapter final : public du_connection_notifie
 public:
   void connect_node_connection_handler(cu_cp_controller& cu_ctrl_) { cu_ctrl = &cu_ctrl_; }
 
-  bool on_du_setup_request(const std::set<plmn_identity>& plmn_ids) override
+  std::set<plmn_identity> on_connected_plmns_required(const std::set<plmn_identity>& plmn_ids) override
   {
     ocudu_assert(cu_ctrl != nullptr, "CU-CP controller must not be nullptr");
-    return cu_ctrl->handle_du_setup_request(plmn_ids);
+    return cu_ctrl->get_connected_plmns(plmn_ids);
   }
 
 private:

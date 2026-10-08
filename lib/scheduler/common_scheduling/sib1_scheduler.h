@@ -48,6 +48,7 @@ private:
   /// \param[in] dmrs_info DMRS information for SIB1.
   /// \param[in] tbs Transport block size.
   void fill_sib1_grant(cell_slot_resource_allocator& res_grid,
+                       unsigned                      ssb_idx,
                        crb_interval                  sib1_crbs_grant,
                        unsigned                      time_resource,
                        const dmrs_information&       dmrs_info,

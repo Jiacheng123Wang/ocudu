@@ -5,7 +5,7 @@
 #pragma once
 
 #include "precoding_matrix_indicator.h"
-#include "ocudu/ran/beamforming/beam_identifier.h"
+#include "ocudu/ran/precoding/precoding_constants.h"
 #include "ocudu/ran/precoding/precoding_weight_matrix.h"
 #include "ocudu/ran/precoding_beamforming_composite.h"
 
@@ -13,10 +13,16 @@ namespace ocudu {
 
 /// \brief Maximum number of beams contained in a composite precoding matrix weights.
 ///
-/// It is derived from the structure of 3GPP precoding matrices defined in TS38.214 Section 5.2.2.2.1. In case of four
-/// layers, the precoding uses two different beams, \f$v_{l, m}\f$ and \f$v_{l', m'}\f$, where \f$l \neq l'\f$ and \f$m
-/// \neq m'\f$. In such case, two beams are allocated, each one with two polarizations.
-static constexpr unsigned max_nof_beams_per_pmi = 4;
+/// It is derived from the structure of the 3GPP precoding matrices defined in TS38.214 Section 5.2.2.2:
+/// - the Type I Single-Panel codebook uses at most two spatial beams, \f$v_{l, m}\f$ and \f$v_{l', m'}\f$ with
+///   \f$l \neq l'\f$ and \f$m \neq m'\f$, which occurs for four layers; and
+/// - the Type II codebook combines up to \f$L = 4\f$ spatial beams, as per Section 5.2.2.2.3.
+///
+/// In both cases each spatial beam is allocated once per polarization, so the Type II codebook sets the maximum at
+/// \f$2L\f$ beams, one per combining coefficient.
+static constexpr unsigned max_nof_beams_per_pmi = 2 * max_nof_typeII_beams;
+static_assert(max_nof_beams_per_pmi <= precoding_constants::MAX_NOF_PORTS,
+              "The composite precoding matrix cannot hold one port per beam.");
 
 /// Constructs a precoder configuration for a single transmitter port.
 precoding_weight_matrix make_single_port();
@@ -53,44 +59,12 @@ precoding_weight_matrix make_identity(unsigned nof_streams);
 /// \remark This precoding matrix is intended for testing purposes only.
 precoding_weight_matrix make_one_layer_all_ports(unsigned nof_ports);
 
-/// \brief Constructs a precoding weight matrix for one layer mapped into two transmit ports.
-///
-/// All weights are derived from TS38.214 Table 5.2.2.2.1-1 for 1-layer CSI reporting.
-///
-/// \param[in] i_codebook Codebook identifier.
-/// \return A precoding weight matrix for one layer and two ports.
-precoding_weight_matrix make_one_layer_two_ports(unsigned i_codebook);
-
-/// \brief Constructs a precoding weight matrix for two layers mapped into two transmit ports.
-///
-/// All weights are derived from TS38.214 Table 5.2.2.2.1-1 for 2-layer CSI reporting.
-///
-/// \param[in] i_codebook Codebook identifier.
-/// \return A precoding weight matrix for two layers and two ports.
-precoding_weight_matrix make_two_layer_two_ports(unsigned i_codebook);
-
-/// \brief Constructs a precoding weight matrix for a given number of layers for a Type I Single-Panel antenna
-/// configuration.
-///
-/// All weights are derived from TS38.214 Table 5.2.2.2.1-5 to 5.2.2.2.1-8, which describe CSI reporting using Type I
-/// Single-Panel codebook for one to four layers. The generated precoding weights for the first half of ports
-/// corresponds to the first polarization, while the second half of ports corresponds to the second polarization.
-///
-/// \param[in] pmi The Precoding Matrix Indicator (PMI) codebook parameters.
-/// \param[in] nof_layers The number of layers used for the transmission.
-/// \return A precoding weight matrix for the given number of layers and the given antenna panel distribution.
-precoding_weight_matrix make_type1_sp_mode1(const precoding_matrix_indicator& pmi, unsigned nof_layers);
-
-/// \brief Constructs a precoding weight matrix for a given number of layers for a Type II precoding codebook.
-///
-/// All weights are derived from TS38.214 Section 5.2.2.2.3, which describe CSI reporting using Type II codebook for one
-/// or two layers. The generated precoding weights for the first half of ports corresponds to the first polarization,
-/// while the second half of ports corresponds to the second polarization.
+/// \brief Constructs a precoding weight matrix from the specified PMI for the given number of layers.
 ///
 /// \param[in] pmi        The Precoding Matrix Indicator (PMI) codebook parameters.
 /// \param[in] nof_layers The number of layers used for the transmission.
-/// \return A precoding weight matrix for the given number of layers and the given antenna panel distribution.
-precoding_weight_matrix make_type2(const precoding_matrix_indicator& pmi, unsigned nof_layers);
+/// \return A precoding weight matrix for the given number of layers and the codebook described by the PMI.
+precoding_weight_matrix make_precoding(const precoding_matrix_indicator& pmi, unsigned nof_layers);
 
 /// \brief Derives the MIMO precoding matrix and its beam list from the specified PMI for the given number of layers.
 ///

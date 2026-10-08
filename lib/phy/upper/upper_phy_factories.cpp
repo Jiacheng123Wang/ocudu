@@ -8,6 +8,7 @@
 #include "metrics/upper_phy_metrics_collector_impl.h"
 #include "uplink_processor_impl.h"
 #include "uplink_processor_pool_impl.h"
+#include "uplink_processor_printer_decorator.h"
 #include "upper_phy_impl.h"
 #include "upper_phy_pdu_validators.h"
 #include "upper_phy_rx_results_notifier_printer_decorator.h"
@@ -24,6 +25,8 @@
 #include "ocudu/phy/upper/channel_processors/ssb/factories.h"
 #include "ocudu/phy/upper/signal_processors/nzp_csi_rs/factories.h"
 #include "ocudu/phy/upper/signal_processors/prs/factories.h"
+#include "ocudu/phy/upper/signal_processors/srs/doa_estimator_configuration.h"
+#include "ocudu/phy/upper/signal_processors/srs/doa_estimator_factory.h"
 #include "ocudu/phy/upper/signal_processors/srs/srs_estimator_factory.h"
 #include "ocudu/support/error_handling.h"
 #include "ocudu/support/macos_compat.h"
@@ -399,7 +402,7 @@ private:
     // Create notifier.
     std::unique_ptr<upper_phy_rx_results_notifier> notifier =
         std::make_unique<upper_phy_rx_results_notifier_printer_decorator>(
-            config.notifier, backend, config.sector, triggers);
+            config.notifier, *backend, config.sector, triggers);
 
     // Create new configuration and substitute the notifier.
     uplink_processor_config config2{
@@ -415,7 +418,13 @@ private:
     backend->on_new_sector(config.sector, std::move(notifier));
 
     // Create uplink processor using the new notifier.
-    return base_factory->create(config2, std::forward<Args>(args)...);
+    std::unique_ptr<uplink_processor> processor = base_factory->create(config2, std::forward<Args>(args)...);
+    if (!processor) {
+      return nullptr;
+    }
+
+    // Wrap the uplink processor for stopping the backend before the processor.
+    return std::make_unique<uplink_processor_printer_decorator>(std::move(processor), backend);
   }
 
   std::shared_ptr<uplink_processor_factory>         base_factory;
@@ -597,12 +606,14 @@ create_dl_resource_grid_pool(const upper_phy_factory_dependencies&  factory_depe
   report_fatal_error_if_not(factory_dependencies.executors.dl_grid_executor.executor != nullptr,
                             "Invalid task executor.");
 
+  // Get the number of resource grid ports, which is equal to the number of beams for the given antenna topology.
+  unsigned nof_tx_ports = get_total_nof_beams(config.tx_ant_topology);
+
   // Generate resource grid instances.
   std::vector<std::unique_ptr<resource_grid>> grids(config.nof_dl_rg);
-  std::generate(
-      grids.begin(), grids.end(), [&rg_factory, nof_tx_ports = config.nof_tx_ports, dl_bw_rb = config.dl_bw_rb]() {
-        return rg_factory->create(nof_tx_ports, MAX_NSYMB_PER_SLOT, dl_bw_rb * NOF_SUBCARRIERS_PER_RB);
-      });
+  std::generate(grids.begin(), grids.end(), [&rg_factory, nof_tx_ports, dl_bw_rb = config.dl_bw_rb]() {
+    return rg_factory->create(nof_tx_ports, MAX_NSYMB_PER_SLOT, dl_bw_rb * NOF_SUBCARRIERS_PER_RB);
+  });
 
   return create_asynchronous_resource_grid_pool(*factory_dependencies.executors.dl_grid_executor.executor,
                                                 std::move(grids));
@@ -673,8 +684,18 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
     report_fatal_error_if_not(prach_factory, "Invalid PRACH detector pool factory.");
   }
 
+  std::shared_ptr<doa_estimator_factory> doa_factory = nullptr;
+  if (config.doa_enabled) {
+    doa_estimator_configuration doa_config = {
+        .nof_antennas                     = config.nof_rx_ports,
+        .antenna_distance_over_wavelength = config.doa_antenna_distance_over_wavelength,
+        .cross_polarized                  = config.doa_cross_polarized,
+    };
+    doa_factory = create_doa_estimator_factory(doa_config);
+    report_fatal_error_if_not(doa_factory, "Invalid DOA estimator factory.");
+  }
   std::shared_ptr<srs_estimator_factory> srs_factory =
-      create_srs_estimator_generic_factory(sequence_factory, ta_est_factory, config.ul_bw_rb);
+      create_srs_estimator_generic_factory(sequence_factory, ta_est_factory, doa_factory, config.ul_bw_rb);
   report_fatal_error_if_not(srs_factory, "Invalid SRS estimator factory.");
 
   // Create SRS estimator pool factory if more than one thread is used.

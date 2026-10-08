@@ -5,6 +5,7 @@
 #pragma once
 
 #include "du_context/nrppa_du_context.h"
+#include "du_context/nrppa_trp_registry.h"
 #include "meas_context/nrppa_meas_context.h"
 #include "ue_context/nrppa_ue_context.h"
 #include "ocudu/asn1/nrppa/nrppa.h"
@@ -16,7 +17,10 @@
 
 namespace ocudu::ocucp {
 
-class nrppa_impl : public nrppa_interface, public nrppa_message_handler, public nrppa_ue_context_removal_handler
+class nrppa_impl : public nrppa_interface,
+                   public nrppa_message_handler,
+                   public nrppa_ue_context_removal_handler,
+                   public nrppa_du_context_handler
 {
 public:
   nrppa_impl(const std::vector<supported_tracking_area>& supported_tas_,
@@ -36,6 +40,10 @@ public:
                        cu_cp_ue_index_t         old_ue_index,
                        nrppa_cu_cp_ue_notifier& new_ue_notifier) override;
 
+  // See nrppa_du_context_handler for documentation.
+  void handle_du_addition(cu_cp_du_index_t du_index, nrppa_f1ap_notifier& f1ap_notifier) override;
+  void handle_du_removal(cu_cp_du_index_t du_index) override;
+
   /// \brief Initialize the measurement report timer for the UE.
   /// \param[in] ue_index The UE index.
   /// \param[in] meas_periodicity_ms The measurement periodicity in milliseconds.
@@ -43,6 +51,7 @@ public:
 
   nrppa_message_handler&            get_nrppa_message_handler() override { return *this; }
   nrppa_ue_context_removal_handler& get_nrppa_ue_context_removal_handler() override { return *this; }
+  nrppa_du_context_handler&         get_nrppa_du_context_handler() override { return *this; }
 
 private:
   /// \brief Send the measurement results to the LMF.
@@ -104,8 +113,8 @@ private:
   timer_manager&          timers;
   task_executor&          task_exec;
 
-  std::map<plmn_identity, tac_t>       plmn_to_tac;
-  std::map<trp_id_t, cu_cp_du_index_t> trp_id_to_du_idx;
+  std::map<plmn_identity, tac_t> plmn_to_tac;
+  nrppa_trp_registry             trp_registry;
 };
 
 } // namespace ocudu::ocucp

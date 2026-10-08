@@ -5,6 +5,7 @@
 #include "cu_cp_test_environment.h"
 #include "lib/xnap/procedures/ngran_node_cfg_update_asn1_helpers.h"
 #include "lib/xnap/procedures/xn_setup_procedure_asn1_helpers.h"
+#include "tests/test_doubles/e1ap/e1ap_cu_cp_test_messages.h"
 #include "tests/test_doubles/e1ap/e1ap_test_message_validators.h"
 #include "tests/test_doubles/f1ap/f1ap_test_message_validators.h"
 #include "tests/test_doubles/ngap/ngap_test_message_validators.h"
@@ -13,7 +14,6 @@
 #include "tests/test_doubles/xnap/xnap_test_message_validators.h"
 #include "tests/unittests/cu_cp/test_doubles/mock_cu_up.h"
 #include "tests/unittests/cu_cp/test_helpers.h"
-#include "tests/unittests/e1ap/common/e1ap_cu_cp_test_messages.h"
 #include "tests/unittests/ngap/ngap_test_messages.h"
 #include "tests/unittests/xnap/xnap_test_messages.h"
 #include "ocudu/adt/format.h"
@@ -74,6 +74,7 @@ cu_cp_test_environment::cu_cp_test_environment(cu_cp_test_env_params params_) :
   cu_cp_cfg.admission.max_nof_ues         = params.max_nof_ues;
   cu_cp_cfg.admission.max_nof_drbs_per_ue = params.max_nof_drbs_per_ue;
   cu_cp_cfg.bearers.drb_config            = config_helpers::make_default_cu_cp_qos_config_list();
+  cu_cp_cfg.ntn_location_mappings         = params.ntn_location_mappings;
   // Fill NGAP config.
   for (const auto& [amf_index, amf_config] : amf_configs) {
     cu_cp_cfg.ngap.n2_gws.push_back(&*amf_config.amf_stub);

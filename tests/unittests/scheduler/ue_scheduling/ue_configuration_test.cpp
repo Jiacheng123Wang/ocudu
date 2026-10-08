@@ -4,6 +4,7 @@
 
 #include "lib/scheduler/ue_context/ue_cell_repository.h"
 #include "lib/scheduler/ue_context/ue_repository.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
 #include "tests/test_doubles/utils/test_rng.h"
 #include "ocudu/scheduler/config/logical_channel_config_factory.h"
@@ -100,7 +101,7 @@ TEST_F(ue_configuration_test, when_td_alloc_list_r16_is_configured_then_dci_tdra
               units::bits(log2_ceil(ss.bwp->dl.td_mapper().dedicated_pdsch_td_resources().size())));
     ASSERT_TRUE(ss.dci_sz.format0_1_ue_size.has_value());
     ASSERT_EQ(ss.dci_sz.format0_1_ue_size->time_resource,
-              units::bits(log2_ceil(ss.bwp->ul.td_mapper().pusch_td_resources().size())));
+              units::bits(log2_ceil(ss.bwp->ul.td_mapper().dedicated_pusch_td_resources().size())));
   }
 
   // Reconfigure the UE with Rel-16 TDRA lists that mirror the applied lists and append repetition entries.
@@ -123,7 +124,8 @@ TEST_F(ue_configuration_test, when_td_alloc_list_r16_is_configured_then_dci_tdra
     pdsch_cfg.pdsch_td_alloc_list.push_back(rep_alloc);
   }
   auto& pusch_cfg = serv_cell.ul_config->init_ul_bwp.pusch_cfg.value();
-  for (const auto& alloc : ue_cfg.search_space(to_search_space_id(2)).bwp->ul.td_mapper().pusch_td_resources()) {
+  for (const auto& alloc :
+       ue_cfg.search_space(to_search_space_id(2)).bwp->ul.td_mapper().dedicated_pusch_td_resources()) {
     pusch_cfg.pusch_td_alloc_list.push_back(alloc);
   }
   for (uint8_t rep : {2, 4, 8}) {
@@ -201,6 +203,8 @@ TEST_F(ue_configuration_test, when_reconfiguration_is_received_then_ue_updates_l
 class ue_ul_meas_gap_test : public ue_configuration_test
 {
 protected:
+  ue_ul_meas_gap_test() { OCUDU_TEST_REQUIREMENTS("DU-GEN-9"); }
+
   /// 6ms gap every 80ms, starting at subframe 10. At 15kHz there is one slot per subframe.
   static constexpr meas_gap_config test_gap{10, meas_gap_length::ms6, meas_gap_repetition_period::ms80};
 
@@ -227,6 +231,8 @@ protected:
 
 TEST_F(ue_ul_meas_gap_test, when_no_report_was_received_then_the_cell_estimate_places_the_window)
 {
+  OCUDU_TEST_REQUIREMENTS("DU-NTN-MOB-1");
+
   // T_TA of 14 slots, as in an NTN cell with a feeder link. The window sits at the gap offset plus T_TA, guarded by one
   // slot on each side, so at phases 13..21.
   ue_cell_configuration ue_cfg = make_ue_cfg(std::chrono::microseconds{14600});
@@ -239,6 +245,8 @@ TEST_F(ue_ul_meas_gap_test, when_no_report_was_received_then_the_cell_estimate_p
 
 TEST_F(ue_ul_meas_gap_test, when_the_cell_has_an_estimate_then_a_report_does_not_displace_it)
 {
+  OCUDU_TEST_REQUIREMENTS("DU-NTN-MOB-1");
+
   // The cell estimate is recomputed as the satellite moves, while a UE report only refreshes while tar-Config is
   // configured. Letting a report win would freeze the window at the value last reported, which ages at tens of
   // microseconds per second.
@@ -256,6 +264,8 @@ TEST_F(ue_ul_meas_gap_test, when_the_cell_has_an_estimate_then_a_report_does_not
 
 TEST_F(ue_ul_meas_gap_test, when_the_cell_does_not_track_the_timing_advance_then_a_report_still_places_the_window)
 {
+  OCUDU_TEST_REQUIREMENTS("DU-NTN-MOB-1");
+
   // A cell without reference_location produces no estimate, so the window would stay unshifted at phases 0..6.
   ue_cell_configuration ue_cfg = make_ue_cfg(std::nullopt);
   ASSERT_FALSE(ue_cfg.is_ul_enabled(slot_at_gap_phase(0), no_report));

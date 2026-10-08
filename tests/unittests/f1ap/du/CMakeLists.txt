@@ -24,6 +24,7 @@ set(SOURCES f1ap_du_setup_procedure_test.cpp
             f1ap_du_gnbcu_config_update_test.cpp
             f1ap_du_positioning_exchange_procedure_test.cpp
             f1ap_du_trp_information_exchange_procedure_test.cpp
+            f1ap_du_e_cid_measurement_procedure_test.cpp
             f1ap_du_positioning_measurement_procedure_test.cpp
             f1ap_du_paging_test.cpp
             f1ap_du_write_replace_warning_test.cpp

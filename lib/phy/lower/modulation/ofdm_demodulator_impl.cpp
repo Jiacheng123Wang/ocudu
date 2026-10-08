@@ -337,6 +337,7 @@ ofdm_symbol_demodulator_impl::ofdm_symbol_demodulator_impl(const ofdm_demodulato
                                                            ofdm_demodulator_dependencies         dependencies) :
   dft_size(ofdm_config.dft_size),
   rg_size(ofdm_config.bw_rb * NOF_SUBCARRIERS_PER_RB),
+  half_rg_size(rg_size / 2),
   cp(ofdm_config.cp),
   nof_samples_window_offset(ofdm_config.nof_samples_window_offset),
   scs(to_subcarrier_spacing(ofdm_config.numerology)),
@@ -357,9 +358,6 @@ ofdm_symbol_demodulator_impl::ofdm_symbol_demodulator_impl(const ofdm_demodulato
 
   // Fill DFT input with zeros.
   ocuduvec::zero(dft->get_input());
-
-  // Set the right size to the internal phase compensation buffer.
-  compensated_output.resize(dft_size);
 
   if (ofdm_config.nof_samples_window_offset != 0) {
     // Verify the window is valid.
@@ -516,10 +514,13 @@ void ofdm_symbol_demodulator_impl::fill_dft_input(span<cf_t>         dft_input,
                cp_len + dft_size,
                scs_to_khz(scs));
 
-  // Prepare the DFT inputs, while skipping the cyclic prefix.
-  ocuduvec::convert(dft_input,
+  // Get phase correction (TS138.211, Section 5.4).
+  cf_t phase_compensation = phase_compensation_table.get_coefficient(symbol_index);
+
+  // Prepare the DFT inputs, while skipping the cyclic prefix. Include the conversion from ci16 to cf.
+  ocuduvec::sc_prod(dft_input,
                     input.subspan(cp_len - nof_samples_window_offset, dft_size),
-                    ocuduvec::scaling_factor_ci16_to_cf);
+                    phase_compensation * scale / ocuduvec::scaling_factor_ci16_to_cf);
 }
 
 void ofdm_symbol_demodulator_impl::process_dft_output(resource_grid_writer& grid,
@@ -530,24 +531,25 @@ void ofdm_symbol_demodulator_impl::process_dft_output(resource_grid_writer& grid
   // Calculate number of symbols per slot.
   unsigned nsymb = get_nsymb_per_slot(cp);
 
-  // Get phase correction (TS138.211, Section 5.4)
-  cf_t phase_compensation = phase_compensation_table.get_coefficient(symbol_index);
-
-  // Apply scaling and phase compensation.
-  ocuduvec::sc_prod(compensated_output, dft_output, phase_compensation * scale);
+  // Extract view of the destination frequency domain for the corresponding OFDM symbol.
+  span<cbf16_t> symbol_view = grid.get_view(port_index, symbol_index % nsymb);
 
   // Compensate DFT window offset phase shift.
   if (!window_phase_compensation.empty()) {
-    ocuduvec::prod(compensated_output, window_phase_compensation, compensated_output);
+    span<const cf_t> phase_shift(window_phase_compensation);
+
+    // DFT window shift compensation and map the upper bound frequency domain data.
+    ocuduvec::prod(symbol_view.first(half_rg_size), phase_shift.last(half_rg_size), dft_output.last(half_rg_size));
+
+    // DFT window shift compensation and map the lower bound frequency domain data.
+    ocuduvec::prod(symbol_view.last(half_rg_size), phase_shift.first(half_rg_size), dft_output.first(half_rg_size));
+  } else {
+    // Map the upper bound frequency domain data.
+    ocuduvec::convert(symbol_view.first(half_rg_size), dft_output.last(half_rg_size));
+
+    // Map the lower bound frequency domain data.
+    ocuduvec::convert(symbol_view.last(half_rg_size), dft_output.first(half_rg_size));
   }
-
-  // Map the upper bound frequency domain data.
-  span<cf_t> upper_bound(&compensated_output[dft_size - rg_size / 2], rg_size / 2);
-  grid.put(port_index, symbol_index % nsymb, 0, upper_bound);
-
-  // Map the lower bound frequency domain data.
-  span<cf_t> lower_bound(&compensated_output[0], rg_size / 2);
-  grid.put(port_index, symbol_index % nsymb, rg_size / 2, lower_bound);
 }
 
 void ofdm_symbol_demodulator_impl::demodulate(resource_grid_writer& grid,

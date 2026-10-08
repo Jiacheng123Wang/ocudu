@@ -28,6 +28,14 @@
 #undef sctp_rcvinfo
 #undef sctp_sndinfo
 
+/// Notification type carried in sctp_tlv::sn_type. The Linux kernel API exposes it as an enum in <linux/sctp.h>,
+/// reached through <netinet/sctp.h>; usrsctp defines the SCTP_* constants but no matching type name.
+using sctp_sn_type = uint16_t;
+
+/// Send-receipt notification, which only the Linux kernel stack emits. usrsctp defines every other SCTP_*_EVENT
+/// constant but not this one, so it is defined here with the Linux value to keep the shared switch readable.
+#define SCTP_DATA_IO_EVENT 0x8000
+
 #include <cstddef>
 #include <sys/socket.h>
 #include <sys/types.h>

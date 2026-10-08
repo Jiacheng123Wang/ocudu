@@ -50,23 +50,61 @@ constexpr unsigned GTPU_MAX_NUM_HEADER_EXTENSIONS = 10;
 constexpr unsigned GTPU_MAX_NUM_PRIVATE_EXTENSIONS     = 1;
 constexpr unsigned GTPU_PRIVATE_EXTENSION_VALUE_LENGTH = 1;
 
-/// GTP-U extension header types. See TS 29.281 v16.2.0, figure 5.2.1-3.
+constexpr unsigned GTPU_SN_MOD         = 65536;
+constexpr unsigned GTPU_RX_WINDOW_SIZE = 32768;
+
+/// \brief GTP-U extension header types.
+///
+/// Ref: TS 29.281 v16.2.0 Sec. 5.2.1 Fig. 5.2.1-3.
 enum class gtpu_extension_header_type : uint8_t {
+  /// \brief No more extension headers.
   no_more_extension_headers = 0b00000000,
-  reserved_0                = 0b00000001,
-  reserved_1                = 0b00000010,
-  long_pdcp_pdu_number_0    = 0b00000011,
-  service_class_indicator   = 0b00100000,
-  udp_port                  = 0b01000000,
-  ran_container             = 0b10000001,
-  long_pdcp_pdu_number_1    = 0b10000010,
-  xw_ran_container          = 0b10000011,
-  nr_ran_container          = 0b10000100,
-  pdu_session_container     = 0b10000101,
-  pdcp_pdu_number           = 0b11000000,
-  reserved_2                = 0b11000001,
-  reserved_3                = 0b11000010
+  /// \brief Reserved - Control Plane only.
+  reserved_0 = 0b00000001,
+  /// \brief Reserved - Control Plane only.
+  reserved_1 = 0b00000010,
+  /// \brief Long PDCP PDU Number.
+  ///
+  /// This value shall be used by a source gNB compliant with v15.3.0 or later.
+  /// This type replaces "1000 0010" since v15.3.0 to relax the comprehension requirement in case the end node decides
+  /// to ignore the PDCP SN and starts from 0.
+  ///
+  /// Ref: TS 29.281 Annex B (informative); Details: WG TDoc C4-184134, CR 0092.
+  long_pdcp_pdu_number = 0b00000011,
+  /// \brief Service Class Indicator.
+  service_class_indicator = 0b00100000,
+  /// \brief UDP Port. Provides the UDP Source Port of the triggering message.
+  udp_port = 0b01000000,
+  /// \brief RAN Container.
+  ran_container = 0b10000001,
+  /// \brief Long PDCP PDU Number (legacy).
+  ///
+  /// This value shall not be used by a source gNB compliant with v15.3.0 or later. It may be received from a source eNB
+  /// complying with an earlier release.
+  /// This type was introduced in v13.1.0 but replaced by "0000 0011" since v15.3.0 to relax the comprehension
+  /// requirement in case the end node decides to ignore the PDCP SN and starts from 0.
+  ///
+  /// Ref: TS 29.281 Annex B (informative); Details: WG TDoc C4-184134, CR 0092.
+  long_pdcp_pdu_number_legacy = 0b10000010,
+  /// \brief Xw RAN Container.
+  xw_ran_container = 0b10000011,
+  /// \brief NR RAN Container.
+  nr_ran_container = 0b10000100,
+  /// \brief PDU Session Container.
+  ///
+  /// For a GTP-PDU with several Extension Headers, the PDU Session Container should be the first Extension Header.
+  pdu_session_container = 0b10000101,
+  /// \brief PDCP PDU Number.
+  ///
+  /// As an exception to general comprehension rules, for a G-PDU with this extension header, the SGW shall consider it
+  /// as 'comprehension not required'.s
+  pdcp_pdu_number = 0b11000000,
+  /// \brief Reserved - Control Plane only.
+  reserved_2 = 0b11000001,
+  /// \brief Reserved - Control Plane only.
+  reserved_3 = 0b11000010
 };
+
 inline const char* to_string(gtpu_extension_header_type type)
 {
   switch (type) {
@@ -78,9 +116,10 @@ inline const char* to_string(gtpu_extension_header_type type)
       return "UDP port";
     case gtpu_extension_header_type::ran_container:
       return "RAN container";
-    case gtpu_extension_header_type::long_pdcp_pdu_number_0:
-    case gtpu_extension_header_type::long_pdcp_pdu_number_1:
+    case gtpu_extension_header_type::long_pdcp_pdu_number:
       return "long PDCP PDU number";
+    case gtpu_extension_header_type::long_pdcp_pdu_number_legacy:
+      return "long PDCP PDU number (pre v15.3.0)";
     case gtpu_extension_header_type::xw_ran_container:
       return "XW RAN container";
     case gtpu_extension_header_type::nr_ran_container:
@@ -104,30 +143,40 @@ inline const char* format_as(gtpu_extension_header_type ext_type)
   return to_string(ext_type);
 }
 
-/// 00 Comprehension of this extension header is not required. An Intermediate Node shall forward it to any Receiver
-/// Endpoint.
-/// 01 Comprehension of this extension header is not required. An Intermediate Node shall discard the
-/// Extension Header Content and not forward it to any Receiver Endpoint. Other extension headers shall be treated
-/// independently of this extension header.
-/// 10 Comprehension of this extension header is required by the Endpoint
-/// Receiver but not by an Intermediate Node. An Intermediate Node shall forward the whole field to the Endpoint
-/// Receiver.
-/// 11 Comprehension of this header type is required by recipient (either Endpoint Receiver or Intermediate Node).
+/// \brief GTP-U comprehention flags for extension header types.
+///
+/// Ref: TS 29.281 v16.2.0 Sec. 5.2.1 Fig. 5.2.1-2.
 enum class gtpu_comprehension : uint8_t {
-  not_required_intermediate_node_forward     = 0b00000000,
-  not_required_intermediate_node_discard     = 0b00000001,
-  required_at_endpoint_not_intermediate_node = 0b00000010,
-  required_at_endpoint_and_intermediate_node = 0b00000011
+  /// Comprehension of this extension header is not required. An Intermediate Node shall forward it to any Receiver
+  /// Endpoint.
+  not_required_intermediate_node_forward = 0b00,
+  /// Comprehension of this extension header is not required. An Intermediate Node shall discard the Extension Header
+  /// Content and not forward it to any Receiver Endpoint. Other extension headers shall be treated independently of
+  /// this extension header.
+  not_required_intermediate_node_discard = 0b01,
+  /// Comprehension of this extension header is required by the Endpoint Receiver but not by an Intermediate Node. An
+  /// Intermediate Node shall forward the whole field to the Endpoint Receiver.
+  required_at_endpoint_not_intermediate_node = 0b10,
+  /// Comprehension of this header type is required by recipient (either Endpoint Receiver or Intermediate Node).
+  required_at_endpoint_and_intermediate_node = 0b11
 };
 
-/// GTP-U information element types types. See TS 29.281 Sec. 8.1.
+/// GTP-U information element types.
+///
+/// Ref: TS 29.281 Sec. 8.1.
 enum class gtpu_information_element_type : uint8_t {
-  recovery                          = 14,
+  /// Recovery.
+  recovery = 14,
+  /// Tunnel Endpoint Identifier Data I.
   tunnel_endpoint_identifier_data_i = 16,
-  gsn_address                       = 133,
-  extension_header_type_list        = 141,
-  private_extension                 = 255
+  /// GSN Address (GTP-U Peer Address).
+  gsn_address = 133,
+  /// Extension Header Type List.
+  extension_header_type_list = 141,
+  /// Private Extension.
+  private_extension = 255
 };
+
 inline const char* to_string(gtpu_information_element_type type)
 {
   switch (type) {

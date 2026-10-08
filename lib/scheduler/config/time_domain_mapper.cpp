@@ -176,12 +176,21 @@ ul_time_domain_mapper::ul_time_domain_mapper(const ul_time_domain_builder_params
     // as the first entry of the list. This way PDSCH(s) are scheduled before PUSCH and all DL slots are filled with
     // PDSCH and all UL slots are filled with PUSCH under heavy load. It also ensures that correct DAI value goes in
     // the UL PDCCH of DCI Format 0_1.
-    pusch_td_res_list = time_domain_resource_helper::generate_dedicated_pusch_td_res_list(
+    common_pusch_td_res_list = time_domain_resource_helper::generate_dedicated_pusch_td_res_list(
         params.tdd_cfg, params.cp, auto_res->min_k2, auto_res->max_srs_symbols, auto_res->symbols_per_srs);
   } else {
     const auto& explicit_res = std::get<builder_params::pusch_explicit_resources>(params.pusch_params);
-    ocudu_assert(not explicit_res.pusch_td_res_list.empty(), "Explicit PUSCH TD resource list must not be empty.");
-    pusch_td_res_list = explicit_res.pusch_td_res_list;
+    ocudu_assert(not explicit_res.common_pusch_td_res_list.empty(), "Common PUSCH TD resource list must not be empty.");
+    common_pusch_td_res_list = explicit_res.common_pusch_td_res_list;
+  }
+
+  // A UE without a dedicated PUSCH-TimeDomainAllocationList (legacy or Rel-16) falls back to the common list for DCI
+  // format 0_1.
+  const auto* pusch_explicit_res = std::get_if<builder_params::pusch_explicit_resources>(&params.pusch_params);
+  if (pusch_explicit_res != nullptr and not pusch_explicit_res->dedicated_pusch_td_res_list.empty()) {
+    dedicated_pusch_td_res_list = pusch_explicit_res->dedicated_pusch_td_res_list;
+  } else {
+    dedicated_pusch_td_res_list = common_pusch_td_res_list;
   }
 
   // PUCCH / k1.
@@ -201,41 +210,71 @@ ul_time_domain_mapper::ul_time_domain_mapper(const ul_time_domain_builder_params
   }
 
   // Generate the PUSCH TD resource index candidates for each slot (handles both FDD and TDD).
-  pusch_td_res_indices_per_slot =
-      get_pusch_td_resource_indices_per_slot(params.scs, params.tdd_cfg, pusch_td_res_list, min_k1_val);
+  common_pusch_td_res_indices_per_slot =
+      get_pusch_td_resource_indices_per_slot(params.scs, params.tdd_cfg, common_pusch_td_res_list, min_k1_val);
+  dedicated_pusch_td_res_indices_per_slot =
+      get_pusch_td_resource_indices_per_slot(params.scs, params.tdd_cfg, dedicated_pusch_td_res_list, min_k1_val);
 
-  // Generate the dedicated and common k1 candidates valid for a PDSCH transmitted in each slot.
-  common_k1_list = pucch_td_helper::get_common_k1_candidates(min_k1_val);
-  dedicated_k1_per_slot =
-      get_pucch_k1_list_per_slot(dedicated_k1_list, params.tdd_cfg, pusch_td_res_list, pusch_td_res_indices_per_slot);
-  common_k1_per_slot =
-      get_pucch_k1_list_per_slot(common_k1_list, params.tdd_cfg, pusch_td_res_list, pusch_td_res_indices_per_slot);
+  // Generate the dedicated and common k1 candidates valid for a PDSCH transmitted in each slot. Note: keyed off the
+  // common PUSCH list (not the dedicated one), since k1 candidates bound the earliest PUCCH slot relative to any
+  // PUSCH the cell might schedule, not specifically the UE's dedicated repetition-capable TDRA rows.
+  common_k1_list        = pucch_td_helper::get_common_k1_candidates(min_k1_val);
+  dedicated_k1_per_slot = get_pucch_k1_list_per_slot(
+      dedicated_k1_list, params.tdd_cfg, common_pusch_td_res_list, common_pusch_td_res_indices_per_slot);
+  common_k1_per_slot = get_pucch_k1_list_per_slot(
+      common_k1_list, params.tdd_cfg, common_pusch_td_res_list, common_pusch_td_res_indices_per_slot);
+
+  // Precompute the highest numberOfRepetitions-r16 in the dedicated list once, since it never changes afterwards.
+  for (const pusch_time_domain_resource_allocation& entry : dedicated_pusch_td_res_list) {
+    if (entry.nof_repetitions.has_value() and
+        (not max_dedicated_pusch_repetitions.has_value() or
+         max_dedicated_pusch_repetitions.value() < entry.nof_repetitions.value())) {
+      max_dedicated_pusch_repetitions = entry.nof_repetitions;
+    }
+  }
 }
 
-std::optional<uint8_t> ul_time_domain_mapper::find_pusch_td_res_index(slot_point             pdcch_slot,
-                                                                      slot_point             pusch_slot,
-                                                                      ofdm_symbol_range      usable_symbols,
-                                                                      unsigned               ntn_cs_koffset,
-                                                                      std::optional<uint8_t> retx_symbols) const
+ul_time_domain_mapper::pusch_td_res_selection
+ul_time_domain_mapper::find_pusch_td_res_indices(dci_ul_format          dci_format,
+                                                 slot_point             pdcch_slot,
+                                                 slot_point             pusch_slot,
+                                                 ofdm_symbol_range      usable_symbols,
+                                                 unsigned               ntn_cs_koffset,
+                                                 std::optional<uint8_t> nof_repetitions,
+                                                 std::optional<uint8_t> retx_symbols) const
 {
-  std::optional<uint8_t> best;
-  for (uint8_t idx : pusch_td_res_indices(pdcch_slot.count())) {
+  const auto pusch_td_res_list = pusch_td_resources(dci_format);
+
+  // Keeps the best of the rows of one kind: the first qualifying one for a reTx, whose symbols are pinned to the
+  // original transmission's anyway, and the longest one otherwise.
+  auto keep_best = [&pusch_td_res_list, &retx_symbols](std::optional<uint8_t>& best, uint8_t idx) {
+    if (not best.has_value() or (not retx_symbols.has_value() and
+                                 pusch_td_res_list[*best].symbols.length() < pusch_td_res_list[idx].symbols.length())) {
+      best = idx;
+    }
+  };
+
+  pusch_td_res_selection sel;
+  for (uint8_t idx : pusch_td_res_indices(dci_format, pdcch_slot.count())) {
     const pusch_time_domain_resource_allocation& pusch_td_res = pusch_td_res_list[idx];
+
     if (pdcch_slot + pusch_td_res.k2 + ntn_cs_koffset != pusch_slot) {
       continue;
     }
     if (not usable_symbols.contains(pusch_td_res.symbols)) {
       continue;
     }
-    if (retx_symbols.has_value()) {
-      if (pusch_td_res.symbols.length() != *retx_symbols) {
-        continue;
-      }
-      return idx;
+    if (retx_symbols.has_value() and pusch_td_res.symbols.length() != *retx_symbols) {
+      continue;
     }
-    if (not best.has_value() or pusch_td_res_list[*best].symbols.length() < pusch_td_res.symbols.length()) {
-      best = idx;
+
+    if (pusch_td_res.nof_repetitions == nof_repetitions) {
+      keep_best(sel.selected, idx);
+    } else if (nof_repetitions.has_value() and not pusch_td_res.nof_repetitions.has_value()) {
+      // A single-transmission row qualifying for the same slot: the fallback, had the caller not asked for
+      // repetitions. Found here for free, as the search walks these candidates anyway.
+      keep_best(sel.single_tx, idx);
     }
   }
-  return best;
+  return sel;
 }

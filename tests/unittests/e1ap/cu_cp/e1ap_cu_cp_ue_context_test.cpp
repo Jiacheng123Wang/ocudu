@@ -4,6 +4,7 @@
 
 #include "../common/test_helpers.h"
 #include "lib/e1ap/cu_cp/ue_context/e1ap_cu_cp_ue_context.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/utils/test_rng.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ocudulog/logger.h"
@@ -20,6 +21,8 @@ class e1ap_cu_cp_ue_context_test : public ::testing::Test
 protected:
   e1ap_cu_cp_ue_context_test()
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-11");
+
     e1ap_logger.set_level(ocudulog::basic_levels::debug);
     ocudulog::init();
   }

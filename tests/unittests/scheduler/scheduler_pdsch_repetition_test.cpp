@@ -6,6 +6,7 @@
 /// \brief Unit tests for CQI-triggered Rel-16 PDSCH repetitions.
 
 #include "test_utils/scheduler_test_simulator.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/scheduler/cell_config_builder_profiles.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
 #include <gtest/gtest.h>
@@ -133,6 +134,8 @@ protected:
 
 TEST_F(scheduler_pdsch_repetition_test, when_cqi_below_threshold_then_pdsch_repetition_bundles_are_scheduled)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-8-d");
+
   // Enqueue enough bytes for continuous DL tx.
   dl_buffer_state_indication_message dl_buf_st{ue_idx, ue_drb_lcid, 10000000};
   this->push_dl_buffer_state(dl_buf_st);
@@ -167,12 +170,10 @@ TEST_F(scheduler_pdsch_repetition_test, when_cqi_below_threshold_then_pdsch_repe
       ASSERT_EQ(occ0->pdsch_cfg.codewords[0].rv_index, dci.tb1_redundancy_version);
 
       // Occasions 1..K-1: transmitted in fully-DL slots with the same TBS/PRBs and the cycled RV; dropped otherwise.
-      unsigned last_tx_occasion = 0;
       for (unsigned i = 1; i != nof_reps; ++i) {
         const slot_point    occ_slot = pdcch_slot + i;
         const dl_msg_alloc* occ      = find_grant_with_harq(occ_slot, dci.harq_process_number);
         if (is_fully_dl(occ_slot)) {
-          last_tx_occasion = i;
           ASSERT_NE(occ, nullptr) << fmt::format("Missing repetition occasion at slot {}", occ_slot);
           ASSERT_FALSE(occ->pdsch_cfg.codewords[0].new_data);
           ASSERT_EQ(occ->pdsch_cfg.codewords[0].rv_index, expected_repetition_rv(dci.tb1_redundancy_version, i));
@@ -184,12 +185,11 @@ TEST_F(scheduler_pdsch_repetition_test, when_cqi_below_threshold_then_pdsch_repe
         }
       }
 
-      // The HARQ-ACK PUCCH takes place k1 slots after the last transmitted occasion. A dropped occasion is not
-      // received at all (TS 38.213, 11.1), so it cannot be the DL slot the PDSCH reception ends in (TS 38.213, 9.2.3).
+      // The HARQ-ACK PUCCH takes place k1 slots after the last (nominal) occasion.
       ASSERT_TRUE(dci.pdsch_harq_fb_timing_indicator.has_value());
       const auto dedicated_k1_list = cell_cfg(to_du_cell_index(0)).init_bwp.ul.td_mapper().dedicated_k1_candidates();
       const unsigned   k1          = dedicated_k1_list[dci.pdsch_harq_fb_timing_indicator.value()];
-      const slot_point expected_pucch_slot = pdcch_slot + last_tx_occasion + k1;
+      const slot_point expected_pucch_slot = pdcch_slot + (nof_reps - 1) + k1;
       if (expected_pucch_slot <= last_collected_slot) {
         ASSERT_EQ(pucch_slots.count(expected_pucch_slot), 1)
             << fmt::format("No PUCCH at slot {} for the bundle scheduled at slot {}", expected_pucch_slot, pdcch_slot);
@@ -227,6 +227,8 @@ TEST_F(scheduler_pdsch_repetition_test, when_cqi_below_threshold_then_pdsch_repe
 
 TEST_F(scheduler_pdsch_repetition_test, when_harq_is_nacked_then_retx_is_scheduled_as_repetition_bundle)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-8-d");
+
   // Report NACK for all HARQ-ACK bits, forcing HARQ reTxs.
   this->register_uci_handler([](uci_indication& uci) {
     for (auto& pdu : uci.ucis) {
@@ -278,51 +280,58 @@ TEST_F(scheduler_pdsch_repetition_test, when_harq_is_nacked_then_retx_is_schedul
   ASSERT_GT(nof_retx_bundles, 0) << "No reTx repetition bundle was scheduled";
 }
 
-// Bundles whose nominal last occasion falls in a fully-UL slot. Such an occasion is not received at all (TS 38.213,
-// 11.1), so the HARQ-ACK is counted from the last transmitted occasion (TS 38.213, 9.2.3). Counting it from the
-// nominal one instead asked the UCI allocator for the k1 candidates of a UL slot, whose per-slot k1 list is empty:
-// that both read past the end of the empty candidate range and left the bundle unallocated.
-TEST_F(scheduler_pdsch_repetition_test, when_trailing_occasions_fall_in_ul_slots_then_harq_ack_follows_last_tx_occasion)
+// A bundle that loses trailing occasions to slots which cannot carry the PDSCH. The UE reads repetitionNumber-r16
+// from the TDRA row and counts every occasion of the nominal window, the ones it never receives included, so it
+// reports the HARQ-ACK k1 slots after the last occasion of that window (TS 38.213, Section 9.2.3), not after the last
+// one actually transmitted. Anchoring the PUCCH at the latter makes the gNB listen too early and the report is lost.
+TEST_F(scheduler_pdsch_repetition_test, when_trailing_occasions_are_dropped_then_harq_ack_follows_the_nominal_window)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-8-d");
+
   const unsigned tdd_period = nof_slots_per_tdd_period(*cell_cfg(to_du_cell_index(0)).params.tdd_cfg);
 
   // Bursty traffic whose phase advances by one slot per iteration, so that bundles start at every position of the TDD
-  // pattern over the run, including the last DL slot whose trailing occasions fall in the special and UL slots.
+  // pattern over the run, including the last DL slots whose trailing occasions fall in the special and UL slots.
   for (unsigned i = 0; i != 2 * tdd_period; ++i) {
     dl_buffer_state_indication_message dl_buf_st{ue_idx, ue_drb_lcid, 1000};
     this->push_dl_buffer_state(dl_buf_st);
     run_and_collect(tdd_period + 1);
   }
 
-  unsigned nof_ul_tail_bundles = 0;
+  unsigned nof_truncated_bundles = 0;
   for (const auto& [pdcch_slot, slot_dcis] : dcis) {
     for (const dci_1_1_configuration& dci : slot_dcis) {
       if (dci.time_resource != rep_time_resource or pdcch_slot + (nof_reps - 1) > last_collected_slot) {
         continue;
       }
-      // Only bundles whose nominal last occasion falls in a fully-UL slot are of interest here.
-      if (not is_fully_ul(pdcch_slot + (nof_reps - 1))) {
-        continue;
-      }
-      ++nof_ul_tail_bundles;
-
+      // Only bundles that lost their trailing occasions tell the two anchors apart.
       unsigned last_tx_occasion = 0;
       for (unsigned i = 1; i != nof_reps; ++i) {
         if (is_fully_dl(pdcch_slot + i)) {
           last_tx_occasion = i;
         }
       }
+      if (last_tx_occasion == nof_reps - 1) {
+        continue;
+      }
+      ++nof_truncated_bundles;
+
       ASSERT_TRUE(dci.pdsch_harq_fb_timing_indicator.has_value());
       const auto dedicated_k1_list = cell_cfg(to_du_cell_index(0)).init_bwp.ul.td_mapper().dedicated_k1_candidates();
       const unsigned   k1          = dedicated_k1_list[dci.pdsch_harq_fb_timing_indicator.value()];
-      const slot_point expected_pucch_slot = pdcch_slot + last_tx_occasion + k1;
+      const slot_point expected_pucch_slot = pdcch_slot + (nof_reps - 1) + k1;
       if (expected_pucch_slot <= last_collected_slot) {
         ASSERT_EQ(pucch_slots.count(expected_pucch_slot), 1)
-            << fmt::format("No PUCCH at slot {} for the bundle scheduled at slot {}", expected_pucch_slot, pdcch_slot);
+            << fmt::format("No PUCCH at slot {} for the bundle scheduled at slot {}, whose last transmitted occasion "
+                           "is at offset {} of a {}-occasion window",
+                           expected_pucch_slot,
+                           pdcch_slot,
+                           last_tx_occasion,
+                           nof_reps);
       }
     }
   }
-  ASSERT_GT(nof_ul_tail_bundles, 0) << "No bundle whose nominal last occasion falls in a UL slot was scheduled";
+  ASSERT_GT(nof_truncated_bundles, 0) << "No bundle lost a trailing occasion, the two anchors were never told apart";
 }
 
 class scheduler_pdsch_repetition_high_cqi_test : public base_pdsch_repetition_tester, public ::testing::Test
@@ -334,6 +343,8 @@ protected:
 
 TEST_F(scheduler_pdsch_repetition_high_cqi_test, when_cqi_above_threshold_then_no_repetitions_are_scheduled)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-8-d");
+
   dl_buffer_state_indication_message dl_buf_st{ue_idx, ue_drb_lcid, 10000000};
   this->push_dl_buffer_state(dl_buf_st);
 
@@ -362,6 +373,8 @@ protected:
 
 TEST_F(scheduler_pdsch_repetition_disabled_test, when_threshold_is_zero_then_no_repetitions_are_scheduled)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-8-d");
+
   dl_buffer_state_indication_message dl_buf_st{ue_idx, ue_drb_lcid, 10000000};
   this->push_dl_buffer_state(dl_buf_st);
 

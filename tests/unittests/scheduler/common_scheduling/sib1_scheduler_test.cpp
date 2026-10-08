@@ -23,10 +23,11 @@ class dummy_pdcch_resource_allocator : public pdcch_resource_allocator
 public:
   void slot_indication(slot_point /*sl_tx*/) {}
 
-  pdcch_dl_information* alloc_dl_pdcch_common(cell_slot_resource_allocator& slot_alloc,
-                                              rnti_t                        rnti,
-                                              search_space_id               ss_id,
-                                              aggregation_level             aggr_lvl) override
+  pdcch_dl_information* alloc_dl_pdcch_common(cell_slot_resource_allocator&  slot_alloc,
+                                              rnti_t                         rnti,
+                                              search_space_id                ss_id,
+                                              aggregation_level              aggr_lvl,
+                                              std::optional<beam_identifier> beam) override
   {
     report_fatal_error_if_not(
         (fmt::underlying(ss_id)) ==
@@ -39,6 +40,8 @@ public:
     slot_alloc.result.dl.dl_pdcchs.back().ctx.coreset_cfg =
         &*slot_alloc.cfg.params.dl_cfg_common.init_dl_bwp.pdcch_common.coreset0;
     slot_alloc.result.dl.dl_pdcchs.back().ctx.cces = {0, ocudu::aggregation_level::n4};
+    slot_alloc.result.dl.dl_pdcchs.back().ctx.precoding_and_beamforming =
+        beam.has_value() ? make_single_beam_precoding(*beam) : make_default_precoding();
     return &slot_alloc.result.dl.dl_pdcchs[0];
   }
 
@@ -62,10 +65,11 @@ public:
     return nullptr;
   }
 
-  pdcch_ul_information* alloc_ul_pdcch_common(cell_slot_resource_allocator& slot_alloc,
-                                              rnti_t                        rnti,
-                                              search_space_id               ss_id,
-                                              aggregation_level             aggr_lvl) override
+  pdcch_ul_information* alloc_ul_pdcch_common(cell_slot_resource_allocator&  slot_alloc,
+                                              rnti_t                         rnti,
+                                              search_space_id                ss_id,
+                                              aggregation_level              aggr_lvl,
+                                              std::optional<beam_identifier> beam) override
   {
     ocudu_terminate("Common PDCCHs should not be called while allocating RARs");
     return nullptr;
@@ -622,6 +626,46 @@ build_sib1_partial_slot_cell_req(const sib1_tdd_partial_slot_test_params& params
       time_domain_resource_helper::generate_dedicated_pusch_td_res_list(
           params.tdd_config, msg.ran.ul_cfg_common.init_ul_bwp.generic_params.cp, msg.ran.init_bwp.pusch.min_k2);
   return msg;
+}
+
+// The SIB1 of an SS/PBCH block is carried by the beam of that block, so that a UE that finds the cell on a beam reads
+// the SIB1 of that beam.
+TEST(sib1_scheduler_test, sib1_is_carried_by_the_beam_of_its_ssb)
+{
+  // A beam other than the first one, so that the assertions discriminate against a hardcoded default.
+  constexpr beam_identifier test_ssb_beam = static_cast<beam_identifier>(3);
+
+  // One transmitted SS/PBCH block, so that every SIB1 belongs to it.
+  sched_cell_configuration_request_message cell_req = sib1_scheduler_setup::make_cell_cfg_req_for_sib_sched(
+      subcarrier_spacing::kHz15, 9U, 0b1000, 4U, ssb_periodicity::ms10, 20, duplex_mode::FDD);
+  cell_req.ran.ssb_cfg.ssb_beams.reset();
+  cell_req.ran.ssb_cfg.ssb_beams.set_beam(0, test_ssb_beam);
+
+  sib1_scheduler_setup t_bench{sib1_scheduler_setup::make_scheduler_expert_cfg(
+                                   {10, aggregation_level::n4, 10, aggregation_level::n4, sib1_rtx_periodicity::ms10}),
+                               cell_req};
+
+  // Run until the SIB1 of the transmitted block is scheduled.
+  bool is_sib1_scheduled = false;
+  for (unsigned sl_idx = 0; sl_idx != 100 and not is_sib1_scheduled; ++sl_idx) {
+    t_bench.run_slot();
+
+    const auto& sibs = t_bench.res_grid[0].result.dl.bc.sibs;
+    if (sibs.empty()) {
+      continue;
+    }
+    is_sib1_scheduled = true;
+
+    ASSERT_EQ(test_ssb_beam, std::get<beam_identifier>(sibs.back().pdsch_cfg.precoding_and_beamforming));
+
+    const auto& pdcchs = t_bench.res_grid[0].result.dl.dl_pdcchs;
+    const auto* pdcch  = std::find_if(
+        pdcchs.begin(), pdcchs.end(), [](const auto& pdcch_) { return pdcch_.ctx.rnti == rnti_t::SI_RNTI; });
+    ASSERT_NE(pdcch, pdcchs.end());
+    ASSERT_EQ(test_ssb_beam, std::get<beam_identifier>(pdcch->ctx.precoding_and_beamforming));
+  }
+
+  ASSERT_TRUE(is_sib1_scheduled) << "the SIB1 was never scheduled";
 }
 
 class sib1_tdd_partial_slot_test : public ::testing::TestWithParam<sib1_tdd_partial_slot_test_params>

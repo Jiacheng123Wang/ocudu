@@ -20,6 +20,7 @@
 #include "ocudu/asn1/rrc_nr/ul_ccch_msg.h"
 #include "ocudu/ran/rb_id.h"
 #include "ocudu/support/ocudu_assert.h"
+#include <algorithm>
 #include <chrono>
 
 using namespace ocudu;
@@ -239,7 +240,8 @@ void rrc_ue_impl::handle_pdu(const srb_id_t srb_id, byte_buffer rrc_pdu, bool in
   {
     asn1::cbit_ref bref(rrc_pdu);
     if (ul_dcch_msg.unpack(bref) != asn1::OCUDUASN_SUCCESS or
-        ul_dcch_msg.msg.type().value != ul_dcch_msg_type_c::types_opts::c1) {
+        (ul_dcch_msg.msg.type().value != ul_dcch_msg_type_c::types_opts::c1 and
+         ul_dcch_msg.msg.type().value != ul_dcch_msg_type_c::types_opts::msg_class_ext)) {
       logger.log_error(rrc_pdu.begin(), rrc_pdu.end(), "Failed to unpack DCCH UL PDU");
       return;
     }
@@ -259,6 +261,11 @@ void rrc_ue_impl::handle_pdu(const srb_id_t srb_id, byte_buffer rrc_pdu, bool in
   // AC=+: Message can be sent unciphered after security activation.
   // AC=-: Message should never be sent unciphered after security activation.
   // AC=NA: Message can never bet sent after security activation.
+
+  if (ul_dcch_msg.msg.type().value == ul_dcch_msg_type_c::types_opts::msg_class_ext) {
+    handle_ul_dcch_msg_class_ext(ul_dcch_msg, integrity_verified);
+    return;
+  }
 
   switch (ul_dcch_msg.msg.c1().type().value) {
     case ul_dcch_msg_type_c::c1_c_::types_opts::options::ul_info_transfer:
@@ -324,6 +331,29 @@ void rrc_ue_impl::handle_pdu(const srb_id_t srb_id, byte_buffer rrc_pdu, bool in
   }
 }
 
+void rrc_ue_impl::handle_ul_dcch_msg_class_ext(const asn1::rrc_nr::ul_dcch_msg_s& ul_dcch_msg, bool integrity_verified)
+{
+  if (ul_dcch_msg.msg.msg_class_ext().type().value != ul_dcch_msg_type_c::msg_class_ext_c_::types_opts::c2) {
+    logger.log_error("Unsupported DCCH UL message class extension");
+    return;
+  }
+
+  const auto& c2 = ul_dcch_msg.msg.msg_class_ext().c2();
+  switch (c2.type().value) {
+    case ul_dcch_msg_type_c::msg_class_ext_c_::c2_c_::types_opts::ue_info_resp_r16:
+      // P=- AI=- CI=- (Info: may carry the coarse UE location, so never accepted unprotected.)
+      if (!integrity_verified) {
+        handle_illegal_pdu_integrity(c2.type().to_string(), integrity_verified);
+        return;
+      }
+      handle_rrc_transaction_complete(ul_dcch_msg, c2.ue_info_resp_r16().rrc_transaction_id);
+      break;
+    default:
+      logger.log_error("Unsupported DCCH UL message type");
+      break;
+  }
+}
+
 void rrc_ue_impl::handle_illegal_pdu_integrity(const char* msg, bool integrity_verified)
 {
   logger.log_warning("Requesting UE release. Cause: Illegal PDU integrity={} for msg={}", integrity_verified, msg);
@@ -361,6 +391,7 @@ void rrc_ue_impl::handle_ul_info_transfer(const ul_info_transfer_ies_s& ul_info_
   ul_nas_msg.user_location_info.nr_cgi   = {context.plmn_id, context.cell.cgi.nci};
   ul_nas_msg.user_location_info.tai      = {context.plmn_id, context.cell.tac};
   ul_nas_msg.user_location_info.tac_list = context.cell.tac_list;
+  fill_ue_derived_location(ul_nas_msg.user_location_info);
 
   if (!ngap_notifier.on_ul_nas_transport_message(ul_nas_msg)) {
     logger.log_info(
@@ -373,6 +404,11 @@ void rrc_ue_impl::handle_ul_info_transfer(const ul_info_transfer_ies_s& ul_info_
 
 void rrc_ue_impl::handle_measurement_report(const asn1::rrc_nr::meas_report_s& msg)
 {
+  store_coarse_ue_location(context.coarse_location,
+                           msg.crit_exts.meas_report().meas_results.coarse_location_info_r17,
+                           cu_cp_notifier,
+                           logger);
+
   // Convert asn1 to common type.
   rrc_meas_results meas_results =
       asn1_to_measurement_results(msg.crit_exts.meas_report().meas_results, ocudulog::fetch_basic_logger("RRC"));
@@ -486,6 +522,12 @@ async_task<bool> rrc_ue_impl::handle_security_mode_complete_expected(uint8_t tra
     if (!transaction.has_response()) {
       logger.log_debug("Did not receive RRC Security Mode Complete. Cause: {}",
                        transaction.failure_cause() == protocol_transaction_failure::timeout ? "timeout" : "canceled");
+      CORO_EARLY_RETURN(false);
+    }
+
+    // A UE may answer with any message carrying this transaction id, including one from the message class extension.
+    if (transaction.response().msg.type().value != ul_dcch_msg_type_c::types_opts::c1) {
+      logger.log_warning("Received an unexpected message in place of RRC Security Mode Complete");
       CORO_EARLY_RETURN(false);
     }
 
@@ -811,6 +853,10 @@ async_task<bool> rrc_ue_impl::handle_handover_reconfiguration_complete_expected(
       // The UE in the target cell is in connected state on RRCReconfigurationComplete reception.
       context.state = rrc_state::connected;
 
+      // A handover target serves the UE from a new RRC UE, with no coarse location and no Security Mode Command to
+      // ask for one. Security is already active, which TS 38.300 sec. 16.14.8 gates the request on.
+      request_coarse_ue_location();
+
       // Notify metrics.
       metrics_notifier.on_new_rrc_connection();
 
@@ -888,6 +934,7 @@ rrc_ue_impl::get_rrc_ue_release_context(bool                                    
   release_context.user_location_info.nr_cgi   = {context.plmn_id, context.cell.cgi.nci};
   release_context.user_location_info.tai      = {context.plmn_id, context.cell.tac};
   release_context.user_location_info.tac_list = context.cell.tac_list;
+  fill_ue_derived_location(release_context.user_location_info);
 
   if (requires_rrc_message) {
     if (context.pdcp_manager.get_srb_ids().empty()) {
@@ -987,8 +1034,15 @@ std::optional<rrc_meas_cfg> rrc_ue_impl::generate_meas_config(const std::optiona
       context.cell.cgi.nci, current_meas_config, cond_meas, candidate_pcis);
 
   if (!cond_meas) {
+    // A config carrying only removals leaves the UE without measurement configuration once applied.
+    const bool removal_only = result.has_value() && result.value().meas_obj_to_add_mod_list.empty() &&
+                              result.value().meas_id_to_add_mod_list.empty() &&
+                              result.value().report_cfg_to_add_mod_list.empty();
     // Store regular meas config and derive serving cell MO.
-    context.meas_cfg = result;
+    context.meas_cfg = removal_only ? std::nullopt : result;
+    if (removal_only) {
+      context.serving_cell_mo = std::nullopt;
+    }
     if (context.meas_cfg.has_value()) {
       for (const auto& meas_obj : context.meas_cfg.value().meas_obj_to_add_mod_list) {
         if (meas_obj.meas_obj_nr.has_value() && meas_obj.meas_obj_nr.value().ssb_freq == context.cell.ssb_arfcn) {

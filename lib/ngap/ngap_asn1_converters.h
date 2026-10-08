@@ -216,8 +216,11 @@ cu_cp_user_location_info_to_asn1(const cu_cp_user_location_info_nr& cu_cp_user_l
 {
   asn1::ngap::user_location_info_nr_s asn1_user_location_info;
 
-  // Fill NR CGI.
-  asn1_user_location_info.nr_cgi.nr_cell_id.from_number(cu_cp_user_location_info.nr_cgi.nci.value());
+  // Fill NR CGI. TS 38.300 sec. 16.14.5 has an NTN cell report the Mapped Cell ID of the area holding the UE
+  // in place of its Uu Cell ID. Where none applies the Uu Cell ID stands: every cell outside NTN, and an NTN cell
+  // whose areas name none for the UE position.
+  asn1_user_location_info.nr_cgi.nr_cell_id.from_number(
+      cu_cp_user_location_info.mapped_nci.value_or(cu_cp_user_location_info.nr_cgi.nci).value());
   asn1_user_location_info.nr_cgi.plmn_id = cu_cp_user_location_info.nr_cgi.plmn_id.to_bytes();
   // Fill TAI.
   asn1_user_location_info.tai.plmn_id = cu_cp_user_location_info.tai.plmn_id.to_bytes();
@@ -227,18 +230,30 @@ cu_cp_user_location_info_to_asn1(const cu_cp_user_location_info_nr& cu_cp_user_l
     asn1_user_location_info.time_stamp_present = true;
     asn1_user_location_info.time_stamp.from_number(cu_cp_user_location_info.time_stamp.value());
   }
-  // NR NTN TAI Information, TS 38.413: the TAI above carries one TAC, so report the full broadcast list here. An
-  // AMF reading this IE ignores that TAI; one that does not support it still has it.
-  if (not cu_cp_user_location_info.tac_list.empty()) {
+  // NR NTN TAI Information, TS 38.413 sec. 9.3.3.53: the TAI above carries one TAC, so report every broadcast TAC
+  // here, plus the one derived from the UE location when known. Both are filled: an AMF that reads this IE ignores
+  // the TAI, sec. 9.3.1.16, while an older one skips the IE and uses the TAI. Broadcasting several TACs is optional,
+  // TS 38.300 sec. 16.14.3.1, so a single-TAC cell reports the IE too once a TAC is derived, sec. 16.14.5.
+  if (not cu_cp_user_location_info.tac_list.empty() or cu_cp_user_location_info.ue_location_derived_tac.has_value()) {
     asn1_user_location_info.ie_exts_present                      = true;
     asn1_user_location_info.ie_exts.nr_ntn_tai_info_present      = true;
     asn1_user_location_info.ie_exts.nr_ntn_tai_info.serving_plmn = cu_cp_user_location_info.tai.plmn_id.to_bytes();
-    for (tac_t tac : cu_cp_user_location_info.tac_list) {
+
+    // TS 38.331: a cell broadcasting a single TAC carries it in trackingAreaCode, which the CU-CP keeps in the TAI
+    // alone. The TAC List in NR NTN takes one entry at least, TS 38.413 sec. 9.3.3.53, so report that TAC here.
+    const tac_list_t single_tac{cu_cp_user_location_info.tai.tac};
+    for (tac_t tac : cu_cp_user_location_info.tac_list.empty() ? single_tac : cu_cp_user_location_info.tac_list) {
       asn1::fixed_octstring<3, true> asn1_tac;
       asn1_tac.from_number(tac);
       asn1_user_location_info.ie_exts.nr_ntn_tai_info.tac_list_in_nr_ntn.push_back(asn1_tac);
     }
-    // UE Location Derived TAC needs the coarse UE location, not reported yet.
+
+    // UE Location Derived TAC in NR NTN, TS 38.413 sec. 9.3.3.53: reported only when the UE location is known.
+    if (cu_cp_user_location_info.ue_location_derived_tac.has_value()) {
+      asn1_user_location_info.ie_exts.nr_ntn_tai_info.ue_location_derived_tac_in_nr_ntn_present = true;
+      asn1_user_location_info.ie_exts.nr_ntn_tai_info.ue_location_derived_tac_in_nr_ntn.from_number(
+          cu_cp_user_location_info.ue_location_derived_tac.value());
+    }
   }
 
   return asn1_user_location_info;
@@ -352,6 +367,14 @@ inline bool pdu_session_res_modify_response_item_to_asn1(template_asn1_item& asn
       asn1_item.qos_flow_id = to_underlying(qos_flow.qos_flow_id);
       response_transfer.qos_flow_add_or_modify_resp_list.push_back(asn1_item);
     }
+  }
+
+  // Fill the QoS flows that failed to be added or modified.
+  for (const auto& qos_flow : resp.transfer.qos_flow_failed_to_add_or_modify_list) {
+    asn1::ngap::qos_flow_with_cause_item_s asn1_item;
+    asn1_item.qos_flow_id = to_underlying(qos_flow.qos_flow_id);
+    asn1_item.cause       = cause_to_asn1(qos_flow.cause);
+    response_transfer.qos_flow_failed_to_add_or_modify_list.push_back(asn1_item);
   }
 
   // Pack pdu_session_res_modify_resp_transfer_s.

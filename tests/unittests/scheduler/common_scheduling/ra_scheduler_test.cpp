@@ -8,6 +8,7 @@
 #include "lib/scheduler/ue_context/ue_cell_repository.h"
 #include "lib/scheduler/ue_context/ue_repository.h"
 #include "sub_scheduler_test_environment.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/scheduler/cell_config_builder_profiles.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
 #include "tests/test_doubles/scheduler/scheduler_result_finder.h"
@@ -78,7 +79,8 @@ public:
     ASSERT_NO_FATAL_FAILURE(tracker.on_new_result(res_grid[0].slot, res_grid[0].result));
   }
 
-  void handle_rach_indication(rach_indication_message ind)
+  /// \param occasion_slot_delay Slots between the PRACH occasion and the slot the lower layers report it in.
+  void handle_rach_indication(rach_indication_message ind, unsigned occasion_slot_delay = 0)
   {
     // Advance the simulator to a slot that has a valid PRACH occasion. The ra_scheduler only
     // prereserves MsgA PUSCH for slots whose corresponding PRACH slot is a valid occasion per
@@ -91,8 +93,9 @@ public:
     run_slot_until([this, &prach_mapper]() { return prach_mapper.has_prach_occasion(next_slot_rx()); });
     ind.slot_rx = next_slot_rx();
     if (not ind.occasions.empty()) {
-      // The occasion index tracks the slot_rx just selected above.
-      ind.occasions[0].slot_index = test_helper::compute_prach_occasion_slot_index(cell_cfg, ind.slot_rx);
+      // The lower layers report the t_id of the occasion, which may precede the slot they report it in.
+      ind.occasions[0].slot_index =
+          test_helper::compute_prach_occasion_slot_index(cell_cfg, ind.slot_rx - occasion_slot_delay);
     }
     ra_sch.handle_rach_indication(ind);
     tracker.on_new_rach_ind(ind);
@@ -201,6 +204,7 @@ public:
   ra_scheduler_common_test() :
     ra_scheduler_setup(get_sched_req(GetParam()), GetParam().sched_csi_rs, GetParam().sched_sib1)
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-RACH-16-1", "DU-GEN-2-a");
   }
 
   static sched_cell_configuration_request_message get_sched_req(const test_params& t_params)
@@ -222,17 +226,12 @@ TEST_P(ra_scheduler_common_test, when_no_rach_indication_received_then_no_rar_al
 
 /// \brief The RA-RNTI comes from the reported occasion slot index, not from the indication slot.
 ///
-/// The RAR is only matched if the scheduler and the tracker both take t_id from the occasion.
+/// The lower layers own t_id, as per TS 38.321, Section 5.1.3. The RAR is only matched if the scheduler and the tracker
+/// both take t_id from the occasion.
 TEST_P(ra_scheduler_common_test, when_occasion_slot_index_differs_from_rx_slot_then_ra_rnti_uses_the_occasion)
 {
-  handle_rach_indication(create_rach_indication(1));
-
-  // The t_id is counted in the PRACH subcarrier spacing, so it only differs from the indication slot when that is
-  // coarser than the cell's, which not every configuration under test provides.
-  const slot_point prach_slot_rx = next_slot_rx();
-  if (test_helper::compute_prach_occasion_slot_index(cell_cfg, prach_slot_rx) == prach_slot_rx.slot_index()) {
-    GTEST_SKIP() << "This PRACH configuration counts the t_id in the slot's own numerology, so the two coincide";
-  }
+  // A one subframe shift changes t_id in any numerology, so it never matches the one derived from slot_rx.
+  handle_rach_indication(create_rach_indication(1), get_nof_slots_per_subframe(cell_cfg.scs_common()));
 
   for (unsigned slot_count = 0, max_slot_count = 1000; slot_count < max_slot_count and tracker.nof_msg3_acked() == 0;
        ++slot_count) {
@@ -360,25 +359,98 @@ TEST_P(ra_scheduler_common_test, when_crc_is_ko_then_msg3_retx_is_scheduled)
 }
 
 using tdd_fr1_30khz = tdd_pattern_profile_fr1_30khz;
-INSTANTIATE_TEST_SUITE_P(
-    ra_scheduler,
-    ra_scheduler_common_test,
-    ::testing::Values(
-        // FR1, FDD.
-        test_params{frequency_range::FR1, 2},
-        test_params{frequency_range::FR1, 4},
-        test_params{frequency_range::FR1, 4, std::nullopt, true},
-        // FR1, TDD.
-        test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU)},
-        test_params{frequency_range::FR1, 4, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU)},
-        test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDSU)},
-        test_params{frequency_range::FR1, 1, create_tdd_pattern(tdd_fr1_30khz::DSUU)},
-        test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU), true},
-        test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU), true, true},
-        test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_pattern_profile_fr1_30khz::DDDSU), true, true},
-        // FR2, TDD.
-        test_params{frequency_range::FR2, 1, create_tdd_pattern(tdd_pattern_profile_fr2_120khz::DDDSU)},
-        test_params{frequency_range::FR2, 1, create_tdd_pattern(tdd_pattern_profile_fr2_120khz::DDDSU), true}));
+
+static std::vector<test_params> get_test_params()
+{
+  return {// FR1, FDD.
+          test_params{frequency_range::FR1, 2},
+          test_params{frequency_range::FR1, 4},
+          test_params{frequency_range::FR1, 4, std::nullopt, true},
+          // FR1, TDD.
+          test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU)},
+          test_params{frequency_range::FR1, 4, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU)},
+          test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDSU)},
+          test_params{frequency_range::FR1, 1, create_tdd_pattern(tdd_fr1_30khz::DSUU)},
+          test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU), true},
+          test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_fr1_30khz::DDDDDDDSUU), true, true},
+          test_params{frequency_range::FR1, 2, create_tdd_pattern(tdd_pattern_profile_fr1_30khz::DDDSU), true, true},
+          // FR2, TDD.
+          test_params{frequency_range::FR2, 1, create_tdd_pattern(tdd_pattern_profile_fr2_120khz::DDDSU)},
+          test_params{frequency_range::FR2, 1, create_tdd_pattern(tdd_pattern_profile_fr2_120khz::DDDSU), true}};
+}
+
+INSTANTIATE_TEST_SUITE_P(ra_scheduler, ra_scheduler_common_test, ::testing::ValuesIn(get_test_params()));
+
+/// RA procedure in an NTN cell, where every DL-signalled UL transmission is delayed by the cell-specific Koffset.
+class ra_scheduler_ntn_test : public ra_scheduler_setup, public ::testing::Test
+{
+public:
+  ra_scheduler_ntn_test() : ra_scheduler_setup(get_sched_req(), false, false) {}
+
+  static sched_cell_configuration_request_message get_sched_req()
+  {
+    sched_cell_configuration_request_message req = sched_config_helper::make_default_sched_cell_configuration_request(
+        create(duplex_mode::FDD, frequency_range::FR1));
+    req.ran.ntn_params.emplace();
+    req.ran.ntn_params->ntn_cfg.cell_specific_koffset = std::chrono::milliseconds{20};
+    return req;
+  }
+};
+
+TEST_F(ra_scheduler_ntn_test, msg3_is_scheduled_the_cell_specific_koffset_after_its_msg3_delay)
+{
+  OCUDU_TEST_REQUIREMENTS("DU-NTN-TIM-4");
+
+  ASSERT_GT(cell_cfg.ntn_cs_koffset, 0U);
+  handle_rach_indication(create_rach_indication(1));
+
+  const rar_information* rar = nullptr;
+  for (unsigned slot_count = 0; slot_count != 100 and rar == nullptr; ++slot_count) {
+    run_slot();
+    if (not res_grid[0].result.dl.rar_grants.empty()) {
+      rar = &res_grid[0].result.dl.rar_grants.front();
+    }
+  }
+  ASSERT_NE(rar, nullptr) << "No RAR was scheduled";
+  ASSERT_EQ(rar->grants.size(), 1U);
+  const rar_ul_grant& grant = rar->grants.front();
+
+  // TS 38.213, Section 8.3: the Msg3 PUSCH is transmitted K2 + delta slots after the RAR, extended by K_offset in NTN.
+  const auto&    ul_bwp     = cell_cfg.params.ul_cfg_common.init_ul_bwp;
+  const unsigned k2         = ul_bwp.pusch_cfg_common->pusch_td_alloc_list[grant.time_resource_assignment].k2;
+  const unsigned msg3_delay = ra_helper::get_msg3_delay(ul_bwp.generic_params.scs, k2);
+
+  const auto has_msg3 = [&grant](const cell_slot_resource_allocator& alloc) {
+    return std::any_of(alloc.result.ul.puschs.begin(), alloc.result.ul.puschs.end(), [&grant](const ul_sched_info& p) {
+      return p.pusch_cfg.rnti == grant.temp_crnti;
+    });
+  };
+  ASSERT_TRUE(has_msg3(res_grid[msg3_delay + cell_cfg.ntn_cs_koffset]))
+      << "Msg3 must be scheduled K_offset slots after the Msg3 delay";
+  ASSERT_FALSE(has_msg3(res_grid[msg3_delay])) << "Msg3 must not be scheduled at the terrestrial Msg3 delay";
+}
+
+TEST_F(ra_scheduler_ntn_test, ra_procedure_completes_with_msg3_retransmissions)
+{
+  OCUDU_TEST_REQUIREMENTS("DU-NTN-TIM-4");
+
+  const unsigned nof_preambles = 2;
+  handle_rach_indication(create_rach_indication(nof_preambles));
+
+  // NACK the first Msg3 transmissions, so that their retransmissions are scheduled over the NTN delay too.
+  for (unsigned slot_count = 0; slot_count != 1000 and tracker.nof_msg3_newtxs() < nof_preambles; ++slot_count) {
+    run_slot();
+    handle_crc_for_pending_puschs(false);
+  }
+  for (unsigned slot_count = 0; slot_count != 1000 and tracker.nof_msg3_acked() < nof_preambles; ++slot_count) {
+    run_slot();
+    handle_crc_for_pending_puschs(true);
+  }
+
+  ASSERT_EQ(tracker.nof_msg3_newtxs(), nof_preambles);
+  ASSERT_GE(tracker.nof_msg3_retxs(), nof_preambles);
+  ASSERT_EQ(tracker.nof_msg3_acked(), nof_preambles);
+}
 
 class ra_scheduler_failed_rar_test : public ra_scheduler_setup, public ::testing::TestWithParam<test_params>
 {
@@ -386,6 +458,7 @@ public:
   ra_scheduler_failed_rar_test() :
     ra_scheduler_setup(get_sched_req(GetParam()), GetParam().sched_csi_rs, GetParam().sched_sib1)
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-RACH-16-1", "DU-GEN-2-a");
   }
 
   static sched_cell_configuration_request_message get_sched_req(const test_params& t_params)
@@ -514,6 +587,7 @@ public:
                                       unsigned             duration_ms   = 40) :
     ra_scheduler_setup(make_sched_cfg(snr_threshold_dB, max_preambles, duration_ms), get_sched_req(), false, false)
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-RACH-16-1", "DU-GEN-2-a");
   }
 
   static scheduler_expert_config
@@ -670,6 +744,208 @@ TEST_F(ra_scheduler_backoff_duration_test, duration_is_mapped_to_table_index)
   EXPECT_EQ(*backoff_rar->backoff_indicator, 6U);
 }
 
+/// Beam that the RA scheduler is expected to map the SS/PBCH block of the test cell onto.
+constexpr beam_identifier test_ssb_beam = static_cast<beam_identifier>(3);
+
+/// Beam that a transmission is mapped onto, or \c beam_identifier::invalid if it is not beamformed.
+static beam_identifier beam_of(const precoding_and_beamforming_info& info)
+{
+  const beam_identifier* beam = std::get_if<beam_identifier>(&info);
+  return beam != nullptr ? *beam : beam_identifier::invalid;
+}
+
+/// \brief Test suite for the beam that the RA procedure maps its downlink transmissions onto.
+///
+/// The cell transmits a single SS/PBCH block on \c test_ssb_beam, so that every PRACH occasion is associated with it
+/// and every RA transmission is expected to be carried by that beam.
+class ra_scheduler_beam_test : public ra_scheduler_setup, public ::testing::Test
+{
+public:
+  ra_scheduler_beam_test() : ra_scheduler_setup(make_beam_req(), /*sched_csi=*/false, /*sched_sib1=*/false)
+  {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MIMO-16-12");
+  }
+
+  static sched_cell_configuration_request_message make_beam_req()
+  {
+    cell_config_builder_params builder_params = create(duplex_mode::FDD, frequency_range::FR1);
+    builder_params.min_k1                     = 2;
+    builder_params.min_k2                     = 2;
+    auto  req     = sched_config_helper::make_default_sched_cell_configuration_request(builder_params);
+    auto& ssb_cfg = req.ran.ssb_cfg;
+    // A beam other than the first one, so that the assertions discriminate against a hardcoded default.
+    ssb_cfg.ssb_beams.reset();
+    ssb_cfg.ssb_beams.set_beam(0, test_ssb_beam);
+    return req;
+  }
+};
+
+/// Verifies that the RAR PDSCH and its PDCCH are carried by the beam of the SS/PBCH block that the UE reached the
+/// cell on.
+TEST_F(ra_scheduler_beam_test, rar_pdsch_and_pdcch_use_the_beam_of_the_ssb)
+{
+  handle_rach_indication(create_rach_indication(1));
+
+  const rar_information* rar   = nullptr;
+  bool                   found = run_slot_until([&]() {
+    if (res_grid[0].result.dl.rar_grants.empty()) {
+      return false;
+    }
+    rar = &res_grid[0].result.dl.rar_grants.front();
+    return true;
+  });
+
+  ASSERT_TRUE(found) << "No RAR was scheduled";
+  ASSERT_EQ(beam_of(rar->pdsch_cfg.precoding_and_beamforming), test_ssb_beam);
+  ASSERT_EQ(res_grid[0].result.dl.dl_pdcchs.size(), 1);
+  ASSERT_EQ(beam_of(res_grid[0].result.dl.dl_pdcchs.front().ctx.precoding_and_beamforming), test_ssb_beam);
+}
+
+/// Verifies that the PDCCH scheduling a Msg3 retransmission is carried by the beam of the SS/PBCH block, so that the
+/// UE can receive its retransmission grant.
+TEST_F(ra_scheduler_beam_test, msg3_retx_pdcch_uses_the_beam_of_the_ssb)
+{
+  handle_rach_indication(create_rach_indication(1));
+
+  // Drive the Msg3 to a NACK, which triggers a retransmission scheduled over an uplink DCI.
+  for (unsigned i = 0, max_slots = 1000; i != max_slots and tracker.nof_msg3_retxs() == 0; ++i) {
+    run_slot();
+    handle_crc_for_pending_puschs(false);
+    if (not res_grid[0].result.dl.ul_pdcchs.empty()) {
+      ASSERT_EQ(beam_of(res_grid[0].result.dl.ul_pdcchs.front().ctx.precoding_and_beamforming), test_ssb_beam);
+    }
+  }
+
+  ASSERT_GE(tracker.nof_msg3_retxs(), 1) << "No Msg3 retransmission was scheduled";
+}
+
+/// \brief Test suite for the beam selection across several SS/PBCH blocks.
+///
+/// The cell transmits two SS/PBCH blocks, each on its own beam. The association of TS 38.213, Section 8.1 alternates
+/// them over consecutive PRACH occasions, so RARs answering different occasions are expected to use different beams.
+class ra_scheduler_multi_beam_test : public ra_scheduler_setup, public ::testing::Test
+{
+public:
+  static constexpr beam_identifier first_beam  = static_cast<beam_identifier>(1);
+  static constexpr beam_identifier second_beam = static_cast<beam_identifier>(2);
+
+  ra_scheduler_multi_beam_test() : ra_scheduler_setup(make_multi_beam_req(), /*sched_csi=*/false, /*sched_sib1=*/false)
+  {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MIMO-16-12");
+  }
+
+  static sched_cell_configuration_request_message make_multi_beam_req()
+  {
+    cell_config_builder_params builder_params = create(duplex_mode::FDD, frequency_range::FR1);
+    builder_params.min_k1                     = 2;
+    builder_params.min_k2                     = 2;
+    auto  req     = sched_config_helper::make_default_sched_cell_configuration_request(builder_params);
+    auto& ssb_cfg = req.ran.ssb_cfg;
+    ssb_cfg.ssb_beams.reset();
+    ssb_cfg.ssb_beams.set_beam(0, first_beam);
+    ssb_cfg.ssb_beams.set_beam(1, second_beam);
+    return req;
+  }
+};
+
+/// Verifies that RARs answering different PRACH occasions are carried by the beams of the different SS/PBCH blocks
+/// those occasions are associated with.
+///
+/// The assertion is on the set of beams observed rather than on the beam of a given occasion: the association order
+/// is the subject of \c ssb_to_ro_mapping_test, and recomputing it here would pass even against a constant beam.
+TEST_F(ra_scheduler_multi_beam_test, rars_of_different_occasions_use_different_beams)
+{
+  // Each attempt drains less than one system frame, so that the next indication lands on the PRACH occasion right
+  // after the previous one. Draining a whole number of frames would keep hitting the same point of the association
+  // period and observe a single SS/PBCH block.
+  static constexpr unsigned nof_slots_drained = 8;
+
+  std::set<unsigned> observed_beams;
+  for (unsigned attempt = 0; attempt != 6 and observed_beams.size() < 2; ++attempt) {
+    handle_rach_indication(create_rach_indication(1));
+
+    for (unsigned i = 0; i != nof_slots_drained and observed_beams.size() < 2; ++i) {
+      run_slot();
+      for (const rar_information& rar : res_grid[0].result.dl.rar_grants) {
+        const beam_identifier beam = beam_of(rar.pdsch_cfg.precoding_and_beamforming);
+        ASSERT_NE(beam, beam_identifier::invalid);
+        observed_beams.emplace(to_underlying(beam));
+      }
+    }
+  }
+
+  ASSERT_EQ(observed_beams, (std::set<unsigned>{to_underlying(first_beam), to_underlying(second_beam)}))
+      << "The RARs must be carried by the beams of the SS/PBCH blocks their occasions map onto";
+}
+
+/// \brief Test suite for the beam of a RAR that carries only a Backoff Indicator.
+///
+/// Reuses the two SS/PBCH block cell, and configures an SNR threshold that drops every detected preamble, so the RAR
+/// carries no RAPID subheader and its beam cannot be inferred from a granted UE.
+class ra_scheduler_backoff_only_beam_test : public ra_scheduler_setup, public ::testing::Test
+{
+public:
+  static constexpr beam_identifier first_beam  = ra_scheduler_multi_beam_test::first_beam;
+  static constexpr beam_identifier second_beam = ra_scheduler_multi_beam_test::second_beam;
+
+  ra_scheduler_backoff_only_beam_test() :
+    ra_scheduler_setup(make_sched_cfg(),
+                       ra_scheduler_multi_beam_test::make_multi_beam_req(),
+                       /*sched_csi=*/false,
+                       /*sched_sib1=*/false)
+  {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MIMO-16-12");
+  }
+
+  static scheduler_expert_config make_sched_cfg()
+  {
+    scheduler_expert_config cfg               = config_helpers::make_default_scheduler_expert_config();
+    cfg.ra.backoff_indicator_snr_threshold_dB = -5.0F;
+    return cfg;
+  }
+
+  /// Creates a PRACH occasion whose single preamble is below the SNR threshold.
+  rach_indication_message create_weak_rach_indication()
+  {
+    rach_indication_message::preamble weak = create_random_preamble();
+    weak.snr_dB                            = -10.0F;
+    return test_helper::create_rach_indication(cell_cfg, next_slot_rx(), {weak});
+  }
+};
+
+/// Verifies that a RAR carrying only a Backoff Indicator is beamformed towards the SS/PBCH block of its PRACH
+/// occasion, so that the UEs told to back off can receive it.
+///
+/// The beam cannot be taken from a granted UE here, so a RAR that ignored the occasion association would fall back to
+/// the first SS/PBCH block and only ever be seen on \c first_beam.
+TEST_F(ra_scheduler_backoff_only_beam_test, backoff_only_rars_use_the_beams_of_their_occasions)
+{
+  // Each attempt drains less than one system frame, so that the next indication lands on the PRACH occasion right
+  // after the previous one. Draining a whole number of frames would keep hitting the same point of the association
+  // period and observe a single SS/PBCH block.
+  static constexpr unsigned nof_slots_drained = 8;
+
+  std::set<unsigned> observed_beams;
+  for (unsigned attempt = 0; attempt != 6 and observed_beams.size() < 2; ++attempt) {
+    handle_rach_indication(create_weak_rach_indication());
+
+    for (unsigned i = 0; i != nof_slots_drained and observed_beams.size() < 2; ++i) {
+      run_slot();
+      for (const rar_information& rar : res_grid[0].result.dl.rar_grants) {
+        ASSERT_TRUE(rar.backoff_indicator.has_value());
+        ASSERT_TRUE(rar.grants.empty());
+        const beam_identifier beam = beam_of(rar.pdsch_cfg.precoding_and_beamforming);
+        ASSERT_NE(beam, beam_identifier::invalid);
+        observed_beams.emplace(to_underlying(beam));
+      }
+    }
+  }
+
+  ASSERT_EQ(observed_beams, (std::set<unsigned>{to_underlying(first_beam), to_underlying(second_beam)}))
+      << "The backoff-only RARs must be carried by the beams of the SS/PBCH blocks their occasions map onto";
+  ASSERT_EQ(tracker.nof_msg3_newtxs(), 0U) << "No preamble should have been granted a Msg3";
+}
+
 struct two_step_test_params {
   /// MsgA PUSCH TD offset.
   uint8_t                                td_offset;
@@ -694,6 +970,7 @@ public:
   ra_scheduler_two_step_rach_test() :
     ra_scheduler_setup(make_two_step_rach_req(GetParam()), /*sched_csi=*/false, /*sched_sib1=*/false)
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-RACH-16-2", "DU-GEN-2-a");
   }
 
   static sched_cell_configuration_request_message make_two_step_rach_req(const two_step_test_params& params)
@@ -703,7 +980,10 @@ public:
     builder_params.min_k1               = 2;
     builder_params.min_k2               = 2;
     builder_params.tdd_ul_dl_cfg_common = params.tdd_cfg;
-    auto  req  = sched_config_helper::make_default_sched_cell_configuration_request(builder_params);
+    auto req = sched_config_helper::make_default_sched_cell_configuration_request(builder_params);
+    // A beam other than the first one, so that the assertions discriminate against a hardcoded default.
+    req.ran.ssb_cfg.ssb_beams.reset();
+    req.ran.ssb_cfg.ssb_beams.set_beam(0, test_ssb_beam);
     auto& rach = *req.ran.ul_cfg_common.init_ul_bwp.rach_cfg_common;
     // Reserve preamble IDs [60, 64) for 2-step CB RACH.
     rach.nof_cb_preambles_per_ssb = MSGA_PREAMBLE_OFFSET;
@@ -849,6 +1129,24 @@ TEST_P(ra_scheduler_two_step_rach_test, when_msga_crc_ok_then_msgb_with_success_
   ASSERT_EQ(tracker.nof_msg3_newtxs(), 0) << "SuccessRAR must not allocate a Msg3 PUSCH";
 }
 
+/// Verifies that the MsgB PDSCH and its PDCCH are carried by the beam of the SS/PBCH block that the UE reached the
+/// cell on, the way the 4-step RAR is.
+TEST_P(ra_scheduler_two_step_rach_test, msgb_pdsch_and_pdcch_use_the_beam_of_the_ssb)
+{
+  const rnti_t tc_rnti = to_rnti(to_underlying(rnti_t::MIN_CRNTI));
+  send_msga_rach({make_msga_preamble(0, tc_rnti)});
+
+  ASSERT_TRUE(run_slot_until([this]() { return not res_grid[0].result.ul.puschs.empty(); }));
+  send_msga_crc(0, true);
+
+  ASSERT_TRUE(run_slot_until([this]() { return not res_grid[0].result.dl.rar_grants.empty(); }));
+
+  ASSERT_EQ(beam_of(res_grid[0].result.dl.rar_grants.front().pdsch_cfg.precoding_and_beamforming), test_ssb_beam);
+
+  ASSERT_EQ(res_grid[0].result.dl.dl_pdcchs.size(), 1);
+  ASSERT_EQ(beam_of(res_grid[0].result.dl.dl_pdcchs.front().ctx.precoding_and_beamforming), test_ssb_beam);
+}
+
 /// When MsgA PUSCH decoding fails (CRC=KO), the scheduler must respond with a FallbackRAR and allocate a
 /// Msg3 PUSCH for the UE to fall back to the 4-step procedure.
 TEST_P(ra_scheduler_two_step_rach_test, when_msga_crc_ko_then_fallback_rar_and_msg3_scheduled)
@@ -984,6 +1282,8 @@ class ra_scheduler_cfra_test : public ra_scheduler_setup, public ::testing::Test
 public:
   ra_scheduler_cfra_test() : ra_scheduler_setup(make_cfra_sched_req(), false, false)
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-RACH-16-1", "DU-GEN-2-b");
+
     // The RA scheduler classifies a CRC as a CFRA Msg3 by looking the C-RNTI up in the cell UE repository, so the
     // CFRA UE must be registered there.
     auto ue_req                    = sched_config_helper::create_default_sched_ue_creation_request(cell_cfg.params);
@@ -1061,6 +1361,8 @@ public:
   ra_scheduler_cfra_uci_on_msg3_test() :
     ra_scheduler_setup(make_expert_cfg(GetParam()), make_cfra_sched_req(), false, false)
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-RACH-16-1", "DU-GEN-2-b");
+
     auto ue_req                    = sched_config_helper::create_default_sched_ue_creation_request(cell_cfg.params);
     ue_req.ue_index                = cfra_ue_index;
     ue_req.crnti                   = cfra_crnti;

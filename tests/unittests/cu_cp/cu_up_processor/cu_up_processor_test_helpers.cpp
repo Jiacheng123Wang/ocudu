@@ -5,6 +5,7 @@
 #include "cu_up_processor_test_helpers.h"
 #include "lib/cu_cp/cu_up_processor/cu_up_processor_config.h"
 #include "lib/cu_cp/cu_up_processor/cu_up_processor_factory.h"
+#include "tests/ocudu_test_requirements.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/cu_cp/cu_cp_configuration_helpers.h"
 
@@ -44,6 +45,8 @@ cu_up_processor_test::cu_up_processor_test() :
   }()),
   common_task_sched(std::make_unique<dummy_task_sched>())
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-11");
+
   test_logger.set_level(ocudulog::basic_levels::debug);
   cu_cp_logger.set_level(ocudulog::basic_levels::debug);
   ocudulog::init();

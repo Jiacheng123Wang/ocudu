@@ -6,6 +6,7 @@
 #include "apps/services/worker_manager/worker_manager_config.h"
 #include "ru_sdr_config.h"
 #include "ocudu/adt/format.h"
+#include "ocudu/ran/antenna_topology.h"
 #include "ocudu/ran/band_helper.h"
 #include <sstream>
 
@@ -22,6 +23,7 @@ static lower_phy_configuration generate_lower_phy_config(const flexible_o_du_ru_
   // Static configuration that the gnb supports.
   static constexpr cyclic_prefix cp = cyclic_prefix::NORMAL;
 
+  // Calculate channel bandwidth in subcarriers.
   const unsigned bandwidth_sc =
       NOF_SUBCARRIERS_PER_RB * band_helper::get_n_rbs_from_bw(config.bw, config.scs, config.freq_range);
 
@@ -33,7 +35,7 @@ static lower_phy_configuration generate_lower_phy_config(const flexible_o_du_ru_
   out_cfg.bandwidth_rb               = band_helper::get_n_rbs_from_bw(config.bw, config.scs, config.freq_range);
   out_cfg.dl_freq_hz                 = band_helper::nr_arfcn_to_freq(config.dl_arfcn);
   out_cfg.ul_freq_hz                 = band_helper::nr_arfcn_to_freq(config.ul_arfcn);
-  out_cfg.nof_tx_ports               = config.nof_tx_antennas;
+  out_cfg.tx_ant_topology            = config.tx_ant_topology;
   out_cfg.nof_rx_ports               = config.nof_rx_antennas;
   out_cfg.dft_window_offset          = 0.5F;
   out_cfg.dft_processor_type         = dft_processor_type;

@@ -90,6 +90,7 @@ public:
   std::vector<rrc_plmn_ran_area_cell_t> get_ran_area_cells() override;
 
   void store_cell_info_db(const std::map<nr_cell_global_id_t, rrc_cell_info>& cell_infos) override;
+  void remove_cell_info(const nr_cell_global_id_t& cgi) override;
 
   std::optional<std::chrono::system_clock::time_point> get_ref_time_r16(const byte_buffer& encoded,
                                                                         bool               is_local_clock) override;
@@ -146,8 +147,8 @@ private:
 
   // RRC-internal user database indexed by ue_index.
   std::unordered_map<cu_cp_ue_index_t, std::unique_ptr<rrc_ue_impl>> ue_db;
-  // Cell database to store cell information from the DU.
-  std::map<nr_cell_identity, rrc_cell_info> cell_info_db;
+  // Cell database to store cell information from the DU. Keyed by NR-CGI, as the NCI is only unique within a PLMN.
+  std::map<nr_cell_global_id_t, rrc_cell_info> cell_info_db;
 
   // Metrics aggregator.
   rrc_du_metrics_aggregator metrics_aggregator;

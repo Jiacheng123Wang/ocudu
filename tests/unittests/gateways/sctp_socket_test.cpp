@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "sctp_test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "ocudu/gateways/sctp_socket.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include <arpa/inet.h>
@@ -526,6 +527,7 @@ TEST_F(sctp_socket_test, connectx_fails_with_empty_list)
 /// Test bindx with multiple IPv4 loopback addresses.
 TEST_F(sctp_socket_test, bindx_with_multiple_ipv4_addresses)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-4");
   // The test verifies all three addresses are in the socket's local address list: the usrsctp shim on macOS cannot
   // bind (nor associate) distinct local addresses, see OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS.
   OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
@@ -560,6 +562,7 @@ TEST_F(sctp_socket_test, bindx_with_multiple_ipv4_addresses)
 /// Test bindx with mixed IPv4 and IPv6 addresses.
 TEST_F(sctp_socket_test, bindx_with_mixed_ipv4_and_ipv6_addresses)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-4");
   OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
 
   sctp_socket_params params = create_default_params();
@@ -592,6 +595,7 @@ TEST_F(sctp_socket_test, bindx_with_mixed_ipv4_and_ipv6_addresses)
 /// Test connectx with multiple IPv4 loopback addresses.
 TEST_F(sctp_socket_test, connectx_with_multiple_ipv4_addresses)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-4");
   OCUDU_SKIP_IF_NO_SCTP_CONNECTX();
 
   // Create and bind server socket
@@ -646,6 +650,7 @@ TEST_F(sctp_socket_test, connectx_with_multiple_ipv4_addresses)
 /// Test connectx with mixed IPv4 and IPv6 addresses.
 TEST_F(sctp_socket_test, connectx_with_mixed_ipv4_and_ipv6_addresses)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-4");
   OCUDU_SKIP_IF_NO_SCTP_CONNECTX();
 
   // Create and bind server socket
@@ -709,6 +714,7 @@ TEST_F(sctp_socket_test, connectx_with_mixed_ipv4_and_ipv6_addresses)
 /// Test connectx with different number of addresses on server and client.
 TEST_F(sctp_socket_test, connectx_with_different_address_counts)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-4");
   OCUDU_SKIP_IF_NO_SCTP_CONNECTX();
 
   // Create and bind server socket with 2 addresses

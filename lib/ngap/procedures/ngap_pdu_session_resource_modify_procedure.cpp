@@ -75,7 +75,15 @@ void ngap_pdu_session_resource_modify_procedure::operator()(coro_context<async_t
 void ngap_pdu_session_resource_modify_procedure::combine_pdu_session_resource_modify_response()
 {
   for (const auto& modify_item : verification_outcome.response.pdu_session_res_modify_list) {
-    response.pdu_session_res_modify_list.emplace(modify_item.pdu_session_id, modify_item);
+    if (not response.pdu_session_res_modify_list.contains(modify_item.pdu_session_id)) {
+      response.pdu_session_res_modify_list.emplace(modify_item.pdu_session_id, modify_item);
+      continue;
+    }
+    // Report the QoS flows that failed the verification next to the QoS flows that were added or modified.
+    auto& transfer = response.pdu_session_res_modify_list[modify_item.pdu_session_id].transfer;
+    for (const auto& failed_qos_flow : modify_item.transfer.qos_flow_failed_to_add_or_modify_list) {
+      transfer.qos_flow_failed_to_add_or_modify_list.emplace(failed_qos_flow.qos_flow_id, failed_qos_flow);
+    }
   }
   for (const auto& failed_item : verification_outcome.response.pdu_session_res_failed_to_modify_list) {
     response.pdu_session_res_failed_to_modify_list.emplace(failed_item.pdu_session_id, failed_item);

@@ -33,9 +33,12 @@ rrc_du_impl::get_cell_info(const std::vector<cu_cp_du_served_cells_item>& served
 {
   std::map<nr_cell_global_id_t, rrc_cell_info> cell_info_map;
   for (const auto& served_cell : served_cell_list) {
+    const nr_cell_identity nci = served_cell.served_cell_info.nr_cgi.nci;
     if (!served_cell.gnb_du_sys_info.has_value()) {
-      logger.error("Missing gnb_du_sys_info for served cell");
-      return {};
+      // Note that "For NG-RAN, the gNB-DU shall include the gNB-DU System Information IE and the TAI Slice Support
+      // List IE in the F1 SETUP REQUEST message.", see TS 38.473 section 8.2.3.2.
+      logger.error("nci={}: Missing gnb_du_sys_info for served cell", nci);
+      continue;
     }
 
     rrc_cell_info cell_info;
@@ -55,15 +58,15 @@ rrc_du_impl::get_cell_info(const std::vector<cu_cp_du_served_cells_item>& served
     asn1::cbit_ref                  bref_meas{served_cell.served_cell_info.meas_timing_cfg};
     asn1::rrc_nr::meas_timing_cfg_s asn1_meas_timing_cfg;
     if (asn1_meas_timing_cfg.unpack(bref_meas) != asn1::OCUDUASN_SUCCESS) {
-      logger.error("Failed to unpack Measurement Timing Config container");
-      return {};
+      logger.error("nci={}: Failed to unpack Measurement Timing Config container", nci);
+      continue;
     }
     if (asn1_meas_timing_cfg.crit_exts.type() != meas_timing_cfg_s::crit_exts_c_::types_opts::c1 ||
         asn1_meas_timing_cfg.crit_exts.c1().type() !=
             meas_timing_cfg_s::crit_exts_c_::c1_c_::types_opts::meas_timing_conf ||
         asn1_meas_timing_cfg.crit_exts.c1().meas_timing_conf().meas_timing.size() == 0) {
-      logger.error("Invalid Measurement Timing Config container");
-      return {};
+      logger.error("nci={}: Invalid Measurement Timing Config container", nci);
+      continue;
     }
 
     for (const auto& asn1_meas_timing : asn1_meas_timing_cfg.crit_exts.c1().meas_timing_conf().meas_timing) {
@@ -75,23 +78,16 @@ rrc_du_impl::get_cell_info(const std::vector<cu_cp_du_served_cells_item>& served
 
     // At least one measurement timing config entry with freq_and_timing must be present.
     if (cell_info.meas_timings.empty()) {
-      logger.error("No Measurement Timing Config contained freq_and_timing entry");
-      return {};
-    }
-
-    if (!served_cell.gnb_du_sys_info.has_value()) {
-      // Note that "For NG-RAN, the gNB-DU shall include the gNB-DU System Information IE and the TAI Slice Support List
-      // IE in the F1 SETUP REQUEST message.", see TS 38.473 sectuion 8.2.3.2.
-      logger.error("Missing gnb_du_sys_info for served cell");
-      return {};
+      logger.error("nci={}: No Measurement Timing Config contained freq_and_timing entry", nci);
+      continue;
     }
 
     // Unpack SIB1 to store timers.
     asn1::rrc_nr::sib1_s sib1_msg;
     asn1::cbit_ref       bref2(served_cell.gnb_du_sys_info.value().sib1_msg);
     if (sib1_msg.unpack(bref2) != asn1::OCUDUASN_SUCCESS) {
-      logger.error("Failed to unpack SIB1");
-      return {};
+      logger.error("nci={}: Failed to unpack SIB1", nci);
+      continue;
     }
     cell_info.timers.t300 = std::chrono::milliseconds{sib1_msg.ue_timers_and_consts.t300.to_number()};
     cell_info.timers.t301 = std::chrono::milliseconds{sib1_msg.ue_timers_and_consts.t301.to_number()};
@@ -108,33 +104,44 @@ rrc_du_impl::get_cell_info(const std::vector<cu_cp_du_served_cells_item>& served
     // defined as b1+b2+…+b(n-1)+i for the PLMN included at the n-th entry of PLMN-IdentityInfoList and the i-th entry
     // of its corresponding PLMN-IdentityInfo, where b(j) is the number of PLMN-Identity entries in each
     // PLMN-IdentityInfo, respectively.
+    bool valid_plmns = true;
     for (const auto& plmn_id_info : sib1_msg.cell_access_related_info.plmn_id_info_list) {
       for (const auto& plmn_info : plmn_id_info.plmn_id_list) {
         if (plmn_info.mcc_present) {
           expected<mobile_country_code> mcc = mobile_country_code::from_bytes(plmn_info.mcc);
           if (!mcc.has_value()) {
-            logger.error("Invalid MCC in SIB1 RRC container");
-            return {};
+            logger.error("nci={}: Invalid MCC in SIB1 RRC container", nci);
+            valid_plmns = false;
+            break;
           }
           expected<mobile_network_code> mnc = mobile_network_code::from_bytes(plmn_info.mnc);
           if (!mnc.has_value()) {
-            logger.error("Invalid MNC in SIB1 RRC container");
-            return {};
+            logger.error("nci={}: Invalid MNC in SIB1 RRC container", nci);
+            valid_plmns = false;
+            break;
           }
           logger.debug("Found PLMN identity {} in SIB1 RRC container", plmn_identity(mcc.value(), mnc.value()));
           cell_info.plmn_identity_list.emplace_back(mcc.value(), mnc.value());
         }
       }
+      if (!valid_plmns) {
+        break;
+      }
+    }
+    if (!valid_plmns) {
+      continue;
     }
 
     if (cell_info.plmn_identity_list.empty()) {
-      logger.error("No PLMN identities found in SIB1 RRC container");
-      return {};
+      logger.error("nci={}: No PLMN identities found in SIB1 RRC container", nci);
+      continue;
     }
 
     if (cell_info.plmn_identity_list.size() > 12U) {
-      logger.error("Too many PLMN identities found in SIB1 RRC container ({}>12)", cell_info.plmn_identity_list.size());
-      return {};
+      logger.error("nci={}: Too many PLMN identities found in SIB1 RRC container ({}>12)",
+                   nci,
+                   cell_info.plmn_identity_list.size());
+      continue;
     }
 
     cell_info_map.emplace(served_cell.served_cell_info.nr_cgi, cell_info);
@@ -147,9 +154,9 @@ std::vector<rrc_plmn_ran_area_cell_t> rrc_du_impl::get_ran_area_cells()
 {
   // Map PLMN IDs to their cells.
   std::map<plmn_identity, std::vector<nr_cell_identity>> plmn_to_cells;
-  for (const auto& [cell_id, cell_info] : cell_info_db) {
+  for (const auto& [cgi, cell_info] : cell_info_db) {
     for (const auto& plmn : cell_info.plmn_identity_list) {
-      plmn_to_cells[plmn].push_back(cell_id);
+      plmn_to_cells[plmn].push_back(cgi.nci);
     }
   }
 
@@ -168,8 +175,13 @@ std::vector<rrc_plmn_ran_area_cell_t> rrc_du_impl::get_ran_area_cells()
 void rrc_du_impl::store_cell_info_db(const std::map<nr_cell_global_id_t, rrc_cell_info>& cell_infos)
 {
   for (const auto& [cgi, cell_info] : cell_infos) {
-    cell_info_db.emplace(cgi.nci, cell_info);
+    cell_info_db.insert_or_assign(cgi, cell_info);
   }
+}
+
+void rrc_du_impl::remove_cell_info(const nr_cell_global_id_t& cgi)
+{
+  cell_info_db.erase(cgi);
 }
 
 std::optional<std::chrono::system_clock::time_point> rrc_du_impl::get_ref_time_r16(const byte_buffer& encoded,
@@ -344,7 +356,7 @@ rrc_ue_interface* rrc_du_impl::add_ue(const rrc_ue_creation_message& msg)
   ue_cfg.force_reestablishment_fallback = cfg.force_reestablishment_fallback;
   ue_cfg.force_resume_fallback          = cfg.force_resume_fallback;
   ue_cfg.rrc_procedure_guard_time_ms    = cfg.rrc_procedure_guard_time_ms;
-  ue_cfg.meas_timings                   = cell_info_db.at(msg.cell.cgi.nci).meas_timings;
+  ue_cfg.meas_timings                   = cell_info_db.at(msg.cell.cgi).meas_timings;
   ue_cfg.rrc_reject_wait_time           = cfg.rrc_reject_wait_time;
 
   // Copy RRC cell and add SSB ARFCN.
@@ -355,8 +367,8 @@ rrc_ue_interface* rrc_du_impl::add_ue(const rrc_ue_creation_message& msg)
   }
   rrc_cell_context rrc_cell   = msg.cell;
   rrc_cell.ssb_arfcn          = ue_cfg.meas_timings.front().freq_and_timing.value().carrier_freq;
-  rrc_cell.timers             = cell_info_db.at(msg.cell.cgi.nci).timers;
-  rrc_cell.plmn_identity_list = cell_info_db.at(msg.cell.cgi.nci).plmn_identity_list;
+  rrc_cell.timers             = cell_info_db.at(msg.cell.cgi).timers;
+  rrc_cell.plmn_identity_list = cell_info_db.at(msg.cell.cgi).plmn_identity_list;
 
   // Add RRC UE to RRC DU adapter.
   rrc_ue_rrc_du_adapters.emplace(ue_index, rrc_ue_rrc_du_adapter{get_rrc_du_connection_event_handler()});

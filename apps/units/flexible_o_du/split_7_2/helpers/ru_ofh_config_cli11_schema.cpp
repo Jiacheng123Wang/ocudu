@@ -13,6 +13,34 @@
 
 using namespace ocudu;
 
+static void configure_cli11_ru_ofh_beamforming_args(CLI::App& app, std::optional<ru_ofh_beamforming_config>& config)
+{
+  // Parse into a separate buffer. The current value might be inherited from the base cell beamforming configuration,
+  // while the schema allows the cell to define its own params.
+  auto bf_cfg = std::make_shared<ru_ofh_beamforming_config>(config.value_or(ru_ofh_beamforming_config{}));
+
+  CLI::App* bf_subcmd =
+      add_subcommand(app, "beamforming", "Downlink beamforming (Category B) configuration. Omit it for Category A");
+  add_option(*bf_subcmd, "--bfw_compr_method", bf_cfg->compression_method, "Beamforming weights compression method")
+      ->capture_default_str()
+      ->check(CLI::IsMember({"none", "bfp"}));
+  add_option(
+      *bf_subcmd, "--bfw_compr_bitwidth", bf_cfg->compression_bitwidth, "Beamforming weights compression bit width")
+      ->capture_default_str()
+      ->range(1, 16);
+
+  bf_subcmd->parse_complete_callback([&config, bf_subcmd, bf_cfg]() {
+    if (bf_subcmd->count() == 0) {
+      return;
+    }
+    if (bf_subcmd->count("--bfw_compr_method") != bf_subcmd->count("--bfw_compr_bitwidth")) {
+      report_error("Invalid Open Fronthaul Radio Unit configuration detected: both compression method and compression "
+                   "bitwidth must be specified for the beamforming weights\n");
+    }
+    config.emplace(*bf_cfg);
+  });
+}
+
 static void configure_cli11_ru_ofh_base_cell_args(CLI::App& app, ru_ofh_unit_base_cell_config& config)
 {
   add_option_function<std::string>(
@@ -265,6 +293,8 @@ static void configure_cli11_ru_ofh_base_cell_args(CLI::App& app, ru_ofh_unit_bas
       ->capture_default_str()
       ->check(cplane_prach_fft_size_check);
 
+  configure_cli11_ru_ofh_beamforming_args(app, config.dl_beamforming);
+
   // Callback function for validating that both compression method and bitwidth parameters were specified.
   auto validate_compression_input = [](CLI::App& cli_app, const std::string& direction) {
     std::string method_param    = "--compr_method_" + direction;
@@ -442,15 +472,6 @@ static void configure_cli11_expert_execution_args(CLI::App& app, ru_ofh_unit_exp
       ->capture_default_str();
 }
 
-#ifdef DPDK_FOUND
-static void configure_cli11_hal_args(CLI::App& app, std::optional<ru_ofh_unit_hal_config>& config)
-{
-  config.emplace();
-
-  add_option(app, "--eal_args", config->eal_args, "EAL configuration parameters used to initialize DPDK");
-}
-#endif
-
 static void configure_cli11_metrics_args(CLI::App& app, ru_ofh_unit_metrics_config& config)
 {
   CLI::App* layers_subcmd = add_subcommand(app, "layers", "Layer basis metrics configuration")->configurable();
@@ -472,33 +493,8 @@ void ocudu::configure_cli11_with_ru_ofh_config_schema(CLI::App& app, ru_ofh_unit
   CLI::App* expert_subcmd = add_subcommand(app, "expert_execution", "Expert execution configuration")->configurable();
   configure_cli11_expert_execution_args(*expert_subcmd, parsed_cfg.config.expert_execution_cfg);
 
-  // HAL section only available when DPDK is present.
-#ifdef DPDK_FOUND
-  CLI::App* hal_subcmd = add_subcommand(app, "hal", "HAL configuration")->configurable();
-  configure_cli11_hal_args(*hal_subcmd, parsed_cfg.config.hal_config);
-#endif
-
   // Metrics section.
   app_helpers::configure_cli11_with_metrics_appconfig_schema(app, parsed_cfg.config.metrics_cfg.metrics_cfg);
   CLI::App* metrics_subcmd = add_subcommand(app, "metrics", "Metrics configuration")->configurable();
   configure_cli11_metrics_args(*metrics_subcmd, parsed_cfg.config.metrics_cfg);
-}
-
-#ifdef DPDK_FOUND
-static void manage_hal_optional(CLI::App& app, std::optional<ru_ofh_unit_hal_config>& hal_config)
-{
-  // Clean the HAL optional.
-  if (auto subcmd = app.get_subcommand("hal"); subcmd->count_all() == 0) {
-    hal_config.reset();
-    // As HAL configuration is optional, disable the command when it is not present in the configuration.
-    subcmd->disabled();
-  }
-}
-#endif
-
-void ocudu::autoderive_ru_ofh_parameters_after_parsing(CLI::App& app, ru_ofh_unit_parsed_config& parsed_cfg)
-{
-#ifdef DPDK_FOUND
-  manage_hal_optional(app, parsed_cfg.config.hal_config);
-#endif
 }

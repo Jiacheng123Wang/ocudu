@@ -69,6 +69,12 @@ static mac_cell_creation_request make_mac_cell_config(du_cell_index_t           
   return mac_cfg;
 }
 
+/// Formats the maximum number of F1-C TNL connection attempts for logging.
+static std::string format_max_retries(unsigned max_retries)
+{
+  return max_retries == du_start_request::unlimited_retries ? "unlimited" : std::to_string(max_retries);
+}
+
 static std::string make_sib_mapping_info_str(span<const sib_type> sib_mapping)
 {
   std::string out;
@@ -120,31 +126,42 @@ void du_setup_procedure::operator()(coro_context<async_task<void>>& ctx)
   proc_logger.log_proc_started();
 
   // Establish TNL association with the CU-CP.
-  for (; count != request.max_f1c_tnl_connection_retries and not ctxt.ctxt.stop_command_received and
-         not ctxt.params.f1ap.conn_mng.connect_to_cu_cp();
-       ++count) {
-    ctxt.logger.warning("F1-C TNL association with CU-CP attempt {}/{} failed. Retrying in {} ms...",
+  for (; not ctxt.ctxt.stop_command_received and not ctxt.params.f1ap.conn_mng.connect_to_cu_cp(); ++count) {
+    if (count + 1 >= request.max_f1c_tnl_connection_retries) {
+      // No attempt is left, so the failure is final and the gateway already reported its cause.
+      report_error("F1 Setup failed. Cause: F1-C TNL connection failed");
+    }
+    // Only the first attempt is reported at warning level. The SCTP gateway announces the repetitions periodically, so
+    // reporting each one of them here would flood the log of a DU that is waiting for its CU-CP.
+    if (count == 0) {
+      ctxt.logger.warning("F1-C TNL association with CU-CP attempt {}/{} failed. Retrying in {} ms...",
+                          count + 1,
+                          format_max_retries(request.max_f1c_tnl_connection_retries),
+                          request.f1c_tnl_connection_retry_wait.count());
+    } else {
+      ctxt.logger.debug("F1-C TNL association with CU-CP attempt {}/{} failed. Retrying in {} ms...",
                         count + 1,
-                        request.max_f1c_tnl_connection_retries,
+                        format_max_retries(request.max_f1c_tnl_connection_retries),
                         request.f1c_tnl_connection_retry_wait.count());
+    }
     CORO_AWAIT(async_wait_for(timer, request.f1c_tnl_connection_retry_wait));
-  }
-  if (count == request.max_f1c_tnl_connection_retries) {
-    report_error("F1 Setup failed. Cause: F1-C TNL connection failed");
   }
   if (ctxt.ctxt.stop_command_received) {
     // DU is being shutdown.
     CORO_EARLY_RETURN();
   }
 
-  // Configure cells.
-  configure_du_cells();
-
   // Initiate F1 Setup.
   CORO_AWAIT_VALUE(response_msg, start_f1_setup_request());
 
   // Handle F1 setup result and activate cells.
   CORO_AWAIT(handle_f1_setup_response(response_msg));
+  if (not response_msg.has_value()) {
+    // The CU-CP rejected the F1 Setup and the TNL association was torn down as a result. Unlike a failed TNL
+    // connection, this is a decision of the CU-CP and not a transient failure, so it is not retried. Close the
+    // application instead of leaving the DU running with no served cell and no way back.
+    report_error("F1 Setup failed. Cause: {}", failure_cause);
+  }
 
   // Notify successful setup and deliver packed F1 setup PDU bytes via notifier.
   if (ctxt.params.f1ap.f1_setup_complete_notifier != nullptr) {
@@ -159,12 +176,8 @@ void du_setup_procedure::operator()(coro_context<async_task<void>>& ctx)
   CORO_RETURN();
 }
 
-void du_setup_procedure::configure_du_cells()
+void odu::configure_du_cells(const du_proc_context_view& ctxt)
 {
-  if (not request.configure_cells) {
-    // No need to reconfigure cells.
-    return;
-  }
   ctxt.cell_mng.remove_all_cells();
 
   // Save cell configurations.
@@ -267,6 +280,7 @@ async_task<void> du_setup_procedure::handle_f1_setup_response(const f1_setup_res
         break;
       case f1_setup_failure::result_code::proc_failure:
         failure_cause = "DU failed to run F1 Setup Procedure";
+        break;
       default:
         report_fatal_error("Invalid F1 Setup Response");
     }

@@ -4,6 +4,7 @@
 
 #include "du_processor_test_helpers.h"
 #include "lib/cu_cp/du_processor/du_processor_factory.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/unittests/cu_cp/test_helpers.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/cu_cp/cu_cp_configuration_helpers.h"
@@ -40,6 +41,10 @@ struct dummy_cu_cp_measurement_handler : public cu_cp_measurement_handler {
     return std::nullopt;
   }
   void handle_measurement_report(const cu_cp_ue_index_t ue_index, const rrc_meas_results& meas_results) override {}
+};
+
+struct dummy_cu_cp_location_manager_handler : public cu_cp_location_manager_handler {
+  void handle_location_update(cu_cp_ue_index_t ue_index) override {}
 };
 
 struct dummy_cu_cp_ue_removal_handler : public cu_cp_ue_removal_handler {
@@ -95,7 +100,8 @@ public:
                                                             ue_rem_handler,
                                                             ue_admission_handler,
                                                             ue_mng.find_ue(ue_index)->get_up_resource_manager(),
-                                                            meas_handler);
+                                                            meas_handler,
+                                                            location_handler);
   }
   byte_buffer handle_target_cell_sib1_required(cu_cp_du_index_t du_index, nr_cell_global_id_t cgi) override
   {
@@ -111,6 +117,9 @@ public:
     }
     return activate;
   }
+
+  void             handle_du_cells_removed(span<const nr_cell_identity> cells) override {}
+  void             handle_du_added(cu_cp_du_index_t du_index) override {}
   void             handle_du_removed(cu_cp_du_index_t du_index) override {}
   async_task<void> handle_transaction_info_loss(const ue_transaction_info_loss_event& ev) override
   {
@@ -120,11 +129,12 @@ public:
   void handle_served_cells_updated() override {}
 
 private:
-  ue_manager&                         ue_mng;
-  dummy_cu_cp_ue_admission_controller ue_admission_handler;
-  dummy_cu_cp_measurement_handler     meas_handler;
-  dummy_cu_cp_ue_removal_handler      ue_rem_handler;
-  dummy_cu_cp_rrc_ue_interface        rrc_ue_handler;
+  ue_manager&                          ue_mng;
+  dummy_cu_cp_ue_admission_controller  ue_admission_handler;
+  dummy_cu_cp_measurement_handler      meas_handler;
+  dummy_cu_cp_location_manager_handler location_handler;
+  dummy_cu_cp_ue_removal_handler       ue_rem_handler;
+  dummy_cu_cp_rrc_ue_interface         rrc_ue_handler;
 };
 
 } // namespace
@@ -156,6 +166,8 @@ du_processor_test::du_processor_test() :
 
   du_cfg_mgr{cu_cp_cfg.node.gnb_id, config_helpers::get_supported_plmns(cu_cp_cfg.ngap.ngaps)}
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-ARCH-INTF-9");
+
   test_logger.set_level(ocudulog::basic_levels::debug);
   cu_cp_logger.set_level(ocudulog::basic_levels::debug);
   ocudulog::init();

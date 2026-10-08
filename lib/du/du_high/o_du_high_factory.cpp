@@ -11,7 +11,7 @@
 #include "ocudu/du/du_high/o_du_high_config.h"
 #include "ocudu/e2/e2_du_factory.h"
 #include "ocudu/fapi_adaptor/mac/mac_fapi_fastpath_adaptor_factory.h"
-#include "ocudu/fapi_adaptor/precoding_matrix_table_generator.h"
+#include "ocudu/fapi_adaptor/precoding_codebook_generator.h"
 #include "ocudu/fapi_adaptor/uci_part2_correspondence_generator.h"
 #include "ocudu/ran/band_helper.h"
 #include "ocudu/ran/ssb/ssb_mapping.h"
@@ -31,7 +31,7 @@ generate_mac_fapi_p5_sector_adaptor_dependencies(const o_du_high_sector_dependen
 }
 
 static fapi_adaptor::mac_fapi_p5_sector_fastpath_adaptor_config
-generate_fapi_p5_cell_config(const du_cell_config& du_cell)
+generate_fapi_p5_cell_config(const du_cell_config& du_cell, bool is_rt_mode_enabled)
 {
   fapi::cell_configuration cell_cfg;
   const subcarrier_spacing scs_common = du_cell.ran.dl_cfg_common.init_dl_bwp.generic_params.scs;
@@ -67,7 +67,7 @@ generate_fapi_p5_cell_config(const du_cell_config& du_cell)
 
   cell_cfg.prach_cfg = *du_cell.ran.ul_cfg_common.init_ul_bwp.rach_cfg_common;
 
-  return {cell_cfg};
+  return {.is_rt_mode_enabled = is_rt_mode_enabled, .cell_cfg = cell_cfg};
 }
 
 static fapi_adaptor::mac_fapi_fastpath_adaptor_config
@@ -83,7 +83,8 @@ generate_fapi_fastpath_adaptor_config(const o_du_high_config& config)
     fapi_adaptor::mac_fapi_p7_sector_fastpath_adaptor_config p7_cfg = {
         .sector_id = i, .cell_nof_prbs = nof_prb, .scs = scs_common};
 
-    out_config.sectors.push_back({.p5_config = generate_fapi_p5_cell_config(du_cell), .p7_config = p7_cfg});
+    out_config.sectors.push_back(
+        {.p5_config = generate_fapi_p5_cell_config(du_cell, config.is_rt_mode_enabled), .p7_config = p7_cfg});
   }
 
   return out_config;
@@ -92,12 +93,13 @@ generate_fapi_fastpath_adaptor_config(const o_du_high_config& config)
 static fapi_adaptor::mac_fapi_p7_sector_fastpath_adaptor_dependencies
 generate_mac_fapi_p7_sector_adaptor_dependencies(const o_du_high_sector_dependencies& sector_dependencies,
                                                  const pmi_codebook_config&           codebook_config,
+                                                 antenna_topology                     topology,
                                                  unsigned                             sector)
 {
   return {.p7_gateway           = sector_dependencies.p7_gateway,
           .p7_last_req_notifier = sector_dependencies.p7_last_req_notifier,
-          .pm_mapper            = std::move(std::get<std::unique_ptr<fapi_adaptor::precoding_matrix_mapper>>(
-              fapi_adaptor::generate_precoding_matrix_tables(codebook_config, sector))),
+          .pm_mapper            = std::move(std::get<std::unique_ptr<fapi_adaptor::precoding_codebook_mapper>>(
+              fapi_adaptor::generate_precoding_codebooks(codebook_config, topology, sector))),
           .part2_mapper         = std::move(std::get<std::unique_ptr<fapi_adaptor::uci_part2_correspondence_mapper>>(
               fapi_adaptor::generate_uci_part2_correspondence(1))),
           .fapi_logger          = sector_dependencies.fapi_logger};
@@ -133,7 +135,8 @@ generate_fapi_fastpath_adaptor_dependencies(const o_du_high_config& config, o_du
     const auto& sector_dependencies = odu_dependencies.sectors[i];
     out_dependencies.sectors.push_back(
         {.p5_dependencies = generate_mac_fapi_p5_sector_adaptor_dependencies(sector_dependencies),
-         .p7_dependencies = generate_mac_fapi_p7_sector_adaptor_dependencies(sector_dependencies, codebook_config, i)});
+         .p7_dependencies = generate_mac_fapi_p7_sector_adaptor_dependencies(
+             sector_dependencies, codebook_config, config.du_hi.ran.cells[i].ran.dl_carrier.topology, i)});
   }
 
   return out_dependencies;

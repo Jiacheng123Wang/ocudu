@@ -218,6 +218,7 @@ bool rrc_resume_procedure::transfer_retrieved_context_and_update_keys()
   srb1_msg.srb_id   = srb_id_t::srb1;
   srb_notifier.create_srb(srb1_msg);
   rrc_ue_resume_notifier.on_new_as_security_context(/* security_mode_active */ true);
+  rrc_ue_resume_notifier.on_as_security_activated();
 
   return true;
 }
@@ -249,6 +250,14 @@ async_task<void> rrc_resume_procedure::handle_rrc_resume_fallback()
 
 bool rrc_resume_procedure::verify_and_update_security_context()
 {
+  // A local resume reuses the AS keys the UE was suspended with. Without a security context there is nothing to verify
+  // the ResumeMAC-I against and nothing to derive the refreshed keys from, so the resume is rejected before the key
+  // derivation below runs on unselected algorithms.
+  if (not cu_cp_ue_notifier.get_security_context().sel_algos.algos_selected) {
+    logger.log_warning("Invalid resume request. Cause: UE has no AS security context");
+    return false;
+  }
+
   // The ResumeMAC-I is computed with the AS keys of the cell the UE was suspended in, which for a local resume is a
   // cell of this node.
   const bool valid = verify_resume_mac_i(to_short_mac_i(resume_request.rrc_resume_request.resume_mac_i.to_number()),

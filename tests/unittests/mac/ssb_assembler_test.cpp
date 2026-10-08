@@ -4,6 +4,7 @@
 
 #include "lib/mac/mac_dl/ssb_assembler.h"
 #include "mac_test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "ocudu/mac/mac_cell_result.h"
 #include "ocudu/scheduler/result/pdsch_info.h"
 #include <gtest/gtest.h>
@@ -61,6 +62,8 @@ TEST_F(ssb_assembler_test, set_intra_freq_reselection_takes_effect_on_next_assem
 
 TEST_F(ssb_assembler_test, assembled_ssb_carries_the_beam_of_its_ssb_index)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MIMO-16-12");
+
   const std::array<beam_identifier, 2> beams = {beam_identifier::n0, to_beam_id(5)};
 
   // Transmit the two lowest SSB candidates, each on a different beam.
@@ -78,6 +81,7 @@ TEST_F(ssb_assembler_test, assembled_ssb_carries_the_beam_of_its_ssb_index)
     multi_ssb_assembler.assemble_ssb(pdu, info);
 
     ASSERT_EQ(pdu.ssb_index, ssb_index);
-    ASSERT_EQ(pdu.beam_id, beams[ssb_index]);
+    ASSERT_TRUE(std::holds_alternative<beam_identifier>(pdu.precoding_and_beamforming));
+    ASSERT_EQ(std::get<beam_identifier>(pdu.precoding_and_beamforming), beams[ssb_index]);
   }
 }

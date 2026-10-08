@@ -39,6 +39,8 @@ struct downlink_handler_impl_config {
   tx_window_timing_parameters tx_timing_params;
   /// If set to true, logs late events as warnings, otherwise as info.
   bool enable_log_warnings_for_lates;
+  /// If set to true, the downlink transmission is beamformed (Category B), otherwise it is not (Category A).
+  bool is_cat_b_enabled;
 };
 
 /// Downlink handler implementation dependencies.
@@ -84,6 +86,7 @@ private:
   const unsigned                                        sector_id;
   ocudulog::basic_logger&                               logger;
   const cyclic_prefix                                   cp;
+  const bool                                            is_cat_b_enabled;
   const std::optional<tdd_ul_dl_config_common>          tdd_config;
   const static_vector<unsigned, MAX_NOF_SUPPORTED_EAXC> dl_eaxc;
   tx_window_checker                                     window_checker;

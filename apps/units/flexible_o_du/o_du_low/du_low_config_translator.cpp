@@ -128,6 +128,8 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
       du_low.loggers.phy_rx_symbol_printer.triggers.pusch_on_ko;
   upper_phy_factory_config.rx_symbol_printer.triggers.pusch_threshold_sinr_dB =
       du_low.loggers.phy_rx_symbol_printer.triggers.pusch_threshold_sinr_dB;
+  upper_phy_factory_config.rx_symbol_printer.triggers.pusch_threshold_iter =
+      du_low.loggers.phy_rx_symbol_printer.triggers.pusch_threshold_iter;
   upper_phy_factory_config.ldpc_encoder_type          = "auto";
   // Effective backends of the uplink pipeline mode: resolved once above, so the factories only ever see a concrete
   // implementation (the LDPC decoder honors the expert knob when the Metal codec is built in, and stays on the CPU
@@ -175,6 +177,10 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
       upper_phy_factory_config.phy_tap_tdd_pattern = cells[0].tdd_pattern;
     }
   }
+  upper_phy_factory_config.doa_enabled = du_low.expert_phy_cfg.doa_enabled;
+  upper_phy_factory_config.doa_antenna_distance_over_wavelength =
+      du_low.expert_phy_cfg.doa_antenna_distance_over_wavelength;
+  upper_phy_factory_config.doa_cross_polarized = du_low.expert_phy_cfg.doa_cross_polarized;
 
   // The flexible PDSCH processor implementation will be used by default.
   const auto& upper_phy_threads_cfg = du_low.expert_execution_cfg.threads;
@@ -223,6 +229,9 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
     // In a NTN cell, extend the HARQ process lifetime by the cell-specific-k-offset.
     if (cell.ntn_cs_koffset) {
       expire_pusch_harq_timeout_slots += cell.ntn_cs_koffset->count() * nof_slots_per_subframe;
+    }
+    if (cell.ntn_k_mac) {
+      expire_pusch_harq_timeout_slots += cell.ntn_k_mac->count() * nof_slots_per_subframe;
     }
 
     // Calculate the number of UL slots in a frame and in a PUSCH HARQ process lifetime.
@@ -298,7 +307,7 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
                  to_string(cell.duplex));
 
     upper_phy_cell.sector                     = i;
-    upper_phy_cell.nof_tx_ports               = cell.nof_tx_antennas;
+    upper_phy_cell.tx_ant_topology            = cell.tx_ant_topology;
     upper_phy_cell.nof_rx_ports               = cell.nof_rx_antennas;
     upper_phy_cell.nof_dl_rg                  = dl_pipeline_depth + 2;
     upper_phy_cell.nof_ul_rg                  = ul_pipeline_depth;

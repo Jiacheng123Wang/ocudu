@@ -138,30 +138,40 @@ void logical_cell_manager::derealize_du_cells(cu_cp_du_index_t du_index)
 {
   for (auto& [nci, cell] : cells) {
     if (cell.realized && cell.du_index == du_index) {
-      cell.realized          = false;
-      cell.du_index          = cu_cp_du_index_t::invalid;
-      cell.operational_state = cell_operational_state::disabled;
-      if (cell.admin_state == cell_admin_state::shutting_down) {
-        // A graceful stop cannot complete once the DU is gone, and the cell is off the air either way:
-        // resolve the transient to locked so the operator intent behind the stop is kept.
-        cell.admin_state = cell_admin_state::locked;
-        logger.info("Logical cell nci={:#x} admin_state: shutting_down -> locked (du={} removed mid-stop)",
-                    nci.value(),
-                    du_index);
-      }
-      if (cell.barred_by_failed_stop) {
-        // The bar a failed stop left on the air is gone with the DU; only operator intent survives.
-        cell.barred                = false;
-        cell.barred_by_failed_stop = false;
-        logger.info("Logical cell nci={:#x} failed-stop bar cleared (du={} removed)", nci.value(), du_index);
-      }
-
-      logger.info("Logical cell nci={:#x} de-realized (du={} removed). Operator intent kept (admin_state={} "
-                  "barred={})",
-                  nci.value(),
-                  du_index,
-                  to_string(cell.admin_state),
-                  cell.barred);
+      derealize(nci, cell);
     }
   }
+}
+
+void logical_cell_manager::derealize_cell(nr_cell_identity nci)
+{
+  auto it = cells.find(nci);
+  if (it == cells.end() || !it->second.realized) {
+    return;
+  }
+  derealize(nci, it->second);
+}
+
+void logical_cell_manager::derealize(nr_cell_identity nci, logical_cell& cell)
+{
+  cell.realized          = false;
+  cell.du_index          = cu_cp_du_index_t::invalid;
+  cell.operational_state = cell_operational_state::disabled;
+  if (cell.admin_state == cell_admin_state::shutting_down) {
+    // A graceful stop cannot complete once the cell is gone, and the cell is off the air either way:
+    // resolve the transient to locked so the operator intent behind the stop is kept.
+    cell.admin_state = cell_admin_state::locked;
+    logger.info("Logical cell nci={:#x} admin_state: shutting_down -> locked (de-realized mid-stop)", nci.value());
+  }
+  if (cell.barred_by_failed_stop) {
+    // The bar a failed stop left on the air is gone with the cell; only operator intent survives.
+    cell.barred                = false;
+    cell.barred_by_failed_stop = false;
+    logger.info("Logical cell nci={:#x} failed-stop bar cleared (de-realized)", nci.value());
+  }
+
+  logger.info("Logical cell nci={:#x} de-realized. Operator intent kept (admin_state={} barred={})",
+              nci.value(),
+              to_string(cell.admin_state),
+              cell.barred);
 }

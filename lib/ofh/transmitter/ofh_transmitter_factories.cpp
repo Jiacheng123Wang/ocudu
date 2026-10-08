@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ofh_transmitter_factories.h"
+#include "../support/beamforming_weights_repository.h"
 #include "ofh_data_flow_cplane_scheduling_commands_impl.h"
 #include "ofh_data_flow_cplane_scheduling_commands_metrics_decorator.h"
 #include "ofh_data_flow_cplane_scheduling_commands_task_dispatcher.h"
@@ -17,12 +18,14 @@
 #include "ocudu/ofh/ethernet/ethernet_factories.h"
 #include "ocudu/ofh/ofh_sector_executor_mapper.h"
 #include "ocudu/ofh/serdes/ofh_serdes_factories.h"
+#include "ocudu/ran/beamforming/beam_weights_codebook_generator.h"
 
 using namespace ocudu;
 using namespace ofh;
 
 static std::unique_ptr<data_flow_cplane_scheduling_commands>
 create_data_flow_cplane_sched(const transmitter_config&                         tx_config,
+                              bool                                              is_downlink,
                               bool                                              static_compr_header_enabled,
                               ocudulog::basic_logger&                           logger,
                               std::shared_ptr<ether::eth_frame_pool>            frame_pool,
@@ -59,6 +62,12 @@ create_data_flow_cplane_sched(const transmitter_config&                         
   dependencies.cp_builder                = (static_compr_header_enabled)
                                                ? create_ofh_control_plane_static_compression_message_builder()
                                                : create_ofh_control_plane_dynamic_compression_message_builder();
+
+  if (is_downlink && tx_config.beamforming) {
+    beam_weights_codebook codebook = generate_beam_weights_codebook(tx_config.beamforming->topology);
+    dependencies.bf_weights_repo =
+        std::make_unique<beamforming_weights_repository>(codebook, tx_config.beamforming->bfw_compr_params);
+  }
 
   auto data_flow_cplane = std::make_unique<data_flow_cplane_scheduling_commands_impl>(config, std::move(dependencies));
   if (!tx_config.are_metrics_enabled) {
@@ -179,30 +188,32 @@ resolve_transmitter_dependencies(const transmitter_config&                      
   dependencies.frame_pool_dl_cp =
       create_eth_frame_pool(tx_config, logger, message_type::control_plane, data_direction::downlink, false);
 
-  dependencies.dl_df_cplane = std::make_unique<data_flow_cplane_downlink_task_dispatcher>(
-      logger,
+  std::unique_ptr<data_flow_cplane_scheduling_commands> dl_df_cplane =
       create_data_flow_cplane_sched(tx_config,
+                                    true,
                                     tx_config.is_downlink_static_compr_hdr_enabled,
                                     logger,
                                     dependencies.frame_pool_dl_cp,
                                     ul_cp_context_repo,
-                                    prach_cp_context_repo),
-      exec_mapper,
-      tx_config.sector);
+                                    prach_cp_context_repo);
+  data_flow_message_encoding_metrics_collector* dl_df_cplane_metrics = dl_df_cplane->get_metrics_collector();
+  dependencies.dl_df_cplane = std::make_unique<data_flow_cplane_downlink_task_dispatcher>(
+      logger, std::move(dl_df_cplane), exec_mapper, tx_config.sector, dl_df_cplane_metrics);
 
   dependencies.frame_pool_dl_up =
       create_eth_frame_pool(tx_config, logger, message_type::user_plane, data_direction::downlink);
 
+  std::unique_ptr<data_flow_uplane_downlink_data> dl_df_uplane =
+      create_data_flow_uplane_data(tx_config, logger, dependencies.frame_pool_dl_up);
+  data_flow_message_encoding_metrics_collector* dl_df_uplane_metrics = dl_df_uplane->get_metrics_collector();
   dependencies.dl_df_uplane = std::make_unique<data_flow_uplane_downlink_task_dispatcher>(
-      logger,
-      create_data_flow_uplane_data(tx_config, logger, dependencies.frame_pool_dl_up),
-      exec_mapper,
-      tx_config.sector);
+      logger, std::move(dl_df_uplane), exec_mapper, tx_config.sector, dl_df_uplane_metrics);
 
   dependencies.frame_pool_ul_cp =
       create_eth_frame_pool(tx_config, logger, message_type::control_plane, data_direction::uplink, false);
 
   dependencies.ul_df_cplane = create_data_flow_cplane_sched(tx_config,
+                                                            false,
                                                             tx_config.is_uplink_static_compr_hdr_enabled,
                                                             logger,
                                                             dependencies.frame_pool_ul_cp,

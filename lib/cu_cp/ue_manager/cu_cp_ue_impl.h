@@ -177,6 +177,9 @@ public:
   /// \brief Get the PCI of the UE.
   [[nodiscard]] pci_t get_pci() const { return pci; }
 
+  /// \brief Get the global identity of the cell serving the UE.
+  [[nodiscard]] std::optional<nr_cell_global_id_t> get_serving_cell_id() const override { return serving_cell_id; }
+
   /// \brief Get the C-RNTI of the UE.
   [[nodiscard]] rnti_t get_c_rnti() const { return ue_ctxt.crnti; }
 
@@ -219,10 +222,11 @@ public:
   unique_timer& get_rna_update_timer() { return rna_update_timer; }
 
   /// \brief Update a UE with PCI and/or C-RNTI.
-  void update_du_ue(gnb_du_id_t     du_id_       = gnb_du_id_t::invalid,
-                    pci_t           pci_         = INVALID_PCI,
-                    rnti_t          c_rnti_      = rnti_t::INVALID_RNTI,
-                    du_cell_index_t pcell_index_ = INVALID_DU_CELL_INDEX);
+  void update_du_ue(gnb_du_id_t                        du_id_       = gnb_du_id_t::invalid,
+                    pci_t                              pci_         = INVALID_PCI,
+                    rnti_t                             c_rnti_      = rnti_t::INVALID_RNTI,
+                    du_cell_index_t                    pcell_index_ = INVALID_DU_CELL_INDEX,
+                    std::optional<nr_cell_global_id_t> cgi_         = std::nullopt);
 
   /// \brief Set/update the measurement context of the UE.
   void update_meas_context(cell_meas_manager_ue_context meas_ctxt);
@@ -308,6 +312,8 @@ private:
   cu_cp_ue_context ue_ctxt;
   du_cell_index_t  pcell_index = INVALID_DU_CELL_INDEX;
   pci_t            pci         = INVALID_PCI;
+  /// Global identity of the cell serving the UE.
+  std::optional<nr_cell_global_id_t> serving_cell_id;
 
   // RRC UE context.
   rrc_ue_interface*       rrc_ue = nullptr;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
+#include "tests/ocudu_test_requirements.h"
 #include "tests/unittests/rrc/rrc_ue_test_helpers.h"
 #include "tests/unittests/xnap/xnap_test_messages.h"
 #include "xnap_test_helpers.h"
@@ -20,7 +21,7 @@ using namespace ocucp;
 class xnap_handover_preparation_procedure_test : public xnap_test
 {
 public:
-  xnap_handover_preparation_procedure_test()           = default;
+  xnap_handover_preparation_procedure_test() { OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-3"); }
   ~xnap_handover_preparation_procedure_test() override = default;
 
   static xnap_handover_request generate_handover_request(cu_cp_ue_index_t            ue_index,
@@ -470,6 +471,8 @@ protected:
 /// only the preparation for the cell it names.
 TEST_F(xnap_cho_preparation_test, when_two_cho_candidates_prepared_then_each_ack_resolves_its_own_cell)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   async_task<xnap_handover_preparation_response> t_a = xnap->handle_handover_request_required(make_cho_request(cell_a));
   lazy_task_launcher<xnap_handover_preparation_response> launcher_a(t_a);
   async_task<xnap_handover_preparation_response> t_b = xnap->handle_handover_request_required(make_cho_request(cell_b));
@@ -498,6 +501,8 @@ TEST_F(xnap_cho_preparation_test, when_two_cho_candidates_prepared_then_each_ack
 /// A Handover Preparation Failure naming one candidate cell must fail only that preparation.
 TEST_F(xnap_cho_preparation_test, when_one_cho_candidate_fails_then_the_other_stays_pending)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   async_task<xnap_handover_preparation_response> t_a = xnap->handle_handover_request_required(make_cho_request(cell_a));
   lazy_task_launcher<xnap_handover_preparation_response> launcher_a(t_a);
   async_task<xnap_handover_preparation_response> t_b = xnap->handle_handover_request_required(make_cho_request(cell_b));
@@ -518,6 +523,8 @@ TEST_F(xnap_cho_preparation_test, when_one_cho_candidate_fails_then_the_other_st
 /// and keeps the UE context alive for the remaining candidate.
 TEST_F(xnap_cho_preparation_test, when_non_winner_cancelled_then_handover_cancel_names_that_candidate)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   async_task<xnap_handover_preparation_response> t_a = xnap->handle_handover_request_required(make_cho_request(cell_a));
   lazy_task_launcher<xnap_handover_preparation_response> launcher_a(t_a);
   async_task<xnap_handover_preparation_response> t_b = xnap->handle_handover_request_required(make_cho_request(cell_b));
@@ -557,6 +564,8 @@ TEST_F(xnap_cho_preparation_test, when_non_winner_cancelled_then_handover_cancel
 /// signalling connection, taking the sibling candidates with it.
 TEST_F(xnap_cho_preparation_test, when_one_cho_candidate_times_out_then_the_cancel_names_only_that_cell)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   async_task<xnap_handover_preparation_response> t_a = xnap->handle_handover_request_required(make_cho_request(cell_a));
   lazy_task_launcher<xnap_handover_preparation_response> launcher_a(t_a);
   async_task<xnap_handover_preparation_response> t_b = xnap->handle_handover_request_required(make_cho_request(cell_b));
@@ -585,6 +594,8 @@ TEST_F(xnap_cho_preparation_test, when_one_cho_candidate_times_out_then_the_canc
 /// cell can be prepared again.
 TEST_F(xnap_cho_preparation_test, when_cho_preparation_fails_early_then_the_same_cell_can_be_prepared_again)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   xnap_handover_request bad_request = make_cho_request(cell_a);
   bad_request.ue_context_info_ho_request.pdu_session_res_to_be_setup_list.clear();
 
@@ -608,6 +619,8 @@ TEST_F(xnap_cho_preparation_test, when_cho_preparation_fails_early_then_the_same
 /// peer. All of them share one Source NG-RAN node UE XnAP ID and must each resolve on their own cell.
 TEST_F(xnap_cho_preparation_test, when_eight_cho_candidates_prepared_then_all_resolve_independently)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-15");
+
   constexpr unsigned nof_candidates = 8;
 
   std::vector<nr_cell_global_id_t>                                                     cells;

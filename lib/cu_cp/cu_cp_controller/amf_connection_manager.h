@@ -67,12 +67,12 @@ public:
   /// Checks whether the CU-CP is connected to the AMF with the given CU_CP AMF index.
   bool is_amf_connected(cu_cp_amf_index_t amf_index) const;
 
-  /// Returns the number of AMFs.
-  size_t nof_amfs() const { return amfs_connected.size(); }
+  /// Returns the number of AMFs the CU-CP is connected to.
+  size_t nof_connected_amfs() const;
 
 private:
-  /// Handles the connection setup result.
-  void handle_connection_setup_result(cu_cp_amf_index_t amf_index, bool success);
+  /// Sets the connection state of the AMF with the given CU-CP AMF index.
+  void set_amf_connected(cu_cp_amf_index_t amf_index, bool connected);
 
   /// Converts the given PLMN identity into a CU_CP AMF index.
   cu_cp_amf_index_t plmn_to_amf_index(plmn_identity plmn) const;
@@ -89,6 +89,8 @@ private:
   ocudulog::basic_logger&           logger;
   cu_cp_ng_setup_complete_notifier* ng_setup_notifier;
 
+  /// Connection state of each configured AMF. The map holds an entry for each AMF from construction on and its
+  /// structure never changes, so that the flags can be read from any thread while the CU-CP executor updates them.
   std::unordered_map<cu_cp_amf_index_t, std::atomic<bool>> amfs_connected;
 
   std::atomic<bool> stopped{false};

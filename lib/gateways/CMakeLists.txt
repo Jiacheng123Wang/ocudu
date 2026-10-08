@@ -11,6 +11,15 @@ if (APPLE)
 else ()
     list(APPEND SCTP_BACKEND_SOURCES sctp_socket_linux.cpp sctp_network_server_impl_linux.cpp)
 endif ()
+if(SCTP_FOUND)
+    sbom_add(
+        PACKAGE            "SCTP"
+        DOWNLOAD_LOCATION  "https://www.sctp.org/"
+        SUPPLIER           "SCTP project"
+        LICENSE            "BSD-3-Clause"
+    )
+endif (SCTP_FOUND)
+
 
 add_library(ocudu_gateway
         sctp_socket.cpp

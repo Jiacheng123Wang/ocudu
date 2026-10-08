@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/utils/test_rng.h"
 #include "tests/unittests/scheduler/test_utils/scheduler_test_suite.h"
 #include "uci_test_utils.h"
@@ -114,6 +115,7 @@ public:
   uci_sched_meas_gap_test() :
     t_bench{test_bench_params{.sr_period = sr_period, .sr_offset = 0, .csi_period = std::nullopt, .meas_gap = test_gap}}
   {
+    OCUDU_TEST_REQUIREMENTS("DU-GEN-9");
   }
 
 protected:
@@ -170,6 +172,8 @@ public:
     csi_offset(test_rng::uniform_int<unsigned>(0, to_underlying(GetParam()) - 1)),
     t_bench{test_bench_params{.csi_period = csi_period, .csi_offset = csi_offset}}
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MIMO-16-1");
+
     sr_period = sr_periodicity_to_slot(
         t_bench.get_main_ue().get_pcell().cfg().init_bwp().ul.ded()->pucch_cfg.value().sr_res_list[0].period);
 

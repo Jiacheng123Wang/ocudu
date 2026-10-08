@@ -35,7 +35,6 @@ variables:
       artifacts: false
   variables:
     TEST_EXECUTION_TIMEOUT: 0
-    CTEST_XUNIT_NAME: "ctest"
     ENABLE_SPLIT_DWARF: "True"
   script:
     - &script_functions |
@@ -224,10 +223,11 @@ variables:
     - launch_tests_ocudu_extended
   timeout: 3 hours
   after_script:
+    - xunit_name=ctest; [ -n "${OCUDU_TEST_REQUIREMENT_REPORTS}" ] && xunit_name=xunit
     - mv ${CI_PROJECT_DIR}/${OCUDU_BUILD_DIR}/coverage_1.xml    ${CI_PROJECT_DIR}/${CI_JOB_ID}_coverage_1.xml           || true
     - mv ${CI_PROJECT_DIR}/${OCUDU_BUILD_DIR}/coverage_2.xml    ${CI_PROJECT_DIR}/${CI_JOB_ID}_coverage_2.xml           || true
     - mv ${CI_PROJECT_DIR}/${OCUDU_BUILD_DIR}/coverage_3.xml    ${CI_PROJECT_DIR}/${CI_JOB_ID}_coverage_3.xml           || true
-    - mv ${CI_PROJECT_DIR}/${OCUDU_BUILD_DIR}/xunit.xml         ${CI_PROJECT_DIR}/${CI_JOB_ID}_${CTEST_XUNIT_NAME}.xml  || true
+    - mv ${CI_PROJECT_DIR}/${OCUDU_BUILD_DIR}/xunit.xml         ${CI_PROJECT_DIR}/${CI_JOB_ID}_${xunit_name}.xml        || true
     - mv ${CI_PROJECT_DIR}/${OCUDU_BUILD_DIR}/ctest_output.log  ${CI_PROJECT_DIR}/${CI_JOB_ID}_ctest_output.log         || true
   artifacts:
     when: always
@@ -235,10 +235,13 @@ variables:
       coverage_report:
         coverage_format: cobertura
         path: ${CI_JOB_ID}_coverage*.xml
-      junit: ${CI_JOB_ID}_${CTEST_XUNIT_NAME}.xml
+      junit:
+        - ${CI_JOB_ID}_ctest.xml
+        - ${CI_JOB_ID}_xunit.xml
     paths:
       - ${CI_JOB_ID}_coverage*.xml
-      - ${CI_JOB_ID}_${CTEST_XUNIT_NAME}.xml
+      - ${CI_JOB_ID}_ctest.xml
+      - ${CI_JOB_ID}_xunit.xml
       - ${CI_JOB_ID}_ctest_output.log
       - ${OCUDU_BUILD_DIR}/Testing/Temporary/MemoryChecker.*.log
     expire_in: 5 days
@@ -257,7 +260,7 @@ variables:
     ENABLE_GCOV: "True"
     MARCH: x86-64-v3
     LINKER: mold
-    CTEST_XUNIT_NAME: xunit
+    OCUDU_TEST_REQUIREMENT_REPORTS: "True"
 
 .smoke relwithdeb:
   extends: .build_and_unit
@@ -270,7 +273,7 @@ variables:
     ENABLE_UHD: "True"
     ENABLE_ZEROMQ: "True"
     ENABLE_DPDK: "True"
-    DPDK_VERSION: "25.11_avx2"
+    DPDK_VERSION: "25.11.3_avx2"
     ENABLE_SCHEDTRACE: "True"
     TEST_MODE: default
     MARCH: x86-64-v3
@@ -278,7 +281,6 @@ variables:
 
 .smoke tsan:
   extends: .build_and_unit
-  stage: extended
   variables:
     OS: ubuntu-26.04
     COMPILER: clang
@@ -292,7 +294,6 @@ variables:
 
 .smoke asan:
   extends: .build_and_unit
-  stage: extended
   variables:
     OS: ubuntu-26.04
     COMPILER: clang
@@ -305,7 +306,6 @@ variables:
 
 .smoke rtsan:
   extends: .build_and_unit
-  stage: extended
   variables:
     OS: ubuntu-26.04
     COMPILER: clang
@@ -317,7 +317,7 @@ variables:
     ENABLE_ZEROMQ: "False"
     ENABLE_DPDK: "True"
     ENABLE_RTSAN: "True"
-    DPDK_VERSION: "25.11_avx2"
+    DPDK_VERSION: "25.11.3_avx2"
     ENABLE_SCHEDTRACE: "True"
     TEST_MODE: rtsan
     MARCH: x86-64-v3
@@ -325,7 +325,6 @@ variables:
 
 .smoke valgrind:
   extends: .build_and_unit
-  stage: extended
   variables:
     OS: ubuntu-24.04
     COMPILER: gcc
@@ -370,7 +369,7 @@ variables:
     COMPILER: clang
     CMAKE_BUILD_TYPE: Release
     ASSERT_LEVEL: NONE
-    TEST_MODE: none
+    TEST_MODE: default
     MARCH: x86-64-v3
 
 # Combinations to use in schedules matrix
@@ -415,6 +414,7 @@ smoke old clang cached:
 
 smoke tsan cached:
   extends: .smoke tsan
+  stage: extended
   rules:
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
       when: never
@@ -426,6 +426,7 @@ smoke tsan cached:
 
 smoke asan cached:
   extends: .smoke asan
+  stage: extended
   rules:
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
       when: never
@@ -437,6 +438,7 @@ smoke asan cached:
 
 smoke rtsan cached:
   extends: .smoke rtsan
+  stage: extended
   rules:
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
       when: never
@@ -484,6 +486,7 @@ smoke old clang clean:
 
 smoke tsan clean:
   extends: .smoke tsan
+  stage: extended
   rules:
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
       when: manual
@@ -491,6 +494,7 @@ smoke tsan clean:
 
 smoke asan clean:
   extends: .smoke asan
+  stage: extended
   rules:
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
       when: manual
@@ -498,6 +502,7 @@ smoke asan clean:
 
 smoke rtsan clean:
   extends: .smoke rtsan
+  stage: extended
   rules:
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
       when: manual
@@ -576,6 +581,7 @@ intermediate commits clean:
 
 valgrind changed tests:
   extends: .smoke valgrind
+  stage: extended
   allow_failure:
     exit_codes: 124 # timeout command's exit code when the time is reached
   rules:
@@ -620,8 +626,19 @@ smoke coverage:
     - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Smoke/
     - if: $ON_PROTECTED_BRANCH
 
+smoke tsan:
+  extends: .smoke tsan
+  rules:
+    - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Nightly/
+
 smoke asan:
   extends: .smoke asan
+  rules:
+    - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Nightly/
+
+smoke valgrind:
+  extends: .smoke valgrind
+  timeout: 4 hours
   rules:
     - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Nightly/
 
@@ -629,6 +646,23 @@ smoke rtsan:
   extends: .smoke rtsan
   rules:
     - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Nightly/
+
+smoke dtls: # OpenSSL+DTLS only available in fedora now
+  extends: .build_and_unit
+  rules:
+    - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Nightly/
+  variables:
+    OS: fedora-44
+    COMPILER: gcc
+    CMAKE_BUILD_TYPE: RelWithDebInfo
+    ASSERT_LEVEL: PARANOID
+    ENABLE_WERROR: "False"
+    MARCH: x86-64-v3
+    TEST_MODE: full
+    OCUDU_TEST_REQUIREMENT_REPORTS: "True"
+  tags:
+    - ${OCUDU_RUNNER_TAG}-amd64
+    - sctp
 
 # Packaging
 
@@ -657,11 +691,8 @@ package:
     matrix:
       - OS_VERSION: "22.04"
       - OS_VERSION: "24.04"
-      # - OS_VERSION: "25.10"             # disabled, see comment below
       - OS_VERSION: "26.04"
-      # Since version 20251007 of Ubuntu 25.10 a Rust implementation of coreutils (rust-coreutils and coreutils-from-uutils)
-      # is used instead of the traditional version from GNU (coreutils-from-gnu). A bug in the Rust coreutils
-      # causes a permission error during startup of the container (as the packing is run as unprivileged user).
+      - OS_VERSION: "26.10"
   needs: []
 
 install-package:
@@ -680,8 +711,8 @@ install-package:
     matrix:
       - OS_VERSION: "22.04"
       - OS_VERSION: "24.04"
-      # - OS_VERSION: "25.10"             # disabled, see comment above
       - OS_VERSION: "26.04"
+      - OS_VERSION: "26.10"
   needs:
     - package
 
@@ -784,14 +815,14 @@ ubuntu-24.04 avx512:
         ENABLE_FFTW: "False"
         ENABLE_MKL: "True"
 
-ubuntu-25.10 avx2:
+ubuntu-26.10 avx2:
   extends: .build_and_unit
   rules:
     - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Nightly/
       when: delayed
       start_in: 4 hours
   variables:
-    OS: ubuntu-25.10
+    OS: ubuntu-26.10
     MARCH: x86-64-v3
   parallel:
     matrix:
@@ -1150,9 +1181,9 @@ build uhd alt:
       - OS: ubuntu-24.04
         COMPILER: [gcc, clang]
         UHD_VERSION: ["4.9.0.0", "4.8.0.0", "4.7.0.0", "4.6.0.0"]
-      - OS: [ubuntu-25.10]
+      - OS: [ubuntu-26.10]
         COMPILER: [gcc, clang]
-        UHD_VERSION: ["4.8.0.0"]
+        UHD_VERSION: ["4.9.0.1"]
       - OS: [ubuntu-26.04]
         COMPILER: [gcc, clang]
         UHD_VERSION: ["4.9.0.1"]
@@ -1273,26 +1304,26 @@ ubuntu-24.04 arm native:
         ENABLE_FFTW: "False"
         ENABLE_ARMPL: "True"
 
-ubuntu-25.10 amd64 native:
+ubuntu-26.10 amd64 native:
   extends: .build_and_unit
   rules:
     - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Weekly/
       when: delayed
       start_in: 6 hours
   variables:
-    OS: ubuntu-25.10
+    OS: ubuntu-26.10
   parallel:
     matrix:
       - <<: *basic_combinations
 
-ubuntu-25.10 avx512:
+ubuntu-26.10 avx512:
   extends: .build_and_unit
   rules:
     - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Weekly/
       when: delayed
       start_in: 7 hours
   variables:
-    OS: ubuntu-25.10
+    OS: ubuntu-26.10
     MARCH: x86-64-v4
     TEST_MODE: full
   tags:
@@ -1303,28 +1334,28 @@ ubuntu-25.10 avx512:
     matrix:
       - <<: *basic_combinations
 
-ubuntu-25.10 arm native:
+ubuntu-26.10 arm native:
   extends: .build_and_unit
   rules:
     - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Weekly/
       when: delayed
       start_in: 3 hours
   variables:
-    OS: ubuntu-25.10
+    OS: ubuntu-26.10
   tags:
     - ${OCUDU_RUNNER_TAG}-arm64
   parallel:
     matrix:
       - <<: *basic_combinations
 
-ubuntu-25.10 arm neon:
+ubuntu-26.10 arm neon:
   extends: .build_and_unit
   rules:
     - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Weekly/
       when: delayed
       start_in: 4 hours
   variables:
-    OS: ubuntu-25.10
+    OS: ubuntu-26.10
     MCPU: neoverse-n1+crc+crypto+ssbs
   tags:
     - ${OCUDU_RUNNER_TAG}-arm64
@@ -1400,7 +1431,7 @@ ubuntu-22.04 avx2 dpdk 25.11:
   variables:
     OS: ubuntu-22.04
     MARCH: x86-64-v3
-    DPDK_VERSION: "25.11_avx2"
+    DPDK_VERSION: "25.11.3_avx2"
   parallel:
     matrix:
       - <<: *basic_combinations_dpdk
@@ -1472,7 +1503,7 @@ ubuntu-22.04 avx512 dpdk 25.11:
     OS: ubuntu-22.04
     MARCH: x86-64-v4
     TEST_MODE: full
-    DPDK_VERSION: "25.11_avx512"
+    DPDK_VERSION: "25.11.3_avx512"
   tags:
     - ${OCUDU_RUNNER_TAG}-amd64
     - avx512
@@ -1524,7 +1555,7 @@ ubuntu-24.04 avx2 dpdk 25.11:
   variables:
     OS: ubuntu-24.04
     MARCH: x86-64-v3
-    DPDK_VERSION: "25.11_avx2"
+    DPDK_VERSION: "25.11.3_avx2"
   parallel:
     matrix:
       - <<: *basic_combinations_dpdk
@@ -1567,7 +1598,7 @@ ubuntu-24.04 avx512 dpdk 25.11:
   variables:
     OS: ubuntu-24.04
     MARCH: x86-64-v4
-    DPDK_VERSION: "25.11_avx512"
+    DPDK_VERSION: "25.11.3_avx512"
     TEST_MODE: full
   parallel:
     matrix:
@@ -1576,64 +1607,31 @@ ubuntu-24.04 avx512 dpdk 25.11:
         ENABLE_FFTW: "False"
         ENABLE_MKL: "True"
 
-ubuntu-25.10 avx2 dpdk 24.11:
+ubuntu-26.10 avx2 dpdk 25.11:
   extends: .build_and_unit
   rules:
     - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Weekly/
       when: delayed
       start_in: 20 hours
   variables:
-    OS: ubuntu-25.10
+    OS: ubuntu-26.10
     MARCH: x86-64-v3
-    DPDK_VERSION: "24.11.2_avx2"
+    DPDK_VERSION: "25.11.3_avx2"
   parallel:
     matrix:
       - <<: *basic_combinations_dpdk
 
-ubuntu-25.10 avx2 dpdk 25.11:
+ubuntu-26.10 avx512 dpdk 25.11:
   extends: .build_and_unit
   rules:
     - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Weekly/
       when: delayed
       start_in: 21 hours
   variables:
-    OS: ubuntu-25.10
-    MARCH: x86-64-v3
-    DPDK_VERSION: "25.11_avx2"
-  parallel:
-    matrix:
-      - <<: *basic_combinations_dpdk
-
-ubuntu-25.10 avx512 dpdk 24.11:
-  extends: .build_and_unit
-  rules:
-    - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Weekly/
-      when: delayed
-      start_in: 22 hours
-  variables:
-    OS: ubuntu-25.10
+    OS: ubuntu-26.10
     MARCH: x86-64-v4
     TEST_MODE: full
-    DPDK_VERSION: "24.11.2_avx512"
-  tags:
-    - ${OCUDU_RUNNER_TAG}-amd64
-    - avx512
-    - sctp
-  parallel:
-    matrix:
-      - <<: *basic_combinations_dpdk
-
-ubuntu-25.10 avx512 dpdk 25.11:
-  extends: .build_and_unit
-  rules:
-    - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Weekly/
-      when: delayed
-      start_in: 23 hours
-  variables:
-    OS: ubuntu-25.10
-    MARCH: x86-64-v4
-    TEST_MODE: full
-    DPDK_VERSION: "25.11_avx512"
+    DPDK_VERSION: "25.11.3_avx512"
   tags:
     - ${OCUDU_RUNNER_TAG}-amd64
     - avx512
@@ -1647,11 +1645,11 @@ ubuntu-26.04 avx2 dpdk 25.11:
   rules:
     - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Weekly/
       when: delayed
-      start_in: 24 hours
+      start_in: 22 hours
   variables:
     OS: ubuntu-26.04
     MARCH: x86-64-v3
-    DPDK_VERSION: "25.11_avx2"
+    DPDK_VERSION: "25.11.3_avx2"
   parallel:
     matrix:
       - <<: *basic_combinations_dpdk
@@ -1661,11 +1659,11 @@ ubuntu-26.04 avx512 dpdk 25.11:
   rules:
     - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Weekly/
       when: delayed
-      start_in: 25 hours
+      start_in: 23 hours
   variables:
     OS: ubuntu-26.04
     MARCH: x86-64-v4
-    DPDK_VERSION: "25.11_avx512"
+    DPDK_VERSION: "25.11.3_avx512"
     TEST_MODE: full
   tags:
     - ${OCUDU_RUNNER_TAG}-amd64

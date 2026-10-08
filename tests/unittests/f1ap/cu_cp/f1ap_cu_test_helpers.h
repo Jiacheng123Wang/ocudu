@@ -125,6 +125,13 @@ public:
     return next_du_setup_resp;
   }
 
+  du_config_update_result on_new_du_config_update(const du_config_update_request& msg) override
+  {
+    du_config_update_result res;
+    res.result.emplace<du_config_update_result::accepted>();
+    return res;
+  }
+
   cu_cp_ue_index_t request_new_ue_creation() override
   {
     logger.info("Received request to create new UE");

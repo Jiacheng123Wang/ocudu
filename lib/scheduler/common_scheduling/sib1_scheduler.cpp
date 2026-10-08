@@ -184,7 +184,8 @@ bool sib1_scheduler::allocate_sib1(cell_slot_resource_allocator& res_grid, unsig
       pdcch_sched.alloc_dl_pdcch_common(res_grid,
                                         rnti_t::SI_RNTI,
                                         cell_cfg.params.dl_cfg_common.init_dl_bwp.pdcch_common.sib1_search_space_id,
-                                        expert_cfg.sib1_dci_aggr_lev);
+                                        expert_cfg.sib1_dci_aggr_lev,
+                                        cell_cfg.params.ssb_cfg.ssb_beams.get_beam(ssb_idx));
   if (pdcch == nullptr) {
     logger.warning("Could not allocated SIB1's DCI in PDCCH for SSB index {}", ssb_idx);
     return false;
@@ -198,11 +199,12 @@ bool sib1_scheduler::allocate_sib1(cell_slot_resource_allocator& res_grid, unsig
       grant_info{cell_cfg.params.dl_cfg_common.init_dl_bwp.generic_params.scs, sib1_ofdm_symbols, sib1_crbs});
 
   // 4. Delegate filling SIB1 grants to helper function.
-  fill_sib1_grant(res_grid, sib1_crbs, time_resource, dmrs_info, sib1_prbs_tbs.tbs_bytes);
+  fill_sib1_grant(res_grid, ssb_idx, sib1_crbs, time_resource, dmrs_info, sib1_prbs_tbs.tbs_bytes);
   return true;
 }
 
 void sib1_scheduler::fill_sib1_grant(cell_slot_resource_allocator& res_grid,
+                                     unsigned                      ssb_idx,
                                      crb_interval                  sib1_crbs_grant,
                                      unsigned                      time_resource,
                                      const dmrs_information&       dmrs_info,
@@ -241,6 +243,9 @@ void sib1_scheduler::fill_sib1_grant(cell_slot_resource_allocator& res_grid,
                            sib1_crbs_grant,
                            pdsch_td_res_alloc_list[sib1_pdcch.dci.as_si_rnti_f1_0().time_resource].symbols,
                            dmrs_info);
+
+  // The UE reads the SIB1 of the SS/PBCH block that it found the cell on, so the block and its SIB1 share a beam.
+  pdsch.precoding_and_beamforming = make_single_beam_precoding(cell_cfg.params.ssb_cfg.ssb_beams.get_beam(ssb_idx));
 }
 
 void sib1_scheduler::handle_pending_sib1_update()

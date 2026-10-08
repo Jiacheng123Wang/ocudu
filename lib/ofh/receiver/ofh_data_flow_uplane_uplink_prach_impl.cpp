@@ -25,9 +25,9 @@ data_flow_uplane_uplink_prach_impl::data_flow_uplane_uplink_prach_impl(
   ocudu_assert(uplane_decoder, "Invalid User-Plane decoder");
 }
 
-bool data_flow_uplane_uplink_prach_impl::should_uplane_packet_be_filtered(
-    unsigned                              eaxc,
-    const uplane_message_decoder_results& results) const
+bool data_flow_uplane_uplink_prach_impl::should_uplane_packet_be_filtered(unsigned                              eaxc,
+                                                                          const uplane_message_decoder_results& results,
+                                                                          bool is_seq_id_correct)
 {
   if (OCUDU_UNLIKELY(!is_a_prach_message(results.params.filter_index))) {
     logger.info("Sector#{}: dropped received Open Fronthaul User-Plane packet for slot '{}' and symbol '{}' as decoded "
@@ -36,6 +36,10 @@ bool data_flow_uplane_uplink_prach_impl::should_uplane_packet_be_filtered(
                 results.params.slot,
                 results.params.symbol_id,
                 to_underlying(results.params.filter_index));
+
+    if (is_seq_id_correct) {
+      metrics_collector.increase_corrupted_messages();
+    }
 
     return true;
   }
@@ -88,18 +92,22 @@ bool data_flow_uplane_uplink_prach_impl::should_uplane_packet_be_filtered(
   return !are_uplane_prb_fields_valid(results, context, sector_id, logger);
 }
 
-void data_flow_uplane_uplink_prach_impl::decode_type1_message(unsigned eaxc, span<const uint8_t> message)
+void data_flow_uplane_uplink_prach_impl::decode_type1_message(unsigned            eaxc,
+                                                              span<const uint8_t> message,
+                                                              bool                is_seq_id_correct)
 {
   uplane_message_decoder_results results;
   if (!uplane_decoder->decode(results, message)) {
     metrics_collector.increase_dropped_messages();
+    if (is_seq_id_correct) {
+      metrics_collector.increase_corrupted_messages();
+    }
 
     return;
   }
 
-  if (should_uplane_packet_be_filtered(eaxc, results)) {
+  if (should_uplane_packet_be_filtered(eaxc, results, is_seq_id_correct)) {
     metrics_collector.increase_dropped_messages();
-
     return;
   }
 

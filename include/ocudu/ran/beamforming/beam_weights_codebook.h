@@ -114,7 +114,7 @@ public:
   /// \return The channel coefficient for the given transmit and receive ports.
   cf_t get_coefficient(beam_identifier beam_id, unsigned i_antenna) const
   {
-    unsigned i_beam = to_uint(beam_id);
+    unsigned i_beam = to_underlying(beam_id);
     ocudu_assert(i_beam < get_nof_beams(),
                  "The beam index (i.e., {}) exceeds the maximum (i.e., {}).",
                  i_beam,
@@ -133,7 +133,7 @@ public:
   /// \param[in] i_antenna   Antenna port index.
   void set_coefficient(cf_t coefficient, beam_identifier beam_id, unsigned i_antenna)
   {
-    unsigned i_beam = to_uint(beam_id);
+    unsigned i_beam = to_underlying(beam_id);
     ocudu_assert(i_beam < get_nof_beams(),
                  "The beam index (i.e., {}) exceeds the maximum (i.e., {}).",
                  i_beam,
@@ -148,7 +148,7 @@ public:
   /// \brief  Gets a view of the coefficients associated with a given antenna index.
   /// \return A view of the coefficients for the contribution of each beam to the given antenna.
   /// \remark An assertion is triggered if the antenna index exceeds the maximum.
-  span<const cf_t> get_antenna_coefficients(unsigned i_antenna)
+  span<const cf_t> get_antenna_coefficients(unsigned i_antenna) const
   {
     ocudu_assert(i_antenna < get_nof_antennas(),
                  "The antenna index (i.e., {}) exceeds the maximum (i.e., {}).",
@@ -166,7 +166,7 @@ public:
   template <unsigned MaxNofAntennas>
   static_vector<cf_t, MaxNofAntennas> get_beam_coefficients(beam_identifier beam_id) const
   {
-    unsigned i_beam = to_uint(beam_id);
+    unsigned i_beam = to_underlying(beam_id);
     ocudu_assert(i_beam < get_nof_beams(),
                  "The beam index (i.e., {}) exceeds the maximum (i.e., {}).",
                  i_beam,

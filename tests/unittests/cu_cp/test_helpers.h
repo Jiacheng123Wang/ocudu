@@ -66,6 +66,8 @@ public:
     return activate;
   }
 
+  void on_du_cells_removed(span<const nr_cell_identity> cells) override {}
+
   void on_rrc_ue_created(cu_cp_ue_index_t ue_index, rrc_ue_interface& rrc_ue) override
   {
     logger.info("ue={}: Received a RRC UE creation notification", ue_index);
@@ -226,7 +228,10 @@ private:
 class dummy_du_connection_notifier : public du_connection_notifier
 {
 public:
-  bool on_du_setup_request(const std::set<plmn_identity>& plmn_ids) override { return true; }
+  std::set<plmn_identity> on_connected_plmns_required(const std::set<plmn_identity>& plmn_ids) override
+  {
+    return plmn_ids;
+  }
 };
 
 class dummy_cu_cp_ref_time_report_notifier : public cu_cp_ref_time_report_notifier
@@ -760,6 +765,14 @@ public:
     return launch_no_op_task(ue_cap_transfer_outcome);
   }
 
+  void fill_ue_derived_location(cu_cp_user_location_info_nr& user_location_info) const override
+  {
+    user_location_info.ue_location_derived_tac = ue_location_derived_tac;
+    user_location_info.mapped_nci              = mapped_nci;
+  }
+
+  void request_coarse_ue_location() override {}
+
   rrc_ue_release_context
   get_rrc_ue_release_context(bool                                          requires_rrc_msg,
                              std::optional<std::chrono::seconds>           release_wait_time,
@@ -794,6 +807,8 @@ public:
   }
 
   void update_meas_config(const rrc_meas_cfg& /* cfg */) override {}
+
+  std::optional<rrc_meas_cfg> get_meas_config() override { return std::nullopt; }
 
   std::optional<uint8_t> get_serving_cell_mo() override
   {
@@ -880,6 +895,7 @@ public:
 
   // RRC UE Reestablishment proc notifier.
   void on_new_as_security_context(bool security_mode_active) override {}
+  void on_as_security_activated() override {}
 
   // Interface functions.
   rrc_ue_controller&              get_controller() override { return *this; }
@@ -903,8 +919,10 @@ public:
   byte_buffer last_ue_capabilities;
 
 private:
-  ocudulog::basic_logger&               logger                      = ocudulog::fetch_basic_logger("TEST");
-  bool                                  ue_cap_transfer_outcome     = true;
+  ocudulog::basic_logger&               logger                  = ocudulog::fetch_basic_logger("TEST");
+  bool                                  ue_cap_transfer_outcome = true;
+  std::optional<tac_t>                  ue_location_derived_tac;
+  std::optional<nr_cell_identity>       mapped_nci;
   bool                                  rrc_reconfiguration_outcome = false;
   unsigned                              test_transaction_id;
   static_vector<srb_id_t, MAX_NOF_SRBS> srb_vec;

@@ -18,6 +18,7 @@
 #include "ocudu/phy/upper/uplink_slot_processor.h"
 #include "ocudu/phy/upper/upper_phy_rx_results_notifier.h"
 #include "ocudu/support/executors/task_executor.h"
+#include "ocudu/support/synchronization/stop_event.h"
 #include <utility>
 
 namespace ocudu {
@@ -235,8 +236,6 @@ private:
 
   /// Uplink processor finite-state machine.
   uplink_processor_fsm state_machine;
-  /// Resource grid reference counter.
-  std::atomic<unsigned>& grid_ref_counter;
   /// PDU repository.
   uplink_pdu_slot_repository_impl pdu_repository;
   /// Pool of PUSCH processor adaptors.
@@ -253,6 +252,8 @@ private:
   std::unique_ptr<srs_estimator> srs;
   /// Resource grid associated to the slot.
   std::unique_ptr<resource_grid> grid;
+  /// Resource grid controller.
+  uplink_resource_grid_controller grid_controller;
   /// Task executors.
   task_executor_collection task_executors;
   /// Receive buffer pool.
@@ -283,5 +284,7 @@ private:
   static constexpr uint64_t hop_count_no_slot = UINT64_MAX;
   uint64_t                  hop_count_slot   = hop_count_no_slot;
   uint64_t                  hop_count_hops   = 0;
+  /// Stop control source.
+  rt_stop_event_source stop_control;
 };
 } // namespace ocudu

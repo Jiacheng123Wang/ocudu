@@ -33,6 +33,13 @@ public:
   {
     return launch_no_op_task(expected<measurement_response_t, measurement_failure_t>{measurement_response_t{}});
   }
+
+  async_task<expected<e_cid_measurement_response_t, e_cid_measurement_failure_t>>
+  on_e_cid_measurement_request(const e_cid_measurement_request_t& request) override
+  {
+    return launch_no_op_task(
+        expected<e_cid_measurement_response_t, e_cid_measurement_failure_t>{e_cid_measurement_response_t{}});
+  }
 };
 
 // Test class.

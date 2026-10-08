@@ -11,6 +11,7 @@ add_executable(common_scheduler_test
         ra_scheduler_test.cpp
         ra_ue_repository_test.cpp
         paging_scheduler_test.cpp
+        prs_scheduler_test.cpp
         sub_scheduler_test_environment.cpp)
 target_link_libraries(common_scheduler_test
         ocudu_sched
@@ -22,4 +23,4 @@ target_link_libraries(common_scheduler_test
         sched_test_doubles
         gtest
         ocudu_gtest_main)
-add_test(common_scheduler_test common_scheduler_test)
+gtest_discover_tests(common_scheduler_test)

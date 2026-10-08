@@ -431,39 +431,39 @@ bool ocudu::gtpu_extension_header_comprehension_check(const gtpu_extension_heade
                                                       gtpu_tunnel_logger&               logger)
 {
   switch (type) {
+      // Supported extensions.
     case gtpu_extension_header_type::no_more_extension_headers:
+    case gtpu_extension_header_type::long_pdcp_pdu_number:
+    case gtpu_extension_header_type::long_pdcp_pdu_number_legacy:
+    case gtpu_extension_header_type::nr_ran_container:
+    case gtpu_extension_header_type::pdu_session_container:
+    case gtpu_extension_header_type::pdcp_pdu_number:
       return true;
+      // Not supported extension, log depending on encoded comprehension requirement.
     case gtpu_extension_header_type::service_class_indicator:
     case gtpu_extension_header_type::udp_port:
     case gtpu_extension_header_type::ran_container:
-    case gtpu_extension_header_type::long_pdcp_pdu_number_0:
-    case gtpu_extension_header_type::long_pdcp_pdu_number_1:
     case gtpu_extension_header_type::xw_ran_container:
       break;
-    case gtpu_extension_header_type::nr_ran_container:
-    case gtpu_extension_header_type::pdu_session_container:
-      return true;
-    case gtpu_extension_header_type::pdcp_pdu_number:
-      // TODO add actual support for PDCP PDU number.
-      return true;
+      // Reserved fields.
     case gtpu_extension_header_type::reserved_0:
     case gtpu_extension_header_type::reserved_1:
     case gtpu_extension_header_type::reserved_2:
     case gtpu_extension_header_type::reserved_3:
       return false;
+      // Unexpected values, log depending on encoded comprehension requirement.
     default:
       break;
   }
   logger.log_debug("Extension header not comprehended. type={}", type);
 
-  uint8_t comp = static_cast<uint8_t>(type) >> 6U;
-  bool    comp_not_needed =
-      !(comp == static_cast<uint8_t>(gtpu_comprehension::required_at_endpoint_not_intermediate_node) ||
-        comp == static_cast<uint8_t>(gtpu_comprehension::required_at_endpoint_and_intermediate_node));
+  uint8_t comp         = static_cast<uint8_t>(type) >> 6U;
+  bool comp_not_needed = comp != static_cast<uint8_t>(gtpu_comprehension::required_at_endpoint_not_intermediate_node) &&
+                         comp != static_cast<uint8_t>(gtpu_comprehension::required_at_endpoint_and_intermediate_node);
   if (comp_not_needed) {
     logger.log_debug("Extension header not comprehended. type={}", type);
   } else {
-    logger.log_error("Extension header not comprehended. type={}", type);
+    logger.log_warning("Extension header not comprehended. type={}", type);
   }
   return comp_not_needed;
 }

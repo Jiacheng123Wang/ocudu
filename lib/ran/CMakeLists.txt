@@ -26,6 +26,7 @@ add_library(ocudu_ran
         pdsch/pdsch_dmrs_symbol_mask.cpp
         pdsch/pdsch_mcs.cpp
         pdsch/pdsch_antenna_port_mapping.cpp
+        prs/prs.cpp
         prach/prach_configuration.cpp
         prach/prach_cyclic_shifts.cpp
         prach/prach_frequency_mapping.cpp
@@ -58,6 +59,7 @@ add_library(ocudu_ran
         sch/sch_segmentation.cpp
         sib/sib_helper.cpp
         srs/srs_bandwidth_configuration.cpp
+        srs/srs_configuration_helpers.cpp
         srs/srs_information.cpp
         ssb/pbch_mib_pack.cpp
         ssb/ssb_freq_position_generator.cpp
@@ -65,7 +67,8 @@ add_library(ocudu_ran
         ssb/ssb_helper.cpp
         ssb/ssb_mapping.cpp
         tdd_ul_dl_config.cpp
-        drx_config.cpp)
+        drx_config.cpp
+        ntn_location_mapping.cpp)
 target_link_libraries(ocudu_ran ocudulog ocuduvec)
 
 add_to_exported_libs(ocudu_ran)

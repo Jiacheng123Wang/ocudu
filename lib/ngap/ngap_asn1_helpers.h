@@ -29,6 +29,23 @@
 
 namespace ocudu::ocucp {
 
+/// \brief Converts a satellite RAT type into the RAT Information of a supported TA, as per TS 38.413,
+/// Section 9.3.1.125.
+inline asn1::ngap::rat_info_e satellite_rat_type_to_asn1(satellite_rat_type rat)
+{
+  switch (rat) {
+    case satellite_rat_type::nr_leo:
+      return asn1::ngap::rat_info_opts::nr_leo;
+    case satellite_rat_type::nr_meo:
+      return asn1::ngap::rat_info_opts::nr_meo;
+    case satellite_rat_type::nr_geo:
+      return asn1::ngap::rat_info_opts::nr_geo;
+    case satellite_rat_type::nr_othersat:
+      return asn1::ngap::rat_info_opts::nr_othersat;
+  }
+  return asn1::ngap::rat_info_opts::nulltype;
+}
+
 /// \brief Fills ASN.1 NGSetupRequest struct.
 /// \param[out] asn1_request The NGSetupRequest ASN.1 struct to fill.
 /// \param[in] ngap_ctxt The NGAP context.
@@ -68,6 +85,14 @@ inline void fill_asn1_ng_setup_request(asn1::ngap::ng_setup_request_s& asn1_requ
         asn1_broadcast_plmn_item.tai_slice_support_list.push_back(asn1_slice_support_item);
       }
       asn1_supported_ta_item.broadcast_plmn_list.push_back(asn1_broadcast_plmn_item);
+    }
+
+    // Fill the RAT Information of an NTN tracking area, from which the AMF derives the satellite RAT type of the UEs
+    // it serves (TS 23.501, Section 5.4.10).
+    if (supported_ta_item.satellite_rat.has_value()) {
+      asn1_supported_ta_item.ie_exts_present          = true;
+      asn1_supported_ta_item.ie_exts.rat_info_present = true;
+      asn1_supported_ta_item.ie_exts.rat_info         = satellite_rat_type_to_asn1(*supported_ta_item.satellite_rat);
     }
 
     asn1_request->supported_ta_list.push_back(asn1_supported_ta_item);
@@ -135,6 +160,65 @@ inline void fill_asn1_ul_nas_transport(asn1::ngap::ul_nas_transport_s& asn1_msg,
 
   auto& user_loc_info_nr = asn1_msg->user_location_info.set_user_location_info_nr();
   user_loc_info_nr       = cu_cp_user_location_info_to_asn1(msg.user_location_info);
+}
+
+/// Converts the NGAP ASN.1 QoS Flow Level QoS Parameters IE to common type.
+inline qos_flow_level_qos_parameters
+ngap_asn1_to_qos_flow_level_qos_parameters(const asn1::ngap::qos_flow_level_qos_params_s& asn1_qos_params)
+{
+  qos_flow_level_qos_parameters qos_params;
+
+  if (asn1_qos_params.qos_characteristics.type() == asn1::ngap::qos_characteristics_c::types::dyn5qi) {
+    const auto& asn1_dyn_5qi = asn1_qos_params.qos_characteristics.dyn5qi();
+
+    dyn_5qi_descriptor dyn_5qi  = {};
+    dyn_5qi.qos_prio_level      = qos_prio_level_t{asn1_dyn_5qi.prio_level_qos};
+    dyn_5qi.packet_delay_budget = asn1_dyn_5qi.packet_delay_budget;
+    dyn_5qi.per.exponent        = asn1_dyn_5qi.packet_error_rate.per_exponent;
+    dyn_5qi.per.scalar          = asn1_dyn_5qi.packet_error_rate.per_scalar;
+
+    if (asn1_dyn_5qi.five_qi_present) {
+      dyn_5qi.five_qi = uint_to_five_qi(asn1_dyn_5qi.five_qi);
+    }
+    // The Delay Critical and Averaging Window IEs are only present for GBR QoS flows.
+    if (asn1_dyn_5qi.delay_crit_present) {
+      dyn_5qi.is_delay_critical = asn1_dyn_5qi.delay_crit.value == asn1::ngap::delay_crit_opts::delay_crit;
+    }
+    if (asn1_dyn_5qi.averaging_win_present) {
+      dyn_5qi.averaging_win = asn1_dyn_5qi.averaging_win;
+    }
+    if (asn1_dyn_5qi.max_data_burst_volume_present) {
+      dyn_5qi.max_data_burst_volume = asn1_dyn_5qi.max_data_burst_volume;
+    }
+
+    qos_params.qos_desc = dyn_5qi;
+  } else if (asn1_qos_params.qos_characteristics.type() == asn1::ngap::qos_characteristics_c::types::non_dyn5qi) {
+    non_dyn_5qi_descriptor non_dyn_5qi = {};
+    non_dyn_5qi.five_qi                = uint_to_five_qi(asn1_qos_params.qos_characteristics.non_dyn5qi().five_qi);
+    qos_params.qos_desc                = non_dyn_5qi;
+
+    // TODO: Add optional values.
+  }
+
+  // Fill allocation and retention priority.
+  qos_params.alloc_retention_prio.prio_level_arp         = asn1_qos_params.alloc_and_retention_prio.prio_level_arp;
+  qos_params.alloc_retention_prio.may_trigger_preemption = asn1_qos_params.alloc_and_retention_prio.pre_emption_cap ==
+                                                           asn1::ngap::pre_emption_cap_opts::may_trigger_pre_emption;
+  qos_params.alloc_retention_prio.is_preemptable = asn1_qos_params.alloc_and_retention_prio.pre_emption_vulnerability ==
+                                                   asn1::ngap::pre_emption_vulnerability_opts::pre_emptable;
+
+  // Fill optional parameters.
+  if (asn1_qos_params.add_qos_flow_info_present) {
+    qos_params.add_qos_flow_info = asn1_qos_params.add_qos_flow_info.to_string();
+  }
+  if (asn1_qos_params.gbr_qos_info_present) {
+    qos_params.gbr_qos_info = ngap_asn1_to_gbr_qos_flow_information(asn1_qos_params.gbr_qos_info);
+  }
+  if (asn1_qos_params.reflective_qos_attribute_present) {
+    qos_params.reflective_qos_attribute_subject_to = true;
+  }
+
+  return qos_params;
 }
 
 /// Helper function to fill the CU-CP PDU Session Resource Setup Item for both, PDUSessionResourceSetupItemSUReq and
@@ -212,53 +296,8 @@ inline bool fill_cu_cp_pdu_session_resource_setup_item_base(cu_cp_pdu_session_re
     qos_flow_setup_req_item.qos_flow_id = uint_to_qos_flow_id(asn1_flow_item.qos_flow_id);
 
     // Fill QoS flow level QoS parameters.
-    if (asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.type() ==
-        asn1::ngap::qos_characteristics_c::types::dyn5qi) {
-      dyn_5qi_descriptor dyn_5qi = {};
-      if (asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.dyn5qi().five_qi_present) {
-        dyn_5qi.five_qi =
-            uint_to_five_qi(asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.dyn5qi().five_qi);
-      }
-      // TODO: Add optional values.
-
-      qos_flow_setup_req_item.qos_flow_level_qos_params.qos_desc = dyn_5qi;
-
-      // TODO: Add optional values.
-
-    } else if (asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.type() ==
-               asn1::ngap::qos_characteristics_c::types::non_dyn5qi) {
-      non_dyn_5qi_descriptor non_dyn_5qi = {};
-      non_dyn_5qi.five_qi =
-          uint_to_five_qi(asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.non_dyn5qi().five_qi);
-      qos_flow_setup_req_item.qos_flow_level_qos_params.qos_desc = non_dyn_5qi;
-
-      // TODO: Add optional values.
-    }
-
-    // Fill allocation and retention priority.
-    qos_flow_setup_req_item.qos_flow_level_qos_params.alloc_retention_prio.prio_level_arp =
-        asn1_flow_item.qos_flow_level_qos_params.alloc_and_retention_prio.prio_level_arp;
-    qos_flow_setup_req_item.qos_flow_level_qos_params.alloc_retention_prio.may_trigger_preemption =
-        asn1_flow_item.qos_flow_level_qos_params.alloc_and_retention_prio.pre_emption_cap ==
-        asn1::ngap::pre_emption_cap_opts::may_trigger_pre_emption;
-    qos_flow_setup_req_item.qos_flow_level_qos_params.alloc_retention_prio.is_preemptable =
-        asn1_flow_item.qos_flow_level_qos_params.alloc_and_retention_prio.pre_emption_vulnerability ==
-        asn1::ngap::pre_emption_vulnerability_opts::pre_emptable;
-
-    // Optional parameters.
-    if (asn1_flow_item.qos_flow_level_qos_params.add_qos_flow_info_present) {
-      qos_flow_setup_req_item.qos_flow_level_qos_params.add_qos_flow_info =
-          asn1_flow_item.qos_flow_level_qos_params.add_qos_flow_info.to_string();
-    }
-
-    if (asn1_flow_item.qos_flow_level_qos_params.gbr_qos_info_present) {
-      qos_flow_setup_req_item.qos_flow_level_qos_params.gbr_qos_info =
-          ngap_asn1_to_gbr_qos_flow_information(asn1_flow_item.qos_flow_level_qos_params.gbr_qos_info);
-    }
-
-    if (asn1_flow_item.qos_flow_level_qos_params.reflective_qos_attribute_present) {
-      qos_flow_setup_req_item.qos_flow_level_qos_params.reflective_qos_attribute_subject_to = true;
-    }
+    qos_flow_setup_req_item.qos_flow_level_qos_params =
+        ngap_asn1_to_qos_flow_level_qos_parameters(asn1_flow_item.qos_flow_level_qos_params);
 
     if (asn1_flow_item.erab_id_present) {
       qos_flow_setup_req_item.erab_id = asn1_flow_item.erab_id;
@@ -534,38 +573,8 @@ inline bool fill_ngap_pdu_session_resource_modify_item_base(
 
       // Fill QoS flow level QoS parameters.
       if (asn1_flow_item.qos_flow_level_qos_params_present) {
-        if (asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.type() ==
-            asn1::ngap::qos_characteristics_c::types::dyn5qi) {
-          dyn_5qi_descriptor dyn_5qi = {};
-          if (asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.dyn5qi().five_qi_present) {
-            dyn_5qi.five_qi =
-                uint_to_five_qi(asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.dyn5qi().five_qi);
-          }
-          // TODO: Add optional values.
-
-          qos_flow_add_item.qos_flow_level_qos_params.qos_desc = dyn_5qi;
-
-          // TODO: Add optional values.
-
-        } else if (asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.type() ==
-                   asn1::ngap::qos_characteristics_c::types::non_dyn5qi) {
-          non_dyn_5qi_descriptor non_dyn_5qi = {};
-          non_dyn_5qi.five_qi =
-              uint_to_five_qi(asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.non_dyn5qi().five_qi);
-          qos_flow_add_item.qos_flow_level_qos_params.qos_desc = non_dyn_5qi;
-
-          // TODO: Add optional values.
-        }
-
-        // Fill allocation and retention priority.
-        qos_flow_add_item.qos_flow_level_qos_params.alloc_retention_prio.prio_level_arp =
-            asn1_flow_item.qos_flow_level_qos_params.alloc_and_retention_prio.prio_level_arp;
-        qos_flow_add_item.qos_flow_level_qos_params.alloc_retention_prio.may_trigger_preemption =
-            asn1_flow_item.qos_flow_level_qos_params.alloc_and_retention_prio.pre_emption_cap.value ==
-            asn1::ngap::pre_emption_cap_opts::may_trigger_pre_emption;
-        qos_flow_add_item.qos_flow_level_qos_params.alloc_retention_prio.is_preemptable =
-            asn1_flow_item.qos_flow_level_qos_params.alloc_and_retention_prio.pre_emption_vulnerability.value ==
-            asn1::ngap::pre_emption_vulnerability_opts::pre_emptable;
+        qos_flow_add_item.qos_flow_level_qos_params =
+            ngap_asn1_to_qos_flow_level_qos_parameters(asn1_flow_item.qos_flow_level_qos_params);
       }
 
       modify_item.transfer.qos_flow_add_or_modify_request_list.emplace(qos_flow_add_item.qos_flow_id,
@@ -737,10 +746,9 @@ inline void fill_asn1_ue_context_release_complete(asn1::ngap::ue_context_release
       asn1::ngap::recommended_cell_item_s asn1_recommended_cell_item;
 
       // Fill NG RAN CGI.
-      asn1_recommended_cell_item.ngran_cgi.set_nr_cgi().nr_cell_id.from_number(
-          cu_cp_recommended_cell_item.ngran_cgi.nci.value());
-      asn1_recommended_cell_item.ngran_cgi.set_nr_cgi().plmn_id =
-          cu_cp_recommended_cell_item.ngran_cgi.plmn_id.to_bytes();
+      auto& asn1_nr_cgi = asn1_recommended_cell_item.ngran_cgi.set_nr_cgi();
+      asn1_nr_cgi.nr_cell_id.from_number(cu_cp_recommended_cell_item.ngran_cgi.nci.value());
+      asn1_nr_cgi.plmn_id = cu_cp_recommended_cell_item.ngran_cgi.plmn_id.to_bytes();
 
       // Fill time stayed in cell.
       if (cu_cp_recommended_cell_item.time_stayed_in_cell.has_value()) {

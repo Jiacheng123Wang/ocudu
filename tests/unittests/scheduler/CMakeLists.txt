@@ -39,6 +39,7 @@ add_executable(scheduler_test
         scheduler_ue_removal_test.cpp
         scheduler_tdd_test.cpp
         scheduler_pdsch_repetition_test.cpp
+        scheduler_pusch_repetition_test.cpp
         scheduler_ue_fallback_mode_test.cpp
         scheduler_ta_cmd_test.cpp
 		scheduler_multi_cell_test.cpp
@@ -46,6 +47,7 @@ add_executable(scheduler_test
         scheduler_qos_test.cpp
         scheduler_multi_grants_test.cpp
         scheduler_multi_ue_test.cpp
+        scheduler_ntn_koffset_test.cpp
 		scheduler_no_ue_test.cpp
 )
 target_link_libraries(scheduler_test
@@ -57,7 +59,7 @@ target_link_libraries(scheduler_test
         ocudu_du_config_validators
         gtest
         ocudu_gtest_main)
-add_test(scheduler_test scheduler_test)
+gtest_discover_tests(scheduler_test)
 
 add_executable(scheduler_metrics_handler_test scheduler_metrics_handler_test.cpp)
 target_link_libraries(scheduler_metrics_handler_test

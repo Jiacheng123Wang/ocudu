@@ -30,7 +30,7 @@ void loopback_buffer::write(const baseband_gateway_buffer_reader& data, baseband
   // writing is met at the atomic read, it is guaranteed to be met in the future.
   baseband_gateway_timestamp last_rx_ts = last_rx_timestamp.load(std::memory_order_acquire);
   report_fatal_error_if_not(
-      (timestamp + nof_requested_samples) - last_rx_ts <= buffer.get_nof_samples(),
+      timestamp + nof_requested_samples <= last_rx_ts + buffer.get_nof_samples(),
       "Attempting to write samples [{}, {}) that would overwrite unread sample {}. buffer size: {}",
       timestamp,
       timestamp + nof_requested_samples,
@@ -100,11 +100,14 @@ void loopback_buffer::read(baseband_gateway_buffer_writer& data, baseband_gatewa
   // is met at the atomic read, it is guaranteed to be met in the future.
   baseband_gateway_timestamp last_tx_ts = last_tx_timestamp.load(std::memory_order_acquire);
   if (last_tx_ts < timestamp + nof_requested_samples - 1) {
-    // Reading is not safe. Print a warning and skip the operation.
-    logger.warning("Attempting to read samples [{}, {}), ahead of the last written timestamp, i.e., {}",
+    // Reading is not safe. Print a message and skip the operation.
+    logger.warning("Loopback: Attempting to read samples [{}, {}), ahead of the last written timestamp, i.e., {}",
                    timestamp,
                    timestamp + nof_requested_samples,
                    last_tx_ts);
+
+    // Advance the last RX timestamp. This makes the reading position advance, even if there are no available samples.
+    last_rx_timestamp.store(timestamp + nof_requested_samples - 1, std::memory_order_release);
     return;
   }
 

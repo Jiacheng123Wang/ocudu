@@ -14,9 +14,6 @@
 
 namespace ocudu {
 
-constexpr unsigned gtpu_sn_mod         = 65536;
-constexpr unsigned gtpu_rx_window_size = 32768;
-
 /// GTP-U RX state variables
 struct gtpu_rx_state {
   /// RX_NEXT indicates the SN value of the next GTP-U SDU expected to be received.
@@ -51,7 +48,7 @@ public:
     psup_packer(logger.get_basic_logger()),
     lower_dn(rx_lower_),
     config(cfg),
-    rx_window(logger, gtpu_rx_window_size),
+    rx_window(logger, GTPU_RX_WINDOW_SIZE),
     ue_ctrl_timer_factory(ue_ctrl_timer_factory_)
   {
     ocudu_assert(cfg.ue_ambr_limiter != nullptr, "No UE-AMBR limiter provided");
@@ -356,7 +353,7 @@ private:
   /// \return The rebased value of sn.
   constexpr uint16_t rx_mod_base(uint16_t sn, const gtpu_rx_state& st) const
   {
-    return (sn - st.rx_deliv) % gtpu_sn_mod;
+    return (sn - st.rx_deliv) % GTPU_SN_MOD;
   }
 
   /// Checks whether a sequence number is inside the current Rx window.
@@ -367,7 +364,7 @@ private:
   constexpr bool inside_rx_window(uint16_t sn, const gtpu_rx_state& st) const
   {
     // RX_Deliv <= SN < RX_Deliv + Window_Size
-    return rx_mod_base(sn, st) < gtpu_rx_window_size;
+    return rx_mod_base(sn, st) < GTPU_RX_WINDOW_SIZE;
   }
 
   // Log helper for throttling

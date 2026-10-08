@@ -30,9 +30,13 @@ protected:
     ocudulog::fetch_basic_logger("TEST").set_level(ocudulog::basic_levels::debug);
     ocudulog::init();
 
-    // Add cells to cell manager.
-    for (const auto& cell : cells) {
-      cell_mng.add_cell(cell);
+    // Add and start cells, so that they accept UEs.
+    mac_dummy.mac_cell.wait_start.ready_ev.set();
+    for (unsigned i = 0; i != cells.size(); ++i) {
+      cell_mng.add_cell(cells[i]);
+      async_task<bool>         t = cell_mng.start(to_du_cell_index(i));
+      lazy_task_launcher<bool> launcher{t};
+      report_fatal_error_if_not(t.ready() and t.get(), "Failed to start cell={}", i);
     }
 
     // By default F1AP creates two F1-C bearers.
@@ -175,6 +179,23 @@ TEST_F(du_ue_manager_tester, when_mac_fails_to_create_ue_then_no_ue_is_created_i
   // TEST: DU manager completes DU UE creation procedure with failure.
   ASSERT_EQ(ue_mng.nof_ues(), 0);
   ASSERT_FALSE(is_ue_creation_complete());
+}
+
+TEST_F(du_ue_manager_tester, when_ue_create_request_is_received_for_stopped_cell_then_it_is_discarded)
+{
+  // Action: Cell is stopped.
+  mac_dummy.mac_cell.wait_stop.ready_ev.set();
+  async_task<void>         t = cell_mng.stop_all();
+  lazy_task_launcher<void> launcher{t};
+  ASSERT_TRUE(t.ready());
+
+  // Action: UL CCCH Message received.
+  push_ul_ccch_message(create_ul_ccch_message(to_rnti(0x4601)));
+
+  // TEST: No UE creation is started.
+  ASSERT_FALSE(f1ap_dummy.last_ue_create.has_value());
+  ASSERT_FALSE(mac_dummy.last_ue_create_msg.has_value());
+  ASSERT_EQ(ue_mng.nof_ues(), 0);
 }
 
 TEST_F(du_ue_manager_tester, inexistent_ue_index_removal_is_handled)

@@ -9,6 +9,7 @@
 #include "test_utils/indication_generators.h"
 #include "test_utils/result_test_helpers.h"
 #include "test_utils/scheduler_test_simulator.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/scheduler/cell_config_builder_profiles.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
 #include "tests/test_doubles/utils/test_rng.h"
@@ -34,6 +35,8 @@ public:
   base_scheduler_conres_test(duplex_mode duplx_mode) :
     scheduler_test_simulator(4, duplx_mode == duplex_mode::FDD ? subcarrier_spacing::kHz15 : subcarrier_spacing::kHz30)
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-RACH-16-1", "DU-GEN-2-a");
+
     ocudulog::fetch_basic_logger("SCHED", true).set_level(sched_log_level);
     builder_params = cell_config_builder_profiles::create(duplx_mode);
   }
@@ -424,6 +427,8 @@ protected:
         scheduler_test_sim_config{.max_scs        = GetParam().max_scs,
                                   .ntn_cs_koffset = std::chrono::milliseconds(GetParam().ntn_cs_koffset)})
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-RACH-16-1", "DU-GEN-2-a");
+
     // Create cell.
     auto cell_cfg_req = sched_config_helper::make_default_sched_cell_configuration_request(builder_params);
     if (ntn_cs_koffset != std::chrono::milliseconds{0}) {
@@ -507,6 +512,8 @@ TEST_P(scheduler_conres_expiry_test, when_conres_retx_goes_after_conres_timer_ex
 
 TEST_P(scheduler_conres_expiry_test, when_ntn_cell_conres_timer_extended_with_rtt)
 {
+  OCUDU_TEST_REQUIREMENTS("DU-NTN-TIM-1");
+
   // Create UE with a delay equal to conres_win_slots when NTN RTT extension is enabled.
   create_ue(nof_rtt_slots > 0 ? conres_win_slots : 0);
   static constexpr unsigned msg4_size = 128;
@@ -589,6 +596,8 @@ class cfra_scheduler_test : public scheduler_test_simulator, public ::testing::T
 public:
   cfra_scheduler_test()
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-RACH-16-1", "DU-GEN-2-b");
+
     cell_config_builder_params bparams;
     auto                       cell_req = sched_config_helper::make_default_sched_cell_configuration_request(bparams);
     cell_req.ran.ul_cfg_common.init_ul_bwp.rach_cfg_common->nof_cb_preambles_per_ssb = NOF_CB_PREAMBLES;
@@ -700,6 +709,8 @@ class cfra_csi_collision_test : public scheduler_test_simulator, public ::testin
 public:
   cfra_csi_collision_test() : scheduler_test_simulator(make_no_uci_on_msg3_sched_cfg())
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-RACH-16-1", "DU-GEN-2-b");
+
     cell_config_builder_params bparams;
     auto                       cell_req = sched_config_helper::make_default_sched_cell_configuration_request(bparams);
     cell_req.ran.ul_cfg_common.init_ul_bwp.rach_cfg_common->nof_cb_preambles_per_ssb = NOF_CB_PREAMBLES;
@@ -818,18 +829,16 @@ TEST_P(cfra_csi_collision_test, msg3_retx_never_shares_slot_with_pucch)
   ASSERT_TRUE(retx_found);
 }
 
-/// Fixture for a single RAR grouping a CFRA UE (with dense periodic CSI) and a CBRA UE. Used to verify that the
+/// Bench for a single RAR grouping a CFRA UE (with dense periodic CSI) and a CBRA UE. Used to verify that the
 /// per-UE Msg3 PUCCH avoidance does not push the CBRA UE off a slot just because the CFRA UE has a PUCCH there.
-class cfra_multi_ue_rar_test : public scheduler_test_simulator, public ::testing::TestWithParam<unsigned>
+class cfra_multi_ue_rar_bench : public scheduler_test_simulator
 {
   static constexpr unsigned NOF_CB_PREAMBLES = 60;
 
 public:
-  // Set to true by any iteration that schedules the CBRA Msg3 in a slot where the CFRA UE has a PUCCH, i.e. the
-  // CFRA UE's PUCCH skip did not block the CBRA UE. Checked once for the whole sweep in TearDownTestSuite.
-  static bool saw_cbra_msg3_with_cfra_pucch;
+  static constexpr unsigned CSI_PERIOD_SLOTS = 20;
 
-  cfra_multi_ue_rar_test() : scheduler_test_simulator(make_no_uci_on_msg3_sched_cfg())
+  cfra_multi_ue_rar_bench() : scheduler_test_simulator(make_no_uci_on_msg3_sched_cfg())
   {
     cell_config_builder_params bparams;
     auto                       cell_req = sched_config_helper::make_default_sched_cell_configuration_request(bparams);
@@ -850,11 +859,51 @@ public:
     add_ue(ue_req);
   }
 
-  static void TearDownTestSuite()
+  /// Triggers the RAR at slot \c rach_lead of the CSI period and checks that both Msg3s are scheduled. Returns whether
+  /// the CBRA Msg3 was scheduled in a slot where the CFRA UE had a PUCCH, i.e. the CFRA UE's PUCCH skip did not block
+  /// the CBRA UE.
+  bool run(unsigned rach_lead)
   {
-    EXPECT_TRUE(saw_cbra_msg3_with_cfra_pucch)
-        << "No iteration scheduled the CBRA Msg3 in a slot where the CFRA UE had a PUCCH; the per-UE avoidance "
-           "evidence is missing";
+    // Let the scheduler allocate the CFRA UE's periodic PUCCHs ahead of the Msg3 candidate slots, then align to the CSI
+    // period, as each bench starts at a random slot.
+    for (unsigned i = 0; i != CSI_PERIOD_SLOTS; ++i) {
+      run_slot();
+    }
+    while (next_slot_rx().count() % CSI_PERIOD_SLOTS != rach_lead) {
+      run_slot();
+    }
+
+    // Single RAR grouping one CFRA and one CBRA preamble in the same occasion (same RA-RNTI).
+    const unsigned cfra_preamble_id =
+        cell_cfg().params.ul_cfg_common.init_ul_bwp.rach_cfg_common->nof_cb_preambles_per_ssb;
+    const std::vector<rach_indication_message::preamble> preambles = {
+        test_helper::create_preamble(cfra_preamble_id, cfra_tc_rnti),
+        test_helper::create_preamble(cbra_preamble_id, cbra_tc_rnti)};
+    sched->handle_rach_indication(test_helper::create_rach_indication(cell_cfg(), next_slot_rx(), preambles));
+
+    bool cfra_msg3_seen                 = false;
+    bool cbra_msg3_seen                 = false;
+    bool cbra_msg3_seen_with_cfra_pucch = false;
+    for (unsigned i = 0; i != 40; ++i) {
+      run_slot();
+      const auto& res            = *last_sched_result();
+      const bool  cfra_has_pucch = find_ue_pucch(cfra_tc_rnti, res.ul.pucchs.unsorted()) != nullptr;
+      if (find_ue_pusch(cfra_tc_rnti, res.ul.puschs) != nullptr) {
+        cfra_msg3_seen = true;
+        EXPECT_FALSE(cfra_has_pucch) << "CFRA Msg3 shares a slot with the CFRA UE's PUCCH (rach_lead=" << rach_lead
+                                     << ")";
+      }
+      if (find_ue_pusch(cbra_tc_rnti, res.ul.puschs) != nullptr) {
+        cbra_msg3_seen = true;
+        // The CBRA UE has no dedicated config, so it never has a PUCCH; if it is scheduled in a slot where the CFRA
+        // UE does have one, the per-UE avoidance correctly served the CBRA UE without being blocked by the CFRA UE.
+        cbra_msg3_seen_with_cfra_pucch |= cfra_has_pucch;
+      }
+    }
+
+    EXPECT_TRUE(cfra_msg3_seen) << "CFRA Msg3 was not scheduled (rach_lead=" << rach_lead << ")";
+    EXPECT_TRUE(cbra_msg3_seen) << "CBRA Msg3 was not scheduled (rach_lead=" << rach_lead << ")";
+    return cbra_msg3_seen_with_cfra_pucch;
   }
 
   const du_ue_index_t cfra_ue_index    = to_du_ue_index(0);
@@ -863,49 +912,22 @@ public:
   const unsigned      cbra_preamble_id = 0;
 };
 
-bool cfra_multi_ue_rar_test::saw_cbra_msg3_with_cfra_pucch = false;
-
-TEST_P(cfra_multi_ue_rar_test, cfra_pucch_does_not_block_other_ue_msg3_in_same_rar)
+TEST(cfra_multi_ue_rar_test, cfra_pucch_does_not_block_other_ue_msg3_in_same_rar)
 {
-  // Sweep the RACH trigger across the periodic-CSI grid to vary the CFRA-PUCCH/Msg3 alignment.
-  for (unsigned i = 0; i != GetParam(); ++i) {
-    run_slot();
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-RACH-16-1", "DU-GEN-2-a", "DU-GEN-2-b");
+
+  // Sweep the RACH trigger across the periodic-CSI grid to vary the CFRA-PUCCH/Msg3 alignment. Only some alignments
+  // put the CBRA Msg3 in a slot where the CFRA UE has a PUCCH, so the sweep as a whole must reach one.
+  bool saw_cbra_msg3_with_cfra_pucch = false;
+  for (unsigned rach_lead = 0; rach_lead != cfra_multi_ue_rar_bench::CSI_PERIOD_SLOTS; ++rach_lead) {
+    cfra_multi_ue_rar_bench bench;
+    saw_cbra_msg3_with_cfra_pucch |= bench.run(rach_lead);
   }
 
-  // Single RAR grouping one CFRA and one CBRA preamble in the same occasion (same RA-RNTI).
-  const unsigned cfra_preamble_id =
-      cell_cfg().params.ul_cfg_common.init_ul_bwp.rach_cfg_common->nof_cb_preambles_per_ssb;
-  const std::vector<rach_indication_message::preamble> preambles = {
-      test_helper::create_preamble(cfra_preamble_id, cfra_tc_rnti),
-      test_helper::create_preamble(cbra_preamble_id, cbra_tc_rnti)};
-  sched->handle_rach_indication(test_helper::create_rach_indication(cell_cfg(), next_slot_rx(), preambles));
-
-  bool cfra_msg3_seen = false;
-  bool cbra_msg3_seen = false;
-  for (unsigned i = 0; i != 40; ++i) {
-    run_slot();
-    const auto& res            = *last_sched_result();
-    const bool  cfra_has_pucch = find_ue_pucch(cfra_tc_rnti, res.ul.pucchs.unsorted()) != nullptr;
-    if (find_ue_pusch(cfra_tc_rnti, res.ul.puschs) != nullptr) {
-      cfra_msg3_seen = true;
-      EXPECT_FALSE(cfra_has_pucch) << "CFRA Msg3 shares a slot with the CFRA UE's PUCCH (rach_lead=" << GetParam()
-                                   << ")";
-    }
-    if (find_ue_pusch(cbra_tc_rnti, res.ul.puschs) != nullptr) {
-      cbra_msg3_seen = true;
-      // The CBRA UE has no dedicated config, so it never has a PUCCH; if it is scheduled in a slot where the CFRA
-      // UE does have one, the per-UE avoidance correctly served the CBRA UE without being blocked by the CFRA UE.
-      if (cfra_has_pucch) {
-        saw_cbra_msg3_with_cfra_pucch = true;
-      }
-    }
-  }
-
-  EXPECT_TRUE(cfra_msg3_seen) << "CFRA Msg3 was not scheduled (rach_lead=" << GetParam() << ")";
-  EXPECT_TRUE(cbra_msg3_seen) << "CBRA Msg3 was not scheduled (rach_lead=" << GetParam() << ")";
+  EXPECT_TRUE(saw_cbra_msg3_with_cfra_pucch)
+      << "No iteration scheduled the CBRA Msg3 in a slot where the CFRA UE had a PUCCH; the per-UE avoidance "
+         "evidence is missing";
 }
-
-INSTANTIATE_TEST_SUITE_P(cfra_multi_ue_sweep, cfra_multi_ue_rar_test, ::testing::Range(0U, 20U));
 
 /// Fixture for the 2-step RACH (MsgA/MsgB) successRAR gate in the fallback scheduler: a UE can be created before
 /// its successRAR MsgB is transmitted, and the fallback scheduler must not send anything for it until then.
@@ -916,6 +938,8 @@ protected:
 
   two_step_ra_fallback_scheduler_test() : scheduler_test_simulator(4, subcarrier_spacing::kHz30)
   {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-RACH-16-2", "DU-GEN-2-a");
+
     cell_config_builder_params bparams =
         cell_config_builder_profiles::create(duplex_mode::TDD, frequency_range::FR1, bs_channel_bandwidth::MHz50);
     bparams.min_k1 = 2;

@@ -8,6 +8,7 @@
 #include "apps/helpers/f1/f1_gateway_helpers.h"
 #include "apps/helpers/f1u/f1u_appconfig.h"
 #include "apps/helpers/metrics/metrics_helpers.h"
+#include "apps/helpers/network/dtls_config_translators.h"
 #include "apps/helpers/network/sctp_config_translators.h"
 #include "apps/services/app_execution_metrics/executor_metrics_manager.h"
 #include "apps/services/app_resource_usage/app_resource_usage.h"
@@ -372,6 +373,10 @@ int main(int argc, char** argv)
     xnc_sctp_cfg.non_blocking_mode           = true;
     xnc_sctp_cfg.bind_addresses              = gw_cfg.bind_addrs;
     fill_sctp_network_gateway_config_socket_params(xnc_sctp_cfg, gw_cfg.sctp);
+    if (gw_cfg.dtls.enabled) {
+      xnc_sctp_cfg.dtls_cfg.emplace();
+      fill_dtls_network_gateway_config_params(*xnc_sctp_cfg.dtls_cfg, gw_cfg.dtls);
+    }
     xnc_sctp_cfg.bind_port = XNAP_PORT;
     xnc_sctp_cfg.ppid      = XNAP_PPID;
     xnc_sctp_gateway_config xnc_server_cfg({xnc_sctp_cfg,
@@ -384,8 +389,10 @@ int main(int argc, char** argv)
   }
 
   std::unique_ptr<ocucp::f1c_connection_server> cu_f1c_gw = ocudu::create_f1c_gateway_server(
-      ocudu::f1c_gateway_config{
-          .bind_addrs = cu_cfg.f1ap_cfg.bind_addrs, .sctp_cfg = cu_cfg.f1ap_cfg.sctp, .if_name = "F1-C"},
+      ocudu::f1c_gateway_config{.bind_addrs = cu_cfg.f1ap_cfg.bind_addrs,
+                                .sctp_cfg   = cu_cfg.f1ap_cfg.sctp,
+                                .dtls_cfg   = cu_cfg.f1ap_cfg.dtls,
+                                .if_name    = "F1-C"},
       ocudu::f1c_gateway_dependencies{.broker         = *epoll_broker,
                                       .io_rx_executor = workers.get_cu_cp_executor_mapper().f1c_rx_executor(),
                                       .ctrl_exec      = workers.get_cu_cp_executor_mapper().ctrl_executor(),

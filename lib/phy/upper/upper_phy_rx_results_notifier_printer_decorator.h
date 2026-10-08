@@ -13,11 +13,11 @@ namespace ocudu {
 class upper_phy_rx_results_notifier_printer_decorator : public upper_phy_rx_results_notifier
 {
 public:
-  explicit upper_phy_rx_results_notifier_printer_decorator(upper_phy_rx_results_notifier& base_notifier_,
-                                                           std::shared_ptr<rx_resource_grid_printer_backend> backend_,
-                                                           unsigned                                          sector_,
+  explicit upper_phy_rx_results_notifier_printer_decorator(upper_phy_rx_results_notifier&         base_notifier_,
+                                                           rx_resource_grid_printer_backend&      backend_,
+                                                           unsigned                               sector_,
                                                            const rx_symbol_trigger_configuration& triggers_) :
-    base_notifier(base_notifier_), backend(std::move(backend_)), sector(sector_), triggers(triggers_)
+    base_notifier(base_notifier_), backend(backend_), sector(sector_), triggers(triggers_)
   {
   }
 
@@ -28,7 +28,7 @@ public:
         (!std::isnan(triggers.prach_threshold_rssi_dB) && (result.result.rssi_dB > triggers.prach_threshold_rssi_dB));
 
     if (trigger) {
-      backend->on_prach_trigger(sector, result.context);
+      backend.on_prach_trigger(sector, result.context);
     }
 
     base_notifier.on_new_prach_results(result);
@@ -47,9 +47,11 @@ public:
     std::optional<float> sinr    = result.csi.get_sinr_dB();
     trigger                      = trigger || (!std::isnan(triggers.pusch_threshold_sinr_dB) && sinr.has_value() &&
                           (sinr.value() < triggers.pusch_threshold_sinr_dB));
+    float iter_avg               = result.decoder_result.ldpc_decoder_stats.get_mean();
+    trigger = trigger || (!std::isnan(triggers.pusch_threshold_iter) && (iter_avg > triggers.pusch_threshold_iter));
 
     if (trigger) {
-      backend->on_grid_trigger(sector, result.slot);
+      backend.on_grid_trigger(sector, result.slot);
     }
 
     base_notifier.on_new_pusch_results_data(result);
@@ -62,9 +64,9 @@ public:
   void on_new_srs_results(const ul_srs_results& result) override { base_notifier.on_new_srs_results(result); }
 
 private:
-  upper_phy_rx_results_notifier&                    base_notifier;
-  std::shared_ptr<rx_resource_grid_printer_backend> backend;
-  unsigned                                          sector;
-  rx_symbol_trigger_configuration                   triggers;
+  upper_phy_rx_results_notifier&    base_notifier;
+  rx_resource_grid_printer_backend& backend;
+  unsigned                          sector;
+  rx_symbol_trigger_configuration   triggers;
 };
 } // namespace ocudu

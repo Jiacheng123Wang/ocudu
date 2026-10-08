@@ -52,6 +52,7 @@ static downlink_handler_impl_config generate_downlink_handler_config(const trans
   out_cfg.dl_processing_time            = tx_config.dl_processing_time;
   out_cfg.tx_timing_params              = tx_config.tx_timing_params;
   out_cfg.enable_log_warnings_for_lates = tx_config.enable_log_warnings_for_lates;
+  out_cfg.is_cat_b_enabled              = tx_config.beamforming.has_value();
 
   return out_cfg;
 }
@@ -77,7 +78,8 @@ transmitter_impl::transmitter_impl(const transmitter_config& config, transmitter
   ul_task_dispatcher(config.sector,
                      *dependencies.logger,
                      ul_request_handler,
-                     dependencies.exec_mapper.get_ul_cp_executor()),
+                     dependencies.exec_mapper.get_ul_cp_executor(),
+                     ul_request_handler.get_metrics_collector()),
   msg_transmitter(*dependencies.logger,
                   config.tx_timing_params,
                   config.are_metrics_enabled,

@@ -60,13 +60,13 @@ class mobility_manager final : public mobility_manager_measurement_handler,
 public:
   mobility_manager(const mobility_manager_config& cfg_, const mobility_manager_dependencies& dependencies);
 
-  void trigger_handover(pci_t         source_pci,
+  bool trigger_handover(pci_t         source_pci,
                         rnti_t        rnti,
                         pci_t         target_pci,
                         plmn_identity target_plmn,
                         tac_t         target_tac) override;
 
-  void trigger_conditional_handover(
+  bool trigger_conditional_handover(
       pci_t                                                source_pci,
       rnti_t                                               rnti,
       span<const pci_t>                                    target_pcis,

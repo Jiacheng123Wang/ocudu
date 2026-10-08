@@ -102,6 +102,7 @@ dl_ssb_pdu unittests::build_valid_dl_ssb_pdu()
   pdu.mib_data.pdcch_config_sib1      = generate_byte();
   pdu.mib_data.cell_barred            = generate_bool();
   pdu.mib_data.intra_freq_reselection = generate_bool();
+  pdu.precoding_and_beamforming       = make_single_beam_precoding(to_beam_id(3));
 
   return pdu;
 }
@@ -267,21 +268,19 @@ static pdsch_information fill_valid_pdsch_information(coreset_configuration& cor
   info.mcs_table       = pdsch_mcs_table::qam64;
   info.codewords.push_back(pdsch_codeword{{modulation_scheme::QAM16, 220.F}, 5, 2, units::bytes{128}});
 
+  info.precoding_and_beamforming = make_default_precoding();
   if (nof_ports == 2) {
-    pdsch_precoding_info& pm               = info.precoding.emplace();
-    pm.nof_rbs_per_prg                     = 273U;
-    precoding_matrix_indicator& csi_report = pm.prg_infos.emplace_back();
-    auto&                       pmi        = csi_report.emplace<pmi_two_antenna_port>();
-    pmi.pmi                                = 1;
+    pmi_two_antenna_port pmi;
+    pmi.pmi                        = 1;
+    info.precoding_and_beamforming = precoding_and_beamforming_info{precoding_matrix_indicator{pmi}};
   } else if (nof_ports == 4) {
-    pdsch_precoding_info& pm = info.precoding.emplace();
-    pm.nof_rbs_per_prg       = 273U;
-    pm.prg_infos.emplace_back().emplace<pmi_typeI_single_panel>(pmi_typeI_single_panel{
+    precoding_matrix_indicator pmi = pmi_typeI_single_panel{
         pmi_codebook_typeI_single_panel{pmi_codebook_single_panel_config::two_one, pmi_codebook_typeI_mode::one},
         1,
         std::nullopt,
         std::nullopt,
-        1});
+        1};
+    info.precoding_and_beamforming = precoding_and_beamforming_info{pmi};
   }
 
   // By default, fill 1-port precoding matrix, which means not configuring the precoding in the 'pdsch_information'
@@ -485,6 +484,11 @@ mac_dl_sched_result_test_helper unittests::build_valid_mac_dl_sched_result_with_
     helper.sched_result.csi_rs.push_back(build_valid_csi_pdu(helper));
   }
 
+  // Add DL-PRS PDUs.
+  for (unsigned i = 0; i != MAX_PRS_PDUS_PER_SLOT; ++i) {
+    helper.sched_result.prs.push_back(build_valid_prs_pdu());
+  }
+
   // Add SSBs.
   for (unsigned i = 0; i != MAX_SSB_PER_SLOT; ++i) {
     result.ssb_pdus.push_back(build_valid_dl_ssb_pdu());
@@ -509,6 +513,23 @@ prach_occasion_info unittests::build_valid_prach_occassion()
   prach.format               = prach_format_type::one;
 
   return prach;
+}
+
+prs_info unittests::build_valid_prs_pdu()
+{
+  prs_info prs;
+
+  prs.scs             = subcarrier_spacing::kHz30;
+  prs.cp              = cyclic_prefix::NORMAL;
+  prs.n_id_prs        = 1023;
+  prs.comb_size       = prs_comb_size::four;
+  prs.comb_offset     = 3;
+  prs.nof_symbols     = prs_num_symbols::twelve;
+  prs.symbols         = {2, 14};
+  prs.crbs            = {12, 60};
+  prs.power_offset_db = -3;
+
+  return prs;
 }
 
 ul_sched_info_test_helper unittests::build_valid_pusch_pdu()

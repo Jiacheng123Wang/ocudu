@@ -1,7 +1,10 @@
-## C++ guidelines
+# C++ guidelines
 
-### Configuration Types
+## Code comments
 
-- prefer strong-types over raw integers for config parameters that represent time. Use chrono types like std::chrono::milliseconds by default, or custom enum classes if the user requests it.
+Follow [docs/agents/code_comments.md](docs/agents/code_comments.md).
 
+## Configuration Types
 
+- prefer strong-types over raw integers for config parameters that represent time. Use chrono types like
+  std::chrono::milliseconds by default, or custom enum classes if the user requests it.

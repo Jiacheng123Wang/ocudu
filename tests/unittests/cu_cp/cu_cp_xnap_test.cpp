@@ -4,6 +4,7 @@
 
 #include "lib/cu_cp/routines/mobility/mobility_helpers.h"
 #include "lib/cu_cp/xnap_repository.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/unittests/cu_cp/cu_cp_test_environment.h"
 #include "tests/unittests/cu_cp/test_helpers.h"
 #include "tests/unittests/xnap/xnap_test_helpers.h"
@@ -167,6 +168,8 @@ TEST_F(cu_cp_xnap_repository_test, when_peer_serves_a_cell_then_xnap_is_found_by
 /// must therefore be identified by target cell: identifying it by XNAP UE ID matches every candidate and cancels none.
 TEST_F(cu_cp_xnap_repository_test, when_candidates_at_two_peers_share_a_peer_ue_id_then_only_the_loser_is_cancelled)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-3", "MVP-FUNC-MOB-15");
+
   const xnc_peer_index_t xnc_index_a = xnc_peer_index_t::min;
   const xnc_peer_index_t xnc_index_b =
       uint_to_xnc_peer_index(static_cast<std::underlying_type_t<xnc_peer_index_t>>(xnc_peer_index_t::min) + 1);
@@ -209,6 +212,8 @@ TEST_F(cu_cp_xnap_repository_test, when_candidates_at_two_peers_share_a_peer_ue_
 /// releases the sibling, so it needs an explicit Handover Cancel.
 TEST_F(cu_cp_xnap_repository_test, when_a_sibling_at_the_winners_node_has_its_own_target_ue_id_then_it_is_cancelled)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-3", "MVP-FUNC-MOB-15");
+
   const xnc_peer_index_t xnc_index = xnc_peer_index_t::min;
   ASSERT_NE(xnap_db.add_xnap(xnc_index, {default_peer_addr}, xnap_cfg), nullptr);
 
@@ -246,6 +251,8 @@ TEST_F(cu_cp_xnap_repository_test, when_a_sibling_at_the_winners_node_has_its_ow
 /// preparation on that connection cancelled once the Handover Success arrives, so those must not be cancelled again.
 TEST_F(cu_cp_xnap_repository_test, when_a_sibling_shares_the_winners_signalling_connection_then_it_is_not_cancelled)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-3", "MVP-FUNC-MOB-15");
+
   const xnc_peer_index_t xnc_index = xnc_peer_index_t::min;
   ASSERT_NE(xnap_db.add_xnap(xnc_index, {default_peer_addr}, xnap_cfg), nullptr);
 

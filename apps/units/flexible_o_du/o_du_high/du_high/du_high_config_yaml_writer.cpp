@@ -138,7 +138,9 @@ static YAML::Node build_du_high_ssb_section(const du_high_unit_ssb_config& confi
   for (const auto& ssb_beam : config.beams) {
     YAML::Node beam_node;
     beam_node["ssb_index"] = ssb_beam.ssb_index;
-    beam_node["beam_id"]   = ssb_beam.beam_id;
+    if (ssb_beam.ref_beam_id.has_value()) {
+      beam_node["ref_beam_id"] = ssb_beam.ref_beam_id.value();
+    }
     node["beams"].push_back(beam_node);
   }
   node["ssb_period"]          = config.ssb_period_msec;
@@ -386,11 +388,16 @@ static YAML::Node build_du_high_pusch_section(const du_high_unit_pusch_config& c
   node["max_ue_mcs"]  = config.max_ue_mcs;
   node["harq_mode_b"] = !config.harq_mode_b.empty() ? fmt::format("0x{:08x}", config.harq_mode_b.to_uint64()) : "false";
   node["nof_harqs"]   = config.nof_harqs;
-  node["max_nof_harq_retxs"]           = config.max_nof_harq_retxs;
-  node["harq_retx_timeout"]            = config.harq_retx_timeout;
-  node["max_consecutive_kos"]          = config.max_consecutive_kos;
-  node["mcs_table"]                    = to_string(config.mcs_table);
-  node["max_rank"]                     = config.max_rank;
+  node["max_nof_harq_retxs"]  = config.max_nof_harq_retxs;
+  node["harq_retx_timeout"]   = config.harq_retx_timeout;
+  node["max_consecutive_kos"] = config.max_consecutive_kos;
+  node["mcs_table"]           = to_string(config.mcs_table);
+  node["max_rank"]            = config.max_rank;
+  node["max_nof_rep"]         = config.max_nof_rep;
+  if (config.sinr_rep_threshold.has_value()) {
+    node["sinr_rep_threshold"] = config.sinr_rep_threshold.value();
+  }
+  node["force_rep"]                    = config.force_rep;
   node["msg3_delta_preamble"]          = config.msg3_delta_preamble;
   node["p0_nominal_with_grant"]        = config.p0_nominal_with_grant;
   node["p0_nominal_without_grant"]     = config.p0_nominal_without_grant;
@@ -636,9 +643,10 @@ static YAML::Node build_du_high_csi_section(const du_high_unit_csi_config& confi
 {
   YAML::Node node;
 
-  node["csi_rs_enabled"]  = config.csi_rs_enabled;
-  node["csi_rs_period"]   = config.csi_rs_period_msec;
-  node["pwr_ctrl_offset"] = config.pwr_ctrl_offset;
+  node["csi_rs_enabled"]         = config.csi_rs_enabled;
+  node["csi_rs_period"]          = config.csi_rs_period_msec;
+  node["pwr_ctrl_offset"]        = config.pwr_ctrl_offset;
+  node["type2_codebook_enabled"] = config.type2_codebook_enabled;
   switch (config.report_type) {
     case csi_report_type::aperiodic:
       node["report_type"] = "aperiodic";
@@ -826,13 +834,23 @@ static YAML::Node build_cell_entry(const du_high_unit_base_cell_config& config)
   }
   node["mac_cell_group"] = build_du_high_mac_cell_group_section(config.mcg_cfg);
   node["ssb"]            = build_du_high_ssb_section(config.ssb_cfg);
-  node["sib"]            = build_du_high_sib_section(config.sib_cfg);
-  node["ul_common"]      = build_du_high_ul_common_section(config.ul_common_cfg);
-  node["pdcch"]          = build_du_high_pdcch_section(config.pdcch_cfg);
-  node["pdsch"]          = build_du_high_pdsch_section(config.pdsch_cfg);
-  node["pusch"]          = build_du_high_pusch_section(config.pusch_cfg);
-  node["pucch"]          = build_du_high_pucch_section(config.pucch_cfg);
-  node["prach"]          = build_du_high_prach_section(config.prach_cfg);
+
+  for (const auto& beam : config.ref_beams) {
+    YAML::Node beam_node;
+    beam_node["ref_beam_id"] = beam.ref_beam_id;
+    beam_node["i_panel"]     = beam.i_panel;
+    beam_node["i_pol"]       = beam.i_pol;
+    beam_node["i_beam_dim1"] = beam.i_beam_dim1;
+    beam_node["i_beam_dim2"] = beam.i_beam_dim2;
+    node["ref_beams"].push_back(beam_node);
+  }
+  node["sib"]       = build_du_high_sib_section(config.sib_cfg);
+  node["ul_common"] = build_du_high_ul_common_section(config.ul_common_cfg);
+  node["pdcch"]     = build_du_high_pdcch_section(config.pdcch_cfg);
+  node["pdsch"]     = build_du_high_pdsch_section(config.pdsch_cfg);
+  node["pusch"]     = build_du_high_pusch_section(config.pusch_cfg);
+  node["pucch"]     = build_du_high_pucch_section(config.pucch_cfg);
+  node["prach"]     = build_du_high_prach_section(config.prach_cfg);
   if (config.tdd_ul_dl_cfg) {
     node["tdd_ul_dl_cfg"] = build_du_high_tdd_section(config.tdd_ul_dl_cfg.value());
   }

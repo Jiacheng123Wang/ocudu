@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
+#include "../../ocudu_test_requirements.h"
 #include "sctp_server_test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "ocudu/gateways/sctp_network_server_factory.h"
 #include "ocudu/support/async/async_test_utils.h"
 #include "ocudu/support/executors/inline_task_executor.h"
@@ -10,11 +12,21 @@
 
 using namespace ocudu;
 
+/// Function to call when an error is reported by the application.
+static void app_error_report_handler()
+{
+  ocudulog::fetch_basic_logger("APP").error("Emergency flush of the logger");
+  ocudulog::flush();
+}
+
 class sctp_network_server_peer_test : public ::testing::TestWithParam<bool>
 {
 protected:
   sctp_network_server_peer_test()
   {
+    // Set the application error handler.
+    set_error_handler(app_error_report_handler);
+
     ocudulog::fetch_basic_logger("SCTP-GW").set_level(ocudulog::basic_levels::debug);
     ocudulog::init();
 
@@ -36,6 +48,7 @@ protected:
                                                                "1",
                                                                std::string(TEST_CERT_DIR) + "/link12.crt",
                                                                std::string(TEST_CERT_DIR) + "/link12.key",
+                                                               std::string(TEST_CERT_DIR) + "/ca.crt",
                                                                mode_map};
     }
 
@@ -51,6 +64,7 @@ protected:
                                                                "2",
                                                                std::string(TEST_CERT_DIR) + "/link21.crt",
                                                                std::string(TEST_CERT_DIR) + "/link21.key",
+                                                               std::string(TEST_CERT_DIR) + "/ca.crt",
                                                                mode_map};
     }
 
@@ -68,6 +82,7 @@ protected:
                                    "3",
                                    std::string(TEST_CERT_DIR) + "/link31.crt",
                                    std::string(TEST_CERT_DIR) + "/link31.key",
+                                   std::string(TEST_CERT_DIR) + "/ca.crt",
                                    mode_map};
     }
   }
@@ -115,6 +130,9 @@ protected:
 
 TEST_P(sctp_network_server_peer_test, when_config_is_valid_then_server_is_created_successfully)
 {
+#ifdef OCUDU_HAVE_OPENSSL_DTLS
+  OCUDU_TEST_REQUIREMENTS("MVP-SEC-O-CU-01b", "MVP-SEC-O-CU-10b", "MVP-SEC-O-CU-09b");
+#endif
   OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
 
   server1 = create_sctp_network_server(server_cfg1);
@@ -127,6 +145,9 @@ TEST_P(sctp_network_server_peer_test, when_config_is_valid_then_server_is_create
 
 TEST_P(sctp_network_server_peer_test, when_association_requested_association_initiates_successfully)
 {
+#ifdef OCUDU_HAVE_OPENSSL_DTLS
+  OCUDU_TEST_REQUIREMENTS("MVP-SEC-O-CU-01b", "MVP-SEC-O-CU-10b", "MVP-SEC-O-CU-09b");
+#endif
   OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
 
   server1 = create_sctp_network_server(server_cfg1);
@@ -282,6 +303,9 @@ TEST_P(sctp_network_server_peer_test, when_association_requested_association_ini
 
 TEST_P(sctp_network_server_peer_test, when_connect_called_with_empty_address_list_then_returns_false)
 {
+#ifdef OCUDU_HAVE_OPENSSL_DTLS
+  OCUDU_TEST_REQUIREMENTS("MVP-SEC-O-CU-01b", "MVP-SEC-O-CU-10b", "MVP-SEC-O-CU-09b");
+#endif
   OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
 
   server1 = create_sctp_network_server(server_cfg1);
@@ -297,6 +321,11 @@ TEST_P(sctp_network_server_peer_test, when_connect_called_with_empty_address_lis
 
 TEST_P(sctp_network_server_peer_test, when_connect_uses_multiple_destination_addresses_then_association_succeeds)
 {
+#ifdef OCUDU_HAVE_OPENSSL_DTLS
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-4", "MVP-SEC-O-CU-01b", "MVP-SEC-O-CU-10b", "MVP-SEC-O-CU-09b");
+#else
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-4");
+#endif
   OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
 
   server_cfg1.sctp.bind_addresses = {server1_addr_str, server1_multihomed_addr_str};
@@ -353,6 +382,9 @@ TEST_P(sctp_network_server_peer_test, when_connect_uses_multiple_destination_add
 
 TEST_P(sctp_network_server_peer_test, when_pending_connects_overlap_then_second_connect_is_rejected)
 {
+#ifdef OCUDU_HAVE_OPENSSL_DTLS
+  OCUDU_TEST_REQUIREMENTS("MVP-SEC-O-CU-01b", "MVP-SEC-O-CU-10b", "MVP-SEC-O-CU-09b");
+#endif
   OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
 
   server_cfg1.sctp.bind_addresses = {server1_addr_str, server1_multihomed_addr_str};
@@ -409,6 +441,9 @@ TEST_P(sctp_network_server_peer_test, when_pending_connects_overlap_then_second_
 
 TEST_P(sctp_network_server_peer_test, when_server_is_destroyed_then_associations_are_cleaned_up)
 {
+#ifdef OCUDU_HAVE_OPENSSL_DTLS
+  OCUDU_TEST_REQUIREMENTS("MVP-SEC-O-CU-01b", "MVP-SEC-O-CU-10b", "MVP-SEC-O-CU-09b");
+#endif
   OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
 
   server1 = create_sctp_network_server(server_cfg1);

@@ -199,13 +199,21 @@ void f1u_bearer_impl::discard_sdu(uint32_t pdcp_sn)
     logger.log_debug("Queued first SDU discard block with pdcp_sn={}", pdcp_sn);
   } else {
     nru_pdcp_sn_discard_block& last_block = discard_blocks.back();
-    if (last_block.pdcp_sn_start + last_block.block_size == pdcp_sn) {
+    if (last_block.pdcp_sn_start + last_block.block_size == pdcp_sn &&
+        last_block.block_size < nru_max_discard_block_size) {
       last_block.block_size++;
       logger.log_debug("Expanded previous SDU discard block with pdcp_sn={}. pdcp_sn_start={} block_size={}",
                        pdcp_sn,
                        last_block.pdcp_sn_start,
                        last_block.block_size);
     } else {
+      if (discard_blocks.full()) {
+        // This part should never happen because of immediate flush when reaching full capacity (see below).
+        logger.log_warning("Cannot discard SDU. Maximum number of discard blocks reached. pdcp_sn={} nof_blocks={}",
+                           pdcp_sn,
+                           discard_blocks.size());
+        return;
+      }
       discard_blocks.push_back(nru_pdcp_sn_discard_block{});
       nru_pdcp_sn_discard_block& block = discard_blocks.back();
       block.pdcp_sn_start              = pdcp_sn;

@@ -7,6 +7,7 @@
 #include "ocudu/mac/config/mac_cell_group_config_factory.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/ran/csi_report/csi_report_config_helpers.h"
+#include "ocudu/scheduler/config/ran_cell_config_helper.h"
 #include "ocudu/scheduler/config/serving_cell_config_factory.h"
 #include "ocudu/scheduler/rrm/srs_resource_manager_factory.h"
 #include "ocudu/scheduler/scheduler_configurator.h"
@@ -81,6 +82,7 @@ du_ran_resource_manager_impl::du_ran_resource_manager_impl(span<const du_cell_co
   pucch_res_mng(scheduler_cfg.ue.max_pucchs_per_slot),
   pdsch_res_mng(cell_cfg_list, test_cfg),
   pusch_res_mng(cell_cfg_list, test_cfg),
+  csi_res_mng(cell_cfg_list, test_cfg),
   bearer_res_mng(srbs, qos, logger),
   srs_res_mng(create_srs_resource_manager(cell_cfg_list_[0].ran)),
   meas_cfg_mng(cell_cfg_list),
@@ -321,6 +323,7 @@ du_ran_resource_manager_impl::update_context(du_ue_index_t                      
       pucch_res_mng.update_resources(ue_mcg.cell_group.cells.at(SERVING_PCELL_IDX), *u.ue_cap_manager.summary());
     }
     update_tar_config(ue_mcg.cell_group, cell_cfg_list, *u.ue_cap_manager.summary(), ue_index, logger);
+    csi_res_mng.update_resources(ue_mcg.cell_group, *u.ue_cap_manager.summary(), ue_index);
   }
 
   // > Update UE SRBs and DRBs.
@@ -450,6 +453,7 @@ error_type<std::string> du_ran_resource_manager_impl::allocate_cell_resources(du
 
     pdsch_res_mng.alloc_resources(ue_res.cell_group);
     pusch_res_mng.alloc_resources(ue_res.cell_group);
+    csi_res_mng.alloc_resources(ue_res.cell_group, ue_index);
   } else {
     ocudu_assert(not ue_res.cell_group.cells.contains(serv_cell_index), "Reallocation of SCell detected");
     ue_res.cell_group.cells.emplace(serv_cell_index, ue_cell_config{});
@@ -474,6 +478,7 @@ void du_ran_resource_manager_impl::deallocate_cell_resources(du_ue_index_t ue_in
     srs_res_mng->dealloc_resources(ue_res.cell_group.cells.at(SERVING_PCELL_IDX));
     pdsch_res_mng.dealloc_resources(ue_res.cell_group);
     pusch_res_mng.dealloc_resources(ue_res.cell_group);
+    csi_res_mng.dealloc_resources(ue_res.cell_group);
     cg_res_mng.dealloc_resources(ue_res.cell_group.cells.at(SERVING_PCELL_IDX));
     ue_res.cell_group.cells.at(SERVING_PCELL_IDX).serv_cell_cfg.cell_index = INVALID_DU_CELL_INDEX;
   } else {

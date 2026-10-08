@@ -10,6 +10,7 @@
 #include "ntn/du_high_ntn_config_cli11_schema.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/adt/ranges/transform.h"
+#include "ocudu/ran/antenna_topology.h"
 #include "ocudu/ran/csi_report/csi_report_configuration.h"
 #include "ocudu/ran/drx_config.h"
 #include "ocudu/ran/du_types.h"
@@ -535,7 +536,7 @@ static void configure_cli11_mac_sr_args(CLI::App& app, mac_sr_unit_config& sr_pa
       ->capture_default_str()
       ->enum_values({4, 8, 16, 32, 64});
   add_option(app, "--sr_prohibit_timer", sr_params.sr_prohibit_timer, "Timer for SR transmission on PUCCH in ms")
-      ->enum_values({1, 2, 4, 8, 16, 32, 64, 128});
+      ->enum_values({1, 2, 4, 8, 16, 32, 64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 1082});
 }
 
 static void configure_cli11_mac_cell_group_args(CLI::App& app, du_high_unit_mac_cell_group_config& mcg_params)
@@ -549,14 +550,34 @@ static void configure_cli11_mac_cell_group_args(CLI::App& app, du_high_unit_mac_
   configure_cli11_mac_sr_args(*sr_subcmd, mcg_params.sr_cfg);
 }
 
+static void configure_cli11_ref_beam_args(CLI::App& app, du_high_unit_ref_beam_config& beam_params)
+{
+  add_option(app,
+             "--ref_beam_id",
+             beam_params.ref_beam_id,
+             "Cell reference beam identifier. Used for broadcast signals such as SSB.")
+      ->capture_default_str();
+  add_option(app, "--i_panel", beam_params.i_panel, "Index of the antenna panel that forms the beam")
+      ->capture_default_str();
+  add_option(app, "--i_pol", beam_params.i_pol, "Polarization index of the beam")->capture_default_str()->range(0, 1);
+  add_option(app,
+             "--i_beam_dim1",
+             beam_params.i_beam_dim1,
+             "First dimension index of the beam. Valid values are (0, ..., O1*N1 - 1)")
+      ->capture_default_str();
+  add_option(app,
+             "--i_beam_dim2",
+             beam_params.i_beam_dim2,
+             "Second dimension index of the beam. Valid values are (0, ..., O2*N2 - 1)")
+      ->capture_default_str();
+}
+
 static void configure_cli11_ssb_beam_args(CLI::App& app, du_high_unit_ssb_beam_config& beam_params)
 {
   add_option(app, "--ssb_index", beam_params.ssb_index, "Index of the SSB candidate within the SSB burst")
       ->capture_default_str()
       ->range(0, static_cast<int>(MAX_NOF_SSB_CANDIDATES - 1));
-  add_option(app, "--beam_id", beam_params.beam_id, "Beam that carries the SSB candidate")
-      ->capture_default_str()
-      ->range(0, static_cast<int>(max_nof_beams - 1));
+  add_option(app, "--ref_beam_id", beam_params.ref_beam_id, "Identifier of the beam that carries the SSB candidate");
 }
 
 static void configure_cli11_ssb_args(CLI::App& app, du_high_unit_ssb_config& ssb_params)
@@ -566,7 +587,8 @@ static void configure_cli11_ssb_args(CLI::App& app, du_high_unit_ssb_config& ssb
       "--beams",
       ssb_params.beams,
       configure_cli11_ssb_beam_args,
-      "Transmitted SSB candidates and the beam assigned to each of them");
+      "Transmitted SSB candidates and the beam assigned to each of them. The beam parameters left unset are derived "
+      "from the range of possible parameters given the antenna topology of the cell");
   add_option(app, "--ssb_period", ssb_params.ssb_period_msec, "Period of SSB scheduling in milliseconds")
       ->capture_default_str()
       ->enum_values({5, 10, 20});
@@ -686,6 +708,11 @@ static void configure_cli11_csi_args(CLI::App& app, du_high_unit_csi_config& csi
       "Type of CSI reporting configuration to use")
       ->default_str("periodic")
       ->check(CLI::IsMember({"periodic", "aperiodic"}, CLI::ignore_case));
+  add_option(app,
+             "--type2_codebook_enabled",
+             csi_params.type2_codebook_enabled,
+             "Enable Type-II CSI reporting for the UEs that support the Type-II codebook")
+      ->capture_default_str();
   add_option(app,
              "--meas_csi_rs_slot_offset",
              csi_params.meas_csi_slot_offset,
@@ -1069,6 +1096,26 @@ static void configure_cli11_pusch_args(CLI::App& app, du_high_unit_pusch_config&
       ->capture_default_str()
       ->range(1, 4);
   add_option(app,
+             "--max_nof_rep",
+             pusch_params.max_nof_rep,
+             "Maximum number of PUSCH repetitions offered in the dedicated Rel-16 TDRA list of supporting UEs. Value "
+             "1 disables dynamic PUSCH repetitions.")
+      ->capture_default_str()
+      ->check(CLI::IsMember({1, 2, 3, 4, 7, 8, 12, 16}));
+  add_option(app,
+             "--sinr_rep_threshold",
+             pusch_params.sinr_rep_threshold,
+             "SINR threshold, in dB, below which the scheduler uses PUSCH repetitions for supporting UEs. If not "
+             "set, SINR-triggered repetitions are disabled.")
+      ->capture_default_str()
+      ->check(CLI::Range(-50.0, 50.0));
+  add_option(app,
+             "--force_rep",
+             pusch_params.force_rep,
+             "Force PUSCH repetitions for all supporting UEs regardless of the estimated SINR. Intended for testing "
+             "in setups without RF impairments, where the SINR never drops below sinr_rep_threshold.")
+      ->capture_default_str();
+  add_option(app,
              "--msg3_delta_preamble",
              pusch_params.msg3_delta_preamble,
              "msg3-DeltaPreamble, Power offset between msg3 and RACH preamble transmission")
@@ -1293,7 +1340,7 @@ static void configure_cli11_pucch_args(CLI::App& app, du_high_unit_pucch_config&
       ->range(0, 15);
   add_option(app, "--sr_period_ms", pucch_params.sr_period_msec, "SR period in msec")
       ->capture_default_str()
-      ->enum_values({1.0F, 2.0F, 2.5F, 4.0F, 5.0F, 8.0F, 10.0F, 16.0F, 20.0F, 40.0F, 80.0F, 160.0F, 320.0F});
+      ->enum_values({1.0F, 2.0F, 2.5F, 4.0F, 5.0F, 8.0F, 10.0F, 16.0F, 20.0F, 40.0F, 80.0F});
   add_option_function<std::string>(
       app,
       "--formats",
@@ -2593,6 +2640,12 @@ static void configure_cli11_common_cell_args(CLI::App& app, du_high_unit_base_ce
   CLI::App* ssb_subcmd = add_subcommand(app, "ssb", "SSB parameters");
   configure_cli11_ssb_args(*ssb_subcmd, cell_params.ssb_cfg);
 
+  add_option_object_list<du_high_unit_ref_beam_config>(app,
+                                                       "--ref_beams",
+                                                       cell_params.ref_beams,
+                                                       configure_cli11_ref_beam_args,
+                                                       "List of cell reference beams for broadcasting channels.");
+
   // SIB configuration.
   CLI::App* sib_subcmd = add_subcommand(app, "sib", "SIB configuration parameters");
   configure_cli11_sib_args(*sib_subcmd, cell_params.sib_cfg);
@@ -3038,6 +3091,66 @@ void ocudu::configure_cli11_with_du_high_config_schema(CLI::App& app, du_high_pa
   configure_cli11_test_mode_args(*test_mode_subcmd, parsed_cfg.config.test_mode_cfg);
 }
 
+/// \brief Returns the identifier of the cell reference beam holding the given coordinates.
+///
+/// Appends a reference beam to \c beams if no beam matches the coordinates.
+static unsigned get_or_add_ref_beam(std::vector<du_high_unit_ref_beam_config>& beams,
+                                    unsigned                                   i_panel,
+                                    unsigned                                   i_pol,
+                                    unsigned                                   i_beam_dim1,
+                                    unsigned                                   i_beam_dim2)
+{
+  auto it = std::find_if(beams.begin(), beams.end(), [&](const du_high_unit_ref_beam_config& beam) {
+    return beam.i_panel == i_panel and beam.i_pol == i_pol and beam.i_beam_dim1 == i_beam_dim1 and
+           beam.i_beam_dim2 == i_beam_dim2;
+  });
+  if (it != beams.end()) {
+    return it->ref_beam_id;
+  }
+
+  unsigned ref_beam_id = 0;
+  for (const du_high_unit_ref_beam_config& beam : beams) {
+    ref_beam_id = std::max(ref_beam_id, beam.ref_beam_id + 1);
+  }
+  beams.push_back({ref_beam_id, i_panel, i_pol, i_beam_dim1, i_beam_dim2});
+
+  return ref_beam_id;
+}
+
+/// \brief Assigns a beam to the transmitted SSB candidates that do not configure one.
+///
+/// The beams sweep the grid that the antenna topology defines, advancing the polarization first, then the first
+/// dimension, then the second dimension and last the panel. The beams that the sweep needs are added to the cell.
+static void derive_ssb_beams(du_high_unit_base_cell_config& cell_cfg)
+{
+  const unsigned nof_pol      = get_nof_antenna_polarizations(cell_cfg.tx_ant_topology);
+  const unsigned nof_beams_d1 = get_nof_beams_dim1(cell_cfg.tx_ant_topology);
+  const unsigned nof_beams_d2 = get_nof_beams_dim2(cell_cfg.tx_ant_topology);
+
+  std::vector<du_high_unit_ssb_beam_config*> sorted_beams;
+  sorted_beams.reserve(cell_cfg.ssb_cfg.beams.size());
+  for (auto& beam : cell_cfg.ssb_cfg.beams) {
+    sorted_beams.push_back(&beam);
+  }
+  std::sort(sorted_beams.begin(), sorted_beams.end(), [](const auto* lhs, const auto* rhs) {
+    return lhs->ssb_index < rhs->ssb_index;
+  });
+
+  for (unsigned i = 0, e = sorted_beams.size(); i != e; ++i) {
+    if (sorted_beams[i]->ref_beam_id.has_value()) {
+      continue;
+    }
+
+    // The panel is not wrapped around, so a grid with fewer beams than SSB candidates is rejected by the
+    // configuration validator instead of assigning the same beam twice.
+    sorted_beams[i]->ref_beam_id = get_or_add_ref_beam(cell_cfg.ref_beams,
+                                                       i / (nof_pol * nof_beams_d1 * nof_beams_d2),
+                                                       i % nof_pol,
+                                                       (i / nof_pol) % nof_beams_d1,
+                                                       (i / (nof_pol * nof_beams_d1)) % nof_beams_d2);
+  }
+}
+
 // Derive the parameters set to "auto"-derived for a cell.
 static void derive_cell_auto_params(du_high_unit_base_cell_config& cell_cfg)
 {
@@ -3075,6 +3188,16 @@ static void derive_cell_auto_params(du_high_unit_base_cell_config& cell_cfg)
   // If PRACH RA Response Window not set, a default one is assigned.
   if (not cell_cfg.prach_cfg.ra_resp_window.has_value()) {
     cell_cfg.prach_cfg.ra_resp_window = 10U << to_numerology_value(cell_cfg.common_scs);
+  }
+
+  // Derive the antenna topology from the number of downlink antennas. Every stack component of the cell uses this
+  // topology. The configuration validator rejects a number of antennas that defines no topology.
+  std::optional<antenna_topology> topology = get_single_panel_antenna_topology(cell_cfg.nof_antennas_dl);
+  if (topology.has_value()) {
+    cell_cfg.tx_ant_topology = *topology;
+
+    // Derive SSB beam parameters, if not manually set.
+    derive_ssb_beams(cell_cfg);
   }
 }
 
@@ -3130,7 +3253,7 @@ static band_helper::custom_band_config to_custom_band_config(const du_high_unit_
   return dst;
 }
 
-void ocudu::autoderive_du_high_parameters_after_parsing(CLI::App& app, du_high_unit_config& unit_cfg)
+void ocudu::autoderive_du_high_parameters_after_parsing(du_high_unit_config& unit_cfg)
 {
   static_vector<band_helper::custom_band_config, band_helper::max_nof_custom_bands> raster_bands;
   for (const auto& cb : unit_cfg.custom_freq_bands) {

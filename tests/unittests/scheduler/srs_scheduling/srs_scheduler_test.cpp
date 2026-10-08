@@ -6,6 +6,7 @@
 #include "lib/scheduler/srs/srs_scheduler_impl.h"
 #include "lib/scheduler/ue_context/ue_cell_repository.h"
 #include "lib/scheduler/ue_context/ue_repository.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/scheduler/cell_config_builder_profiles.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
 #include "tests/test_doubles/utils/test_rng.h"
@@ -276,6 +277,8 @@ protected:
 
 TEST_P(srs_scheduler_tester, test_different_periods)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-PHY-16-3");
+
   const auto srs_period_uint = static_cast<unsigned>(GetParam().period);
 
   const auto add_ue_slot = test_rng::uniform_int<unsigned>(0, res_grid.ring_size());
@@ -329,7 +332,10 @@ INSTANTIATE_TEST_SUITE_P(test_srs_scheduler_for_different_periods,
 class srs_positioning_scheduler_test : public srs_sched_test_bench, public ::testing::Test
 {
 public:
-  srs_positioning_scheduler_test() : srs_sched_test_bench(srs_test_params{true, srs_periodicity::sl20}) {}
+  srs_positioning_scheduler_test() : srs_sched_test_bench(srs_test_params{true, srs_periodicity::sl20})
+  {
+    OCUDU_TEST_REQUIREMENTS("MVP-FUNC-POS-16-3-a", "MVP-FUNC-POS-16-3-b");
+  }
 
   const srs_info* next_srs_info(rnti_t rnti, unsigned max_slots = 0)
   {

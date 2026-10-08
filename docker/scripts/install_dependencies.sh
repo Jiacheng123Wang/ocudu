@@ -23,16 +23,30 @@ install_dependencies_debian_ubuntu() {
     local -x DEBIAN_FRONTEND=noninteractive
     local -a pkgs=()
     local ARCH=""
-
     local -a build_pkgs=(
         cmake make gcc g++ pkg-config
         libfftw3-dev libmbedtls-dev libsctp-dev libyaml-cpp-dev libgtest-dev
     )
+    # Customer binaries link only the single-precision FFTW, mbedcrypto, SCTP and
+    # yaml-cpp shared libraries. Development packages, the mbedTLS TLS/X.509
+    # libraries and GoogleTest are build-only and are not shipped at runtime.
     local -a run_pkgs=(
-        libfftw3-dev libmbedtls-dev libsctp-dev libyaml-cpp-dev libgtest-dev libcap2-bin
+        libfftw3-single3 libsctp1 libyaml-cpp0.8 libcap2-bin
     )
+
+    # Runtime images are only built from Ubuntu 24.04 and newer, where mbedcrypto
+    # is the one runtime library whose soname changed after 24.04.
+    case "${VERSION_ID:-}" in
+        24.04)
+            run_pkgs+=(libmbedcrypto7t64)
+            ;;
+        *)
+            run_pkgs+=(libmbedcrypto16)
+            ;;
+    esac
     local -a extra_pkgs=(
         libzmq3-dev libuhd-dev uhd-host libboost-program-options-dev libdpdk-dev libelf-dev libdwarf-dev libdw-dev capnproto libcapnp-dev
+        libeigen3-dev
     )
 
     case "$mode" in
@@ -105,8 +119,8 @@ install_dependencies_fedora() {
         fftw-libs-single lksctp-tools yaml-cpp mbedtls libcap
     )
     local -a extra_pkgs=(
-        boost-devel capnproto capnproto-devel cppzmq-devel dpdk-devel elfutils-devel elfutils-libelf-devel
-        libdwarf-devel libusb1-devel numactl-devel zeromq-devel
+        boost-devel capnproto capnproto-devel cppzmq-devel dpdk-devel uhd-devel elfutils-devel elfutils-libelf-devel
+        libdwarf-devel libusb1-devel numactl-devel zeromq-devel openssl openssl-devel eigen3-devel
     )
 
     case "$mode" in
@@ -144,7 +158,7 @@ install_dependencies_centos() {
     )
     local -a extra_pkgs=(
         boost-devel capnproto capnproto-devel cppzmq-devel dpdk-devel elfutils-devel elfutils-libelf-devel
-        libdwarf-devel libusb1-devel numactl-devel zeromq-devel
+        libdwarf-devel libusb1-devel numactl-devel zeromq-devel eigen3-devel
     )
 
     case "$mode" in
@@ -181,7 +195,7 @@ install_dependencies_ubi10() {
     )
     local -a extra_pkgs=(
         boost-devel capnproto capnproto-devel cppzmq-devel dpdk-devel elfutils-devel elfutils-libelf-devel
-        libdwarf-devel libusb1-devel numactl-devel zeromq-devel
+        libdwarf-devel libusb1-devel numactl-devel zeromq-devel eigen3-devel
     )
 
     case "$mode" in
@@ -214,10 +228,10 @@ install_dependencies_arch() {
         cmake fftw mbedtls3 yaml-cpp lksctp-tools gtest pkgconf
     )
     local -a run_pkgs=(
-        fftw mbedtls3 yaml-cpp lksctp-tools gtest libcap
+        fftw mbedtls3 yaml-cpp lksctp-tools libcap
     )
     local -a extra_pkgs=(
-        zeromq libuhd boost dpdk libelf libdwarf elfutils capnproto
+        zeromq libuhd boost dpdk libelf libdwarf elfutils capnproto eigen
     )
 
     case "$mode" in
@@ -261,7 +275,7 @@ install_dependencies_rhel() {
         yaml-cpp-devel mbedtls-devel
     )
     local -a extra_pkgs=(
-        cppzmq-devel libusbx-devel boost-devel numactl-devel capnproto capnproto-devel
+        cppzmq-devel libusbx-devel boost-devel numactl-devel capnproto capnproto-devel eigen3-devel
     )
 
     case "$mode" in

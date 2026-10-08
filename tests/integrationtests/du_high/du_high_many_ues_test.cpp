@@ -98,6 +98,64 @@ INSTANTIATE_TEST_SUITE_P(du_high_many_ues_test,
                          du_high_many_ues_tester,
                          testing::Values(test_params{0, 60}, test_params{5, 590}));
 
+static du_high_env_sim_params create_ra_under_load_config()
+{
+  du_high_env_sim_params params = create_many_ues_config();
+  // FDD offers a PRACH occasion every 10ms and makes every slot a candidate for the RAR PDCCH.
+  params.builder_params = cell_config_builder_profiles::create(duplex_mode::FDD);
+  return params;
+}
+
+class du_high_ra_under_load_tester : public du_high_env_simulator, public testing::Test
+{
+protected:
+  du_high_ra_under_load_tester() : du_high_env_simulator(create_ra_under_load_config())
+  {
+    // Reset the last sent F1AP PDU (e.g. F1 setup).
+    cu_notifier.f1ap_ul_msgs.clear();
+  }
+
+  // The MAC allocates the TC-RNTIs of the detected preambles from 0x4601 onwards, so the UEs created over CCCH take
+  // their RNTIs from a disjoint range.
+  uint16_t next_rnti = 0x8001;
+};
+
+/// \brief Checks that the RA scheduler sends the RARs within the RA window when the cell is full of fallback UEs.
+///
+/// The RAR and the fallback PDCCHs share the common SearchSpace. The fallback scheduler books it up to
+/// \c ue_fallback_scheduler::max_dl_slots_ahead_sched slots ahead, which can leave no slot for the RAR.
+TEST_F(du_high_ra_under_load_tester, when_many_ues_are_created_in_bursts_then_rars_are_sent_within_the_ra_window)
+{
+  constexpr unsigned nof_bursts        = 6;
+  constexpr unsigned ues_per_burst     = 25;
+  constexpr unsigned slots_per_burst   = 60;
+  constexpr unsigned nof_rach_attempts = 36;
+
+  // Launch the random access attempts, one per PRACH occasion.
+  rach_attempts_result rach_res;
+  this->schedule_task(launch_rach_attempts_task(nof_rach_attempts, rach_res));
+
+  // Launch the UE creation and RRC setup tasks in bursts, so that enough UEs are in fallback mode at the same time.
+  for (unsigned burst = 0; burst != nof_bursts; ++burst) {
+    for (unsigned ue_count = 0; ue_count != ues_per_burst; ++ue_count) {
+      rnti_t rnti             = to_rnti(next_rnti++);
+      auto   ue_creation_task = launch_ue_creation_task(rnti, to_du_cell_index(0), true);
+      auto   rrc_setup_task   = launch_rrc_setup_task(rnti, true);
+      this->schedule_task(async_then(std::move(ue_creation_task), std::move(rrc_setup_task)));
+    }
+    for (unsigned count = 0; count != slots_per_burst; ++count) {
+      this->run_slot();
+    }
+  }
+
+  // Await completion of all tasks.
+  this->run_until_all_pending_tasks_completion();
+
+  ASSERT_EQ(rach_res.nof_rars_received, rach_res.nof_attempts)
+      << "The RA window of " << (rach_res.nof_attempts - rach_res.nof_rars_received) << " out of "
+      << rach_res.nof_attempts << " RARs elapsed before the RA scheduler found room for them";
+}
+
 class du_high_few_ues_test : public du_high_env_simulator, public testing::Test
 {
 protected:

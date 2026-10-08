@@ -30,7 +30,7 @@ public:
   /// \param[in] port    Port index.
   /// \param[in] l       Symbol index.
   /// \param[in] k_init  Initial subcarrier index.
-  /// \param[in] mask    Bitset denoting the subcarriers to be written (if \c true), starting from \c k_init.
+  /// \param[in] mask    Bitset denoting the subcarriers to be written (if \c true) starting from \c k_init.
   /// \param[in] symbols Symbols to be written into the resource grid.
   /// \return A view to the unused entries of \c symbols.
   /// \note The number of elements of \c mask shall be equal to or lower than the resource grid number of subcarriers.
@@ -60,7 +60,7 @@ public:
                                   const bounded_bitset<MAX_NOF_SUBCARRIERS>& mask,
                                   span<const cbf16_t>                        symbols) = 0;
 
-  /// \brief Puts a consecutive number of resource elements for the given \c port and symbol \c l, starting at \c
+  /// \brief Puts a consecutive number of resource elements for the given \c port and symbol \c l starting at \c
   /// k_init.
   ///
   /// \param[in] port    Port index.
@@ -71,7 +71,7 @@ public:
   /// subcarriers.
   virtual void put(unsigned port, unsigned l, unsigned k_init, span<const cf_t> symbols) = 0;
 
-  /// \brief Puts a number of resource elements for the given \c port and symbol \c l, starting at \c
+  /// \brief Puts a number of resource elements for the given \c port and symbol \c l starting at \c
   /// k_init and at a distance of \c stride.
   ///
   /// \param[in] port    Port index.
@@ -99,6 +99,13 @@ public:
   ///
   /// \return The device view, invalid (see resource_grid_device_view::is_valid()) when unavailable.
   virtual resource_grid_device_view get_device_view() const { return {}; }
+
+  /// \brief Gets a view of the whole grid.
+  ///
+  /// The layout is the one described at \ref resource_grid_reader::get_buffer().
+  ///
+  /// \return A span containing the entire data of the resource grid.
+  virtual span<cbf16_t> get_buffer() = 0;
 };
 
 } // namespace ocudu

@@ -29,7 +29,7 @@ mobility_manager::mobility_manager(const mobility_manager_config&       cfg_,
 {
 }
 
-void mobility_manager::trigger_handover(pci_t         source_pci,
+bool mobility_manager::trigger_handover(pci_t         source_pci,
                                         rnti_t        rnti,
                                         pci_t         target_pci,
                                         plmn_identity target_plmn,
@@ -38,12 +38,12 @@ void mobility_manager::trigger_handover(pci_t         source_pci,
   cu_cp_ue_index_t ue_index = ue_mng.get_ue_index(source_pci, rnti);
   if (ue_index == cu_cp_ue_index_t::invalid) {
     logger.warning("Could not trigger handover, UE is invalid. rnti={} pci={}", rnti, source_pci);
-    return;
+    return false;
   }
   expected<std::pair<unsigned, nr_cell_identity>> target = cell_meas_mng.find_neighbour_nci(target_pci);
   if (not target) {
     logger.warning("Could not trigger handover, unknown target cell. pci={}", target_pci);
-    return;
+    return false;
   }
 
   handle_handover(ue_index,
@@ -52,9 +52,10 @@ void mobility_manager::trigger_handover(pci_t         source_pci,
                   target_pci,
                   target_plmn,
                   target_tac);
+  return true;
 }
 
-void mobility_manager::trigger_conditional_handover(
+bool mobility_manager::trigger_conditional_handover(
     pci_t                                                source_pci,
     rnti_t                                               rnti,
     span<const pci_t>                                    target_pcis,
@@ -63,6 +64,7 @@ void mobility_manager::trigger_conditional_handover(
 {
   // Trigger CHO by preparing and then automatically executing.
   handle_conditional_handover(source_pci, rnti, target_pcis, timeout, t1_thres_override);
+  return true;
 }
 
 void mobility_manager::trigger_auto_conditional_handover(cu_cp_ue_index_t ue_index)

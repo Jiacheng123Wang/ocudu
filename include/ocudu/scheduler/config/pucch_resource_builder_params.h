@@ -373,7 +373,8 @@ struct pucch_resource_builder_params {
     }
 
     const auto& f1_params = std::get<pucch_f1_params>(f0_or_f1_params);
-    return to_uint(f1_params.nof_cyc_shifts) * (f1_params.occ_supported ? pucch_constants::f1::NOF_TD_OCC : 1U);
+    return to_uint(f1_params.nof_cyc_shifts) *
+           (f1_params.occ_supported ? format1_nof_td_occs(f1_params.nof_syms, f1_params.intraslot_freq_hopping) : 1U);
   }
   /// Get the configured maximum number of Format 2, 3 or 4 resources to be multiplexed over the same PRBs and symbols.
   unsigned mux_capacity_234() const

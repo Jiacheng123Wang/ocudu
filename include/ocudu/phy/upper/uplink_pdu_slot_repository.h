@@ -9,6 +9,7 @@
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_processor.h"
 #include "ocudu/phy/upper/signal_processors/srs/srs_estimator_configuration.h"
 #include "ocudu/phy/upper/uplink_processor_context.h"
+#include "ocudu/support/synchronization/stop_event.h"
 #include <variant>
 
 namespace ocudu {

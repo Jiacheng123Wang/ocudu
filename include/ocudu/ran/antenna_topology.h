@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <optional>
 
 namespace ocudu {
 
@@ -15,6 +16,11 @@ namespace ocudu {
 ///
 /// An antenna topology is defined by a number of independent panels. Each panel that contain a matrix of
 /// \f$(N_1, N_2)\f$ antennas with one or two polarizations.
+///
+/// Each topology defines a beam grid, the set of beams that its panels can form. Every antenna dimension is sampled
+/// with an oversampling factor \f$(O_1, O_2)\f$, which gives \f$N_1 O_1\f$ beams in the first dimension and
+/// \f$N_2 O_2\f$ in the second, as per TS 38.214 Section 5.2.2.2. A beam of the grid is selected by its panel, its
+/// polarization and its index in each of the two dimensions.
 ///
 /// The values for each enumeration are grouped in 4 nibbles (groups of 4 bits), from MSB to LSB:
 /// - Number of panels minus one;
@@ -106,15 +112,46 @@ constexpr unsigned get_total_nof_ports(antenna_topology topology)
   return nof_panels * nof_elements_dim1 * nof_elements_dim2 * nof_polarizations;
 }
 
+/// \brief Determines if the antenna topology defines a grid of beams.
+///
+/// A panel with one element in each dimension cannot steer a beam. Its beams map directly onto the antenna ports.
+/// The topology applies no beamforming.
+constexpr bool has_beam_grid(antenna_topology topology)
+{
+  return (get_nof_beams_dim1(topology) != 1) || (get_nof_beams_dim2(topology) != 1);
+}
+
 /// Gets the antenna topology total number of beams.
 constexpr unsigned get_total_nof_beams(antenna_topology topology)
 {
+  // Get total number of antenna ports.
+  unsigned total_nof_ports = get_total_nof_ports(topology);
+
+  // If the panels are 1x1 elements, the beam to antenna port is direct.
+  if (!has_beam_grid(topology)) {
+    return total_nof_ports;
+  }
+
+  // Get number of combinations of beams.
   unsigned nof_panels        = get_nof_antenna_panels(topology);
   unsigned nof_beams_dim1    = get_nof_beams_dim1(topology);
   unsigned nof_beams_dim2    = get_nof_beams_dim2(topology);
   unsigned nof_polarizations = get_nof_antenna_polarizations(topology);
 
-  return get_total_nof_ports(topology) + nof_panels * nof_beams_dim1 * nof_beams_dim2 * nof_polarizations;
+  // Otherwise return the sum of ports and beams.
+  return total_nof_ports + nof_panels * nof_beams_dim1 * nof_beams_dim2 * nof_polarizations;
+}
+
+/// Gets the maximum number of antenna ports that any of the supported antenna topologies defines.
+constexpr unsigned get_max_nof_ports()
+{
+  unsigned max_nof_ports = 0;
+  for (antenna_topology topology : all_antenna_topologies) {
+    unsigned nof_ports = get_total_nof_ports(topology);
+    max_nof_ports      = std::max(max_nof_ports, nof_ports);
+  }
+
+  return max_nof_ports;
 }
 
 /// Gets the maximum number of beams that any of the supported antenna topologies defines.
@@ -127,6 +164,25 @@ constexpr unsigned get_max_nof_beams()
   }
 
   return max_nof_beams;
+}
+
+/// \brief Gets the single-panel antenna topology defined for a number of antenna ports.
+/// \return The antenna topology, or \c std::nullopt if no topology is defined for the number of ports.
+/// \remark This function needs to be updated to support more parameters and antenna topologies.
+constexpr std::optional<antenna_topology> get_single_panel_antenna_topology(unsigned nof_ports)
+{
+  switch (nof_ports) {
+    case 1:
+      return antenna_topology::one_port;
+    case 2:
+      return antenna_topology::two_port;
+    case 4:
+      return antenna_topology::four_ports;
+    case 8:
+      return antenna_topology::eight_ports;
+    default:
+      return std::nullopt;
+  }
 }
 
 /// Convert the antenna topology to a constant string.

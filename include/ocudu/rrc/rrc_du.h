@@ -42,6 +42,9 @@ public:
 
   virtual void store_cell_info_db(const std::map<nr_cell_global_id_t, rrc_cell_info>& cell_infos) = 0;
 
+  /// Removes the stored information of a cell.
+  virtual void remove_cell_info(const nr_cell_global_id_t& cgi) = 0;
+
   /// \brief Decodes a PER-encoded ReferenceTime-r16 octet string (TS 38.331 section 6.3.2) into a UTC time point,
   /// as carried opaquely in the ref_time field of the F1AP TimeReferenceInformation IE (TS 38.473 section 9.3.1.148).
   ///

@@ -56,8 +56,8 @@ public:
   /// Gets the XNC connection handler.
   xnc_connection_manager& xnc_connection_handler() { return xnc_mng; }
 
-  /// Handles a DU setup request for the given PLMN identifiers. Returns true on success, false otherwise.
-  bool handle_du_setup_request(const std::set<plmn_identity>& plmn_ids);
+  /// \brief Returns the subset of the given PLMN identifiers for which an AMF is connected.
+  std::set<plmn_identity> get_connected_plmns(const std::set<plmn_identity>& plmn_ids);
 
   /// Determines whether the CU-CP should accept new UE connections.
   bool request_ue_setup() const override;

@@ -13,6 +13,7 @@
 #include "ocudu/du/du_high/du_qos_config_helpers.h"
 #include "ocudu/du/du_update_config_helpers.h"
 #include "ocudu/ran/band_helper.h"
+#include "ocudu/ran/beamforming/beam_identifier_helpers.h"
 #include "ocudu/ran/duplex_mode.h"
 #include "ocudu/ran/pdcch/pdcch_candidates.h"
 #include "ocudu/ran/prach/prach_configuration.h"
@@ -402,6 +403,11 @@ static void fill_csi_resources(odu::du_cell_config& out_cell, const du_high_unit
   }
   du_csi.pwr_ctrl_offset = static_cast<int8_t>(cell_cfg.csi_cfg.pwr_ctrl_offset);
 
+  // The Type-II codebook is only configured for the UEs that report support for it.
+  if (csi_cfg.type2_codebook_enabled) {
+    du_csi.type2_codebook.emplace();
+  }
+
   // [Implementation-defined] The default CSI symbols are in symbols 4 and 8, the DM-RS for PDSCH might collide in
   // symbol index 8 when the number of DM-RS additional positions is 3.
   if (uint_to_dmrs_additional_positions(cell_cfg.pdsch_cfg.dmrs_add_pos) == dmrs_additional_positions::pos3) {
@@ -725,15 +731,23 @@ std::vector<odu::du_cell_config> ocudu::generate_du_cell_config(const du_high_un
     // > SSB.
     out_cell.ran.ssb_cfg.ssb_beams.reset();
     for (const auto& ssb_beam : base_cell.ssb_cfg.beams) {
-      out_cell.ran.ssb_cfg.ssb_beams.set_beam(ssb_beam.ssb_index, to_beam_id(ssb_beam.beam_id));
+      const auto& beam = *std::find_if(base_cell.ref_beams.begin(),
+                                       base_cell.ref_beams.end(),
+                                       [&ssb_beam](const du_high_unit_ref_beam_config& cell_beam) {
+                                         return cell_beam.ref_beam_id == ssb_beam.ref_beam_id.value();
+                                       });
+      out_cell.ran.ssb_cfg.ssb_beams.set_beam(
+          ssb_beam.ssb_index,
+          get_beam_id(base_cell.tx_ant_topology, beam.i_panel, beam.i_pol, beam.i_beam_dim1, beam.i_beam_dim2));
     }
     out_cell.ran.ssb_cfg.ssb_period      = static_cast<ssb_periodicity>(base_cell.ssb_cfg.ssb_period_msec);
     out_cell.ran.ssb_cfg.ssb_block_power = base_cell.ssb_cfg.ssb_block_power;
     out_cell.ran.ssb_cfg.pss_to_sss_epre = base_cell.ssb_cfg.pss_to_sss_epre;
 
     // > Carrier config.
-    out_cell.ran.dl_carrier.nof_ant = base_cell.nof_antennas_dl;
-    out_cell.ran.ul_carrier.nof_ant = base_cell.nof_antennas_ul;
+    out_cell.ran.dl_carrier.nof_ant  = base_cell.nof_antennas_dl;
+    out_cell.ran.dl_carrier.topology = base_cell.tx_ant_topology;
+    out_cell.ran.ul_carrier.nof_ant  = base_cell.nof_antennas_ul;
     // > System Information.
     fill_si_acquisition_info(out_cell.si, base_cell);
     if (out_cell.si.si_config.has_value()) {
@@ -819,7 +833,7 @@ std::vector<odu::du_cell_config> ocudu::generate_du_cell_config(const du_high_un
     const unsigned nof_crbs = band_helper::get_n_rbs_from_bw(base_cell.channel_bw_mhz, param.scs_common, freq_range);
 
     // DL-PRS parameters.
-    out_cell.prs_cfg = make_prs_config(base_cell.prs_cfg, nof_crbs);
+    out_cell.ran.prs_cfg = make_prs_config(base_cell.prs_cfg, nof_crbs);
 
     // MAC Cell Group Config parameters.
     out_cell.mcg_params = make_mac_cell_group_params(base_cell);
@@ -1379,6 +1393,8 @@ static scheduler_expert_config generate_scheduler_expert_config(const du_high_un
   out_cfg.ue.dl_mcs                                         = {pdsch.min_ue_mcs, pdsch.max_ue_mcs};
   out_cfg.ue.pdsch_rv_sequence.assign(pdsch.rv_sequence.begin(), pdsch.rv_sequence.end());
   out_cfg.ue.pdsch_cqi_rep_threshold           = pdsch.cqi_rep_threshold;
+  out_cfg.ue.pusch_sinr_rep_threshold          = pusch.sinr_rep_threshold;
+  out_cfg.ue.pusch_force_rep                   = pusch.force_rep;
   out_cfg.ue.dl_harq_la_cqi_drop_threshold     = pdsch.harq_la_cqi_drop_threshold;
   out_cfg.ue.dl_harq_la_ri_drop_threshold      = pdsch.harq_la_ri_drop_threshold;
   out_cfg.ue.max_nof_dl_harq_retxs             = pdsch.max_nof_harq_retxs;
@@ -1534,6 +1550,8 @@ void ocudu::generate_du_high_config(odu::du_high_configuration& du_hi_cfg, const
   du_hi_cfg.metrics.enable_sched_ue = du_high_unit_cfg.metrics.layers_cfg.enable_scheduler_ue;
   du_hi_cfg.metrics.enable_du_proc  = du_high_unit_cfg.metrics.layers_cfg.enable_du_proc;
   du_hi_cfg.metrics.period          = std::chrono::milliseconds{du_high_unit_cfg.metrics.du_report_period};
+
+  du_hi_cfg.f1ap.retry_tnl_connection = du_high_unit_cfg.retry_f1c_connection;
 
   // Validates the derived parameters.
   du_hi_cfg.ran.srbs                  = generate_du_srb_config(du_high_unit_cfg);

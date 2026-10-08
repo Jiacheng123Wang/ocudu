@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
+#include "tests/ocudu_test_requirements.h"
 #include "tests/test_doubles/xnap/xnap_test_message_validators.h"
 #include "tests/unittests/xnap/xnap_test_messages.h"
 #include "xnap_test_helpers.h"
@@ -49,6 +50,8 @@ public:
 
 TEST_F(xnap_retrieve_ue_context_procedure_test, when_retrieval_is_required_then_request_is_sent_to_peer)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   const cu_cp_ue_index_t ue_index = create_ue();
   ASSERT_NE(ue_index, cu_cp_ue_index_t::invalid);
 
@@ -64,6 +67,8 @@ TEST_F(xnap_retrieve_ue_context_procedure_test, when_retrieval_is_required_then_
 
 TEST_F(xnap_retrieve_ue_context_procedure_test, when_response_is_received_then_ue_context_is_returned)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   const cu_cp_ue_index_t ue_index = create_ue();
   ASSERT_NE(ue_index, cu_cp_ue_index_t::invalid);
 
@@ -87,6 +92,8 @@ TEST_F(xnap_retrieve_ue_context_procedure_test, when_response_is_received_then_u
 
 TEST_F(xnap_retrieve_ue_context_procedure_test, when_failure_is_received_then_retrieval_fails)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   const cu_cp_ue_index_t ue_index = create_ue();
   ASSERT_NE(ue_index, cu_cp_ue_index_t::invalid);
 
@@ -105,6 +112,8 @@ TEST_F(xnap_retrieve_ue_context_procedure_test, when_failure_is_received_then_re
 
 TEST_F(xnap_retrieve_ue_context_procedure_test, when_peer_does_not_respond_then_retrieval_times_out)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   const cu_cp_ue_index_t ue_index = create_ue();
   ASSERT_NE(ue_index, cu_cp_ue_index_t::invalid);
 
@@ -121,6 +130,8 @@ TEST_F(xnap_retrieve_ue_context_procedure_test, when_peer_does_not_respond_then_
 
 TEST_F(xnap_retrieve_ue_context_procedure_test, when_xnap_stopped_then_pending_retrieval_fails)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   const cu_cp_ue_index_t ue_index = create_ue();
   ASSERT_NE(ue_index, cu_cp_ue_index_t::invalid);
 
@@ -144,6 +155,8 @@ TEST_F(xnap_retrieve_ue_context_procedure_test, when_xnap_stopped_then_pending_r
 
 TEST_F(xnap_retrieve_ue_context_procedure_test, when_request_for_unknown_ue_context_id_received_then_failure_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   ASSERT_NO_FATAL_FAILURE(run_xn_setup_with_served_cell());
 
   cu_cp_notifier.ue_context_id_lookup_result = cu_cp_ue_index_t::invalid;
@@ -157,6 +170,8 @@ TEST_F(xnap_retrieve_ue_context_procedure_test, when_request_for_unknown_ue_cont
 
 TEST_F(xnap_retrieve_ue_context_procedure_test, when_request_for_unadvertised_target_cell_received_then_failure_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   ASSERT_NO_FATAL_FAILURE(run_xn_setup_with_served_cell());
 
   const cu_cp_ue_index_t ue_index            = create_ue();
@@ -175,6 +190,8 @@ TEST_F(xnap_retrieve_ue_context_procedure_test, when_request_for_unadvertised_ta
 
 TEST_F(xnap_retrieve_ue_context_procedure_test, when_cu_cp_accepts_the_retrieval_then_response_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   ASSERT_NO_FATAL_FAILURE(run_xn_setup_with_served_cell());
 
   const cu_cp_ue_index_t ue_index                                         = create_ue();
@@ -197,6 +214,8 @@ TEST_F(xnap_retrieve_ue_context_procedure_test, when_cu_cp_accepts_the_retrieval
 
 TEST_F(xnap_retrieve_ue_context_procedure_test, when_cu_cp_rejects_the_retrieval_then_failure_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-GEN-3");
+
   ASSERT_NO_FATAL_FAILURE(run_xn_setup_with_served_cell());
 
   const cu_cp_ue_index_t ue_index                     = create_ue();

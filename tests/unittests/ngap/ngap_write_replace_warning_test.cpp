@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ngap_test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/asn1/ngap/ngap_pdu_contents.h"
 #include <gtest/gtest.h>
@@ -35,6 +36,8 @@ protected:
 /// Valid minimal request is forwarded to CU-CP and a response is sent to the AMF.
 TEST_F(ngap_write_replace_warning_test, when_minimal_request_received_request_is_forwarded_and_response_is_sent)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-5", "CU-GEN-1");
+
   ngap_message msg = generate_write_replace_warning_request();
   ngap->handle_message(msg);
   ctrl_worker.run_pending_tasks();
@@ -46,6 +49,8 @@ TEST_F(ngap_write_replace_warning_test, when_minimal_request_received_request_is
 /// Mandatory IEs are correctly decoded into the common type.
 TEST_F(ngap_write_replace_warning_test, when_minimal_request_received_mandatory_ies_are_correctly_decoded)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-5", "CU-GEN-1");
+
   ngap_message msg = generate_write_replace_warning_request();
   ngap->handle_message(msg);
   ctrl_worker.run_pending_tasks();
@@ -66,6 +71,8 @@ TEST_F(ngap_write_replace_warning_test, when_minimal_request_received_mandatory_
 /// Optional IEs are correctly decoded when present.
 TEST_F(ngap_write_replace_warning_test, when_request_with_optionals_received_optional_ies_are_correctly_decoded)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-5", "CU-GEN-1");
+
   ngap_message msg = generate_write_replace_warning_request_with_optionals();
   ngap->handle_message(msg);
   ctrl_worker.run_pending_tasks();
@@ -102,6 +109,8 @@ TEST_F(ngap_write_replace_warning_test, when_request_with_optionals_received_opt
 /// Response echoes back the msg_id and serial_num from the request.
 TEST_F(ngap_write_replace_warning_test, when_response_sent_msg_id_and_serial_num_are_echoed_back)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-SVCS-16-5", "CU-GEN-1");
+
   // Configure the notifier to return a specific response.
   cu_cp_notifier.write_replace_warning_response.msg_id     = 0x1234;
   cu_cp_notifier.write_replace_warning_response.serial_num = 0x0001;

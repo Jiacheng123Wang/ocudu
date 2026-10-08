@@ -16,6 +16,7 @@
 #include "ocudu/du/du_high/du_qos_config_helpers.h"
 #include "ocudu/du/du_update_config_helpers.h"
 #include "ocudu/mac/mac_cell_timing_context.h"
+#include "ocudu/ran/prach/ra_helper.h"
 #include "ocudu/scheduler/config/scheduler_expert_config_factory.h"
 #include "ocudu/support/error_handling.h"
 #include "ocudu/support/io/io_broker_factory.h"
@@ -77,6 +78,8 @@ du_high_configuration odu::create_du_high_configuration(const du_high_env_sim_pa
   if (params.sched_ue_expert_cfg.has_value()) {
     cfg.ran.sched_cfg.ue = params.sched_ue_expert_cfg.value();
   }
+
+  cfg.f1ap.retry_tnl_connection = params.retry_f1c_connection;
 
   cfg.metrics.enable_f1ap    = true;
   cfg.metrics.enable_mac     = true;
@@ -899,6 +902,103 @@ async_task<bool> du_high_env_simulator::launch_run_until_task(unique_function<bo
 
         CORO_RETURN(false);
       });
+}
+
+async_task<void> du_high_env_simulator::launch_rach_attempts_task(unsigned              nof_attempts,
+                                                                  rach_attempts_result& result,
+                                                                  unsigned              prach_ind_delay_slots,
+                                                                  du_cell_index_t       cell_index)
+{
+  /// Note: This timeout needs to be higher than the number of slots that the requested PRACH occasions span.
+  static constexpr unsigned rach_attempts_timeout = 2000U;
+
+  /// State of a random access attempt that is waiting for its RAR.
+  struct rach_attempt_context {
+    mac_rach_indication ind;
+    /// RA-RNTI that the RAR of this attempt is addressed to.
+    rnti_t ra_rnti;
+    /// Slot at which the RACH indication reaches the DU.
+    slot_point tx_slot;
+    /// Slot at which the attempt is given up.
+    slot_point give_up_slot;
+    /// Whether the RACH indication was already forwarded.
+    bool sent = false;
+  };
+
+  const rach_config_common& rach_cfg = *du_high_cfg.ran.cells[cell_index].ran.ul_cfg_common.init_ul_bwp.rach_cfg_common;
+
+  return launch_async([this,
+                       nof_attempts,
+                       cell_index,
+                       prach_ind_delay_slots,
+                       &result,
+                       msg1_scs       = rach_cfg.msg1_scs,
+                       ra_resp_window = unsigned{rach_cfg.rach_cfg_generic.ra_resp_window},
+                       count          = 0U,
+                       attempts = std::vector<rach_attempt_context>{}](coro_context<async_task<void>>& ctx) mutable {
+    CORO_BEGIN(ctx);
+
+    result = rach_attempts_result{};
+
+    for (count = 0; (result.nof_attempts != nof_attempts or not attempts.empty()) and count != rach_attempts_timeout;
+         ++count) {
+      // On every run_slot.
+      CORO_AWAIT(next_slot_signal);
+
+      const slot_point           sl_tx    = next_slot.without_hyper_sfn();
+      const phy_cell_test_dummy& phy_cell = phy.cells[cell_index];
+
+      // Detect one contention-based preamble in the PRACH occasions of this slot.
+      if (result.nof_attempts != nof_attempts and phy_cell.last_ul_res.has_value() and
+          phy_cell.last_ul_res->ul_res != nullptr) {
+        for (const prach_occasion_info& occasion : phy_cell.last_ul_res->ul_res->prachs) {
+          rach_attempt_context& attempt = attempts.emplace_back();
+          attempt.ind     = test_helpers::create_rach_indication(phy_cell.last_ul_res->slot, occasion, msg1_scs);
+          const auto& occ = attempt.ind.occasions.front();
+          attempt.ra_rnti = ra_helper::get_ra_rnti(occ.slot_index, occ.start_symbol, occ.frequency_index);
+          attempt.tx_slot = attempt.ind.slot_rx + prach_ind_delay_slots;
+          // [Implementation-defined] The scheduler enforces the RA window, so this only has to outlast it.
+          attempt.give_up_slot = attempt.ind.slot_rx + 2 * ra_resp_window;
+          if (++result.nof_attempts == nof_attempts) {
+            break;
+          }
+        }
+      }
+
+      // Forward the RACH indications whose transport delay has elapsed.
+      for (rach_attempt_context& attempt : attempts) {
+        if (not attempt.sent and attempt.tx_slot <= sl_tx) {
+          du_hi->get_rach_handler(cell_index).handle_rach_indication(attempt.ind);
+          attempt.sent = true;
+        }
+      }
+
+      // Resolve the attempts whose RAR the scheduler has sent.
+      if (phy_cell.last_dl_res.has_value() and phy_cell.last_dl_res->dl_res != nullptr) {
+        for (const rar_information& rar : phy_cell.last_dl_res->dl_res->rar_grants) {
+          auto it = std::find_if(attempts.begin(), attempts.end(), [&rar](const rach_attempt_context& attempt) {
+            return attempt.sent and attempt.ra_rnti == rar.pdsch_cfg.rnti;
+          });
+          if (it != attempts.end()) {
+            attempts.erase(it);
+            ++result.nof_rars_received;
+          }
+        }
+      }
+
+      // Give up on the attempts that got no RAR.
+      attempts.erase(std::remove_if(attempts.begin(),
+                                    attempts.end(),
+                                    [sl_tx](const rach_attempt_context& a) { return a.give_up_slot <= sl_tx; }),
+                     attempts.end());
+    }
+    report_fatal_error_if_not(result.nof_attempts == nof_attempts,
+                              "Only {} of the {} requested PRACH occasions were detected before the timeout",
+                              result.nof_attempts,
+                              nof_attempts);
+
+    CORO_RETURN();
+  });
 }
 
 void du_high_env_simulator::handle_slot_preamble_tasks()

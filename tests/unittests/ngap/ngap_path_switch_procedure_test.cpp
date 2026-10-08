@@ -4,6 +4,7 @@
 
 #include "lib/cu_cp/ue_manager/ue_manager_impl.h"
 #include "ngap_test_helpers.h"
+#include "tests/ocudu_test_requirements.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ran/cause/ngap_cause.h"
 #include "ocudu/ran/cu_types.h"
@@ -69,6 +70,8 @@ protected:
 TEST_F(ngap_path_switch_procedure_test,
        when_path_switch_request_ack_not_received_within_timeout_then_path_switch_procedure_fails)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-3");
+
   // Test preparation: Create UE.
   cu_cp_ue_index_t ue_index = create_ue();
 
@@ -92,6 +95,8 @@ TEST_F(ngap_path_switch_procedure_test,
 /// Test unsuccessful Path Switch Request procedure.
 TEST_F(ngap_path_switch_procedure_test, when_path_switch_request_failure_received_then_path_switch_procedure_fails)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-3");
+
   // Test preparation: Create UE.
   cu_cp_ue_index_t ue_index = create_ue();
 
@@ -115,6 +120,8 @@ TEST_F(ngap_path_switch_procedure_test, when_path_switch_request_failure_receive
 /// Test successful Path Switch Request procedure.
 TEST_F(ngap_path_switch_procedure_test, when_path_switch_request_ack_received_then_path_switch_procedure_succeeds)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-3");
+
   // Test preparation: Create UE.
   cu_cp_ue_index_t ue_index = create_ue();
 
@@ -138,6 +145,8 @@ TEST_F(ngap_path_switch_procedure_test, when_path_switch_request_ack_received_th
 /// Destroying the UE context cancels the pending transaction, which resumes this procedure from within the destructor.
 TEST_F(ngap_path_switch_procedure_test, when_ue_context_is_removed_then_path_switch_procedure_fails)
 {
+  OCUDU_TEST_REQUIREMENTS("MVP-FUNC-MOB-3");
+
   // Test preparation: Create UE.
   cu_cp_ue_index_t ue_index = create_ue();
 

@@ -51,15 +51,6 @@ static void fill_ru_ofh_expert_execution_section(YAML::Node node, const ru_ofh_u
   ofh_threads["enable_busy_waiting"] = config.enable_busy_waiting;
 }
 
-static void fill_ru_ofh_hal_section(YAML::Node node, const std::optional<ru_ofh_unit_hal_config>& config)
-{
-  if (!config.has_value()) {
-    return;
-  }
-  YAML::Node hal_node  = node["hal"];
-  hal_node["eal_args"] = config.value().eal_args;
-}
-
 static unsigned translate_c_plane_prach_fft_len(ofh::cplane_fft_size c_plane_prach_fft_len)
 {
   switch (c_plane_prach_fft_len) {
@@ -114,6 +105,11 @@ static void fill_ru_ofh_base_cell_section(YAML::Node node, const ru_ofh_unit_bas
     }
   } else if (const auto* legacy_scaling_params = std::get_if<ru_ofh_legacy_scaling_config>(&config.iq_scaling_config)) {
     node["iq_scaling"] = legacy_scaling_params->iq_scaling;
+  }
+  if (config.dl_beamforming.has_value()) {
+    YAML::Node bf_node            = node["beamforming"];
+    bf_node["bfw_compr_method"]   = config.dl_beamforming->compression_method;
+    bf_node["bfw_compr_bitwidth"] = config.dl_beamforming->compression_bitwidth;
   }
 }
 
@@ -186,5 +182,4 @@ void ocudu::fill_ru_ofh_config_in_yaml_schema(YAML::Node& node, const ru_ofh_uni
   fill_ru_ofh_log_section(node["log"], config.loggers);
   fill_ru_ofh_expert_execution_section(node["expert_execution"], config.expert_execution_cfg);
   fill_ru_ofh_section(node["ru_ofh"], config);
-  fill_ru_ofh_hal_section(node, config.hal_config);
 }
