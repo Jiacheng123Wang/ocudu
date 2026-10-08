@@ -1072,6 +1072,50 @@ fp8-E4M3（存在但被拒的路径）**。
 
 ★ **阶段 2 的一个已识别约束**（`gpu` 模式的严格策略）：
 `phy_pipeline_strict_enabled()` 在 `gpu` 模式下会**拒绝任何"设备没覆盖"的 hop**
-（`pusch_processor_impl.cpp:296`）⇒ ★ **AI 后端必须让 `serves_hop_in_place()` 为真**，否则**每跳都失败**。
+（`pusch_processor_impl.cpp:429`）⇒ 初稿据此写下"**AI 后端必须让 `serves_hop_in_place()` 为真**"。
+★★ **该结论已被 11.1.2 取代 —— 它不该在 backend 或 config 层靠"记得设成真"来解决。**
 ★ 而 `ul_chain_replay` **故意不发布 pipeline mode**（`phy_pipeline_strict.h` 的注释逐字），
 所以**离线测试台默认不严格** —— ★ **离线能量到的，与线上会发生的，在这一点上不同**，报告必须写明。
+
+#### 11.1.2 ★★ 严格策略与 AI 臂：在**代码层**解决，不靠配置（用户追问，2026-10-08）
+
+> **用户的问题**：*"这个严格的依赖关系是否可以在代码中解决，而不是在 config 中设置？"*
+
+★★ **答案：可以，而且必须 —— 但"让 AI 后端恒返回真"是错的解法。**
+
+**先看清严格检查问的是什么**（`pusch_processor_impl.cpp:429-442`）：
+
+```
+① est_results.device_results_cover_last_estimate()      ← 经典设备估计器有没有产出结果？
+② demodulator.serves_hop_in_place(...)                  ← 它能就地读那些结果吗？
+```
+
+★★ **这两个问题都是关于"经典设备估计器"的。** 而 AI 接收机**根本不走那条路**
+⇒ 对它回答"设备没覆盖"是**范畴错误**，严格策略会把它读成缺陷。
+
+**为什么"恒返回真"不行**：
+若让 AI 后端的 `device_results_is_knob_requested()` 恒为真来求豁免，
+★ **它会把"AI 后端真的挂载失败"也一起豁免掉** —— 那正是严格策略存在的理由。
+⇒ **豁免必须是一个"由后端回答的问题"，不是一个"无条件放行"。**
+
+**已实现的代码层解法**（与既有的 `metal::is_knob_refusal` 机制**同构**）：
+
+| 层 | 改动 |
+|---|---|
+| ★ **接口** | `dmrs_pusch_estimator_results` 新增 `results_are_computed_on_host()`；**默认 `false`（设备）** |
+| ★ **经典设备估计器** | `dmrs_pusch_estimator_impl` **显式实现**：跟随 `device_results_cover_last_estimate()`（空结果集 ⇒ host）|
+| ★ **严格检查** | 先问 `classic_device_receiver = !est_results.results_are_computed_on_host()`；★ **对 AI 臂自然放行**，**没有特例、没有配置项、没有环境变量** |
+
+★★ **语义上的关键**：这正是 `phy_pipeline_strict.h` 自己写下的区分 ——
+*"a hop refused by a KNOB is exempt: the A/B arms exist to take the host route"*。
+★ **AI 臂就是这样的 knob 臂**，所以它**不该被特殊对待，而该被正确分类**。
+
+★★ **而声明仍然是可证伪的**：若一个接收机**声称在设备上、却在主机上算**，
+`results_are_computed_on_host()` 返回 `false` ⇒ 严格策略**照旧拒绝**，**像任何其它 shortfall 一样**。
+⇒ ★ **"不能靠配置豁免"，与"不能靠撒谎绕过"是同一件事的两面。**
+
+★ **落盘位置（本次实作）**：
+`include/ocudu/phy/upper/signal_processors/pusch/dmrs_pusch_estimator.h`（接口）、
+`lib/phy/upper/signal_processors/pusch/dmrs_pusch_estimator_impl.{h,cpp}`（经典设备估计器的回答）、
+`lib/phy/upper/channel_processors/pusch/pusch_processor_impl.cpp`（严格检查的前置问题）。
+★ **`auto`/经典路径逐位不变**（`pusch_processor_unittest` 等 5/5 通过）。

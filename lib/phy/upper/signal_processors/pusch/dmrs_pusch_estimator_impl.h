@@ -118,6 +118,14 @@ private:
   bool device_shortfall_is_knob_requested() const override;
 
   // See the dmrs_pusch_estimator_results interface for the documentation.
+  //
+  // Answered explicitly rather than left to the default, because this class is the CLASSIC DEVICE estimator
+  // whose behaviour the fused lane's strict policy is about: it reports the device whenever it produced the
+  // results there, and the host when the estimator runs on the host at all. The answer follows the same split
+  // as the device-resident results below, so it cannot drift from what the hop actually did.
+  bool results_are_computed_on_host() const override;
+
+  // See the dmrs_pusch_estimator_results interface for the documentation.
   bool sync_device_estimates() const override;
 
   // See the dmrs_pusch_estimator_results interface for the documentation.

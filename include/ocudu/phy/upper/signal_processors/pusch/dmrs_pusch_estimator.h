@@ -249,6 +249,26 @@ public:
   /// port_channel_estimator_results::device_shortfall_is_knob_requested().
   virtual bool device_shortfall_is_knob_requested() const { return false; }
 
+  /// \brief Which side computes this hop's channel estimation: \c true for the host, \c false for the device.
+  ///
+  /// WHY IT IS A SEPARATE QUESTION FROM device_results_cover_last_estimate(). That question - and the shortfall
+  /// reason beside it - are statements about the CLASSIC device estimator: did it produce results, and can the
+  /// demodulator read them where they were produced. A receiver that never uses that path has no shortfall to
+  /// report, so answering "the device did not cover it" on its behalf is a category error, and the fused lane's
+  /// strict policy would read it as a defect (see phy_pipeline_strict.h).
+  ///
+  /// The distinction the strict policy is built on is the one already drawn for the estimator's own A/B arms
+  /// (see metal::is_knob_refusal): a host route the OPERATOR asked for keeps running, because that route IS the
+  /// arm, while a hop the device could not serve fails the grant in mode=gpu. A receiver selected by an operator
+  /// knob is the first kind, and its results object says so here - so the policy needs no special case for it,
+  /// and nothing has to be configured to exempt it.
+  ///
+  /// \note The default reports the device, which is the answer for the classic device estimator and for every
+  ///       estimator without a device path. An implementation that computes on the host MUST override it:
+  ///       claiming the device while computing on the host is the very failure the strict policy exists to
+  ///       catch, and it would be caught in the worst way - as a silent extra host pass over the samples.
+  virtual bool results_are_computed_on_host() const { return false; }
+
   /// \brief Gets the general Channel State Information.
   ///
   /// \param[out] csi Channel State Information object where the CSI parameters are stored.

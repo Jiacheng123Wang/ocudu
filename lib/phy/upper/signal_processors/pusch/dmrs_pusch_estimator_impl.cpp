@@ -212,6 +212,25 @@ const char* dmrs_pusch_estimator_impl::device_shortfall_reason() const
   return nullptr;
 }
 
+bool dmrs_pusch_estimator_impl::results_are_computed_on_host() const
+{
+  // The same question device_results_cover_last_estimate() answers, asked on its own so the strict policy can
+  // tell "this receiver computes on the host" from "the device did not cover this hop" WITHOUT conflating them.
+  // Here they coincide, because this estimator IS the classic device one: it either produced the results on the
+  // device or it did not produce them there at all.
+  //
+  // An empty result set counts as the host: nothing was produced on the device, so nothing may be claimed for it.
+  if (ch_est_result.empty()) {
+    return true;
+  }
+  for (const port_channel_estimator_results* results : ch_est_result) {
+    if ((results == nullptr) || !results->device_results_cover_last_estimate()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool dmrs_pusch_estimator_impl::device_shortfall_is_knob_requested() const
 {
   // Authorized only if EVERY port says so: one port refused by geometry is enough for the hop to be a

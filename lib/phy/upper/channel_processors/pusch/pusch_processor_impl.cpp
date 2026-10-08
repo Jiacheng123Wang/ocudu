@@ -426,7 +426,16 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
   //     with more than one receive port or layer (see channel_equalizer::consumes_device_estimates).
   // That second question is asked of the demodulator itself, so the answer cannot drift from what
   // demodulate() is about to do.
-  if (phy_pipeline_strict_enabled() && !est_results.device_shortfall_is_knob_requested()) {
+  //
+  // BOTH QUESTIONS ARE ABOUT THE CLASSIC DEVICE ESTIMATOR, so they are asked of it: a receiver that computes
+  // on the host - selected by an operator knob, like the arms is_knob_refusal() lists - has no classic device
+  // path to have covered anything, and its results object reports the host instead (see
+  // dmrs_pusch_estimator_results::results_are_computed_on_host). Its route is the arm, so the policy lets it
+  // through on its own answer, with no special case here and nothing to configure. The claim is still
+  // enforced where it can be checked: a receiver that says the device and then computes on the host is a
+  // shortfall and fails the grant like any other.
+  const bool classic_device_receiver = !est_results.results_are_computed_on_host();
+  if (phy_pipeline_strict_enabled() && classic_device_receiver && !est_results.device_shortfall_is_knob_requested()) {
     const bool estimator_covered = est_results.device_results_cover_last_estimate();
     const bool topology_in_place =
         dependencies->get_demodulator().serves_hop_in_place(est_results, pdu.rx_ports.size(), pdu.nof_tx_layers);
