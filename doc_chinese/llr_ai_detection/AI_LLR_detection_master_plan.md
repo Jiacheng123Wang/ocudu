@@ -8,10 +8,14 @@
 > **前身**：`metal_kernel_fusion`（已收官：融合清单穷尽，性能目标在吞吐/占用维度关闭）。
 > 本工作流继承它的问题陈述——"一格 667 µs 里只有几十 µs 是算力"——并换一条完全不同的路去解决它。
 >
-> 版本：v2.1 ｜ 状态：**规划（待 P0 裁决）** ｜ 日期：2026-10-07
+> 版本：v2.2 ｜ 状态：**规划（待 P0 裁决）** ｜ 日期：2026-10-07
 > 配套文档：`memo_01_repo_seams_and_llr_contract.md`（接缝与契约）、
 > `memo_02_paper_2503.16594_reading.md`（参考论文）、`memo_03_literature_survey.md`（文献调研，完整版）、
 > `memo_04_data_labels_and_operating_point.md`（数据与工作点实测）
+>
+> ★ **v2.2 变更（工作约定）**：新增 **§10 工作目录、leg 命名与出处**——
+> 目录三分（`wip/` 进 git、`wip/logs/` 与 `work_tmp/` 不进）、
+> **leg 前缀改为 `aillr0NN-*`**（`mkf` 是上一个工作流），**引用历史工具必须注明完整路径**。
 >
 > ★★★ **v2.1 变更（设计哲学与两条用户补充）**：
 > ① ★★ **新增 §0.2 设计边界**：按 `platform_portability_design_rules.md` 的**三层分解**
@@ -762,9 +766,9 @@ fp8-E4M3（存在但被拒的路径）**。
 
 | # | 功课 | 为什么必须 | 预计产出 |
 |---|---|---|---|
-| **A1** | ★★ **我们仓库侧的"上报路径"彻底摸清**：`est_results.get_channel_state_information(...)` 的**每一个消费字段**（RSRP/EPRE/SNR/TA/CFO）分别被谁读、精度要求、是否影响后续槽 | 深度 3 继承 CE 的全部上报义务；平台已承认这是缺口（`memo_06` §4）。**不知道消费者，就不知道噪声头要输出什么** | `memo_07_reporting_obligations.md` |
+| **A1** | ★★ **我们仓库侧的"上报路径"彻底摸清**：`est_results.get_channel_state_information(...)` 的**每一个消费字段**（RSRP/EPRE/SNR/TA/CFO）分别被谁读、精度要求、是否影响后续槽 | 深度 3 继承 CE 的全部上报义务；平台已承认这是缺口（`memo_06` §4）。**不知道消费者，就不知道噪声头要输出什么** | ★ **计划产出**：`memo_07_reporting_obligations.md`（**尚未落盘**） |
 | **A2** | ★★ **`resource_grid_reader` 的内存布局与零拷贝可行性**：port/symbol/subcarrier 的物理排布、能否直接暴露成 `[port, symbol, subcarrier]` 张量（对应平台的 `RESOURCE_GRID_PORT_SYMBOL_SUBCARRIER_V1`） | 这是模型输入的第一步；布局不对就要拷贝，而拷贝会毁掉零拷贝成就 | 同 A1 或独立 memo |
-| **A3** | ★★ **P0 的实验设计（判据预登记）**：genie 上界怎么算、用哪批数据、**经典链基线用哪一条**（CPU generic / metal mmse？）、BLER 操作点与样本量 | ★ **P0 是"值不值得做"的裁决**，而**没有定义基线就没有可比性** | `memo_08_p0_design.md`（**判据必须写在飞之前**） |
+| **A3** | ★★ **P0 的实验设计（判据预登记）**：genie 上界怎么算、用哪批数据、**经典链基线用哪一条**（CPU generic / metal mmse？）、BLER 操作点与样本量 | ★ **P0 是"值不值得做"的裁决**，而**没有定义基线就没有可比性** | ★ **计划产出**：`memo_08_p0_design.md`（**尚未落盘**；**判据必须写在飞之前**） |
 | **A5** | ★★ **语料设计与采集方案** | ★ 用户已裁定**语料可补充采集且不受限**；§3.1.0 的教训说明**语料设计必须先于模型设计** | ✅ **`memo_09_corpus_design.md` v1.0**（三层结构、不可恢复字段清单、覆盖度账本、飞行绑定、迭代回路） |
 | **A6** | ★★ **采集字段补齐（memo_09 §13.1）**：在"始终编译在内"的那套设施上扩展，补 `dmrs_type`、`nof_cdm_groups_without_data`、`n_rapid`、逐 RE 后均衡噪声，且不拖慢热路径 | ★ **P1 批语料的硬阻塞**；★ **不可恢复字段漏记 = 重飞** | 代码改动 + 一条 leg 验证 |
 | **A4** | ★ **TA/CFO 的下游用途**：它们只被上报，还是被用于补偿/影响后续槽？ | 若被用于补偿，深度 3 的网络**必须继续产出它们**（或保留一个轻量 DM-RS 经典块）；若只上报，问题小得多 | 并入 A1 |
@@ -804,3 +808,45 @@ fp8-E4M3（存在但被拒的路径）**。
 
 ★ **纪律**：**功课没做完就开工，等于把"值不值得做"这个问题推迟到已经投入之后才回答**——
 而这正是 `metal_kernel_fusion` 那条线用几个月换来的教训。
+
+---
+
+## 10. 工作目录、leg 命名与出处（v2.2 新增）
+
+★ 详细约定见 **`doc_chinese/llr_ai_detection/wip/README.md`**；这里是规划层面的三条要点。
+
+### 10.1 目录三分（已核实忽略规则）
+
+| 路径 | 进 git？ | 放什么 |
+|---|---|---|
+| `llr_ai_detection/wip/` | ✅ **进** | 工具、脚本、arm 配置（YAML）、探针 |
+| `llr_ai_detection/wip/logs/` | ❌ **不进** | ★ **新飞腿的日志**（`doc_chinese/.gitignore:17` 的 `**/logs/`） |
+| `llr_ai_detection/work_tmp/` | ❌ **不进** | 语料、参考二进制、仪器输出（`doc_chinese/.gitignore:25` 的 `**/work_tmp/`） |
+
+★ **与 AI CE 历史的区别**：AI CE 的语料在 **`~/ai_ce_work/`**（仓库外），那是**历史原因**。
+本工作流**统一用 `work_tmp/`**，不再往仓库外放东西。
+`memo_04`/`memo_09` 里引用的 `~/ai_ce_work/capture/` 是**历史语料，只读参考、注明出处**。
+
+★ 为什么要有 `work_tmp/`：`doc_chinese/work_tmp/README.md` 记录过一次事故——
+**2026-09-16 的重启一次性带走了 237 个捕获语料、参考二进制、门脚本、上机日志**。
+
+### 10.2 ★★ leg 命名：`aillr0NN-<suffix>`
+
+- `mkf` 是**上一个工作流**的缩写 ⇒ 本工作流改用 **`aillr`**，**编号从 `aillr001` 重新开始**；
+- 序号由 `wip/next_leg_label.sh` **从 leg 日志算出**，不靠记忆（两个序列互相独立）；
+- ★ **已飞过的腿名不改**——**腿名是证据**。
+
+### 10.3 ★★ 历史工具的出处（引用必须注明完整路径）
+
+本规划的多个判据来自上一个工作流的工具。**在工作 memo 中引用时必须注明出处**：
+
+| 工具 | 出处 |
+|---|---|
+| `fly_leg.sh` / `ul_health.sh` / `pair_check.sh` / `probes_off_syntax_check.sh` | `doc_chinese/macos_thread_priority/wip/` |
+| `ab_dumps.sh` | `doc_chinese/phy_pipeline_gpu/wip/` |
+| `next_leg_label.sh`（原始版） | `doc_chinese/metal_kernel_fusion/wip/` |
+| 历史 leg 日志 | `phy_pipeline_gpu/wip/logs/`（1141）、`macos_thread_priority/wip/logs/`（389）、**`metal_kernel_fusion/wip/logs/`（170）** |
+| 历史语料与参考二进制 | `doc_chinese/work_tmp/corpus/`（27 个合成捕获）、`doc_chinese/work_tmp/ref/` |
+
+★ **参考二进制必须与腿同源重建**——`doc_chinese/work_tmp/README.md` 记着"同一提交、不同日期构建的产物不一样"，
+离线 A/B 用错参考会得到**假红**。

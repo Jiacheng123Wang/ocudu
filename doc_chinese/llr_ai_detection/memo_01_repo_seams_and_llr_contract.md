@@ -287,5 +287,5 @@ AI 路径必须换成**统计门**，且在飞行前预登记判据：
 |---|---|
 | 论文 2503.16594v1 逐节读书笔记 | `memo_02_paper_2503.16594_reading.md` |
 | 公开文献调研（架构/数据/损失/部署） | `memo_03_literature_survey.md` |
-| 数据与标签工程细节 | `memo_04_data_and_labels.md` |
+| 数据与标签工程细节 | `memo_04_data_labels_and_operating_point.md` |
 | 主规划（阶段、门禁、风险、工时） | `AI_LLR_detection_master_plan.md` |
