@@ -221,6 +221,13 @@ static bool s12_device_idft_profile_matches(unsigned size, std::mt19937& rng)
 
   metal::dft_metal_engine engine;
   if (!engine.init(size, /*inverse=*/true)) {
+    // A size this machine's DFT pipeline cannot dispatch is a DELEGATION, not a failure: the engine refuses
+    // it so that the factory can fall back, which is also what the OFDM demodulator sees for that size.
+    // There is no device transform to compare, so say which size went uncovered instead of reporting one.
+    if (!metal::dft_metal_engine::is_size_runnable(size)) {
+      std::printf("S12 [%u]: SKIPPED - this device's DFT pipeline cannot dispatch that size\n", size);
+      return true;
+    }
     std::fprintf(stderr, "S12 [%u]: the device has no IDFT of that size (init failed)\n", size);
     return false;
   }
@@ -1142,15 +1149,27 @@ int main()
   // S12 (batch 5b): the device IDFT must reproduce the power delay profile the TA estimator reads.
   // Placed first because every later step of the TA port assumes it.
   if (run_chain) {
-    bool s12_ok = true;
+    // The sizes this machine can actually dispatch are named in the PASS line: a machine whose pipeline
+    // caps below one of them covers the rest, and the log has to say which, or "PASS" would claim more
+    // than was checked.
+    bool                  s12_ok = true;
+    std::vector<unsigned> s12_covered;
     for (unsigned size : {128U, 256U, 2048U}) {
+      if (metal::dft_metal_engine::is_size_runnable(size)) {
+        s12_covered.push_back(size);
+      }
       s12_ok = s12_device_idft_profile_matches(size, rng) && s12_ok;
     }
     if (!s12_ok) {
       std::fprintf(stderr, "S12 FAIL: the device IDFT does not reproduce the host profile\n");
       return 1;
     }
-    std::printf("S12 PASS: the device IDFT reproduces the host power delay profile\n");
+    std::printf("S12 PASS: the device IDFT reproduces the host power delay profile (of 128/256/2048, this "
+                "device dispatched:");
+    for (unsigned covered : s12_covered) {
+      std::printf(" %u", covered);
+    }
+    std::printf(")\n");
     if (!s12_device_ta_matches_host()) {
       std::fprintf(stderr, "S12 FAIL: the device-side TA does not reproduce the host's\n");
       return 1;
