@@ -199,7 +199,7 @@ cmake --build build -j --target dft_processor_metal_unit_test && \
 | 3 | 其余 8 个在 M2 上失败的测试，是否全为本根因 | ✅ 见 §7.3：8 个全是"**Not Run**"（二进制从未构建），重编后 5 个通过、3 个暴露新问题、其中 2 个已修 |
 | 4 | `platform_portability_design_rules.md` 是否采纳 §4 的候选规则 | ⬜ 待用户裁定 |
 | 5 | `memo_08`（P0 设计）加入"下发配置需在 pipeline 上查询"的检查项 | ⬜ 随 `memo_08` 正文一起 |
-| 6 | ★ **M2 的 MMSE 估计器出现非确定性 NaN** | ⬜ **待排查**，见 §7.4。已证明与本工作流改动无关 |
+| 6 | ★ **M2 的 MMSE 估计器出现非确定性 NaN** | 🟡 **已定位到 lane 的 per-hop generation 记账**，见 §7.4；修复未做 |
 
 ---
 
@@ -306,6 +306,58 @@ run 5  Test 13 FAIL (...): the event-order hop does not match ...
 
 ★ 这条**不影响任何飞行结论**（M2 从不是飞行机），但它说明
 "同一份产物在两台 Apple Silicon 上行为不同"——正是 §4 候选规则要防的东西。
+
+### 7.5 ★★★ M2 NaN 的定位（2026-10-08 深夜，证据链完整）
+
+用户再次报告 M2 上这两个测试失败，并问"是否还是 build 问题（没 build metallib）"。
+**答案：不是。** 证据如下（全部可复现）：
+
+| 检查 | 结果 |
+|---|---|
+| M2 的 HEAD | `c4ad2b5083`，工作树干净 |
+| `cmake --build build -j 4` | **0 个目标被重编**（二进制是最新的） |
+| `ctest -R metallib_freshness` | **6/6 通过**（metallib 相对源码不陈旧） |
+| M2 的 `CMakeCache.txt` 烧的路径 | `lib/phy/metal/ocudu_lane.metallib`，与 M4 相同 |
+| 两台的 lane metallib kernel 清单 | **各 37 个，完全相同**；M2 上全部 `max_tg=1024`，无上限违规 |
+| ★ 把 **M4 编的** `ocudu_lane.metallib` 拷到 M2 | **仍然失败** |
+| M2 lib/ 下的孤儿 metallib | 多出 3 个（`ocudu_demod`/`ocudu_equalizer`/`ocudu_mmse`），是旧布局遗留；**没有被加载**，无害但应清理 |
+
+**失败的本质（关键区分）**：
+
+```
+Test 12 PASS: K3 reproduces the host gather bit for bit (24780 REs over 6 shapes, one instance);
+              K4 noise variance matches the host (worst relative 0.00e+00)
+Test 13 FAIL (51 PRB 2 DMRS): the event-order hop does not match the synchronous route
+              (noise variance nan vs 2.465811372e-01, completion 1)
+```
+
+★ **同步路径（`compute()`，单一实例）在 M2 上逐位正确；只有 deferred/async hop 出 NaN。**
+所以不是 kernel、不是算术、不是 metallib。
+
+**两个量化指纹**（`OCUDU_GPU_STRICT=1`，同一 seed）：
+
+| 读数 | M4（通过） | ★ M2（失败） |
+|---|---|---|
+| `lane fence ... own=`（等待指名了本 hop 自己的 generation） | **3** | ★ **0** |
+| `newest=` / `cross_lane=` | 5 / 2 | 2 / **0** |
+| `queue: burst commit -> burst start` | samples=8，mean=**+138.4 µs** | samples=2，mean=**-1.6357e11 µs** |
+
+★★ 最后一条：`-1.6357e11 µs` 恰好是**负的机器运行时长** ⇒ 那个减法的 `commit_seconds(entry)` 是 **0**，
+即 **M2 上这些 lane entry 的 `commit_time` 从未被写入**（代码位置 `ocudu_metal_lane_probe.mm:984-997`，
+其注释自己说这是全文唯一混合时钟的读数，并声明"On Darwin both are mach_absolute_time"）。
+
+★★★ **结论**：M2 上 CE lane 的 **per-hop generation 记账不成立** —— 等待没有指名自己的 generation
+（`own=0`），entry 的 commit 时间未写入。Test 13 的注释早就预言了这个失败模式：
+*"dispatches nobody committed are read as the previous hop's memory, a completion that ran before its
+command buffer did is indistinguishable from a good one."*
+
+**为什么 M4 通过**：同样的代码、同样的 37 个 kernel、同样的 metallib 内容，只有时序不同。
+`own=3` 对 `own=0` 说明这是**时序相关**的记账，不是编译产物差异。**所以 M4 也并非免疫** ——
+它只是在当前的时序下恰好满足，这正是它对飞行有潜在风险的地方。
+
+**下一步（未做）**：从 `own=0` 入手 —— 查 `lane_fence` 的 generation 分配与
+`note_commit_order` / `lane_entry::commit_time` 的写入条件，找出为什么在 M2 的时序下
+等待指名的不是本 hop 的 generation。**这是本分支 macOS lane 的并发记账问题，不是平台能力问题。**
 
 
 ---
