@@ -34,6 +34,14 @@ now register **7590** cases and nothing is dropped silently. The macOS port late
 | 1 | `dft_processor_ci16_test` | upstream `if (CMAKE_SYSTEM_PROCESSOR MATCHES x86_64)`; this host is arm64 | no | registered + `DISABLED TRUE` in an `elseif (APPLE)` branch |
 | 2 | `du_high_many_ues_test/du_high_many_ues_tester.*` | toolchain: CMake 4.4 gtest discovery delimits its output with '#', and the parameter label contained `#ues=`, so both cases were dropped from the ctest list (CMake 3.28 on Ubuntu keeps them) | no | parameter label renamed to `nof_ues=`; both cases now run and **pass** |
 | 0 (count-neutral) | `f1ap_ref_time_provider_adapter_test.subsecond_component_encodes_losslessly` | port: compiled out with `#if !defined(__APPLE__)`; invisible in the count because the whole binary is a single ctest entry | YES | compiled in again; runtime `GTEST_SKIP()` -> visible in the gtest report |
+### 2026-10-08: `dft_processor_ci16_test` registers its placeholder on every non-x86_64 host
+
+The same audit row reads `elseif (APPLE)`, which left an arm64 Linux host taking neither branch: the case was
+built on x86_64 only, the placeholder was registered on Apple only, and everywhere else the name disappeared
+from the list - the silent drop the pattern exists to prevent. It is an `else()` now, and the label says which
+capability is missing (`phy;x86_64_only`), with `macos_unsupported` appended where that applies. macOS keeps
+its `Disabled` case, and an arm64 Linux host now reports "Not Run (Disabled)" instead of nothing.
+
 ### 2026-10-08: the OFH placeholders are one per case again
 
 The 2026-09 audit was accurate for its date: Linux registered one OFH case (`ofh_integration_test`) and macOS

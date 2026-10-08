@@ -135,6 +135,11 @@ In rough priority order:
 7. **`du_high_benchmark` on macOS**: map the Linux CPU-affinity calls onto the Mach thread_policy APIs.
 8. **`ofh_integration_test`**: needs a macOS raw-Ethernet equivalent of AF_PACKET (BPF), out of scope for now.
 
+> **2026-10-08 (2)**: the same shape existed in `tests/unittests/phy/generic_functions/CMakeLists.txt`, where
+> `dft_processor_ci16_test` was registered by an `if (x86_64) ... elseif (APPLE) ... endif ()`. An arm64 Linux
+> host took neither branch and lost the case silently. It is an `else()` now, labelled `phy;x86_64_only` (plus
+> `macos_unsupported` on macOS).
+
 > **2026-10-08**: the name in this item is the one Linux registered when the audit ran. The merge of `main`
 > replaced it there with the eight `ofh_integration_test_non_rt*` cases, and macOS kept a single placeholder, so
 > seven names were missing from the macOS list until `tests/integrationtests/ofh/CMakeLists.txt` was changed to

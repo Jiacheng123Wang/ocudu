@@ -22,13 +22,21 @@ if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
     target_include_directories(dft_processor_ci16_test PRIVATE ${CMAKE_SOURCE_DIR}/tests/unittests)
     target_link_libraries(dft_processor_ci16_test ocudulog ocudu_dft GTest::gtest GTest::gtest_main)
     add_test(dft_processor_ci16_test dft_processor_ci16_test)
-elseif (APPLE)
-    # The ci16 DFT processor is an x86_64-only implementation, so the test cannot be built on Apple Silicon.
-    # Register the ctest case anyway and mark it DISABLED, so that "make test" reports it as
-    # "Not Run (Disabled)" and the total test count matches the Linux/x86_64 reference run.
+else ()
+    # The ci16 DFT processor is an x86_64-only implementation (AVX2, <immintrin.h>), so the test cannot be
+    # built anywhere else. Register the ctest case anyway and mark it DISABLED, so that "make test" reports it
+    # as "Not Run (Disabled)" instead of silently dropping it from the test list.
+    #
+    # This is an `else()` and not `elseif (APPLE)` for that reason: an arm64 Linux host took neither branch and
+    # lost the case from its list entirely, which is the one outcome this pattern exists to prevent. The label
+    # names the capability that is missing, and `macos_unsupported` is appended where it applies so the
+    # platform audits keep their meaning.
     add_test(NAME dft_processor_ci16_test COMMAND ${CMAKE_COMMAND} -E true)
-    set_tests_properties(dft_processor_ci16_test PROPERTIES DISABLED TRUE LABELS "phy;macos_unsupported")
-endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
+    set_tests_properties(dft_processor_ci16_test PROPERTIES DISABLED TRUE LABELS "phy;x86_64_only")
+    if (APPLE)
+        set_property(TEST dft_processor_ci16_test APPEND PROPERTY LABELS "macos_unsupported")
+    endif ()
+endif ()
 
 if ((ENABLE_MKL AND MKL_FOUND) OR (ENABLE_ARMPL AND ARMPL_FOUND) OR (ENABLE_FFTW AND FFTW3F_FOUND))
     target_compile_definitions(dft_processor_test PRIVATE HAVE_FFTW)

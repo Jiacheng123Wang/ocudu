@@ -52,8 +52,8 @@ PARITY = [
      "upstream `#ifdef MBEDTLS_CMAC_C`; the Homebrew mbedtls@2 bottle is built with CMAC disabled", "no",
      "case always registered; runtime `GTEST_SKIP()` when the macro is absent -> Skipped"),
     ("1", "`dft_processor_ci16_test`",
-     "upstream `if (CMAKE_SYSTEM_PROCESSOR MATCHES x86_64)`; this host is arm64", "no",
-     "registered + `DISABLED TRUE` in an `elseif (APPLE)` branch"),
+     "upstream `if (CMAKE_SYSTEM_PROCESSOR MATCHES x86_64)`; every other host registers the case as a DISABLED placeholder (`phy;x86_64_only`)", "no",
+     "registered + `DISABLED TRUE` on every non-x86_64 host (an `else()`, not `elseif (APPLE)`) "),
     ("2", "`du_high_many_ues_test/du_high_many_ues_tester.*`",
      "toolchain: CMake 4.4 gtest discovery delimits its output with '#', and the parameter label contained `#ues=`, "
      "so both cases were dropped from the ctest list (CMake 3.28 on Ubuntu keeps them)", "no",
