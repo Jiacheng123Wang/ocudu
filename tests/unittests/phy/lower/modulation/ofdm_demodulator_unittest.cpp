@@ -132,23 +132,36 @@ TEST(ofdm_demodulator_unittest, demodulate)
             span<const cf_t> dft_input = dft_entries[symbol_idx].input;
 
             // Verify DFT input. It shall include the phase compensation, scaling, and the ci16 to cf conversion scale.
+            // Verify DFT input: it is the ci16 to cf conversion alone.
+            //
+            // DELIBERATE DIVERGENCE FROM UPSTREAM. Upstream folds the phase compensation and the scaling
+            // into this input (a pre-transform product), and this branch applies them AFTER the transform
+            // instead, in process_dft_output(). The reason is the device grid write: the Metal engine
+            // multiplies its own transform output by the same coefficient, so compensating the input here
+            // would be the same arithmetic in a different order - and a different order stops being
+            // bit-identical once the result is rounded to bf16, which is the invariant
+            // ofdm_demodulator_metal_batch_test asserts element by element. It would also compensate the
+            // ring path twice. See the comment in fill_dft_input().
             cf_t              phase_compensation = expected_phase_comp.get_coefficient(symbol_idx);
             std::vector<cf_t> expected_dft_input(dft_size);
-            ocuduvec::sc_prod(expected_dft_input,
+            ocuduvec::convert(expected_dft_input,
                               time_data_symbol.last(dft_size),
-                              (phase_compensation * ofdm_config.scale) / ocuduvec::scaling_factor_ci16_to_cf);
+                              ocuduvec::scaling_factor_ci16_to_cf);
             ASSERT_TRUE(ocuduvec::equal(expected_dft_input, dft_input.first(dft_size)));
 
-            // Generate ideal frequency domain outputs.
+            // Generate ideal frequency domain outputs: the transform output scaled by the per-symbol
+            // coefficient, which is what the post-transform compensation produces.
             for (unsigned subc_idx = 0; subc_idx != nsubc; ++subc_idx) {
               resource_grid_writer_spy::expected_entry_t entry = {};
               entry.port                                       = port_idx;
               entry.symbol                                     = symbol_idx;
               entry.subcarrier                                 = subc_idx;
               if (subc_idx < nsubc / 2) {
-                entry.value = dft_entries[symbol_idx].output[dft_size - (nsubc / 2) + subc_idx];
+                entry.value = dft_entries[symbol_idx].output[dft_size - (nsubc / 2) + subc_idx] *
+                              (phase_compensation * ofdm_config.scale);
               } else {
-                entry.value = dft_entries[symbol_idx].output[subc_idx - (nsubc / 2)];
+                entry.value = dft_entries[symbol_idx].output[subc_idx - (nsubc / 2)] *
+                              (phase_compensation * ofdm_config.scale);
               }
               expected_rg.push_back(entry);
             }
