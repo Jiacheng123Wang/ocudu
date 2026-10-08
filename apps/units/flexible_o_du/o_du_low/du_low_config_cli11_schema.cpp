@@ -254,6 +254,25 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              "knob is only needed with --phy_pipeline cpu_gpu.")
       ->capture_default_str()
       ->check(device_resource_grid_check);
+  auto pusch_receiver_backend_check = [](const std::string& value) -> std::string {
+    if ((value == "auto") || (value == "classic") || (value == "ai")) {
+      return {};
+    }
+    return "Invalid PUSCH receiver backend. Accepted values [auto,classic,ai]";
+  };
+
+  add_option(app,
+             "--pusch_receiver_backend",
+             expert_phy_params.pusch_receiver_backend,
+             "Which receiver computes the PUSCH depth-3 unit (channel estimation + equalization + demapping): auto "
+             "(the effective mode's classic receiver, bit for bit), classic (the same, said explicitly) and ai (the "
+             "learned depth-3 receiver of the LLR AI detection workflow).\nOne knob, not three: depth 3 is one unit, "
+             "and the grid's writer stays a separate knob (--pusch_dft_type), so an A/B against the fused lane "
+             "changes exactly one thing. Only meaningful with --phy_pipeline gpu.\nSTAGE 1: 'ai' is accepted and "
+             "reported but not yet bound to a backend - it resolves to the classic receiver, and the startup log "
+             "says so. Selecting it therefore changes nothing measurable yet.")
+      ->capture_default_str()
+      ->check(pusch_receiver_backend_check);
   add_option(app,
              "--max_proc_delay",
              expert_phy_params.max_processing_delay_slots,

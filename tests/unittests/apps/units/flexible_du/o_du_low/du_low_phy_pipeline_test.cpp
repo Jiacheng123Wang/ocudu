@@ -21,20 +21,26 @@ using namespace ocudu;
 
 namespace {
 
-/// All backends built in (Apple Silicon build).
-constexpr phy_backend_availability all_available{true, true, true, true, true};
+/// All backends built in (Apple Silicon build), the AI receiver included (set by the field below).
+constexpr phy_backend_availability all_available{true, true, true, true, true, true};
 /// No Metal backend built in (any other platform).
-constexpr phy_backend_availability none_available{false, false, false, false, false};
+constexpr phy_backend_availability none_available{false, false, false, false, false, false};
 
 phy_pipeline_request make_request(std::string mode        = "auto",
                                   std::string dft         = "auto",
                                   std::string ch_est      = "auto",
                                   std::string equalizer   = "auto",
                                   std::string ldpc        = "auto",
-                                  std::string device_grid = "auto")
+                                  std::string device_grid = "auto",
+                                  std::string receiver    = "auto")
 {
-  return phy_pipeline_request{
-      std::move(mode), std::move(dft), std::move(ch_est), std::move(equalizer), std::move(ldpc), std::move(device_grid)};
+  return phy_pipeline_request{std::move(mode),
+                              std::move(dft),
+                              std::move(ch_est),
+                              std::move(equalizer),
+                              std::move(ldpc),
+                              std::move(device_grid),
+                              std::move(receiver)};
 }
 
 /// Resolves \c request and fails the test when it is rejected.
@@ -427,5 +433,75 @@ TEST(DuLowPhyPipelineTest, GpuModeRejectsBackendsTheLaneDoesNotOwn)
   EXPECT_EQ(resolve(make_request("gpu", "metal", "metal_mmse", "metal")).dft, "metal");
   EXPECT_EQ(resolve(make_request("gpu", "metal", "metal_nn_mmse")).ch_est, "metal_nn_mmse");
   EXPECT_EQ(resolve(make_request("gpu", "auto", "helena")).ch_est, "helena");
+}
+
+/// \brief The depth-3 receiver knob: one value per unit, and the two modes that cannot express it.
+///
+/// STAGE 1 of the LLR AI detection workflow (design section 1.5): "ai" is ACCEPTED and CARRIED, but
+/// ai_receiver_bound() is false, so it resolves to the classic receiver. Both halves are locked down here,
+/// because the dangerous failure is not "ai is refused" - it is "ai is accepted and the classic chain runs
+/// without anyone being able to tell afterwards".
+TEST(phy_pipeline_mode_test, receiver_backend_defaults_to_classic)
+{
+  // No knob: the classic receiver, and nothing about the resolved value depends on the mode.
+  EXPECT_EQ(resolve(make_request()).receiver, "classic");
+  EXPECT_EQ(resolve(make_request("cpu")).receiver, "classic");
+  EXPECT_EQ(resolve(make_request("cpu_gpu")).receiver, "classic");
+  EXPECT_EQ(resolve(make_request("gpu")).receiver, "classic");
+
+  // Spelled out: the same value.
+  EXPECT_EQ(resolve(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "classic")).receiver, "classic");
+}
+
+TEST(phy_pipeline_mode_test, receiver_ai_is_carried_and_reported)
+{
+  // An invalid value is a conflict of its own (the CLI check carries the same list).
+  std::string error;
+  EXPECT_FALSE(resolve_phy_pipeline(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "bogus"),
+                                    all_available,
+                                    error)
+                   .has_value());
+  EXPECT_NE(error.find("Accepted values [auto,classic,ai]"), std::string::npos) << error;
+}
+
+TEST(phy_pipeline_mode_test, receiver_ai_falls_back_to_classic_while_unbound)
+{
+  // STAGE 1: the value is carried into the request, but no backend is bound to it yet, so it resolves to the
+  // classic receiver - and the caller is expected to report the substitution (the startup log does).
+  ASSERT_FALSE(ai_receiver_bound()) << "this test describes stage 1; update it when the backend is wired";
+
+  std::string           error;
+  const auto            effective = resolve_phy_pipeline(
+      make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai"), all_available, error);
+  ASSERT_TRUE(effective.has_value()) << error;
+  EXPECT_EQ(effective->receiver, "classic");
+  // The rest of the configuration is untouched by the substitution.
+  EXPECT_TRUE(effective->lane_fused);
+  EXPECT_EQ(effective->ch_est, "metal_mmse");
+}
+
+TEST(phy_pipeline_mode_test, receiver_ai_conflicts_with_the_two_modes_that_cannot_express_it)
+{
+  std::string error;
+
+  // cpu forbids every offload, so an AI receiver there is the same kind of conflict as a Metal DFT.
+  EXPECT_FALSE(resolve_phy_pipeline(make_request("cpu", "auto", "auto", "auto", "auto", "auto", "ai"),
+                                    all_available,
+                                    error)
+                   .has_value());
+  EXPECT_NE(error.find("--pusch_receiver_backend"), std::string::npos) << error;
+
+  // cpu_gpu is per-MODULE offload: it cannot say "these three modules at once", so accepting the knob there
+  // would leave the mode unable to describe what it runs.
+  error.clear();
+  EXPECT_FALSE(resolve_phy_pipeline(make_request("cpu_gpu", "auto", "auto", "auto", "auto", "auto", "ai"),
+                                    all_available,
+                                    error)
+                   .has_value());
+  EXPECT_NE(error.find("depth 3 is one unit"), std::string::npos) << error;
+
+  // The classic receiver is accepted in both, so the refusal is about "ai" and not about the knob existing.
+  EXPECT_EQ(resolve(make_request("cpu", "auto", "auto", "auto", "auto", "auto", "classic")).receiver, "classic");
+  EXPECT_EQ(resolve(make_request("cpu_gpu", "auto", "auto", "auto", "auto", "auto", "classic")).receiver, "classic");
 }
 } // namespace

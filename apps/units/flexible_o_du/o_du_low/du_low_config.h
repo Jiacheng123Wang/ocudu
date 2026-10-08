@@ -40,6 +40,27 @@ struct du_low_unit_expert_upper_phy_config {
   /// \note This is the A/B control of the device grid: with \c auto the module-level offload path keeps writing the grid
   /// from the host, so its measurements stay comparable with the runs recorded before the capability existed.
   std::string device_resource_grid = "auto";
+  /// \brief Which receiver computes the PUSCH depth-3 unit (channel estimation + equalization + demapping).
+  ///
+  /// Use one of these options:
+  /// - \c auto: bit-for-bit the classic receiver of the effective pipeline mode (default), or
+  /// - \c classic: the same, said explicitly, or
+  /// - \c ai: the learned depth-3 receiver of the LLR AI detection workflow.
+  ///
+  /// WHY IT IS ONE KNOB AND NOT THREE. Depth 3 is one unit, not three modules: a knob that replaced only the
+  /// estimator would leave the classical equalizer consuming an estimated channel (that is depth 2, the workflow's
+  /// ablation arm), and it would have to edit mode=gpu's rule that refuses a CPU estimator backend outright. The
+  /// three backends therefore move together, and the grid's writer stays a separate knob (\c --pusch_dft_type), so
+  /// an A/B against the fused lane changes exactly one thing.
+  ///
+  /// \note Only meaningful with \c --phy_pipeline gpu (the fused lane): the AI receiver runs on the device, so
+  ///       \c cpu rejects it and \c cpu_gpu cannot express "three modules at once".
+  /// \warning STAGE 1 (2026-10-08): \c ai is PARSED AND REPORTED but NOT YET BOUND to a backend - it resolves to the
+  ///          classic receiver, so selecting it changes nothing measurable. The startup log says so in as many
+  ///          words. This stage exists to prove the knob is inert before anything is wired to it: an accepted value
+  ///          that silently ran the classic chain is the failure mode this workflow keeps correcting (design
+  ///          document, section 1.5).
+  std::string pusch_receiver_backend = "auto";
   /// \brief Sets the maximum allowed downlink processing delay in slots.
   ///
   /// Higher values increase the downlink processing pipeline length, which improves performance and stability for

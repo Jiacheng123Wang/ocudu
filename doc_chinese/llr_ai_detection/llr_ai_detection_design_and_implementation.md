@@ -1036,6 +1036,27 @@ fp8-E4M3（存在但被拒的路径）**。
 
 | 日期 | 类型 | 内容 | 依据 |
 |---|---|---|---|
+| 2026-10-08 | ★★ **实作** | ★★ **§1.5 的臂 1 阶段 1 落地：控制变量 `--expert_phy.pusch_receiver_backend` 已进链**（`auto` / `classic` / `ai`）。★ `auto` **逐位不变**；★ `ai` **被接受并如实上报"尚未接线"**（`ai_receiver_bound() == false`，启动日志按 warning 写明）；★ **冲突矩阵生效**（`cpu`+`ai`、`cpu_gpu`+`ai` 报错；两个模式的 `classic` 均接受）。★ **落点 5 处**：`du_low_config.h` / `du_low_config_cli11_schema.cpp` / `du_low_config_validator.cpp` / `du_low_phy_pipeline.h` / `du_low_config_translator.cpp`（+ YAML writer）。★ **单测 +4**（`du_low_phy_pipeline_test`：默认 classic / 取值校验 / 未接线回退 / 冲突矩阵），**该目标 25/25 通过** | 本会话；`du_low_phy_pipeline_test` 单测输出 |
+| 2026-10-08 | ★★ **更正** | ★★ **§1.5.5bis：三段分解在 `gpu` 臂内不可观测** —— `merged_hop` 是"整跳一个命令缓冲"（Metal 无 encoder/dispatch 级时间戳），且 `gpu` 模式下主机侧相位分段被有意关闭。⇒ **跨臂只比"每跳 dispatch 数 + 端到端主机时间"**，三段分解只解释 AI 臂内部 | `ocudu_metal_lane_probe.h:79-88`、`ul_pipeline_probe.h:3086-3089` |
 | 2026-10-08 | 设计 | ★★ **新增 §1.5：AI 路径怎么进链** —— 控制变量 `--expert_phy.pusch_receiver_backend`（取值 `auto` 或 `classic` 或 `ai`，`auto` = 今天的 GPU lane）、冲突矩阵、落点（工厂的一对后端，接缝 = `pusch_processor_impl.cpp:264/:559/:567`）、**三段时延分解**、两条基线、**臂 0–5**、判据 0–4、**环境 pin 纪律**、两个前置风险 | 用户裁定 2026-10-08；本次代码勘察（`du_low_phy_pipeline.h`、`ocudu_metal_queue.mm:1246`、`p185/p187` 腿日志）|
 | 2026-10-08 | 文档 | ★★ **落点规则确立：增补进现有文件，不新建 memo 文件**（详见 `wip/README.md` §4.1） | 用户裁定 2026-10-08 |
 | 2026-10-08 | 文档 | 本工作流开工前的调研与设计完成，拆分为高层文档 + 本设计文档；开工前功课见 §9 | `memo_01`–`memo_09` |
+
+### 11.1 ★★ 臂 1 阶段 1 的细节（2026-10-08）
+
+**为什么先做"控制变量本身"而不是直接做 AI 后端**：
+★★ **先证明开关是惰性的，再把东西接上去。** 一个"被接受、却静默跑了经典链"的取值，
+正是本工作流反复踩到的那类错误（`memo_10` §开头纪律 3）。⇒ 阶段 1 的**产物就是"它什么都不改变"**，
+并且**这件事被写进了启动日志**，所以事后从腿日志就能判定跑的是哪一臂。
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| ★ **1（本次）** | 控制变量进链；`ai` 解析并上报，**尚未接线**（回退 classic） | ✅ **已完成** |
+| 2 | 工厂侧接 **(AI 估计器, AI 解调器) 一对后端**；AI 后端先做**恒等占位**（转调经典实现）⇒ 量**接缝代价** | ⬜ 下一步 |
+| 3 | 臂 2/3：未训练模型 → 训练后模型 | ⬜ |
+
+★ **阶段 2 的一个已识别约束**（`gpu` 模式的严格策略）：
+`phy_pipeline_strict_enabled()` 在 `gpu` 模式下会**拒绝任何"设备没覆盖"的 hop**
+（`pusch_processor_impl.cpp:296`）⇒ ★ **AI 后端必须让 `serves_hop_in_place()` 为真**，否则**每跳都失败**。
+★ 而 `ul_chain_replay` **故意不发布 pipeline mode**（`phy_pipeline_strict.h` 的注释逐字），
+所以**离线测试台默认不严格** —— ★ **离线能量到的，与线上会发生的，在这一点上不同**，报告必须写明。

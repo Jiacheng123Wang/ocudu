@@ -89,6 +89,19 @@ static void log_phy_pipeline_config(const du_low_unit_expert_upper_phy_config& c
     // module knobs, so this is what a command line without any offload knob selects).
     logger.info("[phy_pipeline]   no offload module selected: the effective backend of every module is CPU");
   }
+
+  // The depth-3 receiver. It gets a line of its own because it is the axis of the LLR AI detection workflow's A/B:
+  // the classic receiver is the arm it is compared against, and a run whose line says "ai" while the classic chain
+  // runs would be the one number nobody could catch afterwards. STAGE 1 takes exactly that path - 'ai' resolves to
+  // the classic receiver because no backend is bound to it yet - so the substitution is stated in as many words.
+  if (config.pusch_receiver_backend == "ai" && effective.receiver != "ai") {
+    logger.warning("[phy_pipeline]   receiver=classic (asked for ai, NOT YET BOUND to a backend - stage 1 of design "
+                   "section 1.5: the knob is accepted and reported, and selecting it changes nothing measurable)");
+  } else {
+    logger.info("[phy_pipeline]   receiver={} (expert_phy --pusch_receiver_backend {})",
+                effective.receiver,
+                config.pusch_receiver_backend);
+  }
 }
 
 static odu::du_low_config generate_du_low_config(const du_low_unit_config&                       du_low,

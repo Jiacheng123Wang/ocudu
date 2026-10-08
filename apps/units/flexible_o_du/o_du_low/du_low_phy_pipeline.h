@@ -27,6 +27,8 @@ struct phy_pipeline_request {
   std::string ldpc = "auto";
   /// `expert_phy --device_resource_grid`: "auto" (follow the pipeline mode), "on" or "off".
   std::string device_grid = "auto";
+  /// `expert_phy --pusch_receiver_backend`: "auto" (the mode's classic receiver), "classic" or "ai".
+  std::string receiver = "auto";
 };
 
 /// Which offload backends are linked into this binary (from the ENABLE_METAL_* build options).
@@ -36,7 +38,21 @@ struct phy_backend_availability {
   bool equalizer = false;
   bool demapper  = false;
   bool ldpc      = false;
+  /// Whether the AI depth-3 receiver is built into this binary. FALSE IN STAGE 1 (see ai_receiver_bound): there is
+  /// no AI backend yet, so a command line that asks for one falls back to the classic receiver and says so.
+  bool ai_receiver = false;
 };
+
+/// \brief Whether a resolved "ai" receiver value is bound to an actual backend yet.
+///
+/// STAGE 1 returns false, and every consumer must treat \c receiver == "ai" as "the classic receiver, asked for by
+/// name". It exists as a function rather than a comment because the fallback has to be REPORTED: a command line that
+/// says "ai" while the classic chain runs is precisely the kind of value that looks plausible and means nothing
+/// (see the design document, section 1.5).
+constexpr bool ai_receiver_bound()
+{
+  return false;
+}
 
 /// Availability of the offload backends in this binary.
 ///
@@ -75,6 +91,12 @@ struct phy_pipeline_effective {
   /// host->device data dependency the fused lane otherwise does not have, and it is OFF unless
   /// `--pusch_dft_type cpu` asks for it (see the `gpu` case of resolve_phy_pipeline()).
   bool host_grid = false;
+  /// \brief Which receiver computes the depth-3 unit: "classic" or "ai" (never "auto").
+  ///
+  /// STAGE 1: \c ai is carried and reported, but every consumer still builds the classic receiver - see
+  /// \ref ai_receiver_bound(). The value therefore changes NOTHING measurable yet, which is the point: the knob
+  /// is proven inert before a backend is wired to it.
+  std::string receiver = "classic";
 };
 
 /// Whether a per-module backend value runs on the CPU.
@@ -184,6 +206,31 @@ resolve_phy_pipeline(const phy_pipeline_request& request, const phy_backend_avai
     return std::nullopt;
   }
 
+  // Depth-3 receiver: "auto" is the mode's classic receiver, so a command line without this knob behaves exactly
+  // as before the capability existed. The AI receiver runs on the device, which two of the three modes cannot
+  // express - and both are CONFLICTS rather than silent overrides (see the header of pusch_receiver_backend):
+  //   * cpu forbids every offload, so an AI receiver there is the same conflict as a Metal DFT;
+  //   * cpu_gpu is per-MODULE offload and cannot say "these three modules at once", so accepting it would leave
+  //     the mode unable to describe what it runs.
+  if (request.receiver == "auto" || request.receiver == "classic") {
+    out.receiver = "classic";
+  } else if (request.receiver == "ai") {
+    if (out.mode == phy_pipeline_mode::cpu) {
+      set_phy_pipeline_conflict(error, out.mode, "--pusch_receiver_backend", request.receiver);
+      return std::nullopt;
+    }
+    if (out.mode == phy_pipeline_mode::cpu_gpu) {
+      error = "--phy_pipeline cpu_gpu conflicts with --pusch_receiver_backend ai: the AI receiver replaces the "
+              "channel estimator, the equalizer and the demapper together (depth 3 is one unit), which per-module "
+              "offload cannot express - use --phy_pipeline gpu";
+      return std::nullopt;
+    }
+    out.receiver = "ai";
+  } else {
+    error = "Invalid PUSCH receiver backend value '" + request.receiver + "'. Accepted values [auto,classic,ai]";
+    return std::nullopt;
+  }
+
   switch (out.mode) {
     case phy_pipeline_mode::cpu:
       // No module may offload in this mode: report the first conflict instead of silently running on the CPU.
@@ -258,6 +305,14 @@ resolve_phy_pipeline(const phy_pipeline_request& request, const phy_backend_avai
       break;
   }
 
+  // A receiver the binary does not carry falls back to the classic one, exactly like a missing device backend falls
+  // back to its CPU implementation above - the difference being that this substitution MUST be visible, because the
+  // command line asked for a different receiver and would otherwise get the classic chain under a name that promises
+  // another one. STAGE 1 takes this path for every "ai" request: ai_receiver_bound() is false.
+  if ((out.receiver == "ai") && (!available.ai_receiver || !ai_receiver_bound())) {
+    out.receiver = "classic";
+  }
+
   // A backend that is not linked into this binary falls back to the CPU implementation (or, for the LDPC decoder, to
   // the CPU-selecting "auto") instead of failing the whole application. The caller reports the substitution.
   if (!available.dft && !is_cpu_phy_backend(out.dft)) {
@@ -307,14 +362,16 @@ inline phy_pipeline_effective resolve_phy_pipeline_or_fatal(std::string_view mod
                                                             std::string_view ch_est,
                                                             std::string_view equalizer,
                                                             std::string_view ldpc,
-                                                            std::string_view device_grid)
+                                                            std::string_view device_grid,
+                                                            std::string_view receiver = "auto")
 {
   const phy_pipeline_request request{std::string(mode),
                                      std::string(dft),
                                      std::string(ch_est),
                                      std::string(equalizer),
                                      std::string(ldpc),
-                                     std::string(device_grid)};
+                                     std::string(device_grid),
+                                     std::string(receiver)};
   std::string                error;
   std::optional<phy_pipeline_effective> resolved =
       resolve_phy_pipeline(request, query_phy_backend_availability(), error);
@@ -336,7 +393,8 @@ phy_pipeline_effective resolve_phy_pipeline_or_fatal(const ExpertPhyConfig& conf
                                        config.pusch_channel_estimator_algo,
                                        config.pusch_channel_equalizer_backend,
                                        config.ldpc_decoder_type,
-                                       config.device_resource_grid);
+                                       config.device_resource_grid,
+                                       config.pusch_receiver_backend);
 }
 
 } // namespace ocudu
