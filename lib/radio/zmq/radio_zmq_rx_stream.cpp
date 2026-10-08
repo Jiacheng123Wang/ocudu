@@ -79,14 +79,22 @@ baseband_gateway_receiver::metadata radio_zmq_rx_stream::receive(baseband_gatewa
   tx_align.align(passed_timestamp, RECEIVE_TS_ALIGN_TIMEOUT);
 
   // Receive samples for each channel.
+  //
+  // One channel that timed out marks the whole block: a block whose channels disagree about which instant they
+  // carry is not a block, and the caller's job for a block that did not arrive is to drop it (see
+  // rx_error::no_data) rather than to process silence as if the peer had delivered it.
+  bool all_channels_arrived = true;
   for (unsigned channel_id = 0, channel_id_end = channels.size(); channel_id != channel_id_end; ++channel_id) {
     span<cf_t> view = span<cf_t>(cf_buffer).first(data.get_channel_buffer(channel_id).size());
-    channels[channel_id]->receive(view);
+    all_channels_arrived = channels[channel_id]->receive(view) && all_channels_arrived;
     float gain = channel_gains[channel_id].load(std::memory_order_relaxed);
     if (gain != 1.0f) {
       ocuduvec::sc_prod(view, view, gain);
     }
     ocuduvec::convert(data.get_channel_buffer(channel_id), view, ocuduvec::scaling_factor_cf_to_ci16);
+  }
+  if (!all_channels_arrived) {
+    ret.error = baseband_gateway_receiver::rx_error::no_data;
   }
 
   // Increment the number of samples.

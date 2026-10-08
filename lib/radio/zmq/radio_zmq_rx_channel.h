@@ -83,7 +83,12 @@ public:
 
   void stop();
 
-  void receive(span<cf_t> buffer);
+  /// \brief Receives samples into \c buffer.
+  /// \param[in,out] buffer Buffer of samples to fill.
+  /// \return True when the peer delivered the whole buffer, false when the wait for it expired and the buffer
+  ///         carries silence instead. A caller must not treat the two the same: silence that reaches the
+  ///         processing chain as if it were a delivered block is what stalls it.
+  bool receive(span<cf_t> buffer);
 
 private:
   void send_request();

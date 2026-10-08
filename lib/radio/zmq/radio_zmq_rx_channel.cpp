@@ -277,18 +277,27 @@ void radio_zmq_rx_channel::run_async()
   }
 }
 
-void radio_zmq_rx_channel::receive(span<cf_t> data)
+bool radio_zmq_rx_channel::receive(span<cf_t> data)
 {
+  /// Longest this call waits for a block before it reports that none arrived.
+  ///
+  /// A live stream fills a block in tens of microseconds (one OFDM symbol is 822 samples at 23.04 Msps, so
+  /// about 36 us), so a wait anywhere near this threshold already means the peer stopped producing. The wait
+  /// cannot be unbounded: the caller is the lower PHY's receive task, which re-enqueues itself and drives the
+  /// stop countdown, so a task parked here makes lower_phy_baseband_processor::stop() wait for a turn that
+  /// never comes - and the interrupt that asked for the stop then ends in the 5-second alarm and SIGKILL
+  /// instead of a clean exit. See rx_error::no_data for what the caller does with the answer.
+  constexpr std::chrono::milliseconds receive_timeout{100};
+
   auto token = stop_control.get_token();
   if (OCUDU_UNLIKELY(token.is_stop_requested())) {
     ocuduvec::zero(data);
-    return;
+    return false;
   }
 
   logger.debug("Requested to receive {} samples.", data.size());
 
-  // Create and start a timer to inform about deadlocks.
-  radio_zmq_timer timer(true);
+  const auto deadline = std::chrono::steady_clock::now() + receive_timeout;
 
   // Try to read samples from circular buffer.
   unsigned count     = 0;
@@ -302,10 +311,11 @@ void radio_zmq_rx_channel::receive(span<cf_t> data)
       zmq_circ_buffer_backoff(nof_spins);
     }
 
-    // Check if an excess of time passed while trying to read samples.
-    if (timer.is_expired()) {
-      logger.info("Waiting for reading samples. Completed {} of {} samples.", count, data.size());
-      timer.start();
+    // Give up on a block that is not coming, and say so rather than passing silence off as a delivery.
+    if (std::chrono::steady_clock::now() >= deadline) {
+      logger.error("Timed out reading samples. Completed {} of {} samples.", count, data.size());
+      ocuduvec::zero(data);
+      return false;
     }
 
     // Increment count.
@@ -314,7 +324,10 @@ void radio_zmq_rx_channel::receive(span<cf_t> data)
 
   if (!state_fsm.is_running()) {
     ocuduvec::zero(data);
+    return false;
   }
+
+  return true;
 }
 
 void radio_zmq_rx_channel::start()

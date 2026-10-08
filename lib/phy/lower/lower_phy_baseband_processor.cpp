@@ -681,6 +681,8 @@ struct ul_rx_stats {
   std::atomic<uint64_t> rx_overflows{0};
   std::atomic<uint64_t> rx_lates{0};
   std::atomic<uint64_t> rx_other{0};
+  /// Blocks the transport did not deliver (see rx_error::no_data): dropped, not processed.
+  std::atomic<uint64_t> rx_no_data{0};
   ///@}
   /// \name The discontinuities themselves, in µs and in order.
   ///
@@ -832,6 +834,11 @@ bool ul_rx_note_call(int64_t begin_ns, int64_t return_ns, int64_t air_us, baseba
     case baseband_gateway_receiver::rx_error::other:
       c.rx_other.fetch_add(1, std::memory_order_relaxed);
       break;
+    case baseband_gateway_receiver::rx_error::no_data:
+      // The transport gave up and the block carries silence. It is counted as its own kind of event because it
+      // is not a radio error - the radio reported nothing - and the block it belongs to is dropped below.
+      c.rx_no_data.fetch_add(1, std::memory_order_relaxed);
+      break;
   }
 
   // The host's own load at a tail event, for the reason ovf_load1_x100 gives.
@@ -867,7 +874,7 @@ void ul_rx_stats_report()
   }
   std::fprintf(stderr,
                "[ul_rx] blocks=%llu samples=%llu gaps=%llu gap_samples=%llu ts0_blocks=%llu "
-               "rx_overflows=%llu rx_lates=%llu rx_other=%llu\n",
+               "rx_overflows=%llu rx_lates=%llu rx_other=%llu rx_no_data=%llu\n",
                static_cast<unsigned long long>(c.blocks.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(c.samples.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(c.gaps.load(std::memory_order_relaxed)),
@@ -875,7 +882,8 @@ void ul_rx_stats_report()
                static_cast<unsigned long long>(c.ts0_blocks.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(c.rx_overflows.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(c.rx_lates.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(c.rx_other.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(c.rx_other.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(c.rx_no_data.load(std::memory_order_relaxed)));
   // The discontinuities themselves: the sizes say which failure it was ("one slot's worth" against "the ring
   // drained"), and only the first one is logged when it happens.
   const unsigned n_gaps = c.gap_us_n.load(std::memory_order_relaxed);
@@ -1453,6 +1461,23 @@ void lower_phy_baseband_processor::ul_process()
     return;
   }
 
+  // While the stop is draining, this chain only counts down, and it must not wait for a radio block to do it.
+  //
+  // The countdown is what stop() waits on, and it turns once per call to this function, so a call that parks in
+  // the radio makes the whole stop depend on the radio producing: a peer that stops delivering (a ZMQ sender
+  // that is gone, a radio link that is down) parks it forever, stop() never returns, and the interrupt that
+  // asked for the stop ends in the 5-second alarm and SIGKILL instead of a clean exit. The blocks this would
+  // have received are not handed over anyway while stopping (see the drop below), so nothing is lost by not
+  // reading them: the radio is stopped right after this chain, and the samples it still holds go with it.
+  //
+  // It turns at executor speed rather than at the radio's rate, which is the point: the countdown is bounded by
+  // how many blocks were in flight (the state's stop_count), not by how long a block takes to arrive.
+  if (rx_stop_requested.load(std::memory_order_acquire)) {
+    report_fatal_error_if_not(rx_executor.defer([this]() { ul_process(); }), "Failed to execute receive task.");
+    rx_state.on_process_end();
+    return;
+  }
+
   // Get receive buffer. The wait is measured (P0-2): this is the one place the receive can be parked by the
   // pool, and it is BEFORE receiver.receive(), so [ul_rx_wait] does not cover it. Since fix B (dev doc 6.26) the
   // wait is BOUNDED: `dropped` says this call was handed the RESERVE buffer because the pool stayed dry past
@@ -1951,7 +1976,19 @@ void lower_phy_baseband_processor::ul_process()
   // being scheduled, and odu::du_ue_drb::stop() on a UE task strand). Those slots belong to a MAC that is
   // going away, so the samples are dropped instead; the receive chain itself still runs to the end of the
   // FSM's countdown (see stop() and wait_stop()), and the blocks already enqueued still run.
-  if (!establishes_phase && rx_stop_requested.load(std::memory_order_acquire)) {
+  // A block the transport did not deliver is dropped for the same reason a block that arrives while stopping
+  // is: it carries no samples the chain may use. Handing it over instead is worse than dropping it - silence
+  // that reaches the uplink processor as if the radio had delivered it stalls the chain, and the pool buffer it
+  // holds is never released, so a silent radio drains the receive pool and parks the chain for good.
+  const bool block_not_delivered = (rx_metadata.error == baseband_gateway_receiver::rx_error::no_data);
+  if (!establishes_phase && block_not_delivered) {
+    static std::atomic<bool> no_data_drop_logged{false};
+    bool                     expected = false;
+    if (no_data_drop_logged.compare_exchange_strong(expected, true)) {
+      ocudulog::fetch_basic_logger("PHY").error(
+          "Uplink block dropped: the transport did not deliver it ({} samples)", nof_samples);
+    }
+  } else if (!establishes_phase && rx_stop_requested.load(std::memory_order_acquire)) {
     static std::atomic<bool> stop_drop_logged{false};
     bool                     expected = false;
     if (stop_drop_logged.compare_exchange_strong(expected, true)) {

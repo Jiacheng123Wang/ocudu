@@ -33,7 +33,18 @@ public:
     /// radio - the discontinuity a host cannot repair (see the gap counting in the lower PHY).
     overflow,
     /// Any other error the radio reported (broken chain, alignment, bad packet).
-    other
+    other,
+    /// \brief The transport gave up: no sample of the requested block arrived, and the block carries silence.
+    ///
+    /// A transport that waits for samples must not wait forever, and a consumer must not treat the wait's
+    /// expiry as a delivered block: this value says the samples are absent rather than bad. The lower PHY
+    /// drops such a block instead of handing it to the uplink processor, exactly as it drops one that
+    /// arrives while it is stopping, so a radio that stops producing cannot stall the processing chain.
+    ///
+    /// What it protects against is not a delayed block but a stopped gNB: the receive task is what drives
+    /// the lower PHY's stop countdown, so a task parked forever in the transport makes
+    /// lower_phy_baseband_processor::stop() wait for a turn that never comes.
+    no_data
   };
 
   /// Receiver metadata.
