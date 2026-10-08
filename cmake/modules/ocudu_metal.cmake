@@ -93,4 +93,81 @@ function(ocudu_add_metallib)
         VERBATIM)
 
     add_custom_target(${OCUDU_METALLIB_TARGET} ALL DEPENDS ${OCUDU_METALLIB_OUTPUT})
+
+    # ---- Freshness check -------------------------------------------------
+    # A stale .metallib is silently wrong rather than loudly broken: the engines load the library from
+    # the path baked in at configure time and look kernels up by name, so a library built from an older
+    # revision of a shader returns wrong numbers with no error anywhere. `cmake --build --target test`
+    # does not build, which is how a tree reaches that state, so this is a TEST and not a build step:
+    # a build step would always pass, because it would have just regenerated the library.
+    #
+    # What counts as "the shader" is the .metal file AND every user header it includes: the butterflies
+    # live in ocudu_dft_butterflies.h, which two metallibs share, so a check that watched only the .metal
+    # files would call a library fresh while a header it compiles from had moved on - the same silent
+    # wrongness it exists to catch. The build already knows those headers (metal -MMD writes them into
+    # the depfiles, see the header of this module), so they are read from there rather than scanned for.
+    # Only dependencies inside the source tree are compared: the toolchain's own headers would make an
+    # Xcode update fail the check on a library that is not stale with respect to anything we wrote.
+    set(freshness_script "${CMAKE_CURRENT_BINARY_DIR}/metallib_freshness_${OCUDU_METALLIB_TARGET}.cmake")
+    set(freshness_sources "")
+    set(freshness_depfiles "")
+    foreach(shader_src IN LISTS OCUDU_METALLIB_SOURCES)
+        get_filename_component(shader_src_abs ${shader_src} ABSOLUTE)
+        get_filename_component(shader_name ${shader_src} NAME_WE)
+        string(APPEND freshness_sources "  \"${shader_src_abs}\"\n")
+        string(APPEND freshness_depfiles "  \"${CMAKE_CURRENT_BINARY_DIR}/${shader_name}.air.d\"\n")
+    endforeach()
+    file(WRITE ${freshness_script}
+         "set(metallib \"${OCUDU_METALLIB_OUTPUT}\")\n"
+         "set(source_root \"${CMAKE_SOURCE_DIR}\")\n"
+         "set(sources\n${freshness_sources})\n"
+         "set(depfiles\n${freshness_depfiles})\n")
+    file(APPEND ${freshness_script} [==[
+if(NOT EXISTS "${metallib}")
+  message(FATAL_ERROR
+      "metallib freshness: ${metallib} does not exist. Run a full build (cmake --build <build-dir>).")
+endif()
+
+# The .metal files themselves, plus every in-tree header the depfiles name (they list the whole
+# transitive closure - a shared header included by another header is already in there).
+set(checked ${sources})
+foreach(depfile IN LISTS depfiles)
+  if(EXISTS "${depfile}")
+    file(READ "${depfile}" depfile_content)
+    string(REPLACE "\\\n" " " depfile_content "${depfile_content}")
+    string(FIND "${depfile_content}" ":" colon_at)
+    if(colon_at GREATER -1)
+      math(EXPR after_colon "${colon_at} + 1")
+      string(SUBSTRING "${depfile_content}" ${after_colon} -1 depfile_deps)
+      separate_arguments(depfile_deps UNIX_COMMAND "${depfile_deps}")
+      foreach(dep IN LISTS depfile_deps)
+        string(FIND "${dep}" "${source_root}/" in_tree)
+        if((in_tree EQUAL 0) AND (NOT dep IN_LIST checked))
+          list(APPEND checked "${dep}")
+        endif()
+      endforeach()
+    endif()
+  endif()
+endforeach()
+
+foreach(src IN LISTS checked)
+  if(NOT EXISTS "${src}")
+    message(FATAL_ERROR "metallib freshness: shader source ${src} does not exist.")
+  endif()
+  if("${src}" IS_NEWER_THAN "${metallib}")
+    message(FATAL_ERROR
+        "metallib freshness: ${metallib} is older than ${src}, the shader it is built from. The kernels "
+        "that load it would run an earlier revision of that shader and return wrong numbers without "
+        "reporting anything. Run a full build (cmake --build <build-dir>): the test target does not build.")
+  endif()
+endforeach()
+list(LENGTH checked nof_checked)
+message(STATUS "metallib freshness: ${metallib} is newer than all ${nof_checked} of its shader inputs")
+]==])
+
+    if(BUILD_TESTING)
+        add_test(NAME metallib_freshness_${OCUDU_METALLIB_TARGET}
+                 COMMAND ${CMAKE_COMMAND} -P ${freshness_script})
+        set_tests_properties(metallib_freshness_${OCUDU_METALLIB_TARGET} PROPERTIES LABELS "phy")
+    endif()
 endfunction()
