@@ -172,8 +172,12 @@ SCTP_FIXES = [
 UBUNTU_ONLY = [
     ("du_high_benchmark", "tests/benchmarks/du_high/CMakeLists.txt",
      "Linux CPU-affinity API: cpu_set_t / CPU_ZERO / CPU_SET / pthread_setaffinity_np"),
-    ("ofh_integration_test", "tests/integrationtests/ofh/CMakeLists.txt",
-     "AF_PACKET raw Ethernet sockets (linux/if_packet.h)"),
+    ("ofh_integration_test_non_rt, ofh_integration_test_non_rt_4x2, ofh_integration_test_non_rt_8x8, "
+     "ofh_integration_test_non_rt_8x8_100MHz, ofh_integration_test_non_rt_custom_eaxc, "
+     "ofh_integration_test_non_rt_fragmented_no_compr, ofh_integration_test_non_rt_cat_b_4x2, "
+     "ofh_integration_test_non_rt_cat_b_8x8", "tests/integrationtests/ofh/CMakeLists.txt",
+     "AF_PACKET raw Ethernet sockets (linux/if_packet.h); macOS registers the same eight names as DISABLED"),
+
     ("rlc_um6_eia2_eea2_stress_test", "tests/integrationtests/rlc/CMakeLists.txt", "pthread_barrier_* not implemented on macOS"),
     ("rlc_um12_eia2_eea2_stress_test", "tests/integrationtests/rlc/CMakeLists.txt", "pthread_barrier_*"),
     ("rlc_am12_eia2_eea2_stress_test", "tests/integrationtests/rlc/CMakeLists.txt", "pthread_barrier_*"),

@@ -34,6 +34,21 @@ now register **7590** cases and nothing is dropped silently. The macOS port late
 | 1 | `dft_processor_ci16_test` | upstream `if (CMAKE_SYSTEM_PROCESSOR MATCHES x86_64)`; this host is arm64 | no | registered + `DISABLED TRUE` in an `elseif (APPLE)` branch |
 | 2 | `du_high_many_ues_test/du_high_many_ues_tester.*` | toolchain: CMake 4.4 gtest discovery delimits its output with '#', and the parameter label contained `#ues=`, so both cases were dropped from the ctest list (CMake 3.28 on Ubuntu keeps them) | no | parameter label renamed to `nof_ues=`; both cases now run and **pass** |
 | 0 (count-neutral) | `f1ap_ref_time_provider_adapter_test.subsecond_component_encodes_losslessly` | port: compiled out with `#if !defined(__APPLE__)`; invisible in the count because the whole binary is a single ctest entry | YES | compiled in again; runtime `GTEST_SKIP()` -> visible in the gtest report |
+### 2026-10-08: the OFH placeholders are one per case again
+
+The 2026-09 audit was accurate for its date: Linux registered one OFH case (`ofh_integration_test`) and macOS
+registered one placeholder of the same name, so the name sets matched. The merge of `main` then brought the
+seven `ofh_integration_test_non_rt*` variants into this branch's `if (NOT APPLE)` branch while the `else()`
+branch kept its single placeholder, which left eight Linux names with no macOS counterpart - the silent drop
+this whole section exists to prevent - and the placeholder's own name was by then a case on neither host.
+
+`tests/integrationtests/ofh/CMakeLists.txt` now registers one `DISABLED` placeholder per Linux case, under the
+same names and with the same labels. Measured afterwards: **every** test name on the Ubuntu host exists on the
+macOS host; the only remaining difference is the `segmented_circular_map*` rendering (CMake 3.28 vs 4.4, same
+cases), and the twenty names that exist only on macOS are the Apple-only ones (11 Metal, 6 `metallib_freshness`,
+3 `paced_task_executor_test`). Counts: macOS registers 10319 of which 17 are `DISABLED`, Ubuntu registers
+10299 with none, and both execute the same set.
+
 | 0 (naming only) | `segmented_circular_map_test*` (60 cases) | CMake 3.28 expands typed-test type names (`/anymap_anyseg`), CMake 4.4 emits `<<type>>`; same number of cases | no | none needed |
 
 ## Run statistics

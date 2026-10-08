@@ -134,6 +134,13 @@ In rough priority order:
 6. **`pthread_barrier_*` shim** (7 RLC stress tests): a small macOS compatibility header could unblock them.
 7. **`du_high_benchmark` on macOS**: map the Linux CPU-affinity calls onto the Mach thread_policy APIs.
 8. **`ofh_integration_test`**: needs a macOS raw-Ethernet equivalent of AF_PACKET (BPF), out of scope for now.
+
+> **2026-10-08**: the name in this item is the one Linux registered when the audit ran. The merge of `main`
+> replaced it there with the eight `ofh_integration_test_non_rt*` cases, and macOS kept a single placeholder, so
+> seven names were missing from the macOS list until `tests/integrationtests/ofh/CMakeLists.txt` was changed to
+> register one `DISABLED` placeholder per Linux case. The reason in this item is unchanged: OFH needs
+> AF_PACKET (or a BPF equivalent), so none of the eight runs on macOS. See SUMMARY.md, "2026-10-08: the OFH
+> placeholders are one per case again".
 9. **`dft_processor_ci16_test`**: needs an arm64 implementation of the ci16 DFT path.
 10. **Sub-microsecond wall clock** (`rrc_du_ref_time_r16_test`): cosmetic; skip until the test matters for macOS.
 11. **gnb UDP-encapsulation fixed port for cross-machine SCTP** (E2E against Linux kernel SCTP peers with

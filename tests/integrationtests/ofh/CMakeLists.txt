@@ -56,8 +56,31 @@ if (NOT APPLE)
     set_property(TEST ofh_integration_test_non_rt_cat_b_4x2 ofh_integration_test_non_rt_cat_b_8x8
                  APPEND PROPERTY LABELS "RU-OFH-CATB-WDBF")
 else ()
-    # macOS: the test cannot be built, but the ctest case is still registered and marked DISABLED so that
-    # "make test" reports it as "Not Run (Disabled)" instead of silently dropping it from the test list.
-    add_test(NAME ofh_integration_test COMMAND ${CMAKE_COMMAND} -E true)
-    set_tests_properties(ofh_integration_test PROPERTIES DISABLED TRUE LABELS "tsan;NO_MEMCHECK;macos_unsupported")
+    # macOS: the test cannot be built, but the ctest cases are still registered and marked DISABLED so that
+    # "make test" reports them as "Not Run (Disabled)" instead of silently dropping them from the test list.
+    #
+    # One placeholder per case the Linux branch registers, under the SAME names: a single placeholder named
+    # after the binary would leave eight Linux names with no macOS counterpart, which is the silently-dropped
+    # coverage this pattern exists to prevent - and the name it used to carry (`ofh_integration_test`) is not a
+    # case on Linux at all, so it only ever appeared in a macOS list.
+    foreach (ofh_case
+            ofh_integration_test_non_rt
+            ofh_integration_test_non_rt_4x2
+            ofh_integration_test_non_rt_8x8
+            ofh_integration_test_non_rt_8x8_100MHz
+            ofh_integration_test_non_rt_custom_eaxc
+            ofh_integration_test_non_rt_fragmented_no_compr
+            ofh_integration_test_non_rt_cat_b_4x2
+            ofh_integration_test_non_rt_cat_b_8x8)
+        add_test(NAME ${ofh_case} COMMAND ${CMAKE_COMMAND} -E true)
+        set_tests_properties(${ofh_case} PROPERTIES DISABLED TRUE
+                             LABELS "tsan;NO_MEMCHECK;macos_unsupported")
+    endforeach ()
+
+    # The labels the Linux branch appends on top of the two above, so a `ctest -L` filter selects the same
+    # cases on both platforms and a macOS run cannot look like it covered them.
+    set_property(TEST ofh_integration_test_non_rt_8x8 ofh_integration_test_non_rt_8x8_100MHz
+                 APPEND PROPERTY LABELS "MVP-FUNC-PHY-16-9")
+    set_property(TEST ofh_integration_test_non_rt_cat_b_4x2 ofh_integration_test_non_rt_cat_b_8x8
+                 APPEND PROPERTY LABELS "RU-OFH-CATB-WDBF")
 endif ()
