@@ -35,10 +35,13 @@ if (NOT APPLE)
             --dl_port_id 0 1 2 3 4 5 6 7 --ul_port_id 0 1 2 3 4 5 6 7 --prach_port_id 8 9
             beamforming --enable true --compr_method_bfw bfp --compr_bitwidth_bfw 9)
 
-    add_test(ofh_integration_test ofh_integration_test -d \'{0,1}\')
+    # There is no bare `ofh_integration_test` case: upstream replaced the `-d '{0,1}'` form (which CLI11
+    # rejects, because CMake passes that argument literally) and then dropped the case altogether once
+    # `ofh_integration_test_non_rt` carried its `--dl_port_id 0 1` coverage. Keeping the old line would
+    # have registered a test that can only fail, which is what this branch did until the Ubuntu run
+    # reported it.
 
-    set_tests_properties(ofh_integration_test
-                         ofh_integration_test_non_rt
+    set_tests_properties(ofh_integration_test_non_rt
                          ofh_integration_test_non_rt_4x2
                          ofh_integration_test_non_rt_8x8
                          ofh_integration_test_non_rt_8x8_100MHz
