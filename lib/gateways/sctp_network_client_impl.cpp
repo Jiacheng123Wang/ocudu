@@ -475,10 +475,19 @@ void sctp_network_client_impl::receive_plain()
                        int msg_flags,
                        const sockaddr_storage& /*src_addr*/,
                        socklen_t /*src_addrlen*/) {
-    auto*               client = static_cast<sctp_network_client_impl*>(user);
+    auto* client = static_cast<sctp_network_client_impl*>(user);
+    // Messages queued behind the one that terminated the association are stale, and the notification handlers
+    // release the receive notifier.
+    if (client->recv_handler == nullptr) {
+      return;
+    }
+
     span<const uint8_t> span_payload(payload.data(), payload.size());
     if (msg_flags & MSG_NOTIFICATION) {
       client->handle_notification(span_payload);
+    } else if (span_payload.empty()) {
+      // A zero-length read is the peer's EOF.
+      client->handle_connection_terminated("Received SCTP EOF");
     } else {
       client->handle_data(span_payload);
     }
