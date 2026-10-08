@@ -7,6 +7,7 @@
 #include "ul_capture.h"
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <mutex>
@@ -70,6 +71,133 @@ const bool strict_report_registered = []() {
 
 } // namespace
 #endif
+
+/// \name The depth-3 receiver seam probe (LLR AI detection workflow, design section 1.5).
+///
+/// The AI receiver will replace the channel estimator and the demodulator as ONE pair (depth 3 is one unit),
+/// so before anything is wired to it the seam has to be measurable on its own: how many times each of the two
+/// entry points is reached, and how long each one takes on the wall clock.
+///
+/// WHY A COUNTER AND NOT JUST A TIMER. The dangerous failure is not "the seam is slow" - it is "the seam was
+/// never reached", which a timer reports as zero and a reader then reads as "cheap". The two counts are what
+/// make that distinguishable, and they are compared against the leg's hop count (one estimate and one
+/// demodulate per PUSCH carrying a codeword).
+///
+/// WHY WALL CLOCK. Both calls are host-side entry points, so the host clock is the right one, and it is the
+/// only clock that spans a device wait (a deferred estimator returns before its results exist, and the wait
+/// happens at sync_device_estimates()). It therefore measures what the CALLER paid, not what the device did -
+/// the device's own time is the lane probe's business (see ocudu_metal_lane_probe.h).
+///
+/// Deliberately NOT under OCUDU_METAL_STATS: the seam is not Metal-specific, and the offline harness that has
+/// to prove the counters line up with the hop count is built on every platform.
+///
+/// OFF unless OCUDU_RECEIVER_PROBE asks for it, and it reads the environment once, so a delivery leg stays
+/// byte-identical and pays one predictable branch per call.
+///@{
+namespace {
+
+struct receiver_seam_probe {
+  bool     enabled          = false;
+  uint64_t estimate_calls   = 0;
+  uint64_t demodulate_calls = 0;
+  int64_t  estimate_ns      = 0;
+  int64_t  demodulate_ns    = 0;
+  /// Sum of (demodulate begin - estimate begin) over the receptions where both were reached: the host time the
+  /// depth-3 unit as a whole costs, which is the quantity the AI arm has to beat.
+  int64_t  unit_ns      = 0;
+  uint64_t unit_samples = 0;
+  /// The estimator has been entered and the demodulator has not run yet, so the pair is open.
+  bool                                  pair_open = false;
+  std::chrono::steady_clock::time_point pair_begin;
+};
+
+receiver_seam_probe& seam_probe()
+{
+  static receiver_seam_probe probe = []() {
+    receiver_seam_probe p;
+    if (const char* env = std::getenv("OCUDU_RECEIVER_PROBE")) {
+      p.enabled = (env[0] != '0');
+    }
+    return p;
+  }();
+  return probe;
+}
+
+const bool seam_probe_report_registered = []() {
+  std::atexit([]() {
+    const receiver_seam_probe& p = seam_probe();
+    if (!p.enabled) {
+      return;
+    }
+    // The counts are ALWAYS reported, and the mismatch warning is the point of the report: "never reached" and
+    // "reached and fast" both print a small time, and only the counts tell them apart.
+    std::fprintf(stderr,
+                 "[receiver_seam] estimate_calls=%llu demodulate_calls=%llu | estimate=%.3fms demodulate=%.3fms "
+                 "| unit=%.3fms over %llu reception(s), %.3fms each\n",
+                 static_cast<unsigned long long>(p.estimate_calls),
+                 static_cast<unsigned long long>(p.demodulate_calls),
+                 static_cast<double>(p.estimate_ns) / 1e6,
+                 static_cast<double>(p.demodulate_ns) / 1e6,
+                 static_cast<double>(p.unit_ns) / 1e6,
+                 static_cast<unsigned long long>(p.unit_samples),
+                 (p.unit_samples != 0) ? static_cast<double>(p.unit_ns) / 1e6 / static_cast<double>(p.unit_samples)
+                                       : 0.0);
+    if (p.demodulate_calls != p.estimate_calls) {
+      std::fprintf(stderr,
+                   "[receiver_seam] WARNING: %llu estimate call(s) against %llu demodulate call(s) - one of the two "
+                   "depth-3 entry points was not reached on every reception\n",
+                   static_cast<unsigned long long>(p.estimate_calls),
+                   static_cast<unsigned long long>(p.demodulate_calls));
+    }
+  });
+  return true;
+}();
+
+/// RAII: records how long one depth-3 entry point took, and keeps the pair's own begin instant.
+class seam_call {
+public:
+  explicit seam_call(bool is_estimate_) : is_estimate(is_estimate_)
+  {
+    receiver_seam_probe& p = seam_probe();
+    if (!p.enabled) {
+      return;
+    }
+    active = true;
+    begin  = std::chrono::steady_clock::now();
+    if (is_estimate) {
+      ++p.estimate_calls;
+      p.pair_begin = begin;
+      p.pair_open  = true;
+    } else {
+      ++p.demodulate_calls;
+      if (p.pair_open) {
+        p.unit_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(begin - p.pair_begin).count();
+        ++p.unit_samples;
+        p.pair_open = false;
+      }
+    }
+  }
+
+  ~seam_call()
+  {
+    if (!active) {
+      return;
+    }
+    receiver_seam_probe& p = seam_probe();
+    const int64_t        d = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now() - begin)
+                          .count();
+    (is_estimate ? p.estimate_ns : p.demodulate_ns) += d;
+  }
+
+private:
+  bool                                  is_estimate;
+  bool                                  active = false;
+  std::chrono::steady_clock::time_point begin;
+};
+
+} // namespace
+///@}
 
 /// \brief Looks at the output of the validator and, if unsuccessful, fills \c msg with the error message.
 ///
@@ -261,7 +389,12 @@ void pusch_processor_impl::process(span<uint8_t>                    data,
       data, std::move(rm_buffer), std::move(dependencies), notifier, grid, pdu, dmrs_type, nof_cdm_groups_without_data);
 
   // Run the channel estimator. When done, the notifier will trigger the remaining steps for recovering the PUSCH data.
-  estimator.estimate(estimator_notifier, grid, ch_est_config);
+  // The seam probe brackets the call: this is one of the two entry points the AI receiver will take over, and a
+  // timer without a counter cannot tell "fast" from "never reached" (see the probe's notes).
+  {
+    seam_call seam(/*is_estimate=*/true);
+    estimator.estimate(estimator_notifier, grid, ch_est_config);
+  }
 }
 
 void pusch_processor_impl::process_data(span<uint8_t>                          data,
@@ -556,8 +689,13 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
   // LLRs are produced, and the segment that ends at the first codeblock decode is otherwise one 647us number
   // with ~2.7us of arithmetic in it. Both landmarks are free while OCUDU_UL_PHASE_INTERIOR is unset.
   ul_pipeline_probe::get().record_demod_enter(pdu.slot.count());
-  dependencies->get_demodulator().demodulate(
-      demodulator_buffer, notifier_adaptor.get_demodulator_notifier(), grid, est_results, demod_config);
+  // The seam probe's second entry point, and the one that closes the pair: the time from the estimate call to this
+  // one is what the depth-3 unit costs the caller, which is the quantity the AI receiver has to beat.
+  {
+    seam_call seam(/*is_estimate=*/false);
+    dependencies->get_demodulator().demodulate(
+        demodulator_buffer, notifier_adaptor.get_demodulator_notifier(), grid, est_results, demod_config);
+  }
   ul_pipeline_probe::get().record_demod_return(pdu.slot.count());
 
   // The demodulation is done: complete the channel estimation and merge its measurements into the
