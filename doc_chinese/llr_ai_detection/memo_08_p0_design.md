@@ -2378,3 +2378,72 @@ floating-point reassociation, not bit for bit"*。
 | ★★ `OCUDU_CE_NV_OVERRIDE=<value>` | ★★ **内建**的 `nv` 覆盖，★ 用来把"估计错"与"只有噪声尺度错"分开 —— ★★ **这正是 §23 合成真值台缺的那块** |
 | ★★ `OCUDU_CE_NV_ROUTE=<band>` | ★ 打印 `device/dev_nv/host_acc/published`，★ 已用它确认 `scaling = 1.413` ✓ |
 | ★★ `ul_chain_replay --cpu / --metal` | ★★ **同一网格的三路对照**，★ 这是本轮唯一真正有效的诊断手段 |
+
+---
+
+## 26. ★★★ §25 的"设备/主机不一致"**也是我错了** —— 我比较的是**两个不同的估计器**（2026-10-08）
+
+> ★★ 用户问"下一步"，我在给建议前想先把 §25 那个"开放问题"缩小，★ **结果发现它不是问题。**
+
+### 26.1 ★★★ 反证：单元测试里设备值与主机值**完全相同**
+
+★ 我去读了 K4 的回归测试（`port_channel_estimator_metal_mmse_unit_test.cpp` 的 **Test 12**），
+★ 它逐形状断言 `device_noise_variance()` 与 `get_noise_variance()` 的相对差 **< 1e-5**。★ **跑它**：
+
+```
+Test 12 (52 PRB, 2 DMRS): ... noise variance matches (relative 0.00e+00)
+Test 12 (25 PRB, 2 DMRS): ... noise variance matches (relative 0.00e+00)
+Test 12 ( 4 PRB, 3 DMRS): ... noise variance matches (relative 0.00e+00)
+Test 12 (51 PRB, 2 DMRS): ... noise variance matches (relative 0.00e+00)
+Test 12 ( 2 PRB, 2 DMRS): ... noise variance matches (relative 0.00e+00)
+Test 12 (25 PRB, 2 DMRS, DC): ... noise variance matches (relative 0.00e+00)
+Test 12 PASS: ... K4 noise variance matches the host (worst relative 0.00e+00)
+```
+
+★★★ **相对差是【恰好 0】**（六个形状、24 780 个 RE）。★ **所以"设备归约 ≠ 主机累积"这个结论是错的。**
+
+### 26.2 ★★★ 真相：`nv_check` 的两个操作数来自**两个不同的估计器**
+
+★ 那个诊断比的是 `gpu_nv`（**Metal MMSE 估计器**）与 `gpu_ls_sigma2[kSigma2]`
+（**提取核**，★ 属于**平均估计器**那一侧）。★ 而**同一个测试文件的 Test 9 早就写明了这个差**：
+
+```
+Test 9: worst cross-path noise variance difference 0.78 dB on the soft-bit scale
+Test 9: worst cross-path noise variance difference 0.87 dB ...
+Test 9: worst cross-path noise variance difference 0.92 dB ...
+Test 9: worst cross-path noise variance difference 0.81 dB ...
+```
+
+★★ **Test 9 的注释自己写着**：*"the two estimators are different algorithms; this is not the invariant"*。
+★★★ **0.78–0.92 dB 与我在真实数据上测到的 1.0 dB（比值 1.26）是同一件事。**
+
+| ★ 我测的 | ★ 值 | ★ 真相 |
+|---|---|---|
+| `nv_check` 的 `ratio` | 0.7948（=1.2584 倍、**1.0 dB**）| ★★ **MMSE 估计器 vs 平均估计器的固有差**，★ 不是缺陷 |
+| replay `--metal` vs `--cpu` 的 SINR | 24.15 vs 23.19 dB | ★★ **同一件事**（两条臂用**不同估计器**）|
+
+★★ **设备与主机对于【同一个估计器】是逐位一致的**（Test 12），★ 所以 §25 的"OPEN ISSUE"
+★★ **不存在**。★ 我把"两个估计器的固有差"误读成了"两条归约路径不一致"。
+
+### 26.3 ★★ 我犯的错，以及它为什么值得记下来
+
+★★ **根因**：我**先看到差异，再去找解释**，★ 而**没有先问"这两个数是不是同一个量"**
+—— ★★ **这正是 F12/F13 那一族**，★ 而这次它发生在我**刚刚写完 F12 的那一节之后**。
+
+★ 更严重的一步：★★ **我把这个错误结论写进了源码注释**
+（`port_channel_estimator_metal_mmse_impl.h` 加了一段 `\warning` 说这是设备侧缺陷，
+`port_channel_estimator_average_impl.cpp` 也加了一段）。
+★★★ **那两段注释是本工作流第一次把错误推进到产品代码里。** ★ **已全部撤回并改为正确描述。**
+
+### 26.4 ★★ 仍然成立、而且真正有用的一条结论
+
+★★ **`--cpu` 与 `--metal` 两条臂用的是【不同的信道估计器】**
+（`average` vs `metal_mmse`，★ 这是设计使然，不是 bug）。
+★★★ **所以：**
+1. ★★ **两条臂的 SINR / `nv` / RSRP 不可直接互比** —— ★ 比的是**估计器**，不是后端；
+2. ★★ **这正好是 `gpu` lane 与 `cpu` lane 的 `a/b` 对照本身**（★ §1.5 的臂 0 就是 `gpu` lane），
+   ★ 所以**它不影响接链工作**，★ 只影响"我拿 `--cpu` 当参照"这种做法；
+3. ★★ **P0-c 的判决不受影响**：★ 那一轮**两臂共用同一个 `h`**（§22.7 已写明），★ `nv` 只用于事后标定。
+
+★ **已加的回归价值**：★ Test 12 现在被明确记为"设备值 == 主机值"的判据，
+★ 而 `OCUDU_CE_NV_CHECK` 的用途**重新定义为"跨估计器差异的观察窗"**，★ 不再是"缺陷探测器"。

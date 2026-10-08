@@ -5159,18 +5159,23 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
   }
 
   // DIAGNOSTIC (OCUDU_CE_NV_CHECK=<band>): the published noise variance against the
-  // extraction's OWN sigma2 slot, on the same hop, after the same wait. Both are device reductions of
-  // the same estimator (K4 reduces it from h at the pilot positions, the extraction's kernel from the
-  // smoothed least-squares pilots), and this note used to say they agree to a fraction of a dB by
-  // construction. THEY DO NOT: measured on C_1047_17921 of corpus aillr_cap002 they differ by 1.26x
-  // (about 1 dB) - nv = 1.18965e-03 against sigma2 = 1.49687e-03, ratio 0.7948 - while the two
-  // HOST-side reductions agree with each other to 0.2%. Reconciling them is an OPEN ISSUE (see the
-  // warning on device_noise_variance() in the header). A wild ratio is therefore a fact about ONE of
-  // the two, not about the estimator. Printed only when the ratio leaves the band, so a clean
-  // hop costs one compare and the timing of the hop is not disturbed by a per-hop write. The band IS
-  // the argument so the instrument can be proved to fire (band 1.001 prints nearly every hop) - an
-  // instrument that never speaks has to be shown able to speak before its silence means anything.
-  // KEPT rather than retired: this is the regression check for the open issue above.
+  // extraction's OWN sigma2 slot, on the same hop, after the same wait.
+  //
+  // READ THE COMPARISON CORRECTLY: these two are NOT the same quantity. This estimator's device
+  // reduction agrees with this estimator's own host reduction to 0.00e+00 (Test 12), so anything
+  // this check reports is NOT a device-versus-host disagreement - it is the difference between two
+  // ESTIMATOR ALGORITHMS, because the extraction's sigma2 slot belongs to the average estimator.
+  // Test 9 measures that difference at 0.78 to 0.92 dB and states that it is not the invariant; the
+  // 0.7948 this check prints on C_1047_17921 of corpus aillr_cap002 is the same fact on real data.
+  // It used to say here that the two agree to a fraction of a dB by construction, which was wrong
+  // about which two quantities were being compared, and a warning was briefly added to
+  // device_noise_variance() claiming a device-side defect on the strength of it. That warning was
+  // wrong and has been removed.
+  //
+  // Printed only when the ratio leaves the band, so a clean hop costs one compare and the timing of
+  // the hop is not disturbed by a per-hop write. The band IS the argument so the instrument can be
+  // proved to fire (band 1.001 prints nearly every hop) - an instrument that never speaks has to be
+  // shown able to speak before its silence means anything.
   if (const char* nv_check = std::getenv("OCUDU_CE_NV_CHECK");
       (nv_check != nullptr) && (gpu_nv != nullptr) && (gpu_ls_sigma2 != nullptr)) {
     const double band    = std::strtod(nv_check, nullptr);

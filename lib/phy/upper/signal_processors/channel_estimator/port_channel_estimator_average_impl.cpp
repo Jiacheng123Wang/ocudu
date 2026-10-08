@@ -290,23 +290,18 @@ bool port_channel_estimator_average_impl::do_finish(const dmrs_symbol_list& pilo
 
   // The hop's noise variance: the DEVICE's when a backend reduced one where the estimates already
   // live (the Metal MMSE estimator does, K4 - see get_device_noise_variance()), the host's
-  // accumulation otherwise. What it changes is where the value comes from: the host's accumulation
-  // reads the pilots of the estimated grid, which a fused backend stops unpacking once every
-  // reporting value is produced on the device (batch 5c).
+  // accumulation otherwise. For the estimator that produces it, the device value equals this host
+  // accumulation exactly (Test 12: worst relative difference 0.00e+00 over six allocation shapes) -
+  // the kernel is handed nof_dmrs_pilots, nof_cdm and min_snr_power for exactly that reason. What it
+  // changes is where the value comes from: the host's accumulation reads the pilots of the estimated
+  // grid, which a fused backend stops unpacking once every reporting value is produced on the device
+  // (batch 5c).
   //
-  // WARNING: the two branches are NOT interchangeable, and this comment used to claim they were
-  // ("the same quantity with the same normalization ... so which one runs does not change what is
-  // published"). Measured on one real capture (C_1047_17921 of corpus aillr_cap002), with the SAME
-  // grid and the SAME binary: the device branch publishes 1.18965e-03 and the host branch
-  // 1.49959e-03, a ratio of 1.26 (about 1 dB), and the published SINR of the two back ends differs
-  // accordingly (19.44 dB on the air leg against 23.19 dB for the same reception replayed through
-  // the host path). The two HOST-side reductions agree with each other to 0.2% - this estimator's
-  // own extraction sigma2 reads 1.49687e-03 - which is what identifies the device reduction as the
-  // outlier rather than a difference in the inputs. K4 predicts the pilot observation from the
-  // MMSE-smoothed h, whose noise the smoothing has already reduced, while both host paths predict
-  // from the least-squares pilots; that is the leading explanation and it has NOT been confirmed.
-  // Reconciling the two is an OPEN ISSUE. Until it is, a measurement that reads this value must
-  // state which back end produced it, and must not compare an air-leg value against an offline one.
+  // NOTE: this branch does NOT make the two ESTIMATORS agree. The Metal MMSE estimator and this
+  // average one are different algorithms whose noise variances differ by about 0.8 to 1.0 dB by
+  // construction - Test 9 measures 0.78 to 0.92 dB on the soft-bit scale and states that this is not
+  // the invariant. So a published SINR must never be compared across the two estimators as though it
+  // measured one receiver: a `--metal` replay against a `--cpu` one differ for that reason alone.
   const float host_noise_acc = noise_var; // the host's own accumulation, before either branch runs
   if (const float* device_noise_variance = get_device_noise_variance(); device_noise_variance != nullptr) {
     noise_var = *device_noise_variance;
