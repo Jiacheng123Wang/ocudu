@@ -29,6 +29,10 @@ class ofdm_symbol_demodulator_impl : public ofdm_symbol_demodulator
   unsigned rg_size;
   /// Half resource grid bandwidth in resource elements.
   unsigned half_rg_size;
+
+  /// Transform output after the scaling and phase compensation of process_dft_output(). Held across calls
+  /// so the compensation and the grid mapping do not allocate on the packet path.
+  std::vector<cf_t> compensated_output;
   /// Cyclic prefix type.
   cyclic_prefix cp;
   /// DFT window offset.
