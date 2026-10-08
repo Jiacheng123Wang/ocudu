@@ -632,6 +632,18 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
                             pusch_constants::MAX_NOF_LAYERS,
                             config.pusch_max_nof_layers);
 
+  // The depth-3 receiver backend. There is exactly ONE implementation today - the classical one,
+  // composed from the estimator, equalizer and demapper this function selects below - so "classic" is
+  // the only value that can be honoured. "ai" reaching here would mean a caller took the factory's
+  // word for it instead of asking ai_receiver_bound(): the flexible O-DU resolves a request for "ai"
+  // down to "classic" precisely so that this cannot happen, and this check is what turns a later
+  // silent fallback into a loud failure. It is fatal and not a warning on purpose - a classic chain
+  // running under an AI label is the failure mode the whole control variable exists to prevent.
+  report_fatal_error_if_not(config.pusch_receiver_backend == "classic",
+                            "Unsupported PUSCH receiver backend '{}': the depth-3 AI receiver is not implemented in "
+                            "this build, so the only backend the upper PHY factory can create is 'classic'.",
+                            config.pusch_receiver_backend);
+
   channel_equalizer_algorithm_type pusch_equalizer_algorithm_type = channel_equalizer_algorithm_type::zf;
   if (config.pusch_channel_equalizer_algorithm == "mmse") {
     pusch_equalizer_algorithm_type = channel_equalizer_algorithm_type::mmse;

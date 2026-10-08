@@ -352,6 +352,23 @@ struct upper_phy_factory_configuration {
   /// - \c metal_nn_mmse: same MMSE math on the GPU hardware matrix unit
   ///   (simdgroup_matrix 8x8; A/B twin of metal_mmse, Apple Silicon only).
   std::string pusch_channel_estimator_algo = "cpu";
+  /// \brief Which receiver computes the PUSCH depth-3 unit.
+  ///
+  /// The depth-3 unit is channel estimation + equalization + demapping taken together: the three are
+  /// replaced as ONE thing, never one at a time, which is why this is a separate knob from the
+  /// per-module backends above (a per-module AI would silently be a depth-2 experiment).
+  ///
+  /// Use one of these options:
+  /// - \c classic: the classical chain, composed from the estimator, equalizer and demapper selected
+  ///   by the fields above (this is what \c auto resolves to), or
+  /// - \c ai: the AI receiver arm, for the A/B against the classic one.
+  ///
+  /// \warning \c ai is CARRIED BUT NOT YET IMPLEMENTED. The backend does not exist in this tree, so a
+  /// request for it resolves to \c classic and the application says so in as many words at startup
+  /// (see ai_receiver_bound() in the flexible O-DU's pipeline resolution). It is deliberately not a
+  /// silent fallback: a run that reports \c ai while the classic chain executes is exactly the kind of
+  /// value that looks plausible and means nothing.
+  std::string pusch_receiver_backend = "classic";
   /// \brief MMSE estimator: fixed RMS delay spread (in microseconds) - v1 constant.
   /// \remark The estimation-backed provider arrives with the v2 statistics module.
   float pusch_channel_estimator_mmse_tau_rms_us = 0.37F;

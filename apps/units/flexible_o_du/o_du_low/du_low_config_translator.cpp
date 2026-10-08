@@ -159,6 +159,14 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
   upper_phy_factory_config.pusch_channel_estimator_compensate_cfo =
       du_low.expert_phy_cfg.pusch_channel_estimator_cfo_compensation;
   upper_phy_factory_config.pusch_channel_estimator_algo = effective.ch_est;
+  // The depth-3 unit's backend. STAGE 1/2: this is the resolution's answer, which is always
+  // "classic" today because ai_receiver_bound() is false - a request for "ai" has already been
+  // resolved down to "classic" and reported by the time the line above logs the mode. Passing it
+  // here rather than leaving it only in the log is what makes the knob SELECT something instead of
+  // merely describing it: the factory refuses a value it cannot honour (see the assertion in
+  // create_ul_processor_factory), so an "ai" that reached it would be a hard failure and not a
+  // classic chain wearing an AI label.
+  upper_phy_factory_config.pusch_receiver_backend = effective.receiver;
   upper_phy_factory_config.pusch_channel_estimator_mmse_tau_rms_us =
       du_low.expert_phy_cfg.pusch_channel_estimator_mmse_tau_rms_us;
   upper_phy_factory_config.pusch_channel_estimator_mmse_fd_hz =
