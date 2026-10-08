@@ -84,8 +84,8 @@ private:
     }
 
 #if defined(__APPLE__)
-    // The descriptor is the shim's bridge socketpair, so ::shutdown() would act on the socketpair instead of the
-    // association. Issue the SCTP-level EOF on the association, as the usrsctp stack requires.
+    // The descriptor is the shim's bridge socketpair, so ::shutdown() cannot close the association: issue the
+    // SCTP-level EOF on the association instead, as the usrsctp stack requires.
     auto dest_addr  = server_addr.native();
     int  ret        = ::sctp_sendmsg(fd,
                              nullptr,
@@ -98,6 +98,18 @@ private:
                              0,
                              0);
     ret             = (ret < 0) ? -1 : 0;
+
+    // The EOF above asks the PEER to shut the association down, and this side stays silent until its
+    // SHUTDOWN_COMP arrives. Closing a kernel SCTP socket (the Linux path) hands this side a local EOF for
+    // free, and that EOF is what releases the receive path: without it the upper layers are never told the
+    // connection dropped, ngap_connection_handler::handle_tnl_association_removal() waits for
+    // rx_path_disconnected forever, and an interrupt ends in the 5-second alarm and SIGKILL instead of a
+    // clean exit. A peer that accepts SCTP but never answers NGAP never sends SHUTDOWN_COMP, so waiting for
+    // it is not an option. The descriptor is the bridge, so shutting it down is exactly the local wake-up
+    // that the Linux path gets from its kernel socket, and the association has already been asked to close.
+    if (::shutdown(fd, SHUT_RDWR) != 0) {
+      logger.debug("{}: Could not shut the receive path down locally (errno=\"{}\")", client_name, ::strerror(errno));
+    }
 #else
     int ret = ::shutdown(fd, SHUT_RDWR);
 #endif
