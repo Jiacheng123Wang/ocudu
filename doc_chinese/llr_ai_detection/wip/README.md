@@ -79,7 +79,7 @@ bash doc_chinese/llr_ai_detection/wip/next_leg_label.sh baseline        # → ai
 
 | 工具 | 出处（`git ls-files` 核实） | 用途 |
 |---|---|---|
-| **`fly_leg.sh`** | `doc_chinese/macos_thread_priority/wip/fly_leg.sh` | ★ 飞腿主脚本（`fly_leg.sh <label> dual\|triple quiet\|stress [cpu\|cpu_gpu\|gpu]`） |
+| **`fly_leg.sh`** | `doc_chinese/macos_thread_priority/wip/fly_leg.sh` | ★ 飞腿主脚本（`fly_leg.sh <label> <dual 或 triple> <quiet 或 stress> [cpu 或 cpu_gpu 或 gpu]`） |
 | **`ul_health.sh`** | `doc_chinese/macos_thread_priority/wip/ul_health.sh` | 腿健康检查 |
 | **`pair_check.sh`** | `doc_chinese/macos_thread_priority/wip/pair_check.sh` | ★ 成对腿判据（**注意：它不渲染结论、恒 `exit 0`**，判据是 ±10% B/hop、±20% defer99/duration） |
 | **`probes_off_syntax_check.sh`** | `doc_chinese/macos_thread_priority/wip/probes_off_syntax_check.sh` | ★ 探针关闭版的语法/编译检查（防"M4 缺陷类"复发） |
@@ -121,6 +121,34 @@ bash doc_chinese/llr_ai_detection/wip/next_leg_label.sh baseline        # → ai
 | 4 | ★ **引用历史工具/日志必须写完整路径** | 见 §3 |
 | 5 | ★ **腿名不改**，序号由工具算 | 腿名是证据 |
 | 6 | ★ **每个数字可追溯到一次 leg** | 继承上一个工作流的纪律 |
+| ★ 7 | ★★ **文档一律"增补进现有文件"，不新建 memo 文件**（用户裁定 2026-10-08）| ① 见 §4.1；★ `memo_01`–`memo_10` 是**已闭合的证据链**，继续加号会让"读哪一份"重新变成问题 |
+
+### 4.1 ★★ 文档落点规则（用户裁定 2026-10-08）
+
+> 用户原话：*"请直接加入 `llr_ai_detection_design_and_implementation.md`，
+> 并在 `llr_ai_detection_high_level_status_and_plan.md` 增加几句话的 summary，
+> **而不是创建一个新的文档 `memo_11`（以后也类似，在现有的 design/implementation 中增加内容，
+> 而不是创建新文件）**。"*
+
+⇒ ★★ **本工作流从 2026-10-08 起按下面的规则落文档：**
+
+| 要写的东西 | ★ 落到哪 | 不要做什么 |
+|---|---|---|
+| 设计、方案、判据、臂定义、实现决策 | ★★ **`llr_ai_detection_design_and_implementation.md`**，**追加一个新小节**（活文档，追加式） | ✗ 不要新建 `memo_11`… |
+| 现状、进度、优先级、给下一个会话的结论 | ★ **`llr_ai_detection_high_level_status_and_plan.md`**，**几句话的 summary + 指回设计文档的节号** | ✗ 不要在高层文档里重抄设计的正文 |
+| 实测结果、实作记录、决策留痕 | ★ **设计文档 §11 Memo 区**（新的在最上面） | ✗ 不要为一次飞行新建文件 |
+| 工具、脚本、臂配置 | ★ `wip/`（进 git） | — |
+
+★ **为什么**（不只是偏好）：
+1. ★ **"只读一份就能接着开工"** 是本工作流的既有约定（见 `session_handoff_*.md` 的用法说明）。
+   每加一个 `memo_1x`，这条约定就多一个需要同步的地方；
+2. ★ **设计文档本来就是"活文档、追加式"**（其开头逐字规定"被证伪的判断以'更正'追加而非删除"），
+   ⇒ **新内容进它，正是它设计的用途**；
+3. ★ 高层文档只放 summary，**保证"高层永远是短的"** —— 它一旦被正文撑大，就不再有"先读这一节"的价值。
+
+★ **编号规则**：新小节插在**相关章节的末尾**，取**下一个空号**（例如 §1 的下一号是 §1.5，
+因为它已有 §1.0–§1.4 与 §1.1bis）。★★ **不重编号已有小节** —— 交叉引用（`§x.y`）遍布全部 memo，
+重编号会让它们**静默指错**。
 
 ---
 

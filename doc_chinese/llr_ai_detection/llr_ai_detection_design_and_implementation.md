@@ -9,8 +9,12 @@
 > - **每个数字可追溯到一次 leg / 一个 commit**；
 > - **追加式**：已写下的判断不删，纠正以"更正"形式追加（保留被证伪的过程本身是资产）；
 > - **开关没生效 ≡ 没有效果**——每次引用一个开关，先证明它真的动了。
+> - ★★ **增补进本文件，不新建 memo 文件**（用户裁定 2026-10-08）。★ 落点规则见 `wip/README.md` §4.1：
+>   设计与判据进**本文件**（取相关章节的下一个空号），现状与进度只在高层的 §0 里留**几句话的 summary**，
+>   实测与决策留痕进 **§11 Memo 区**。★ **不重编号已有小节**（全仓 memo 都在按 `§x.y` 交叉引用）。
 >
-> 版本：v1.0 ｜ 状态：**设计（未开工）** ｜ 日期：2026-10-08
+> 版本：v2.1 ｜ 状态：**设计（未开工）** ｜ 日期：2026-10-08
+> ★ v2.1：新增 **§1.5（AI 路径怎么进链：控制变量、臂定义与判据预登记）**。
 > 前身文档：`AI_LLR_detection_master_plan.md`（v2.2）—— 已拆分为**本文件 + 高层文档**，
 > 原章节映射见 `AI_LLR_detection_master_plan.md`（现为重定向存根）。
 
@@ -281,6 +285,203 @@ LLR 量化（`LLR_MAX=120`、`range_limit` 24/24/20/20）、**模型输出加扰
 - 打开期间 `guarded_call.h:29` 返回 `OCUDU_DAPP_BYPASS_V1`；
 - ★★ **completion 契约在生产里未启用**（`host_capabilities{}` 从不填充，加载器拒绝需要它的接收机）⇒ **生产是 invoke-only**。
 
+### 1.5 ★★ AI 路径怎么进链：控制变量、臂定义与判据预登记（v2.1 新增，2026-10-08）
+
+> **本节的来源**：用户 2026-10-08 的裁定 ——
+> *"目前已经有了 cpu / cpu_gpu / gpu 三种工作模式，我想 LLR AI 工作流的路径应该在 gpu 模式的路径下，
+> 增加一个 `expert_phy` 的控制变量（default 就是原来的 GPU，新的变量是用 LLR AI detection 路径），
+> 可以和目前的 GPU lane 进行 A/B 对照。"*
+> ★ **本节是对这条指令的设计化，并按 §1.3 的路线 A 落点。**
+> ★★ **判据写在飞之前**（与 `memo_08` 同一条纪律）；执行结果追加到 §11 Memo 区。
+
+#### 1.5.1 ★★ 先立事实：三种模式不是三条并列的路，是**一个解析器**
+
+`resolve_phy_pipeline()`（`apps/units/flexible_o_du/o_du_low/du_low_phy_pipeline.h:154`）
+把 **mode × 六个 backend 旋钮**解析成唯一的 `phy_pipeline_effective`。今天三种模式冻结出的集合：
+
+| | `dft` | `ch_est` | `equalizer` | `demapper` | `device_grid` | `lane_fused` |
+|---|---|---|---|---|---|---|
+| `cpu` | cpu | cpu | cpu | cpu | — | no |
+| `cpu_gpu` | 各自旋钮（`auto`→cpu）| 同左 | 同左 | 同左 | 旋钮 | no |
+| ★★ **`gpu`** | ★ **cpu**（2026-09-30 翻转）| ★ **metal_mmse** | ★ **metal** | metal | **yes** | **yes** |
+
+两条**容易看漏、但对本工作流是决定性**的性质：
+
+| # | 事实 | 位置 | 对我们的意义 |
+|---|---|---|---|
+| **T1** | ★ **`gpu` 模式的 DFT 是 CPU**，网格由**主机**写进**设备可见存储**。日志逐字：*"device_grid=yes (written by the HOST DFT)"* | `phy_pipeline_lane_defaults::dft`（`:106`）| ⇒ `gpu` 模式**本来就不要求**设备写网格 ⇒ AI 臂接主机可见的网格**不是新增约束** |
+| ★★ **T2** | ★★ **那块存储是 `MTLResourceStorageModeShared`** —— `newBufferWithBytesNoCopy` + Shared，即**统一内存** | `lib/phy/metal/ocudu_metal_queue.mm:1246` | ★★ **主机可以就地读那张网格，一次拷贝都不需要** ⇒ AI 路径的输入交接**不是搬数据，只是等一个顺序**。⇒ **数据通路上这件事是便宜的**；风险全部在**时机的同步点**上（§1.5.5）|
+
+★ **`gpu` 模式今天已经飞过**（`p185`/`p187`，`doc_chinese/macos_thread_priority/wip/logs/`），
+逐字 `mode=gpu fused=yes device_grid=yes`、`dft=cpu channel_estimator=metal_mmse equalizer=metal demapper=metal`。
+⇒ **这不是一条没验证过的路**，我们要测的是**在它内部换掉深度 3 那一段**。
+
+#### 1.5.2 ★★ 控制变量的形态：粒度必须是**深度 3 这一个单元**，不能是"某个模块的后端"
+
+★★ **这是本设计最关键的裁决。** 若开关做成**逐模块**的（像 `--pusch_channel_estimator_algo` 那样），
+这条 A/B **会静默地改错东西**：
+
+| # | 问题 | 依据 |
+|---|---|---|
+| 1 | ★ **深度 3 是一个单元，不是一个模块。** 只换 CE 会留下经典均衡器吃 AI 的估计 —— 那是**深度 2**（= §2.5 的消融 3），**不是我们要测的臂** | §1.0 的深度表；§2.1 |
+| 2 | ★★ **`gpu` 模式强制 `ch_est=metal_mmse` 且拒绝 CPU 值**（注释逐字 *"this mode has no CPU fallback"*）。加一个逐模块的 `ai` 值**必须去改这段冲突规则**，改错就是"**AI 臂跑了经典链却看起来合理**" —— 正是 `memo_10` §开头纪律 3 那一类错误 | `du_low_phy_pipeline.h:229-250` |
+| 3 | ★ **`lane_fused` 的语义会被搅乱**：lane 的 fused 是"CE 的估计 + 均衡 + 解映射同属一个 lane"；逐模块换掉其中之一，`fused` 这个词就不再指向一件事 | `du_low_phy_pipeline.h:61-62` |
+
+★★ **裁决：新增一个"深度 3 选择器"，一次选定 `(ch_est, equalizer, demapper)` 三者；
+网格写入者（`dft`）保持正交。**
+
+```
+--expert_phy.pusch_receiver_backend   =   auto | classic | ai          # ★ auto == classic
+```
+
+| 值 | 含义 | 与今天的关系 |
+|---|---|---|
+| `auto` | ★ **逐位等价于 `classic`** | ★ 遵守既有的 `auto` 约定（`device_grid` 的 `auto` 就是同一形状），**命令行没写这个旋钮时行为完全不变** |
+| `classic` | 今天的深度 3：`metal_mmse` + `metal` 均衡 + `metal` 解映射 | = 今天的 `--phy_pipeline gpu` |
+| `ai` | ★ **同一条 lane，只把深度 3 那一段换成一次神经前向** | `dft`（网格写入者）、`ldpc`、`device_grid`、调度**全部不动** |
+
+⇒ ★★ **A/B 恰好只差一个变量**，"开关没生效 ≡ 没有效果"这句话才有主语（`high_level §7.2` 纪律）。
+
+★ **命名理由**：本仓库的既有语法是 **"旋钮选 backend，模式由旋钮导出"**（`du_low_phy_pipeline.h:128-144`）。
+`pusch_receiver_backend` 与 `pusch_channel_estimator_algo` / `pusch_channel_equalizer_backend` 同形，
+★ **不新增 mode 枚举值** —— 因为 depth-3 是**模块组的选择**，不是**链路的模式**。
+
+#### 1.5.3 ★★ 冲突矩阵（照抄既有约定，不发明新语义）
+
+| `phy_pipeline` × `pusch_receiver_backend` | 裁决 | 理由 |
+|---|---|---|
+| `cpu` + `ai` | ★★ **冲突（报错）** | 照 `--pusch_dft_type metal` 的先例（`:190-210`）：CPU 模式禁一切 offload |
+| `cpu_gpu` + `ai` | ★★ **冲突（报错）** | ★ 逐模块的 offload 表达不了"**一次换三个模块**"；允许它会让 `cpu_gpu` 的语义变得不可解释 |
+| `cpu_gpu` + `classic` | 允许 | 就是今天的 `cpu_gpu` |
+| `gpu` + `auto` / `classic` | ★★ **接受，且与今天逐位一致** | 回归的判据（§1.5.6 判据 0）|
+| `gpu` + `ai` | ★★ **接受**；★ **`lane_fused` 的语义要在日志里重述** | 见 §1.5.4 |
+| ★ `gpu` + `ai` + `--pusch_dft_type metal` | ★ **额外一臂，但必须显式声明** | 网格写入者变了 ⇒ **多一个变量**，不得混进主臂 |
+
+★ **最后一行值得单独立臂**：CPU DFT 的翻转理由（`~118 µs`，dev 6.212/6.215）是
+**通道估计器要等 front end 的命令缓冲**。★ **AI 路径不读那些缓冲** ⇒ **那个理由可能不成立**。
+★ 这是本工作流**独有的、便宜的**一个可测问题（§1.5.7 臂 5）。
+
+★ **`lane_fused` 的重述**：`fused=yes` 今天的意思是"IQ→LLR 在设备侧一条 lane 上一次提交"。
+`ai` 臂里它应读作 ★ **"深度 3 段由一次前向完成，且 lane 的其他成员不变"**；
+★ **日志必须能区分二者**（否则事后无法从腿日志判断跑的是哪一臂）。
+
+#### 1.5.4 ★ 落点：接缝在**工厂的一对后端**，不在 `pusch_demodulator_impl` 里加第五条路由
+
+★★ **本节的第二个关键判断。** `pusch_demodulator_impl` **已经有四条路由**
+（同步 / 延迟 / fused / fused+单 lane，`pusch_demodulator_impl.cpp:310-346`），
+★ **不要再往里加一条**。正确的落点是**接口边界**：
+
+| 层 | 位置 | 改什么 |
+|---|---|---|
+| CLI | `apps/units/flexible_o_du/o_du_low/du_low_config.h` + `du_low_config_cli11_schema.cpp` | 加一个 `std::string pusch_receiver_backend = "auto";` + 取值检查（`*_schema.cpp` 做取值校验）|
+| **校验** | `du_low_config_validator.cpp` | ★ **冲突矩阵在 validator 里做**（跨参数校验正是这个文件的职责）|
+| **解析** | `du_low_phy_pipeline.h` 的 `phy_pipeline_request` / `phy_pipeline_effective` / `resolve_phy_pipeline()` | 加进请求与生效结构，按 §1.5.3 裁决；★ **`resolve_phy_pipeline_or_fatal` 的两个重载都要带它** |
+| **工厂** | `lib/phy/upper/channel_processors/pusch/processor_factories.cpp` | ★★ `ai` 时给 PUSCH processor 造 **(AI 估计器, AI 解调器) 这一对** |
+| ★★ **接缝** | ★★ **`pusch_processor_impl.cpp:264` `estimator.estimate(...)`、`:559` `demodulator.demodulate(...)`、`:567` CSI 合并** | ★★ **这三处就是现有替换点**（`memo_07` §1 的逐跳链已把它们定位）|
+
+★★ **为什么这一条最省钱**：
+1. **不碰 `pusch_demodulator_impl`**（那个文件是 platform 与 fusion lane 的心脏，改动风险最高）；
+2. ★ **深度 3 的输出义务正好从这对后端里出来** —— `memo_07` §7 的 **R1 信道估计 / R2 逐 RE 后均衡噪声 /
+   R3 TA / R4 DM-RS 噪声 / R5 RSRP+EPRE** 全部由 `dmrs_pusch_estimator_results` 与
+   `pusch_demodulator` 的既有接口承载，**契约不用重新发明**；
+3. ★ **`memo_07` §4.5 的 decorator 形态就是这条接缝的原型**（P0-c 已经在用同一形状）⇒
+   ★ **P0 的装饰器与 P4 的正式后端可以共用一套接口假设**。
+
+#### 1.5.5 ★★ 真正的风险不在开关，在**新增的同步点**
+
+`gpu` 模式的收益来自"**每跳一次提交、少 22 次逐阶段同步**"。
+AI 路径插进来会**引入一个新的三跳交接**：
+
+```
+设备网格就绪 ──①──► 引擎拿到输入 ──②推理──► LLR 就绪 ──③──► LDPC 能读
+```
+
+★★ **算得快不代表跳得快。** ⇒ **P0-d 的时延必须拆成三段分别报告**（这是本节对 `memo_08` P0-d 的加强）：
+
+| 段 | 量什么 | 失败长什么样 |
+|---|---|---|
+| **① 网格交接** | 从设备网格就绪到引擎拿到输入 | ★ 等待排在 lane 后面 ⇒ **吃掉 lane 的全部收益** |
+| **② 推理** | ANE / MPS 的 `p50` / `p99` | 既有锚点：**141 µs vs 690 µs**（`memo_03` §1.1）|
+| **③ LLR 回交** | 到 LDPC 能读 | 契约：host `I8` / accelerator `F16`（§1.1bis 决策 1）|
+
+★★ **并且必须与臂 0 并排报"每跳 dispatch 数"**（今天 `fused=yes` 是 **3.0000/跳**，
+见 `pusch_demodulator_impl.cpp:312-327` 与 `OCUDU_LANE_FUSE_EQDEMOD` 的注释）。
+★ **若 AI 路径把 dispatch 数推回 4+，它就是拿 lane 的收益换算术的收益** ——
+**这个结论只有这个数能给出**。
+
+#### 1.5.6 ★★ 基线有两条，不得混用
+
+| 基线 | 服务哪个问题 | 状态 |
+|---|---|---|
+| **CPU generic 链**（`ul_chain_replay --cpu`）| ★ P0 的 `Δ_max` 上界裁决（**G0**）：三台机器同一份代码 ⇒ 可比 | ✅ 已在 `memo_08` §6.1 定义 |
+| ★★ **`gpu` lane（`metal_mmse` + `metal` 均衡 + metal 解映射）** | ★★ **本节的 A/B**："AI 值不值得接链"（**G4/G5**）| ⬜ **本节定义**，见下 |
+
+★ **两条基线服务的问题不同，禁止互相替代**：
+`memo_08` 的 `Δ_max` 回答"**还有多少空间**"，本节回答"**我们有没有拿到它，以及代价是什么**"。
+
+#### 1.5.7 ★★ 臂定义与判据（★ 预登记，飞之前写死）
+
+**主指标与判据**（照 `memo_08` §1 的体例）：
+
+| # | 判据 | 阈值 | 不通过的后果 |
+|---|---|---|---|
+| ★★ **判据 0（回归门）** | `gpu + auto` 与今天 `gpu` **逐位一致**；`gpu + classic` 亦然 | **逐位** | ★ **臂定义作废**，先修开关 |
+| ★★ **判据 1（主）** | **CRC 不劣化**：AI 臂的 TB 级失败率**不高于**臂 0，且 95% CI 上界 ≤ **+1.0 pp** | 配对 McNemar + Newcombe CI（照 `memo_08` §7.2）| 不接链 |
+| ★★ **判据 2（机制）** | **每跳 dispatch 数不增加**，且**三段时延分解**给全（含 `p99`）| 并排报 | ★ 若 dispatch 增加，**必须写明它换来了什么** |
+| ★★ **判据 3（上报义务）** | `memo_07` §7 的 **R1–R5 全部有值且有限**；`memo_08` §9 的 **F1–F6 指纹先跑** | 指纹全过 | ★ 标 `Not Run`，不得当作数值结果 |
+| ★ **判据 4（回退/仲裁率）** | ★ **回退次数与原因必须与收益一起报**（只报收益 = 不诚实的比较，§1.4 裁决 4）| 计数并打印 | — |
+
+**臂序列（★ 按"先便宜后贵"排，前两臂与模型无关）**：
+
+| 臂 | 内容 | 产出 | 为什么先做 |
+|---|---|---|---|
+| **臂 0** | `gpu + classic` | ★ 对照基线（含 dispatch 数 + 三段时延）| 必须与 AI 臂**同一批样本、同一环境** |
+| ★★ **臂 1** | `gpu + ai`，但 AI 后端是**恒等占位**（直接转调经典实现）| ★★ **接缝开销本身**：DSO/lifecycle、三段时延、dispatch 计数 | ★★ **零模型**。它把"**接缝值多少**"与"**模型质量**"彻底分开 |
+| **臂 2** | `gpu + ai` + **未训练**的模型（形状/量程/契约测试）| 契约测试（§1.2 的 10 条）、量程与 NaN 指纹 | 仍不看精度 |
+| **臂 3** | `gpu + ai` + **训练后**的模型 | ★ **判据 1–4** | 真正的裁决 |
+| ★ **臂 4（消融）** | 臂 3 去掉辅助头（只留 LLR 头）| 多任务的影响（§2.5 消融 1）| — |
+| ★ **臂 5（网格写入者）** | `gpu + ai + --pusch_dft_type metal` | ★ 回答 §1.5.3 末的问题：**AI 路径是否还需要 CPU DFT** | — |
+
+★★ **臂 1 是关键**：第一次端到端飞行一旦劣化，**没有它你分不清是接缝还是网络**。
+
+#### 1.5.8 ★★ 环境 pin 纪律（★ 由本次勘察新增的一条硬约束）
+
+★★ **只 pin `expert_phy` 是不够的。** `lib/phy/` 下有 **123 个 `getenv`**，其中一大批**直接改走哪条路**，
+且**大多是"unset 即 on"**：
+
+| 旋钮 | 作用 | 形态 |
+|---|---|---|
+| `OCUDU_LANE_FUSE_EQDEMOD` | fused equalize+demap 路由 | **unset = on**，`0` 是逃生口 |
+| `OCUDU_CE_LANE_ORDER` | 延迟 hop 的 lane 顺序（默认 `merged`）| 值选择 |
+| `OCUDU_PUSCH_FORCE_SERIAL` | 强制同步链 | **unset = off** |
+| `OCUDU_EQ_DEFER_ENCODE` / `OCUDU_EQ_DIRECT_GRID` | 延迟/直连网格路由 | unset = on |
+
+⇒ ★★ **腿协议必须新增一条"环境 stamp"**：把全部 `OCUDU_*` 打印进腿日志，
+**A/B 两臂的 stamp 必须逐项相同**（差异即两个变量）。
+★ 这比事后排查便宜得多，且它是"开关没生效 ≡ 没有效果"的**可执行形式**。
+
+#### 1.5.9 ★★ 两个前置风险（★ 开工前必须清掉）
+
+| # | 风险 | 事实 | 处置 |
+|---|---|---|---|
+| ★★ **P1** | ★★ **M2 的 NaN 竞态现在挡住这条 A/B** | NaN 在 `port_channel_estimator_metal_mmse_impl` 的 **deferred/async hop**（`memo_10` §7.5），而 **async 正是 `--phy_pipeline gpu` 的默认**：`engine_run()` 的 `defer` **故意不给默认值**，注释逐字说合并路径"**是每一个宽 hop 都会走的、也是空中接口唯一会跑的那条**" | ★★ **先修**。否则链路自适应的输入偶尔是 `NaN`/`+inf` ⇒ **CRC 与 SINR 都会抖**，A/B 结论不可信。★ 上一会话裁定"先记账"，**现在它的重开条件到了** |
+| ★★ **P2** | ★★ **M4 并不免疫** | 同一竞态在 M4 上只是"当前时序恰好满足"（`memo_10` §7.5 的"被推翻的假设"清单）| ★ **前置检查**：A/B 前先在 M4 上按 `memo_10` §7.5 的复现法跑一轮非确定性检测（同一 seed 多次）|
+
+#### 1.5.10 与其余章节的关系（★ 避免交叉引用断裂）
+
+| 关联 | 说明 |
+|---|---|
+| §1.0 深度表 | ★ 本节落实"深度 3 是一个单元"这一条 |
+| §1.1bis 决策 1（LLR 位宽）| ★ 判据 3 的 `③ LLR 回交` 会**直接量到它**；本节不替它裁决 |
+| §1.3 路线 A | ★ 本节就是路线 A 的**第一个可执行落点** |
+| §1.4 信任/回滚 | ★ 判据 4 落实"回退率必须与收益一起报" |
+| **`memo_07` §7** | ★ **R1–R5 是本节的判据 3** |
+| **`memo_08` §6/§7/§9** | ★ 基线两条（§1.5.6）、配对统计（判据 1）、数值指纹（判据 3）|
+| **`memo_09` §8** | ★ 每腿声明"采集意图"；本节的臂序列**每臂都要一份** |
+| §4 G4/G5 | ★ 判据 1–4 是 G4/G5 的**第一批具体判据** |
+
+---
+
 ## 2. 模型设计：一个网络做深度 3
 
 任务重述：**一个**网络，`f(时频网格, DM-RS 位置张量, data-RE 索引, PUSCH/DM-RS 元数据)`
@@ -406,11 +607,7 @@ local symbol distribution"*。让网络知道"哪些是已知的、哪些是待�
 
 | 引擎 | 定位 | 依据 |
 |---|---|---|
-| ★ **ANE** | **首选** | ① 仓库架构原则 *"AI 推理走 NPU"*（`apple_silicon_heterogeneous_gnb_plan.md:17`，
-且该文件已把"**AI 化接收机（信道估计/检测）**"列为 NPU 的承接对象）；
-② ★ **本机实测**：HELENA（116 k）在 **M4 Pro** 上 **ANE p50 141 µs / p99 208**，
-而**同机 MPS/GPU 路径是 p50 690 µs**——**ANE 快 4.9×**（AI CE G1）；
-③ AI CE 的引擎栈（零拷贝 CoreML、专用 worker 线程、2 s ANE keep-alive、宽度分桶）**已经在 ANE 上跑通** |
+| ★ **ANE** | **首选** | ① 仓库架构原则 *"AI 推理走 NPU"*（`apple_silicon_heterogeneous_gnb_plan.md:17`，且该文件已把"**AI 化接收机（信道估计/检测）**"列为 NPU 的承接对象）；② ★ **本机实测**：HELENA（116 k）在 **M4 Pro** 上 **ANE p50 141 µs / p99 208**，而**同机 MPS/GPU 路径是 p50 690 µs**——**ANE 快 4.9×**（AI CE G1）；③ AI CE 的引擎栈（零拷贝 CoreML、专用 worker 线程、2 s ANE keep-alive、宽度分桶）**已经在 ANE 上跑通** |
 | Metal / MPS | **对照臂 / 回退** | 深度 3 若用卷积/ResNet 形态，MPS 未必像 HELENA 的 MHA 那样退化到 CPU ⇒ **用测量决定**，不预设 |
 | CPU | 经典路径兜底 | 已在链上 |
 
@@ -807,4 +1004,6 @@ fp8-E4M3（存在但被拒的路径）**。
 
 | 日期 | 类型 | 内容 | 依据 |
 |---|---|---|---|
+| 2026-10-08 | 设计 | ★★ **新增 §1.5：AI 路径怎么进链** —— 控制变量 `--expert_phy.pusch_receiver_backend`（取值 `auto` 或 `classic` 或 `ai`，`auto` = 今天的 GPU lane）、冲突矩阵、落点（工厂的一对后端，接缝 = `pusch_processor_impl.cpp:264/:559/:567`）、**三段时延分解**、两条基线、**臂 0–5**、判据 0–4、**环境 pin 纪律**、两个前置风险 | 用户裁定 2026-10-08；本次代码勘察（`du_low_phy_pipeline.h`、`ocudu_metal_queue.mm:1246`、`p185/p187` 腿日志）|
+| 2026-10-08 | 文档 | ★★ **落点规则确立：增补进现有文件，不新建 memo 文件**（详见 `wip/README.md` §4.1） | 用户裁定 2026-10-08 |
 | 2026-10-08 | 文档 | 本工作流开工前的调研与设计完成，拆分为高层文档 + 本设计文档；开工前功课见 §9 | `memo_01`–`memo_09` |
