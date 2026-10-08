@@ -1708,6 +1708,112 @@ dft_metal_engine::~dft_metal_engine()
   }
 }
 
+/// \brief Whether \c size is of the family the kernel implements (2^k * 3^m, 2..max_size).
+static bool dft_size_in_family(unsigned size)
+{
+  if (size < 2 || size > dft_metal_engine::max_size) {
+    return false;
+  }
+  unsigned rem = size;
+  while (rem % 2 == 0) {
+    rem /= 2;
+  }
+  while (rem % 3 == 0) {
+    rem /= 3;
+  }
+  return rem == 1;
+}
+
+/// \brief Creates the process-wide device, queue and pipeline if they do not exist yet.
+///
+/// Size-independent by construction, and that is the point: the pipeline is the object a dispatch is
+/// validated against, so it is also what answers whether a size can be dispatched, and a CAPABILITY QUERY
+/// has to be able to ask without disturbing a running engine. An earlier version answered the query by
+/// constructing a whole engine instead, whose warm-up dispatch perturbed the very ordering the strict-mode
+/// tests assert - the query looked pure and was not.
+static bool dft_ensure_resources()
+{
+  std::lock_guard<std::mutex> lock(dft_resources_mutex());
+  dft_resources_t& res = dft_resources();
+  if (res.device != nil) {
+    return true;
+  }
+  res.device = MTLCreateSystemDefaultDevice();
+  if (res.device == nil) {
+    ocudulog::fetch_basic_logger("PHY").error("Metal DFT: no Metal device available");
+    return false;
+  }
+  /// \brief Which queue the front-end DFT commits on.
+  ///
+  /// DEFAULT: the front-end queue (shared_queue::queue()), which is what this engine has always used - the
+  /// per-symbol producers have a queue of their own so that the DFT of a slot overlaps the back-end lane of
+  /// the previous one.
+  ///
+  /// OCUDU_DFT_BACKEND_QUEUE=1 commits them on the BACK-END queue instead, which is the queue the receiving
+  /// chain's late stages (the estimator and the lane burst) use. That is an EXPERIMENT, not a candidate: with
+  /// both stages on one queue, submission order alone orders the DFT before the lane's burst, so the
+  /// cross-queue fence the burst used to encode stops being what provides the
+  /// ordering - while still being encoded, so the two arms differ ONLY in whether the ordering crosses a
+  /// queue. Its purpose is to price the fence, which is the precondition for design document 5.9's step 1:
+  /// D1 wants the DFT on the lane's queue, and that change is only worth its cost if the cross-queue relation
+  /// is what is expensive. If the two arms read the same, the fence is free and D1 becomes purely about the
+  /// 1.83 CPU commits per hop it removes.
+  auto dft_queue = []() {
+    // D1 step 1: a block that may be RELEASED belongs to whoever commits it, and that is the lane, on
+    // the back-end queue - a command buffer is bound to the queue that created it, so a block created
+    // on the front-end queue could not be adopted into the lane's chain. Arming the release therefore
+    // selects the queue as well; the two are one decision, not two knobs to keep in step.
+    if (block_release_requested()) {
+      std::fprintf(stderr,
+                   "[dft_release] D1 step 1: the DFT's open block is handed over uncommitted "
+                   "(the default since 5.9.49), so it is created on the BACK-END queue - the queue the "
+                   "lane commits on\n");
+      return metal::shared_queue::backend_queue();
+    }
+    const char* env = std::getenv("OCUDU_DFT_BACKEND_QUEUE");
+    if ((env != nullptr) && (std::strtoul(env, nullptr, 10) != 0)) {
+      std::fprintf(stderr,
+                   "[dft_queue] EXPERIMENT: the front-end DFT commits on the BACK-END queue "
+                   "(OCUDU_DFT_BACKEND_QUEUE=1)\n");
+      return metal::shared_queue::backend_queue();
+    }
+    return metal::shared_queue::queue();
+  };
+  res.queue = dft_queue();
+
+  NSString* lib_path = resolve_dft_metallib_path();
+  if (lib_path == nil) {
+    ocudulog::fetch_basic_logger("PHY").error(
+        "Metal DFT: pre-compiled shader library 'ocudu_dft.metallib' not found (searched the configure-time "
+        "path, next to the executable, and the working directory)");
+    return false;
+  }
+  NSError*       error   = nil;
+  id<MTLLibrary> library = [res.device newLibraryWithURL:[NSURL fileURLWithPath:lib_path] error:&error];
+  if (library == nil) {
+    ocudulog::fetch_basic_logger("PHY").error("Metal DFT: failed to load the shader library {}: {}",
+                                              lib_path.UTF8String,
+                                              error != nil ? error.localizedDescription.UTF8String : "nil error");
+    return false;
+  }
+  id<MTLFunction> fn = [library newFunctionWithName:@"dft_dit"];
+  if (fn == nil) {
+    ocudulog::fetch_basic_logger("PHY").error("Metal DFT: kernel 'dft_dit' not found in the shader library");
+    return false;
+  }
+  res.pipeline = [res.device newComputePipelineStateWithFunction:fn error:&error];
+  if (res.pipeline == nil) {
+    ocudulog::fetch_basic_logger("PHY").error("Metal DFT: pipeline creation failed: {}",
+                                              error != nil ? error.localizedDescription.UTF8String : "nil error");
+    return false;
+  }
+  // The pipeline, not the device, is the authority on the threadgroup size (see dft_threads_fit()).
+  res.max_tg_threads = res.pipeline.maxTotalThreadsPerThreadgroup;
+
+  ocudulog::fetch_basic_logger("PHY").debug("Metal DFT: loaded pre-compiled shader library {}", lib_path.UTF8String);
+  return true;
+}
+
 bool dft_metal_engine::init(unsigned size, bool inverse)
 {
   // Register the process-exit stats report exactly once (the counters live for the process).
@@ -1719,11 +1825,11 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
   });
 #endif
 
-  if (size < 2 || size > max_size) {
-    return false;
-  }
   // Factor N = 2^k * 3^m (the kernel's supported family); anything else is rejected here
   // (the factory then falls back per configuration).
+  if (!dft_size_in_family(size)) {
+    return false;
+  }
   {
     unsigned rem = size;
     unsigned k   = 0;
@@ -1736,9 +1842,6 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
       rem /= 3;
       ++m;
     }
-    if (rem != 1) {
-      return false;
-    }
     auto* engine   = new dft_engine_impl();
     impl           = engine;
     engine->n      = size;
@@ -1748,100 +1851,13 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
   auto* engine      = static_cast<dft_engine_impl*>(impl);
   engine->inverse   = inverse ? 1u : 0u;
 
-  // Device, queue and pipeline are shared process-wide (they are size-independent).
-  {
-    std::lock_guard<std::mutex> lock(dft_resources_mutex());
-    dft_resources_t& res = dft_resources();
-    if (res.device == nil) {
-      res.device = MTLCreateSystemDefaultDevice();
-      if (res.device == nil) {
-        ocudulog::fetch_basic_logger("PHY").error("Metal DFT: no Metal device available");
-        discard_open_block(engine);
-        delete engine;
-        impl = nullptr;
-        return false;
-      }
-      // rief Which queue the front-end DFT commits on.
-      ///
-      /// DEFAULT: the front-end queue (shared_queue::queue()), which is what this engine has always used - the
-      /// per-symbol producers have a queue of their own so that the DFT of a slot overlaps the back-end lane of
-      /// the previous one.
-      ///
-      /// OCUDU_DFT_BACKEND_QUEUE=1 commits them on the BACK-END queue instead, which is the queue the receiving
-      /// chain's late stages (the estimator and the lane burst) use. That is an EXPERIMENT, not a candidate: with
-      /// both stages on one queue, submission order alone orders the DFT before the lane's burst, so the
-      /// cross-queue fence the burst used to encode stops being what provides the
-      /// ordering - while still being encoded, so the two arms differ ONLY in whether the ordering crosses a
-      /// queue. Its purpose is to price the fence, which is the precondition for design document 5.9's step 1:
-      /// D1 wants the DFT on the lane's queue, and that change is only worth its cost if the cross-queue relation
-      /// is what is expensive. If the two arms read the same, the fence is free and D1 becomes purely about the
-      /// 1.83 CPU commits per hop it removes.
-      auto dft_queue = []() {
-        // D1 step 1: a block that may be RELEASED belongs to whoever commits it, and that is the lane, on
-        // the back-end queue - a command buffer is bound to the queue that created it, so a block created
-        // on the front-end queue could not be adopted into the lane's chain. Arming the release therefore
-        // selects the queue as well; the two are one decision, not two knobs to keep in step.
-        if (block_release_requested()) {
-          std::fprintf(stderr,
-                       "[dft_release] D1 step 1: the DFT's open block is handed over uncommitted "
-                       "(the default since 5.9.49), so it is created on the BACK-END queue - the queue the "
-                       "lane commits on\n");
-          return metal::shared_queue::backend_queue();
-        }
-        const char* env = std::getenv("OCUDU_DFT_BACKEND_QUEUE");
-        if ((env != nullptr) && (std::strtoul(env, nullptr, 10) != 0)) {
-          std::fprintf(stderr,
-                       "[dft_queue] EXPERIMENT: the front-end DFT commits on the BACK-END queue "
-                       "(OCUDU_DFT_BACKEND_QUEUE=1)\n");
-          return metal::shared_queue::backend_queue();
-        }
-        return metal::shared_queue::queue();
-      };
-      res.queue = dft_queue();
-
-      NSString* lib_path = resolve_dft_metallib_path();
-      if (lib_path == nil) {
-        ocudulog::fetch_basic_logger("PHY").error(
-            "Metal DFT: pre-compiled shader library 'ocudu_dft.metallib' not found (searched the configure-time "
-            "path, next to the executable, and the working directory)");
-        discard_open_block(engine);
-        delete engine;
-        impl = nullptr;
-        return false;
-      }
-      NSError*       error   = nil;
-      id<MTLLibrary> library = [res.device newLibraryWithURL:[NSURL fileURLWithPath:lib_path] error:&error];
-      if (library == nil) {
-        ocudulog::fetch_basic_logger("PHY").error("Metal DFT: failed to load the shader library {}: {}",
-                                                  lib_path.UTF8String,
-                                                  error != nil ? error.localizedDescription.UTF8String : "nil error");
-        discard_open_block(engine);
-        delete engine;
-        impl = nullptr;
-        return false;
-      }
-      id<MTLFunction> fn = [library newFunctionWithName:@"dft_dit"];
-      if (fn == nil) {
-        ocudulog::fetch_basic_logger("PHY").error("Metal DFT: kernel 'dft_dit' not found in the shader library");
-        discard_open_block(engine);
-        delete engine;
-        impl = nullptr;
-        return false;
-      }
-      res.pipeline = [res.device newComputePipelineStateWithFunction:fn error:&error];
-      if (res.pipeline == nil) {
-        ocudulog::fetch_basic_logger("PHY").error("Metal DFT: pipeline creation failed: {}",
-                                                  error != nil ? error.localizedDescription.UTF8String : "nil error");
-        discard_open_block(engine);
-        delete engine;
-        impl = nullptr;
-        return false;
-      }
-      // The pipeline, not the device, is the authority on the threadgroup size (see dft_threads_fit()).
-      res.max_tg_threads = res.pipeline.maxTotalThreadsPerThreadgroup;
-
-      ocudulog::fetch_basic_logger("PHY").debug("Metal DFT: loaded pre-compiled shader library {}", lib_path.UTF8String);
-    }
+  // Device, queue and pipeline are shared process-wide (they are size-independent). On failure the engine
+  // object is dropped: nothing has been allocated for this size yet.
+  if (!dft_ensure_resources()) {
+    discard_open_block(engine);
+    delete engine;
+    impl = nullptr;
+    return false;
   }
 
   // The pipeline is the authority on the threadgroup size, so the size is accepted only if it takes the
@@ -1949,13 +1965,14 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
 
 bool dft_metal_engine::is_size_runnable(unsigned size)
 {
-  // Deliberately the SAME predicate init() applies, run on a scratch engine: a second copy of the rule
-  // would be one more place for the query and the dispatch to disagree, which is the failure this method
-  // exists to expose. init() sets up the process-wide device/queue/pipeline on the first call and reuses
-  // them afterwards, so the cost is the size's own tables - and they are exactly what init() needs to
-  // answer.
-  dft_metal_engine probe;
-  return probe.init(size, /*inverse=*/false);
+  // The same two predicates init() applies, and only those two: a second copy of the rule would be one more
+  // place for the query and the dispatch to disagree, which is the failure this method exists to expose.
+  //
+  // What it must NOT do is construct an engine. init() also builds the size's tables and runs the warm-up
+  // dispatch, and those touch process-wide state - an earlier version of this method built a scratch engine
+  // to reuse the predicate verbatim, and that warm-up perturbed the ordering the strict-mode tests assert.
+  // A capability query has to be answerable without disturbing a running engine.
+  return dft_size_in_family(size) && dft_ensure_resources() && dft_threads_fit(size);
 }
 
 bool dft_metal_engine::submit_slot(const void* in, void* out, unsigned slot)

@@ -19,6 +19,7 @@
 
 #include "ocudu/adt/span.h"
 #include "ocudu/phy/generic_functions/dft_processor.h"
+#include "../dft_processor_metal.h"
 #include "ocudu/phy/generic_functions/generic_functions_factories.h"
 #include "ocudu/phy/lower/modulation/modulation_factories.h"
 #include "ocudu/phy/lower/modulation/ofdm_demodulator.h"
@@ -84,9 +85,20 @@ int main()
   ::setenv("OCUDU_DFT_RELEASE_BLOCK", "1", 1);
   ::setenv("OCUDU_GPU_STRICT", "1", 1);
 
-  // Valid size for both backends: 2048 = 2^11, 106 RB grid.
-  const unsigned          dft_size = 2048;
-  const unsigned          bw_rb    = 106;
+  // Valid size for both backends: 2048 = 2^11, 106 RB grid. The size follows THIS machine: a device whose
+  // DFT pipeline cannot take the 2048 threadgroup runs the OFDM demodulator on the default DFT instead,
+  // which exposes no transform pipeline at all, and then there is nothing here to exercise. 512 with a
+  // 25 RB grid is the analogous 5 MHz cell (the pairing dft_processor_metal_unit_test uses for its own
+  // grid write); the batching and the device grid write are size-agnostic.
+  const bool     large_cell = dft_processor_metal::is_supported_size_on_this_device(2048);
+  const unsigned dft_size   = large_cell ? 2048U : 512U;
+  const unsigned bw_rb      = large_cell ? 106U : 25U;
+  if (!large_cell) {
+    std::printf("[DEL] this device's DFT pipeline cannot take the 2048 threadgroup - running the 5 MHz cell "
+                "(dft_size %u, %u RB) instead\n",
+                dft_size,
+                bw_rb);
+  }
   const subcarrier_spacing scs     = subcarrier_spacing::kHz30;
   const cyclic_prefix      cp      = cyclic_prefix::NORMAL;
   const unsigned           rg_size = bw_rb * NOF_SUBCARRIERS_PER_RB;

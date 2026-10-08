@@ -83,7 +83,7 @@ private:
   // See interface for documentation.
   bool set_carrier_center_frequency(double carrier_center_frequency_Hz) override;
 
-  /// rief One symbol whose DFT is still in flight (submitted but not post-processed yet).
+  /// \brief One symbol whose DFT is still in flight (submitted but not post-processed yet).
   struct in_flight_symbol {
     lower_phy_rx_symbol_context context;
     unsigned                    slot = 0;
@@ -114,10 +114,10 @@ private:
   /// the same bound the DFT ring uses (ofdm_symbol_demodulator_impl::max_pipeline_depth).
   static constexpr unsigned nof_symbol_buffers = 8;
 
-  /// rief Waits for the oldest in-flight symbol, writes it into the grid and reports it.
+  /// \brief Waits for the oldest in-flight symbol, writes it into the grid and reports it.
   void finish_oldest_symbol();
 
-  /// rief Finishes every in-flight symbol (used at the end of a slot and on slot changes).
+  /// \brief Finishes every in-flight symbol (used at the end of a slot and on slot changes).
   void drain_pipeline();
 
   std::atomic<bool>                           stopped = false;
