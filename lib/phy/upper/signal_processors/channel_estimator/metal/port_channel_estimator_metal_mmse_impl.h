@@ -112,8 +112,24 @@ public:
   ///
   /// The equalizer scales its soft bits with this value. It is reduced on the device out of the
   /// same h the estimates come from, so a consumer never has to read the grid before dispatching
-  /// the equalizer. \note The reduction order is not the host's, so the value matches
-  /// get_noise_variance() to floating-point reassociation, not bit for bit.
+  /// the equalizer.
+  ///
+  /// \warning This value is NOT interchangeable with get_noise_variance(). It is systematically
+  /// LOWER, measured at 1.26x (about 1 dB) on a real capture, and that is a formula difference
+  /// rather than the floating-point reassociation this note used to claim: K4 predicts the pilot
+  /// observation from the MMSE-smoothed h, whose noise the smoothing has already reduced, whereas
+  /// the host path predicts from the least-squares pilots. The two host-side reductions agree with
+  /// each other exactly, which is what identifies K4 as the outlier: on capture C_1047_17921 of
+  /// corpus aillr_cap002 this extraction's own sigma2 slot reads 1.49687e-03 and the host
+  /// accumulation reads 1.49959e-03 (a ratio of 1.0018), while K4 reads 1.18965e-03 (a ratio of
+  /// 0.7948 against the same sigma2).
+  ///
+  /// The difference is visible in the published SINR of the two back ends on ONE grid: 19.44 dB
+  /// on the air leg against 23.19 dB for the same reception replayed through the host path. Making
+  /// the two agree is an OPEN ISSUE, not a settled equivalence; until then a measurement that reads
+  /// this value must say which back end produced it.
+  /// OCUDU_CE_NV_CHECK=<band> prints the ratio and OCUDU_CE_NV_OVERRIDE=<value> substitutes a
+  /// known value, which is how "the estimate is wrong" is told apart from "only the noise scale is".
   const float* device_noise_variance() const { return gpu_nv_ready ? gpu_nv : nullptr; }
 
   /// Device-side per-symbol channel estimates of the last hop: [layer][total_re] complex cbf16,

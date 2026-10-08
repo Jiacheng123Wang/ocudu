@@ -290,11 +290,23 @@ bool port_channel_estimator_average_impl::do_finish(const dmrs_symbol_list& pilo
 
   // The hop's noise variance: the DEVICE's when a backend reduced one where the estimates already
   // live (the Metal MMSE estimator does, K4 - see get_device_noise_variance()), the host's
-  // accumulation otherwise. It is the same quantity with the same normalization and the same SINR
-  // bound - the kernel is handed nof_dmrs_pilots, nof_cdm and min_snr_power for exactly that reason -
-  // so which one runs does not change what is published. What it DOES change is where the value comes
-  // from: the host's accumulation reads the pilots of the estimated grid, which a fused backend stops
-  // unpacking once every reporting value is produced on the device (batch 5c).
+  // accumulation otherwise. What it changes is where the value comes from: the host's accumulation
+  // reads the pilots of the estimated grid, which a fused backend stops unpacking once every
+  // reporting value is produced on the device (batch 5c).
+  //
+  // WARNING: the two branches are NOT interchangeable, and this comment used to claim they were
+  // ("the same quantity with the same normalization ... so which one runs does not change what is
+  // published"). Measured on one real capture (C_1047_17921 of corpus aillr_cap002), with the SAME
+  // grid and the SAME binary: the device branch publishes 1.18965e-03 and the host branch
+  // 1.49959e-03, a ratio of 1.26 (about 1 dB), and the published SINR of the two back ends differs
+  // accordingly (19.44 dB on the air leg against 23.19 dB for the same reception replayed through
+  // the host path). The two HOST-side reductions agree with each other to 0.2% - this estimator's
+  // own extraction sigma2 reads 1.49687e-03 - which is what identifies the device reduction as the
+  // outlier rather than a difference in the inputs. K4 predicts the pilot observation from the
+  // MMSE-smoothed h, whose noise the smoothing has already reduced, while both host paths predict
+  // from the least-squares pilots; that is the leading explanation and it has NOT been confirmed.
+  // Reconciling the two is an OPEN ISSUE. Until it is, a measurement that reads this value must
+  // state which back end produced it, and must not compare an air-leg value against an offline one.
   const float host_noise_acc = noise_var; // the host's own accumulation, before either branch runs
   if (const float* device_noise_variance = get_device_noise_variance(); device_noise_variance != nullptr) {
     noise_var = *device_noise_variance;

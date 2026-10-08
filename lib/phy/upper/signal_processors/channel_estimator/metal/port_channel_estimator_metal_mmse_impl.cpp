@@ -5158,15 +5158,19 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
     run_pending_corr_checks();
   }
 
-  // TEMPORARY DIAGNOSTIC (OCUDU_CE_NV_CHECK=<band>): the published noise variance against the
+  // DIAGNOSTIC (OCUDU_CE_NV_CHECK=<band>): the published noise variance against the
   // extraction's OWN sigma2 slot, on the same hop, after the same wait. Both are device reductions of
   // the same estimator (K4 reduces it from h at the pilot positions, the extraction's kernel from the
-  // smoothed least-squares pilots), so they agree to a fraction of a dB by construction - the unit test
-  // prints the two paths' cross difference as 0.8 to 1.4 dB, and a wild ratio is therefore a fact about
-  // ONE of the two, not about the estimator. Printed only when the ratio leaves the band, so a clean
+  // smoothed least-squares pilots), and this note used to say they agree to a fraction of a dB by
+  // construction. THEY DO NOT: measured on C_1047_17921 of corpus aillr_cap002 they differ by 1.26x
+  // (about 1 dB) - nv = 1.18965e-03 against sigma2 = 1.49687e-03, ratio 0.7948 - while the two
+  // HOST-side reductions agree with each other to 0.2%. Reconciling them is an OPEN ISSUE (see the
+  // warning on device_noise_variance() in the header). A wild ratio is therefore a fact about ONE of
+  // the two, not about the estimator. Printed only when the ratio leaves the band, so a clean
   // hop costs one compare and the timing of the hop is not disturbed by a per-hop write. The band IS
   // the argument so the instrument can be proved to fire (band 1.001 prints nearly every hop) - an
   // instrument that never speaks has to be shown able to speak before its silence means anything.
+  // KEPT rather than retired: this is the regression check for the open issue above.
   if (const char* nv_check = std::getenv("OCUDU_CE_NV_CHECK");
       (nv_check != nullptr) && (gpu_nv != nullptr) && (gpu_ls_sigma2 != nullptr)) {
     const double band    = std::strtod(nv_check, nullptr);
