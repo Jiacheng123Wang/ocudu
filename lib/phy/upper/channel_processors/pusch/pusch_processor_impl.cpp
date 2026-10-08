@@ -692,6 +692,129 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
                    pdu.slot.system_slot());
       std::fclose(f);
     }
+
+    // ---- The self-describing sidecar (corpus design, A6 stage 1) --------------------------------
+    //
+    // WHY IT EXISTS, and why it is a second file rather than more columns. The CSV above is parsed by
+    // positional unpacking (ai_train/build_labels.py), so appending a column breaks every reader; more to
+    // the point, a column cannot describe itself. The design's rule is that each record carries its own
+    // layout instead of relying on a convention, because conventions drift: the comment above the grid
+    // dump says [port][symbol][re] while the loops below write [symbol][port][re], and that has never
+    // shown up because every capture so far is single-port, where the two orders coincide.
+    //
+    // WHAT IT ADDS THAT THE CSV CANNOT. Two fields unblock a measurement that is currently impossible:
+    // bwp_start_rb and bwp_size_rb. The grid a capture stores is the ALLOCATION, not the BWP, and the
+    // DM-RS sequence is defined against Point A (absolute CRB 0), so without the allocation's absolute
+    // position the reference symbols cannot be reconstructed at all - which is what stopped the DM-RS
+    // reference from ever matching (see memo 08 section 16). k0 alone does not say where it came from.
+    //
+    // The grid is deliberately NOT written twice: this file is metadata only. It carries no label
+    // section (the TB is written by the DD-label hook and paired by slot) and no measurements section
+    // (the per-RE post-equalization noise needs the demodulator's internals - that is A6b, on its own
+    // opt-in hook).
+    std::snprintf(path, sizeof(path), "%s/record.jsonl", dump_dir);
+    f = std::fopen(path, "a");
+    if (f != nullptr) {
+      const unsigned dmrs_type_v = std::holds_alternative<ocudu::pusch_processor::dmrs_configuration>(pdu.dmrs)
+                                       ? static_cast<unsigned>(
+                                             std::get<ocudu::pusch_processor::dmrs_configuration>(pdu.dmrs).dmrs)
+                                       : 0;
+      unsigned cdm_groups = 0;
+      unsigned scr_id     = 0;
+      unsigned n_scid_v   = 0;
+      if (std::holds_alternative<ocudu::pusch_processor::dmrs_configuration>(pdu.dmrs)) {
+        const auto& dmrs_cfg = std::get<ocudu::pusch_processor::dmrs_configuration>(pdu.dmrs);
+        cdm_groups           = dmrs_cfg.nof_cdm_groups_without_data;
+        scr_id               = dmrs_cfg.scrambling_id;
+        n_scid_v             = dmrs_cfg.n_scid;
+      }
+      const unsigned rv       = pdu.codeword.has_value() ? pdu.codeword->rv : 0;
+      const unsigned new_data = pdu.codeword.has_value() ? (pdu.codeword->new_data ? 1U : 0U) : 1U;
+      // The CSV branch below computes its own mask; this one is the sidecar's, so both records name the same set.
+      unsigned sidecar_dmrs_mask = 0;
+      for (unsigned s = 0; s != MAX_NSYMB_PER_SLOT; ++s) {
+        sidecar_dmrs_mask |= (pdu.dmrs_symbol_mask.test(s) ? 1U : 0U) << s;
+      }
+      // The stamp identifies the binary that produced the record. Accepted only as [A-Za-z0-9._-], because
+      // the value goes into a hand-built JSON line and no escaping is worth getting wrong for a build id -
+      // anything else is written as null rather than guessed at.
+      const char* stamp_raw = std::getenv("OCUDU_CORPUS_BINARY_STAMP");
+      bool        stamp_ok  = (stamp_raw != nullptr) && (stamp_raw[0] != '\0');
+      if (stamp_ok) {
+        for (const char* c = stamp_raw; *c != '\0'; ++c) {
+          const bool safe = ((*c >= '0') && (*c <= '9')) || ((*c >= 'a') && (*c <= 'z')) ||
+                            ((*c >= 'A') && (*c <= 'Z')) || (*c == '.') || (*c == '_') || (*c == '-');
+          if (!safe) {
+            stamp_ok = false;
+            break;
+          }
+        }
+      }
+      char stamp_json[128];
+      if (stamp_ok) {
+        std::snprintf(stamp_json, sizeof(stamp_json), "\"%s\"", stamp_raw);
+      } else {
+        std::snprintf(stamp_json, sizeof(stamp_json), "null");
+      }
+      std::fprintf(f,
+                   "{\"schema\":\"ocudu-corpus-record/1\",\"idx\":%u,\"t_us\":%lld,"
+                   "\"slot\":%u,\"scs_khz\":%u,"
+                   "\"grid\":{\"file\":\"rx_%08u_prb%u.f32\",\"elem\":\"cf32\",\"endian\":\"little\","
+                   "\"dims\":[\"symbol\",\"port\",\"subcarrier\"],\"extent\":[%u,%u,%u],"
+                   "\"k0\":%u,\"k0_units\":\"subcarrier_absolute_crb\","
+                   "\"bwp_start_rb\":%u,\"bwp_size_rb\":%u,\"nof_prb\":%u,"
+                   "\"note\":\"dims recorded from the writer, not from the comment above it; the grid "
+                   "holds the ALLOCATION, absolute position = bwp_start_rb + k0/12\"},"
+                   "\"pusch\":{\"rnti\":%u,\"n_id\":%u,\"scid\":%u,\"data_scid\":%u,"
+                   "\"harq_id\":%u,\"rv\":%u,\"new_data\":%u,\"nof_tx_layers\":%u,\"nof_rx_ports\":%u,"
+                   "\"start_symbol_index\":%u,\"nof_symbols\":%u,"
+                   "\"dc_position\":%d,\"n_rapid\":%d,\"enable_transform_precoding\":%s,"
+                   "\"modulation\":%u,\"target_code_rate\":%.1f,\"tbs_lbrm\":%u},"
+                   "\"dmrs\":{\"sym_mask\":%u,\"type\":%u,\"nof_cdm_groups_without_data\":%u,"
+                   "\"scrambling_id\":%u,\"n_scid\":%u},"
+                   "\"lineage\":{\"binary_stamp\":%s}}\n",
+                   idx,
+                   static_cast<long long>(t_us),
+                   pdu.slot.system_slot(),
+                   scs_to_khz(pdu.slot.scs()),
+                   idx,
+                   n_prb,
+                   pdu.nof_symbols,
+                   static_cast<unsigned>(pdu.rx_ports.size()),
+                   static_cast<unsigned>(n_prb * NOF_SUBCARRIERS_PER_RB),
+                   k0,
+                   // The two fields the CSV never had, and the reason the DM-RS reference could not be
+                   // reconstructed: the allocation's position in the absolute CRB grid.
+                   pdu.bwp_start_rb,
+                   pdu.bwp_size_rb,
+                   n_prb,
+                   static_cast<unsigned>(pdu.rnti),
+                   pdu.n_id,
+                   n_scid_v,
+                   scr_id,
+                   static_cast<unsigned>(pdu.harq_id),
+                   rv,
+                   new_data,
+                   pdu.nof_tx_layers,
+                   static_cast<unsigned>(pdu.rx_ports.size()),
+                   pdu.start_symbol_index,
+                   pdu.nof_symbols,
+                   pdu.dc_position.has_value() ? static_cast<int>(*pdu.dc_position) : -1,
+                   pdu.n_rapid.has_value() ? static_cast<int>(*pdu.n_rapid) : -1,
+                   std::holds_alternative<ocudu::pusch_processor::dmrs_transform_precoding_configuration>(pdu.dmrs)
+                       ? "true"
+                       : "false",
+                   static_cast<unsigned>(pdu.mcs_descr.modulation),
+                   static_cast<double>(pdu.mcs_descr.target_code_rate),
+                   static_cast<unsigned>(pdu.tbs_lbrm.value()),
+                   sidecar_dmrs_mask,
+                   dmrs_type_v,
+                   cdm_groups,
+                   scr_id,
+                   n_scid_v,
+                   stamp_json);
+      std::fclose(f);
+    }
   }
 
   // ★ The interior split of the eqdem phase segment (metal_kernel_fusion 2.31): this call is where the hop's
