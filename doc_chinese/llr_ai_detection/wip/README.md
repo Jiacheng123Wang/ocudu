@@ -129,3 +129,4 @@ bash doc_chinese/llr_ai_detection/wip/next_leg_label.sh baseline        # → ai
 | 路径 | 内容 |
 |---|---|
 | `next_leg_label.sh` | 腿序号计算（`aillr` 前缀版） |
+| `A6_capture_fields_plan.md` | ★ **A6 实现方案**（采集字段补齐）：JSONL sidecar、布局自描述、A6a/A6b 拆分、验收判据 |
