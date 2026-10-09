@@ -142,3 +142,116 @@
 ★ 含训练 + ONNX 导出* —— ★★ **这是唯一一个"管线形状与我们一致"的仓库**。
 ★★ **注意**：★ 它是 **PyTorch**，★ 而 **coremltools 9 已移除 ONNX 直转**（§4 坑 3）
 ⇒ ★ **要走它必须再补一截 PyTorch → TF 或 PyTorch → CoreML 的转换**，★ **待完整报告确认可行路径**。
+
+## 7. ★★★ 完整调研报告（★ 定案，★ 含对我前一轮笔记的两处更正）
+
+### 7.1 ★★★ 决定性结论：**在 ~20 dB / 64QAM / 干净信道上，"学习的接收机胜过调好的经典接收机"没有可信证据**
+
+★★★ **文献的天花板【就是】genie/完美 CSI 的 LMMSE，而学习型只能【逼近】它**：
+
+| ★ 证据 | ★ 原文要点 |
+|---|---|
+| ★★ **DeepRx**（TWC 2021, arXiv:2005.01494）| ★ coded BER **"matches that of the LMMSE receiver with full channel knowledge"**；★ 那 ~2 dB 是**对【实用】LMMSE（LS+插值）**；★ 作者：**"When tested with data without interference, the margin is smaller."** |
+| ★★ **NVIDIA NR 接收机**（arXiv:2312.02601）| ★ **"operates less than 1 dB AWAY FROM a baseline using LMMSE + K-best"** ⇒ ★ **更差**，★ 卖**复杂度**不是准确率 |
+| ★★★ **ETH Zurich 真实 5G NR 试验台**（arXiv:2609.04004）| ★★ **"site-specific LMMSE + iterative detection and decoding achieves the LOWEST error rate observed in our datasets"** —— ★★ **胜过他们所测的每一个神经接收机，包括他们自己的 decoder-in-the-loop DUIDD** |
+
+★★★ **所以"我们的理想判决器给出 ≈0 增益"正是论文预测的结果。★ 我们已经在天花板上。**
+★★★ **不要再提"更好的深度 3"。**
+
+★ **文献里的增益全部来自"某个被破坏的假设"**：★ 稀疏导频、高 Doppler、**PA 非线性**
+（★ HybridDeepRx，arXiv:2106.16079 —— ★ **唯一在高 SNR 显示真实增益的机制**）、
+★ 小区间干扰、★ 弱的实用 CE。★★ **这些在我们的场景里都不成立。**
+
+### 7.2 ★★★ 负面/零结果（★ 应当引用，★ 其中一条直接反我）
+
+| ★ 结果 | ★ 内容 |
+|---|---|
+| ★★ **decoder-in-the-loop 的【训练】无增益** | ★ NVIDIA：**"we empirically did not observe any gains by doing so"**；★ ETH DUIDD 只从站点微调得到 **0.004 绝对 BLER** ⇒ ★★ **decoder-in-the-loop 的【评估】是必须的，【训练】不是** |
+| ★★ **标定漂移**（arXiv:2605.26157）| ★ 16 个场景里 **10 个统计打平（±0.2 dB）**；★ QPSK **差 2 dB**；★ 64QAM **架构性失败**；★ **"confidently wrong" 的比特稳定在 ~7%** |
+| ★★ **DeepRx MIMO**（arXiv:2010.16283）| ★ **~14 dB 以上出现 BER 地板** —— ★★ **我们在 19–23 dB，即已在它退化的区间之外** |
+| ★★ **Nokia OTA**（arXiv:2408.04182）| ★ LOS 训练的 DeepRx **"failed the over-the-air tests despite converging well during training"** |
+| ★ **arXiv:2509.18574** | ★ 存在的目的就是**逐块挑选**经典还是神经 ⇒ ★ **证明 DL 不是一致更好** |
+| ★★ **arXiv:2606.29345** | ★★ **MI 不能预测 BLER** ⇒ ★★ **唯一主指标 = 经真实 LDPC 译码后的 coded BLER** |
+
+★★★ **而 ETH 那条"site-specific LMMSE + IDD 最低"同时告诉我们**：
+★★ **§14.7(3) 那条"跨单元联合处理"的正解可能是 IDD（迭代检测译码），而不是一个更大的神经网络**
+—— ★ **而且 IDD 不需要 ANE、不需要训练**。
+
+### 7.3 ★★★ 证据支持什么（★ 三条动机的最终裁决）
+
+| ★ 动机 | ★ 裁决 |
+|---|---|
+| ★★★ **(a) 能量/算力分流** | ★★★ **强支持 —— 这应当是【首要理由】**。★ 实测（arXiv:2606.22283）：★ conv-resnet 上 **ANE 2063 vs GPU 142 GFLOP/s/W = 14.5×（M1）**；★ **2289 vs 175 = 13×（M5）**；★ ANE 轨道 **<6 W** vs GPU **13–21 W**。★★ **与我们的实测方向一致**（ANE 141 µs vs MPS 690 µs = 4.9×）|
+| ★★ **(b) 跨单元联合处理** | ★★ **混合偏弱** ⇒ ★ 降级为"探索" |
+| ★ **(c) 长期押注** | ★ 合理，★ 但**要表述为"能力/工具投资"，不是"准确率"** |
+
+### 7.4 ★★★ ANE 硬约束（★ 更正我 6.2 的一处）
+
+| ★ 约束 | ★ 内容 | ★ 我的更正 |
+|---|---|---|
+| ★★ **fp16 端到端** | ★ 前端接受 fp32/int32/bf16 标注，★ 但**后端不实现它们**；★ **fp32 模型 ⇒ ANE 直接被排除** | ✅ 与我实测一致 |
+| ★★★ **累加器饱和在 `2^15 = 32768`**（★ 是 fp16 上限 65504 的**一半**），★ 对 matmul/linear/**任何 ≥2 tap 的卷积** | ★★ **"一个中间部分积超过 2^15 就溢出为 `inf`，即使后续相消本可以把最终结果拉回范围内。"** | ★★★ **更正**：★ 我实测的 65504 是**逐元素通路**的上限，★ **而乘法累加通路的设计限值是 32768** ⇒ ★★ **设计必须用 32768，不是 65504** |
+| ★ **在片上工作集 2 MB（M1）**；★ roofline 脊 141 FLOP/byte；★ **0.23 ms 派发地板（M1）**；★ 0.5 pJ/FLOP；★ 85 GB/s DRAM | | ★ M4 Pro 实测 139.6 µs **未撞地板** |
+| ★★ **没有原生复数** | ★ 复乘展开为 **4 次实乘 + 2 次实加**；★ **无精度代价**（★ DeepRx：★ 复值网络 **"we have not observed any performance gains"**）| ★ 记录 |
+| ★★ **FFT 不要放 ANE** | ★ butterfly 相对稠密 matmul **无增益**；★ GPU 矩阵单元对 FFT 也无帮助（arXiv:2609.32237 "Bandwidth, Not FLOPS"）⇒ ★★ **FFT 留在 Metal**，★ 两篇独立一致 |
+| ★★ **完全无路径的算子** | ★ `reduce_prod`、scatter 家族、`mod`、`one_hot`、`non_zero`、`band_part`、`reverse_sequence`、`shape`、`sliding_windows`、逻辑与/或/异或、★ **GRU/LSTM/RNN**、★ 反三角/双曲、★ 多数随机采样 | ★ **模型里不能出现这些** |
+| ★ **原生且好** | ★ **2D 卷积（含 dilated/depthwise/grouped/transpose）**、matmul、**融合 SDPA**、layer/instance/group norm、pooling、全部逐元素与激活；★ 3×3 stride-1 自动选 Winograd；★ **张量秩 ≤5**；★ matmul 的深度轴必须 =1；★ fp16 最大核宽 13（M1）/16（A14+）| ★ **HELENA 的算子集正好在这个白名单里** |
+| ★★ **`EnumeratedShapes`（≤128）是官方推荐的高性能形状路径** | ★ 无界范围更差 | ★★ **我们上一轮的 52/106 分桶正是这个模式** ✓ |
+| ★★★ **`0 mW` 是【预期行为】，不是 bug** | ★ **"firmware holds the engine in a fully gated state … until a job arrives"** ⇒ ★★ **不能从功率轨道推断是否落在 ANE 上**；★ 要用 `MLComputePlan` + 时延对比 | ★★★ **更正我 §14.11(2) 的解读**：★ 我说 0 mW 是"零点读数/机会所在"，★ **那仍然成立，但它不能证明"没在用 ANE"** |
+| ★★ **空闲 5 s 后首次调用约 260 ms** | | ★★ **测量时必须保持引擎温热** |
+
+### 7.5 ★★★ 转换管线（★ 更正我 §7.4 的表述）
+
+★★★ **"ONNX → CoreML 已经没有了"**：★ coremltools 官方 —— *"Keras.io and ONNX converters will be
+deprecated in coremltools 6"*，★ **支持在 6.0 被【移除】**。
+★★ **官方唯一路径 = coremltools Unified Conversion API，【直接从 PyTorch】**
+（`torch.jit.trace` / `torch.export`）⇒ `convert_to="mlprogram"` + `compute_precision=FLOAT16`。
+★★ **fp32 会排除 ANE。**
+
+★★ **但注意**：★ **我们上一轮的 TF SavedModel 路线是【实测成功】的**（★ 本轮复现 ANE 139.6 µs ✓）
+—— ★ 所以**"官方主推 PyTorch"与"TF 路线仍可用"并存**，★ **选哪条取决于模型从哪来**：
+★ 复用 HELENA（TF）⇒ TF 路线；★ 用 Sionna/NeuralReceiver（PyTorch）⇒ **必须走 Unified Conversion**。
+
+★ **典型 ANE 阻碍**：★ 自定义层（只落 CPU/GPU ⇒ ★ **我们的 Metal 前后级必须是【独立阶段】，不能同图**）、
+★ RNN/LSTM/GRU、gather/scatter、M1 上的 top-k/sort、动态 slice、★ CoreML 4/5 时代的
+"Broadcastable"/"ND" 层（★ 可用模型手术退回 rank-3 层类型修复）。
+
+### 7.6 ★★ 仓库（★ 一个关键机会）
+
+| ★ 仓库 | ★ 许可 / 框架 | ★ 价值 |
+|---|---|---|
+| ★★★ **Rohde-Schwarz/NeuralReceiver** | ★ **Apache-2.0**，★ Python/**PyTorch**（Sionna 2.0.1），★ 2026-05 活跃 | ★★★ **5G NR PUSCH、DeepRx 11 层 CE+均衡+解映射、【含训练】、并导出 ONNX**（★ 神经接收机 **和** LS+ZF 经典基线都导）⇒ ★★ **与我们深度 3 形状最匹配的一个**。⚠️ **它的基线是 LS+ZF 不是 LMMSE** ⇒ ★★ **ZF 在深衰落上放大噪声，其展示的增益被夸大；引用时必须写明基线** |
+| ★★ **NVlabs/sionna** | Apache-2.0，★ PyTorch 2.x，★ 2026-09 活跃 | ★ 完整 3GPP NR 模块（PUSCH/DMRS/LDPC/TB）+ OFDM；★ **含训练**；★ **无 CoreML 导出** |
+| ★ Sionna Research Kit | Apache-2.0，★ PyTorch + TensorRT | ★ OAI 集成；★ 固定 24-PRB 分块；★ LLR 以 int16 输出；★ **实测 2.42× 的 LLR 尺度失配 vs OAI**；★ `LDPC5GDecoder llr_max=20.0` |
+| ★ NVlabs/neural_rx | ★ NVIDIA 专有许可（非 OSI）| ★ NR MU-MIMO PUSCH，★ 含训练 |
+| ★ EttusResearch/ni-5g-oai-neural-receiver-testbed-ran | ★ 许可未核实 | ★ OAI + USRP 空口神经接收机试验台 |
+
+★★★ **而【没有任何仓库】把神经接收机导出到 CoreML/ANE** ——
+★★★ **这个空白就是我们的贡献机会。**
+
+### 7.7 ★★ 规模与度量纪律
+
+| ★ 项 | ★ 内容 |
+|---|---|
+| ★★ **实时参数预算锚点是 `1e5`，不是 `1e6`** | ★ NVIDIA 实时 NRX = **1.4e5** 权重（★ 代价 <0.7 dB）；★ 我们的 HELENA = **1.16e5**；★ DeepRx 的 1.2M 是**非实时**，★ 且它报告 **0.1M 就退化、1M 以上饱和** |
+| ★★ **知识蒸馏是缩小的成熟手段** | ★ DeepRx KD（arXiv:2507.10409）：★ 11 TFLOPs 学生（教师 30 TFLOPs）★ 在 BER=1e-3 处 **+4 dB** vs 同尺寸从零训；★ 且给出能量锚点 **2 mJ/推理**（Coral Edge TPU）|
+| ★★★ **主指标必须是经真实 NR LDPC 译码后的 coded BLER** | ★ **绝不用 NMSE、绝不用 MI、绝不用未编码 BER** |
+| ★★ **回退必须是【逐槽神经+经典并行仲裁】**，不是"AI 看着不好就回退" | ★★ 500 Hz Doppler 下经典接收机会崩而神经的还能工作 ⇒ ★ **基于分歧的回退会失效（实测 60.5% 回退率）**；★ 他们的修法代价 <5% 时延 |
+
+### 7.8 ★★★ 推荐的最小决定性实验
+
+★★ 在一个 **~1e5 参数的 DeepRx 式模型**上（★ 改造 Rohde-Schwarz/NeuralReceiver 或在 Sionna 里训），
+★ 跑在我们**已有的 OCUDU + CoreML/ANE 栈**上。
+★★★ **基线必须【同时】设三级**：★ **LS+ZF**、★ **LS+插值+LMMSE**、★ **我们现役的 Metal MMSE CE**。
+★★ 在 **64QAM / 19–23 dB** 上量：**coded BLER + 逐槽 P50/P99 时延 + ANE 功率轨道**。
+
+★★★ **预期结果**：**BLER 与现役链打平；ANE 的时延/能量明显更好。**
+★★★ **价值不在准确率**，而在**填补文献空白：ANE 到底能不能承载 PHY 工作负载**
+—— ★★ **这是一个站得住、且新颖的贡献。**
+
+### 7.9 ★★ 另有一条外部对照
+
+★★ **OCUDU dApp 先例**（arXiv:2609.07843 / 2609.07805）：★ 内联神经接收机到 LLR，
+★ 实测 **81.6 µs P50 / 112 µs P99.9**（51 PRB / 2 端口，GB10）；★ 一个神经均衡器跑过
+**26 万次以上的空口调用、0 次回退**。★★ **可用于外部基准，也是"模型输出【解扰域】LLR"
+这个契约的独立验证。**
