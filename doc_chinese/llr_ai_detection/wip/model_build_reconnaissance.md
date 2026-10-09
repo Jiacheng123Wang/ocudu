@@ -538,3 +538,79 @@ predictions run concurrently, the behavior is undefined."*
 ★★★ **而 §10.7 那条 OAI/dlopen 先例给了我们一条省事的路**：
 ★★ **不必 fork OCUDU 上游 —— 用 dlopen 插件注入神经接收机是已被验证可行的**
 （★ 上游 OAI 主线 PHY **零 ML**，★ 其贡献正是那个通用 loader）。
+
+## 11. ★★ 仓库调研收尾（★ 调研全部结束，★ 本节是最后的增量）
+
+### 11.1 ★★★ Sionna 2.x 的 **PyTorch 复数支持是已知弱点**（★ 正打在我们的路径上）
+
+★ 既然结论是"用 Sionna 2.x 在 PyTorch 里训"，★ 这条就很重要：
+
+| ★ 证据 | ★ 内容 |
+|---|---|
+| ★★ Sionna **v2.2.0 "Part 4" notebook 自带一个 warnings filter** | ★★ 针对 ***"Torchinductor does not support code generation for complex operators"*** |
+| ★★ Sionna issue **#1149** | ★ 记录了**广播复数张量产生大量中间临时量** |
+
+★★★ **⇒ 我们打算用的那条 PyTorch 原生 Sionna 线，有已知的复数张量编译与内存问题。**
+★★ **实际缓解（★ 与 ANE 的要求【正好一致】）**：
+★★★ **把复数张量限制在 I/O 边界，内部一律用实值对（real-valued pairs）** ——
+★ 而**这本来就是 ANE 要求的形态**（★ 无原生复数）。
+★★ **⇒ 值得先做一个 spike 再承诺。**
+
+### 11.2 ★★ 合规上的一个**假阳性**（★ 会出现在 CI 里）
+
+★ **GitHub licensee 对 Sionna、`sionna-rk`、**Aerial** 都报 `NOASSERTION`**，
+★ 而**三者的 LICENSE 文件都写着 Apache-2.0**（★ Sionna 的带 `SPDX-License-Identifier: Apache-2.0`；
+★ `sionna-rk` 是 1 489 字节的 Apache-2.0 声明；★ `pyAerial` 的 SPDX 标在
+`pyproject.toml`/`setup.py`/`CMakeLists.txt`/源码里）。
+
+★★ **⇒ 若在 CI 里跑合规扫描，我们最重要的三个依赖都会被标成 unknown/blocked。**
+★ 注意：★ `pyaerial/LICENSE` 与 `pyaerial/NOTICE` **都 404** ⇒ ★ **pyaerial 没有单独的许可文件，
+也没有专有保留条款**。★★ **需要人工复核来清掉这些假阳性。**
+
+### 11.3 ★★ ONNX → CoreML 的**历史**天花板（★ 关掉这个问题）
+
+★ Apple 对 coremltools **4.0 和 5.1** 的文档都写：
+★★ *"ONNX to Core ML supports ONNX Opset version 10 and older."*
+★★ **⇒ 从来不是"支持到 15/17、18–21 不支持"，而是【opset ≤10】，然后在 6.0 被【整体移除】。**
+
+### 11.4 ★★ Core AI 的具体情况（★ 若选后继路径）
+
+| ★ 项 | ★ 内容 |
+|---|---|
+| ★ `github.com/apple/coreai-models` | ★ **BSD-3-Clause**（★ "Copyright 2026 Apple Inc."）|
+| ★ 工具链 | ★★ **只支持 PyTorch / `torch.export` → `.aimodel`**，★★ **不摄入 ONNX** |
+| ★ ANE 放置命令 | ★ `xcrun coreai-build compile model.aimodel --preferred-compute neural-engine` |
+| ★ 要求 | ★ 报告称 iOS/macOS **27.0+** |
+
+★★ **⇒ Core AI 是一条【真正独立的】工具链，不是我们 CoreML 工作的 drop-in。**
+
+### 11.5 ★ 验证 API 的版本细节
+
+★ `MLComputePlan` 的 Python 绑定**自 coremltools 8.1 起存在**（★ 我们是 9.0 ✓）。
+★★ **用 `ComputeUnit.CPU_AND_NE` 以防【静默落到 GPU】**。
+
+### 11.6 ★★ 学习型信道估计仓库的许可（★ 若日后超出深度 3 的范围）
+
+| ★ 类别 | ★ 仓库 |
+|---|---|
+| ★★ **GPL-2.0，Copyleft 阻碍** | ★ `dianixn/Channelformer`（TWC 2023）、★ `dianixn/Attention_Based_Neural_Networks_for_Wireless_Channel_Estimation` |
+| ★★ **MIT，可用** | ★ `Kylin9511/CRNet`、★ `SIJIEJI/CLNet`（★ 80 stars，2026-09 活跃）、★ `tangshunpu/DCRNetV2`（★ 带 Sionna-RT-Mix5 权重）、★ `XML124/CDRN-channel-estimation-IRS`（★ 2021；★ "CDRN" = 卷积去噪残差网络，**不是** diffusion）|
+| ★★ **非商用** | ★ `SAIC-MONTREAL/CeBed`（CC BY-NC 4.0）|
+| ★★ **无许可 ⇒ 保留所有权利** | ★ 三个 `ChannelNet` 副本（★ 且它是 **VehA 二维图像玩具设置，不是 3GPP，无 DMRS/LDPC**）|
+| ★ **代码从未发布** | ★ `ReQuestNet`（Qualcomm，arXiv 2508.08790，仅 CE）；★ **`ReEsNet` 无法核实存在**（★ arXiv 全文零命中）|
+| ★★ **不存在** | ★ **GitHub 上没有任何面向 5G NR 的 diffusion 型信道估计器** |
+
+### 11.7 ★★ 一条"真硬件 PoC"的线索（★ 若日后需要）
+
+★ **CENTRIC** EU 项目（★ Horizon 101096379，★ **就是资助 `neural_rx` 的那个 grant**）
+★ 有公开交付物 **D2.3 / D3.5 / D5.2**，★ 描述含神经接收机输入堆叠的数字硬件架构。
+★★ **已识别，未阅读。**
+★ 另有 arXiv 2512.13263（2025-12）**DFT-Net + Demod-Net 在 FPGA 上**，
+★ ~1.5 dB BER 增益、执行时间低 66% —— ★ **通用 OFDM，无代码发布**。
+
+### 11.8 ★★★ 底线未变，但建设计划多了一条已知风险 + 一条合规麻烦
+
+| ★ | ★ 内容 |
+|---|---|
+| ★★★ **已知风险** | ★★ **Sionna 2.x 在 `torch.compile` 下的复数张量处理** ⇒ ★ **先用实值对做 spike**（★ 与 ANE 要求一致，不是额外代价）|
+| ★★ **合规麻烦** | ★★ **许可扫描器会对 Sionna / `sionna-rk` / `pyAerial` 三处假阳性**，★ 三者其实都是 Apache-2.0 ⇒ **需人工复核** |
