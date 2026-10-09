@@ -1098,6 +1098,18 @@ int main(int argc, char** argv)
   proc_cfg.dec_enable_early_stop = true;
   proc_cfg.max_nof_concurrent_threads = 2;
   proc_cfg.csi_sinr_calc_method = channel_state_information::sinr_type::post_equalization;
+  // THE DEPTH-3 ARM (LLR AI detection, stage S-1). OCUDU_REPLAY_RECEIVER=ai switches this harness to the AI
+  // arm, which is what makes the substitution A/B possible offline at all: the two arms are then the SAME
+  // capture through the SAME build, differing only in which depth-3 implementation runs.
+  //
+  // AT STAGE S-1 THE TWO ARMS ARE BIT-IDENTICAL BY CONSTRUCTION (the AI head forwards to the classical
+  // estimator and demodulator), and that is the point of the stage rather than a defect in it: it is the
+  // control that must hold before any forward pass is inserted. A difference found today would therefore mean
+  // the substitution itself broke something -- which is the only thing this stage can find.
+  if (const char* receiver_env = std::getenv("OCUDU_REPLAY_RECEIVER")) {
+    proc_cfg.pusch_receiver_backend = receiver_env;
+    std::printf("depth-3 receiver arm: %s (OCUDU_REPLAY_RECEIVER)\n", receiver_env);
+  }
   std::shared_ptr<pusch_processor_factory> proc_factory = create_pusch_processor_factory_sw(proc_cfg);
   check(proc_factory, "proc_factory");
   report("created proc_factory");

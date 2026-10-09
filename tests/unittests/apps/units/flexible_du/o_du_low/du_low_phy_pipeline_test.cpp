@@ -437,10 +437,12 @@ TEST(DuLowPhyPipelineTest, GpuModeRejectsBackendsTheLaneDoesNotOwn)
 
 /// \brief The depth-3 receiver knob: one value per unit, and the two modes that cannot express it.
 ///
-/// STAGE 1 of the LLR AI detection workflow (design section 1.5): "ai" is ACCEPTED and CARRIED, but
-/// ai_receiver_bound() is false, so it resolves to the classic receiver. Both halves are locked down here,
-/// because the dangerous failure is not "ai is refused" - it is "ai is accepted and the classic chain runs
-/// without anyone being able to tell afterwards".
+/// STAGE S-1 of the LLR AI detection workflow (design sections 1.5 and 15): "ai" is ACCEPTED, CARRIED, and
+/// now RESOLVED to itself, because the AI arm's head exists as a real object on its own call path (see
+/// pusch_depth3_receiver.h). The dangerous failure is unchanged and is still locked down here: not "ai is
+/// refused", but "ai is accepted and the classic chain runs without anyone being able to tell afterwards".
+/// What moved is where that is defended -- the head reports itself as IDENTITY rather than the request being
+/// silently downgraded, so the configuration path and the PUSCH factory both say so out loud.
 TEST(phy_pipeline_mode_test, receiver_backend_defaults_to_classic)
 {
   // No knob: the classic receiver, and nothing about the resolved value depends on the mode.
@@ -464,18 +466,23 @@ TEST(phy_pipeline_mode_test, receiver_ai_is_carried_and_reported)
   EXPECT_NE(error.find("Accepted values [auto,classic,ai]"), std::string::npos) << error;
 }
 
-TEST(phy_pipeline_mode_test, receiver_ai_falls_back_to_classic_while_unbound)
+TEST(phy_pipeline_mode_test, receiver_ai_resolves_to_the_ai_arm_now_that_its_head_exists)
 {
-  // STAGE 1: the value is carried into the request, but no backend is bound to it yet, so it resolves to the
-  // classic receiver - and the caller is expected to report the substitution (the startup log does).
-  ASSERT_FALSE(ai_receiver_bound()) << "this test describes stage 1; update it when the backend is wired";
+  // STAGE S-1: the AI arm's head is a real object, so the request is HONOURED rather than downgraded. The
+  // question the old version of this test asked ("was the request honoured") has therefore been replaced by
+  // a different one -- "did anything compute" -- which pusch_depth3_receiver::is_identity answers, and which
+  // the PUSCH factory prints at construction. Both halves are asserted here so that a future change cannot
+  // quietly turn the arm back into an alias of the classic chain without failing this test.
+  ASSERT_TRUE(ai_receiver_bound()) << "stage S-1 wires the AI head; if it was un-wired, restore the fallback";
 
-  std::string           error;
-  const auto            effective = resolve_phy_pipeline(
+  std::string error;
+  const auto  effective = resolve_phy_pipeline(
       make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai"), all_available, error);
   ASSERT_TRUE(effective.has_value()) << error;
-  EXPECT_EQ(effective->receiver, "classic");
-  // The rest of the configuration is untouched by the substitution.
+  EXPECT_EQ(effective->receiver, "ai");
+  // The rest of the configuration is untouched: the arm is chosen at the granularity of the whole depth-3
+  // unit, so the per-module backends still describe the units the CLASSICAL arm would use -- and the AI head
+  // delegates to exactly those today.
   EXPECT_TRUE(effective->lane_fused);
   EXPECT_EQ(effective->ch_est, "metal_mmse");
 }

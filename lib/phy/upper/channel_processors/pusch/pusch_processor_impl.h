@@ -11,6 +11,7 @@
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_processor.h"
 #include "ocudu/phy/upper/channel_processors/pusch/ulsch_demultiplex.h"
 #include "ocudu/phy/upper/channel_processors/uci/uci_decoder.h"
+#include "pusch_depth3_receiver.h"
 #include "ocudu/phy/upper/signal_processors/pusch/dmrs_pusch_estimator.h"
 #include "ocudu/phy/upper/unique_rx_buffer.h"
 #include "ocudu/ran/pusch/pusch_constants.h"
@@ -31,6 +32,15 @@ public:
   {
   public:
     /// Creates the dependencies instance.
+    /// \param[in] receiver_     The DEPTH-3 unit: channel estimation + equalization + demapping. Which arm this
+    ///                         is (classical, or the AI head) was decided by the factory; this class only
+    ///                         routes the two seam calls to it.
+    /// \param[in] estimator_    The classical estimator, ALSO held here because the strict policy interrogates
+    ///                         the MODULE (whether its results cover the hop, and whether a device claimed one
+    ///                         it did not compute). Stage S-1 keeps that interrogation on the classical units so
+    ///                         that the arm's behaviour is bit-identical; a real AI arm will have to answer
+    ///                         those questions itself, and that is a change S-1 deliberately does not make.
+    /// \param[in] demodulator_  The classical demodulator, held for the same reason.
     concurrent_dependencies(std::unique_ptr<dmrs_pusch_estimator> estimator_,
                             std::unique_ptr<pusch_demodulator>    demodulator_,
                             std::unique_ptr<ulsch_demultiplex>    demultiplex_,
@@ -54,7 +64,19 @@ public:
       ocudu_assert(uci_dec, "Invalid UCI decoder.");
     }
 
+    /// \brief Attaches the depth-3 unit. Called ONCE, after construction, by the factory that built it.
+    ///
+    /// It is a setter rather than a constructor argument because the unit REFERENCES the two modules below,
+    /// which therefore have to exist first -- and because the dependencies must own them for the strict policy
+    /// to interrogate the very modules the unit runs.
+    void set_depth3(std::unique_ptr<pusch_depth3_receiver> receiver_) { receiver = std::move(receiver_); }
+
+    /// The depth-3 unit. The two seam calls go through this; see pusch_depth3_receiver.h.
+    pusch_depth3_receiver&     get_depth3() { return *receiver; }
+    /// The classical estimator, kept OUTSIDE the seam for the strict policy's interrogation (see the
+    /// constructor's note).
     dmrs_pusch_estimator&      get_estimator() { return *estimator; }
+    /// The classical demodulator, kept for the same reason.
     pusch_demodulator&         get_demodulator() { return *demodulator; }
     ulsch_demultiplex&         get_demultiplex() { return *demultiplex; }
     pusch_uci_decoder_wrapper& get_harq_ack_decoder() { return harq_ack_decoder; }
@@ -62,9 +84,13 @@ public:
     pusch_uci_decoder_wrapper& get_csi_part2_decoder() { return csi_part2_decoder; }
 
   private:
-    /// Channel estimator instance.
+    /// The depth-3 unit (classical, or the AI head that delegates to the two units below). Attached by
+    /// set_depth3() after construction.
+    std::unique_ptr<pusch_depth3_receiver> receiver;
+    /// Channel estimator instance. The dependencies OWN it; the depth-3 unit holds a reference, so the
+    /// strict policy interrogates the very module the unit runs (see the factory).
     std::unique_ptr<dmrs_pusch_estimator> estimator;
-    /// Demodulator instance.
+    /// Demodulator instance. Owned here and referenced by the depth-3 unit, for the same reason.
     std::unique_ptr<pusch_demodulator> demodulator;
     /// Channel demultiplex.
     std::unique_ptr<ulsch_demultiplex> demultiplex;
@@ -161,6 +187,15 @@ private:
       // Return its own reference to the estimator callback interface.
       return *this;
     }
+
+    /// \brief The dependencies this reception is using, or nullptr when idle.
+    ///
+    /// Exposed because the DEPTH-3 seam needs them AFTER \ref configure has taken the caller's handle: the
+    /// caller's \c concurrent_dependencies_pool_type::ptr is moved in, so it is null by the time the unit runs.
+    /// The classical path did not need this -- it held a reference to the estimator, which survives the move --
+    /// but an arm chosen at the granularity of the whole unit has to reach the unit, and the unit lives here.
+    concurrent_dependencies* get_dependencies() { return dependencies.get(); }
+
 
   private:
     // See interface for documentation.

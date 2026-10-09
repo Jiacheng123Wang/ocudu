@@ -105,6 +105,14 @@ struct pusch_processor_factory_sw_configuration {
   bool                                          dec_enable_early_stop = true;
   unsigned                                      max_nof_concurrent_threads;
   channel_state_information::sinr_type csi_sinr_calc_method = channel_state_information::sinr_type::channel_estimator;
+  /// \brief Which DEPTH-3 receiver arm to build.
+  ///
+  /// "classic" (the default) builds the classical chain: the estimator, equalizer and demapper selected by the
+  /// per-module backends. "ai" builds the AI arm's head -- STAGE S-1, an identity that forwards to those same
+  /// classical units on its own call path, so a run with it is bit-identical to "classic" (see
+  /// pusch_depth3_receiver.h). The upper PHY factory resolves this from the expert_phy knob and refuses any
+  /// value it cannot honour, so a value reaching here is always one of these two.
+  std::string pusch_receiver_backend = "classic";
 };
 
 std::shared_ptr<pusch_processor_factory>

@@ -632,16 +632,18 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
                             pusch_constants::MAX_NOF_LAYERS,
                             config.pusch_max_nof_layers);
 
-  // The depth-3 receiver backend. There is exactly ONE implementation today - the classical one,
-  // composed from the estimator, equalizer and demapper this function selects below - so "classic" is
-  // the only value that can be honoured. "ai" reaching here would mean a caller took the factory's
-  // word for it instead of asking ai_receiver_bound(): the flexible O-DU resolves a request for "ai"
-  // down to "classic" precisely so that this cannot happen, and this check is what turns a later
-  // silent fallback into a loud failure. It is fatal and not a warning on purpose - a classic chain
-  // running under an AI label is the failure mode the whole control variable exists to prevent.
-  report_fatal_error_if_not(config.pusch_receiver_backend == "classic",
-                            "Unsupported PUSCH receiver backend '{}': the depth-3 AI receiver is not implemented in "
-                            "this build, so the only backend the upper PHY factory can create is 'classic'.",
+  // The depth-3 receiver backend. TWO values are honourable now, and the difference between them is worth
+  // stating precisely, because conflating them is the failure this control variable exists to prevent:
+  //   * "classic": the classical estimator, equalizer and demapper;
+  //   * "ai":      the AI arm's STAGE S-1 head, a separately constructed object on its own call path that
+  //                FORWARDS to those same classical units. It is therefore bit-identical to "classic" today.
+  // It is NOT a silent fallback: the arm is really built and really used, and the PUSCH factory prints at
+  // construction that its output is not an AI result. A third value would be a caller inventing an arm, so it
+  // stays fatal -- an unrecognised backend running the classical chain under an AI label is exactly the
+  // failure mode to catch.
+  report_fatal_error_if_not(config.pusch_receiver_backend == "classic" || config.pusch_receiver_backend == "ai",
+                            "Unsupported PUSCH receiver backend '{}': the upper PHY factory can build 'classic' or "
+                            "'ai' (the latter being the AI arm's stage-S-1 identity head).",
                             config.pusch_receiver_backend);
 
   channel_equalizer_algorithm_type pusch_equalizer_algorithm_type = channel_equalizer_algorithm_type::zf;
@@ -969,6 +971,9 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
   pusch_config.dec_enable_early_stop      = config.ldpc_decoder_early_stop;
   pusch_config.csi_sinr_calc_method       = config.pusch_sinr_calc_method;
   pusch_config.max_nof_concurrent_threads = dependencies.executors.pusch_executor.max_concurrency;
+  // The DEPTH-3 arm. The value was already resolved and checked by the caller (the flexible O-DU refuses
+  // anything but "classic" until an AI backend exists), so this is a pass-through with no second policy.
+  pusch_config.pusch_receiver_backend = config.pusch_receiver_backend;
 
   // :TODO: check these values in the future. Extract them to more public config.
   pusch_config.ch_estimate_dimensions.nof_symbols        = MAX_NSYMB_PER_SLOT;

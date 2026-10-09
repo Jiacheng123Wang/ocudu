@@ -7,6 +7,7 @@
 #include "pusch_decoder_empty_impl.h"
 #include "pusch_decoder_hw_impl.h"
 #include "pusch_decoder_impl.h"
+#include "pusch_depth3_receiver_impl.h"
 #include "pusch_processor_impl.h"
 #include "pusch_processor_pool.h"
 #include "pusch_processor_validator_impl.h"
@@ -150,8 +151,20 @@ public:
     ch_estimate_dimensions(config.ch_estimate_dimensions),
     dec_nof_iterations(config.dec_nof_iterations),
     dec_enable_early_stop(config.dec_enable_early_stop),
+    depth3_kind(config.pusch_receiver_backend == "ai" ? pusch_depth3_kind::ai_identity
+                                                       : pusch_depth3_kind::classic),
     csi_sinr_calc_method(config.csi_sinr_calc_method)
   {
+    if (depth3_kind == pusch_depth3_kind::ai_identity) {
+      // Say it in as many words. Stage S-1 constructs a REAL object on its own call path, but that object
+      // forwards to the classical units, so nothing downstream may report an AI result from this run.
+      fmt::print(stderr,
+                 "[pusch_receiver] backend=ai: STAGE S-1 IDENTITY. The AI arm is constructed and both depth-3 "
+                 "entry points go through it, but it forwards to the classical estimator and demodulator, so "
+                 "the output is bit-identical to backend=classic and is NOT an AI result. A real forward pass "
+                 "replaces that delegation; until then this run may be used to prove the seam, never to "
+                 "measure a model.\n");
+    }
     ocudu_assert(estimator_factory, "Invalid channel estimation factory.");
     ocudu_assert(demodulator_factory, "Invalid demodulation factory.");
     ocudu_assert(demux_factory, "Invalid demux factory.");
@@ -162,11 +175,19 @@ public:
     std::vector<std::unique_ptr<pusch_processor_impl::concurrent_dependencies>> dependencies(
         config.max_nof_concurrent_threads);
     std::generate(dependencies.begin(), dependencies.end(), [this]() {
-      return std::make_unique<pusch_processor_impl::concurrent_dependencies>(estimator_factory->create(),
-                                                                             demodulator_factory->create(),
-                                                                             demux_factory->create(),
-                                                                             uci_dec_factory->create(),
-                                                                             ch_estimate_dimensions);
+      // The DEPTH-3 unit is built as ONE object: channel estimation + equalization + demapping, so that the
+      // arm is chosen at the granularity of the whole unit rather than per module (see pusch_depth3_receiver.h).
+      //
+      // OWNERSHIP: the dependencies own the two units and the arm merely REFERENCES them. That is what makes
+      // the strict policy ask about the very modules the unit runs -- an arm owning its own copies would leave
+      // the policy interrogating instances nothing ever executes, silently.
+      auto dependencies = std::make_unique<pusch_processor_impl::concurrent_dependencies>(
+          estimator_factory->create(), demodulator_factory->create(), demux_factory->create(),
+          uci_dec_factory->create(), ch_estimate_dimensions);
+
+      dependencies->set_depth3(create_pusch_depth3_receiver(
+          depth3_kind, dependencies->get_estimator(), dependencies->get_demodulator()));
+      return dependencies;
     });
 
     // Create common dependencies pool.
@@ -200,6 +221,9 @@ private:
   pusch_processor::channel_size                                            ch_estimate_dimensions;
   unsigned                                                                 dec_nof_iterations;
   bool                                                                     dec_enable_early_stop;
+  /// Which depth-3 arm to build. Resolved from pusch_receiver_backend by the upper PHY factory, which already
+  /// refuses any value it cannot honour.
+  pusch_depth3_kind                                                        depth3_kind;
   channel_state_information::sinr_type                                     csi_sinr_calc_method;
 };
 

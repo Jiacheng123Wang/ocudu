@@ -45,13 +45,16 @@ struct phy_backend_availability {
 
 /// \brief Whether a resolved "ai" receiver value is bound to an actual backend yet.
 ///
-/// STAGE 1 returns false, and every consumer must treat \c receiver == "ai" as "the classic receiver, asked for by
-/// name". It exists as a function rather than a comment because the fallback has to be REPORTED: a command line that
-/// says "ai" while the classic chain runs is precisely the kind of value that looks plausible and means nothing
-/// (see the design document, section 1.5).
+/// STAGE S-1 returns TRUE, and the meaning is narrower than it sounds. The AI arm's HEAD now exists as a real
+/// object on its own call path (see pusch_depth3_receiver.h), so a command line asking for "ai" gets an arm rather
+/// than a substitution -- but that head forwards to the classical estimator and demodulator, so its output is
+/// bit-identical to "classic" and is NOT an AI result. The distinction this function used to carry has therefore
+/// MOVED rather than disappeared: it is no longer "was the request honoured", it is "did anything compute".
+/// \ref pusch_depth3_receiver::is_identity answers the second, and the PUSCH factory prints it at construction.
+/// A consumer that reports "the AI receiver ran" must consult that, not this.
 constexpr bool ai_receiver_bound()
 {
-  return false;
+  return true;
 }
 
 /// Availability of the offload backends in this binary.

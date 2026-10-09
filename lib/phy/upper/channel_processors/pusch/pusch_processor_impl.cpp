@@ -384,7 +384,6 @@ void pusch_processor_impl::process(span<uint8_t>                    data,
   ch_est_config.dc_position = pdu.dc_position;
 
   // Configure and get the estimator notifier.
-  dmrs_pusch_estimator&          estimator          = dependencies->get_estimator();
   dmrs_pusch_estimator_notifier& estimator_notifier = estimator_notifier_configurator.configure(
       data, std::move(rm_buffer), std::move(dependencies), notifier, grid, pdu, dmrs_type, nof_cdm_groups_without_data);
 
@@ -393,7 +392,14 @@ void pusch_processor_impl::process(span<uint8_t>                    data,
   // timer without a counter cannot tell "fast" from "never reached" (see the probe's notes).
   {
     seam_call seam(/*is_estimate=*/true);
-    estimator.estimate(estimator_notifier, grid, ch_est_config);
+    // THE SEAM. Which arm runs here is the factory's decision (pusch_receiver_backend); at stage S-1 the AI
+    // arm forwards to the same classical estimator, so this substitution changes nothing and is proved so.
+    // The caller's `dependencies` handle was MOVED into configure(), so it is null here; the notifier holds
+    // it for the duration of the reception. Asking the notifier is what lets the seam stay exactly where the
+    // classical path had it, instead of moving the estimation into process_data.
+    concurrent_dependencies* deps = estimator_notifier_configurator.get_dependencies();
+    ocudu_assert(deps != nullptr, "The estimator notifier holds no dependencies: configure() was not called.");
+    deps->get_depth3().estimate(estimator_notifier, grid, ch_est_config);
   }
 }
 
@@ -825,7 +831,7 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
   // one is what the depth-3 unit costs the caller, which is the quantity the AI receiver has to beat.
   {
     seam_call seam(/*is_estimate=*/false);
-    dependencies->get_demodulator().demodulate(
+    dependencies->get_depth3().demodulate(
         demodulator_buffer, notifier_adaptor.get_demodulator_notifier(), grid, est_results, demod_config);
   }
   ul_pipeline_probe::get().record_demod_return(pdu.slot.count());
