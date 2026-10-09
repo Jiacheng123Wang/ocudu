@@ -368,3 +368,75 @@ deprecated in coremltools 6"*，★ **支持在 6.0 被【移除】**。
 | ★★ **1** | ★★★ **"每时隙一个融合程序"不是优化，是【可行性前提】** —— ★ 0.5 ms 预算下，多次派发直接把时隙吃光 |
 | ★★ **2** | ★★ **实验必须有三条引擎臂：ANE / MPS(GPU) / CPU(BNNSGraph)**，★ 而我们的网格很小（~0.12 MB）⇒ ★ **CPU 可能直接赢** |
 | ★★ **3** | ★★ **布局与算子形式要按 Apple 官方规则重写**：★ 末轴 ≥32 fp16 元素且 64B 对齐、★ 官方推荐 `[1,C,T,1]`、★ **用 1×1 Conv2d 取代 Linear**、★ 无 fp32 字面量 |
+
+## 9. ★★ 补充之二（★ 调研完结，★ 含一处对社区流传说法的更正）
+
+### 9.1 ★★ 更正：目标应当是 `ct.target.iOS17`，**不是 iOS18**
+
+★ CoreML 社区（ane-book）流传"要拿到 ANE 原生的 matmul/conv lowering 必须
+`minimum_deployment_target=iOS18`"。★★ **那是错的**。★ 经 coremltools 源码核实
+（`converters/mil/mil/ops/defs/__init__.py`）：★ **`conv` / `conv_quantized` / `conv_transpose` /
+`linear` / `matmul` / `einsum` / `layer_norm` / `softmax` / 全部激活 / 全部池化
+都在【iOS15】opset 基线里。**
+
+| ★ opset | ★ 它真正【新增】的东西 |
+|---|---|
+| ★ iOS16 | ★ gather / gather_nd / topk |
+| ★ iOS17 | ★ 更丰富的激活集（clamped_relu、elu、leaky_relu、prelu、scaled_tanh、sigmoid_hard…）|
+| ★ iOS18 | ★ **`scaled_dot_product_attention`**、`read_state`、`slice_update`、`gru`、分块/LUT 压缩 |
+
+★★ **实际影响**：★ **CNN 类目标 iOS17 即可，不损失任何东西**；
+★ **只有明确需要 MLState（`read_state`）、MLTensor 或【融合 SDPA】时才选 iOS18**。
+★★ **选 iOS18 要付出一年的设备覆盖，而 conv 侧零收益。**
+★ （社区来源对**硬件**行为的描述仍然对 —— 1×1 Conv2d 作为 matmul lowering、BC1S 布局 ——
+★ **错的只是"需要 iOS18"这个框定**。）
+
+### 9.2 ★★★ Apple 亲口写下了对我测量最要紧的那个 caveat
+
+★★ **原文**：*"Core ML decides where each operation runs by weighing more than raw compute speed,
+including the cost of moving data between compute units and how long a compute unit takes to ramp up.
+As a result, **an operation that's compatible with the Neural Engine can still run on the CPU, when
+that's the faster choice overall.**"*
+
+★★★ **⇒ "算子与 ANE 兼容"【永远不蕴含】"该算子在 ANE 上跑了"** ——
+★ 这正是**必须用 `MLComputePlan` 而不是靠推断**的原因。
+★ 并且该 Report 还暴露一个 **"First" 预测统计**（*"the cost of the very first prediction, which
+can be higher than later ones if it requires specialization specific to that input's shape"*）
+—— ★★ **那就是【按形状的 ANE 重编译成本】，★ 如果我们继续用 EnumeratedShapes 分宽度桶，
+★ 这个数就是必须盯的那个。**
+★ 声明限制：★ **它不测内存、不测功率**；★ 结果只对**该设备 + 该 compute-unit 配置**成立。
+
+### 9.3 ★★ API 陷阱
+
+★ **`MLModel.get_compute_plan()` 不存在**（★ 会失败）。★ 正确调用：
+`coremltools.models.compute_plan.MLComputePlan.load_from_path(model.get_compiled_model_path())`。
+★★ 注意 **coremltools 自己的 docstring 也是错的**（★ 例子调 `get_compiled_path()`，★ 那也不存在）。
+
+### 9.4 ★★ `MLState` 让"不能重叠"更硬
+
+★ Apple 原文：★ *"The client shall not read or write the buffers while a prediction is in-flight"*；
+★ *"Each stateful prediction that uses the same MLState must be serialized. Otherwise, if two such
+predictions run concurrently, the behavior is undefined."*
+★★ 结合 ANE 驱动的单挂起队列（★ 实测 **1.04×** 串行化）⇒
+★★★ **无论有没有 state，都【不能重叠时隙】。** ★ 这**强化了"每时隙一个融合程序"的结论**，
+★ 并**排除**了有状态的逐符号流水线设计。
+
+### 9.5 ★★★ ONNX 这条路**彻底关掉**
+
+★★ **`onnx2torch` 不是一个经过验证的桥** —— ★ 没有任何 Apple / coremltools / ONNX / onnx2torch
+文档断言 `ONNX → onnx2torch → ct.convert` 这条链；★ 它返回一个裸 `nn.Module`
+（★ 不是 TorchScript / ExportedProgram），★ 你得自己再导出一次（★ 又多一个会引入错误的 tracing 步）；
+★ 它测过的模型清单全是视觉模型，★ **没有信号处理或复值先例**。★★ **只可作最后手段。**
+★★★ **⇒ 结论定案：进入 CoreML 没有受支持的 ONNX 路径，必须从【原始 PyTorch 模型】转换。**
+
+### 9.6 ★★★ 调研最终结论（★ 三份报告合起来）
+
+| ★ 项 | ★ 裁决 |
+|---|---|
+| ★★★ **准确率动机** | ★★★ **不成立** —— 文献天花板就是 genie LMMSE；★ ETH 真实试验台上 **site-specific LMMSE + IDD 误差最低**，★ 胜过所有被测神经接收机 |
+| ★★★ **能量/算力分流动机** | ★★★ **成立且是首要理由** —— ★ 实测 ANE 比 GPU 好 **2–14.5×**（GFLOP/s/W）|
+| ★★ **跨单元联合处理** | ★★ **降级为探索**；★ 且正解可能是 **IDD**（★ 不需要 ANE、不需要训练）|
+| ★★★ **两个可能杀死 ANE 方案的东西** | ★★★ **① 0.5 ms 时隙 vs ~0.19–0.23 ms 不可流水线的派发地板；② fp16 动态范围（2^15 = 32768 累加器上限），而"相消密集的均衡"没有 fp16 安全形式** |
+| ★★★ **必须加第三个引擎臂** | ★★★ **CPU / BNNSGraph** —— ★ 小网格若派发受限，**CPU 可能直接赢** |
+| ★★★ **先例检索** | ★★★ **零篇**神经接收机或任何无线 PHY 跑在 ANE/CoreML 上（★ 结构化 arXiv 检索已doc）⇒ **我们是第一个** |
+| ★ **唯一值得花 10 分钟核实的线索** | ★ **RADE 的 iOS app**（`github.com/peterbmarks/RADE_decode`）—— ★ 未确认它的神经译码器跑 CoreML/ANE 还是 CPU/Accelerate |
