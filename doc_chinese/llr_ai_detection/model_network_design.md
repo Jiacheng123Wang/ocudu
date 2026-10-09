@@ -1,8 +1,11 @@
 # 深度 3 神经网络：网络设计（★ 草案 v0.1，★ 2026-10-08）
 
-> ★ 上位文档：★ `wip/model_build_reconnaissance.md`（★ 调研，★ §16 是问题陈述的最终版）；
-> ★ `llr_ai_detection_design_and_implementation.md` §15（★ 判据与分层）。
+> ★ 上位文档：★ `model_build_reconnaissance.md`（★ 调研，★ **§16 是问题陈述的最终版**）；
+> ★ `llr_ai_detection_design_and_implementation.md` **§15**（★ 判据与分层）。
 > ★ 本文档只谈**网络本身怎么设计**。
+>
+> ★★ **路径说明**（★ 2026-10-08 已移出 `wip/`，★ 判据见 `wip/README.md` §4.2）：
+> ★★ **本文件与 `model_build_reconnaissance.md` 同在 `llr_ai_detection/` 顶层。**
 >
 > ★★ **设计目标（不可漂移）**：★★ **让 ANE 成为异构 gNB 的一等算力。**
 > ★ 判据 **C1 = coded BLER 不劣化**；★ **C4 = 确实在 ANE 上跑**（`MLComputePlan`）。

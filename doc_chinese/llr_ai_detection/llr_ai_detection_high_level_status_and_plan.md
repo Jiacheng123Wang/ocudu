@@ -58,7 +58,7 @@
 ★★★ **2026-10-08 更新（第八次）：P0 结案【不等于工作流结束】—— 深度 3 模型的调研已完成（设计 §15）。**
 ★★ **用户裁定**：★ ① 要用发展的眼光，**ANE 能力在快速发展**；★ ② **正如 `gpu` lane 一样，
 即使"余量 ≈ 0"，ANE lane 仍是【替代的算力 offloading】** ⇒ **继续建模型仍有其位置。**
-★★★ **调研结论（完整见 `wip/model_build_reconnaissance.md`）**：
+★★★ **调研结论（完整见 `model_build_reconnaissance.md`）**：
 ★ ① **"更准"这条路被关掉，而且是第三方独立证据** —— DeepRx 自称 **"matches"** 完美 CSI 的 LMMSE；
 ★ NVIDIA 比自己的 LMMSE 基线**差 ≤1 dB**；★ **ETH 真实试验台上 site-tuned 经典 LMMSE + 经典 IDD 误差最低**；
 ★ ② **理由是【能量】** —— 实测 **ANE 比 GPU 能效好 13–14.5×**；

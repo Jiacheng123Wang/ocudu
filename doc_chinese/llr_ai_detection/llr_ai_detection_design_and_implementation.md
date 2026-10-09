@@ -1774,7 +1774,7 @@ slot=1207 rnti=17921 64QAM: crc=KO iterations=0
 > ANE lane 仍是一个【替代的算力 offloading】**；★ ③ 因此继续建模型仍有其位置。
 > ★ 用户随后指示**先做调研**（自有 AI CE 工作 + 公开论文 + 开源工程）。
 >
-> ★★ **完整调研记录见 `wip/model_build_reconnaissance.md`（§0 速览、§14 建设计划）**，
+> ★★ **完整调研记录见 `model_build_reconnaissance.md`（§0 速览、§14 建设计划）**，
 > ★ 本节只记**必须进设计文档的那几条**。
 
 ### 15.1 ★★★ 目标（★ 不可漂移）

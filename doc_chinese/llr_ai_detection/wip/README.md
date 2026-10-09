@@ -152,9 +152,44 @@ bash doc_chinese/llr_ai_detection/wip/next_leg_label.sh baseline        # → ai
 
 ---
 
+### 4.2 ★★ 文档**不进** `wip/`（★ 2026-10-08 判例）
+
+★ 用户问：★ **`wip/` 里的设计文档是否应当上移到 `llr_ai_detection/`？**
+★★ **答案：是。** ★ 依据是本文件 §1 的目录地图自己写的定义 ——
+
+| ★ 路径 | ★ 放什么（★ §1 原文）|
+|---|---|
+| ★ `wip/` | ★★ **"工具、脚本、arm 配置（YAML）、探针、一次性实验配方"** |
+| ★ `llr_ai_detection/*.md` | ★★ **"memo、规划、索引 —— 文档是这个仓库的记录"** |
+
+★★ **⇒ 判据很硬**：★ **一个 `.md` 是"给人读的规划/调研"还是"下一腿要用的工具"？**
+★ 前者进 `llr_ai_detection/`，★ 后者留 `wip/`。
+
+★★ **本次执行（2026-10-08）**：
+```
+doc_chinese/llr_ai_detection/wip/model_build_reconnaissance.md
+  → doc_chinese/llr_ai_detection/model_build_reconnaissance.md
+doc_chinese/llr_ai_detection/wip/model_network_design.md
+  → doc_chinese/llr_ai_detection/model_network_design.md
+```
+★ 同时更新了 `llr_ai_detection_design_and_implementation.md` §15 与
+`llr_ai_detection_high_level_status_and_plan.md` 第八次更新里的引用。
+
+★★ **为什么保留为独立文件、而不是并进设计文档**（★ 与 §4.1 的张力，★ 记录在案）：
+★ §4.1 说"设计、方案、判据 → 设计文档，追加新小节"，★ **严格按字面这两份也该并进去**。
+★ 但：★★ **① 体量**（★ 两份合计 **122 KB**，并进去会让设计文档（现 150 KB）翻倍）；
+★★ **② 结构**（★ 调研含 §0 速览 + §1–§16，★ 是**多会话参考**，★ 不是一次追加的小节）；
+★★ **③ 先例**（★ `session_handoff_*.md` 同为独立文件）。
+★★★ **⇒ 本工作流的判据定为**：★ **"小的追加"进设计文档 §15 这类小节；
+"独立的、多会话的参考文档"留在 `llr_ai_detection/` 顶层并在设计文档里【留指针】。**
+
+---
+
 ## 5. 当前内容
 
 | 路径 | 内容 |
 |---|---|
 | `next_leg_label.sh` | 腿序号计算（`aillr` 前缀版） |
 | `A6_capture_fields_plan.md` | ★ **A6 实现方案**（采集字段补齐）：JSONL sidecar、布局自描述、A6a/A6b 拆分、验收判据 |
+
+★ **本目录只放"工具、脚本、臂配置"。文档不放这里** —— 见 §4.2。
