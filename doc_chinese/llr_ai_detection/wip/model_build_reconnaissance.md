@@ -440,3 +440,101 @@ predictions run concurrently, the behavior is undefined."*
 | ★★★ **必须加第三个引擎臂** | ★★★ **CPU / BNNSGraph** —— ★ 小网格若派发受限，**CPU 可能直接赢** |
 | ★★★ **先例检索** | ★★★ **零篇**神经接收机或任何无线 PHY 跑在 ANE/CoreML 上（★ 结构化 arXiv 检索已doc）⇒ **我们是第一个** |
 | ★ **唯一值得花 10 分钟核实的线索** | ★ **RADE 的 iOS app**（`github.com/peterbmarks/RADE_decode`）—— ★ 未确认它的神经译码器跑 CoreML/ANE 还是 CPU/Accelerate |
+
+## 10. ★★★ 更正（★ 三条事实错误，★ 其中一条是许可致命的）
+
+### 10.1 ★★★ 更正 1（**许可致命**）：`NVlabs/neural_rx` 是**非商用**，不是宽松许可
+
+★ 我前文写"NVIDIA 专有许可（非 OSI）"—— ★★ **不够准确，实际是不可商用**。
+★ 其 `LICENSE.txt` §3.3 Use Limitation 原文：
+★★ *"The Work and any derivative works thereof only may be used or intended for use
+**non-commercially**... 'non-commercially' means for **research or evaluation purposes only**."*
+★ 源码头带 `SPDX-License-Identifier: LicenseRef-NvidiaProprietary`。
+★★ 注意文件名是 **`LICENSE.txt` 而不是 `LICENSE`** —— ★ 直接访问 `.../LICENSE` 会 404，
+★ 这就是它被广泛误读成"无许可"或"宽松"的原因。
+★★★ **⇒ 任何源自 `neural_rx` 的东西都不能交付。★ 只能当【架构参考】。**
+
+### 10.2 ★★★ 更正 2：**两个 3GPP-PUSCH 神经接收机仓库都是 TensorFlow/Keras，不是 PyTorch**
+
+| ★ 仓库 | ★ 真实技术栈 |
+|---|---|
+| ★ `Rohde-Schwarz/NeuralReceiver` | ★ **TF/Keras + Sionna `>=1.2.1,<2.0.0`**（★ TensorFlow 时代的 Sionna）★ 我前文写"PyTorch（Sionna 2.0.1）"是错的 —— ★ 被它 README 文献区引用 Sionna 2.0.1 误导，★ 那与它自己的依赖钉**自相矛盾** |
+| ★ `NVlabs/neural_rx` | ★ **TF/Keras + Sionna 0.18**（★ `requirements.txt`: `sionna==0.18.0, onnx==1.16.2, tf2onnx, polygraphy`）★ 我前文写 PyTorch 是错的 |
+
+★★★ **而这是真正有价值的结论**：
+★★★ **不存在任何"PyTorch + 符合 3GPP + 许可宽松"的 PUSCH 神经接收机仓库。**
+★ 最接近的 PyTorch 3GPP-PUSCH DeepRx 是 MathWorks 的 `deeprx.py`（+ `deeprx_30k.pth`，
+★ 11 个 ResNet 块，**1.2325M 可学习参数**，输入 `[312 14 10]`）—— ★★ **不是开源的**。
+
+★★ **实际含义**：★★★ **模型要我们自己写。**
+★ 用 **Sionna 2.x**（Apache-2.0，**PyTorch 原生**）做**符合 3GPP 的数据生成**，
+★ 用 R&S / neural_rx 作**架构参考**。
+★★ **注意**：★ Sionna 1.x 与 2.x **共用 `sionna.phy` API 但【后端不同】**（★ 1.x = TF，★ 2.x = PyTorch）
+⇒ ★★ **1.x 时代的神经接收机代码必须【移植】，不能复用。**
+
+### 10.3 ★★ 更正 3：`sionna-rk`（Research Kit）**不是 OAI 的 fork**
+
+★ `NVlabs/sionna-rk`：★ Apache-2.0，★ 2025-04 建，★ 2026-07 活跃，★ VERSION 1.3.2。
+★★ **它 clone 的是【上游】`gitlab.eurecom.fr/oai/openairinterface5g` 的 tag `2025.w34`**，
+★ 然后打一个 **93 887 字节、39 个文件**的补丁。★ `github.com/NVIDIA/openairinterface5g`
+★ 与 `NVlabs/openairinterface5g` **都 404** ⇒ **不存在 NVIDIA fork**。
+★★ **补丁【不 vendored 神经网络】**，★ 它加的是 **`dlopen` 钩子 + 树外插件构建路径**
+（★ 动 `common/utils/load_module_shlib.c`、`nr_ulsch_demodulation.c`、`nr_ulsch_llr_computation.c`）
+⇒ ★★ **`libreceiver_neural_rx.so` 由此注入，无需上游任何东西。**
+★★★ **这对我们是【最有价值的一条工程先例】**：★ 它证明**"不 fork 上游、用 dlopen 插件接入神经接收机"是可行的**。
+★ 许可混合注意：★ sionna-rk 的 Apache-2.0 代码**坐在 OAI Public License 1.1 的代码之上**。
+
+### 10.4 ★★★ 一个我们**没预料到的 ANE 阻碍**：**空洞卷积（dilation）**
+
+★★ **每一份已发表的 DeepRx 实现（MathWorks、R&S、neural_rx）都在残差块里用空洞卷积。**
+★★ Apple 的 ANE 规则说**大 dilation 率很贵**，★ 必须**分解成 dilation-2/3 的链**。
+★★★ **而去掉或重构 dilation【会改变架构】⇒ 【必须重训】。**
+★★★ **⇒ 不能简单地移植一个 checkpoint。要为这件事留预算。**
+
+### 10.5 ★★ 这一模型类的 ANE **重写清单**（★ 源码级阅读得到）
+
+| ★ 项 | ★ 内容 |
+|---|---|
+| ★★ **4D BC1S `(B,C,1,S)` 布局** | ★ 已发表模型是 3D channels-last `[F,S,C]` ⇒ ★ **子载波要映射到 64 字节对齐的末轴** |
+| ★★ **标准 6 通道（`4·Nrx+2`, Nrx=1）是【糟糕】的 ANE 通道数** | ★★ **要 pad 到 8 或 16** |
+| ★ **`nn.Linear` → 1×1 `Conv2d`** | ★ 否则分解为低效算子并可能落 CPU |
+| ★ **无 fp32 字面量** | ★ 会产生 ANE 无法执行的 f32 缓冲 |
+| ★★ **dilation 要分解掉** | ★ ⇒ **需要重训** |
+| ★★ **FFT 放主机** | ★ coremltools 的 torch 前端**确实注册了 `torch.fft.*`**，★ 但它**降为 O(N²) 稠密 DFT matmul 且带 fp32 cast** —— ★★ **4096 点时是 radix-2 的 ~340 倍数学量，且触发 fp32 回退规则** |
+| ★★ **R&S 的 ONNX 导出形状注意** | ★ `utils/onnx_export.py` 用 `tf2onnx`、**3 个输入**（`rxgrid`/`h_hat`/`pilots`），★ 各 `[None,1,14,n_subcarriers,2]` ⇒ ★★ **batch 维是动态 `None`**，★ 而 **CoreML 要静态或 EnumeratedShapes** |
+| ★★ **neural_rx 的 ONNX 有两个 int32 输入** | ★（`dmrs_ofdm_pos`/`dmrs_subcarrier_pos`）用于索引 ⇒ ★★ **Gather 类算子 ⇒ CoreML 上落 CPU** |
+
+### 10.6 ★★★ 许可结论表（★ 决定我们能碰什么）
+
+| ★ 类别 | ★ 仓库 |
+|---|---|
+| ★★ **可商用 + 3GPP NR** | ★ **`Rohde-Schwarz/NeuralReceiver`**（Apache-2.0，**TF**）、★ **Sionna 核心 + `sionna-rk` + `pyAerial`**（Apache-2.0）、★ `obiedeh/ai-phy-neural-receiver-benchmark`（MIT，ONNX 且有验证过的对齐）|
+| ★★★ **不可商用 ⇒ 不能交付** | ★★ **`NVlabs/neural_rx`**（★ 见 10.1）、★ `SAIC-MONTREAL/CeBed`（CC BY-NC 4.0）|
+| ★★ **Copyleft 阻碍** | ★ `dianixn/Channelformer`（GPL-2.0）|
+| ★★ **无许可文件 ⇒ 保留所有权利，【不要复用】** | ★ 原版 CsiNet（`sydney222`/`Wind0ranger`）、★ `G-ALI007/DeepRx-OFDM-PyTorch`、★ 若干 ChannelNet/CsiNet 副本 |
+
+### 10.7 ★★ 另两条值得知道的
+
+| ★ 项 | ★ 内容 |
+|---|---|
+| ★★ **OAI 主线 PHY 【零 ML】** | ★ 对 `openair1/PHY`（`develop`，commit `f8f7695`，524 个文件）直接 grep：★ `neural`=0、`tensorrt`=0、`onnx`=0、`tensorflow`=0、`pytorch`=0、`cupy`=0、`"machine learning"`=0 ⇒ ★★ **OAI 的真正贡献是【可插拔性】（那个通用 dlopen loader），不是 ML** |
+| ★★ **OAI 许可要注意** | ★ `develop` 自 tag `2026.w14` 起用 **CSSL v1.0**；★ tag `2025.w34`/`v2.1.0`/`v2.2.0` 用 **OAI Public License v1.1** ⇒ ★★ **两者都【未经 OSI 认证】；需要法务审阅并刻意钉住 OAI 修订版** |
+| ★★ **`pyAerial` 是开源的**（Apache-2.0，★ SPDX 已在四处核实）| ★ 但 (a) 它的 PUSCH 神经接收机是**仅推理**（★ 训练 notebook 只有 LLRNet，一个解映射器）；★ (b) **NVIDIA GPU 是硬要求**（cuPHY 后端、`cupy-cuda13x`、TensorRT，**无 CPU 路径**）；★ 随包提供 `neural_rx.onnx`（663 830 字节）|
+| ★★ **没有人在任何地方发表过 NPU 神经接收机时延** | ★ `neural_rx` 在 A100 上 ~1 ms 仍是唯一可比数字 ⇒ ★★ **任何 NPU 声称都是外推**。★ Apple 在积极申请专利（US 12,323,357 B2，"DMRS overhead adaptation with AI-based channel estimation"，受让人 Apple Inc. —— ★ 仅专利索引来源，全文未核实），★ **但未发表任何实现** |
+| ★ 另有两处"记得但不成立" | ★ **Sionna 没有 CSI-feedback 教程**（★ 两次核实，各路径与 v1.2.0 tag 全 404）⇒ ★ "Sionna CsiNet 例子"这个前提是假的；★ **`ReEsNet` 无法核实存在**（★ arXiv 全文零命中）|
+
+### 10.8 ★★★ 修正后的建设计划（★ 这一节替换我 §7.8 的"改造现成仓库"）
+
+★★★ **不存在可抄的 PyTorch 3GPP-PUSCH 神经接收机 ⇒ 【模型要我们自己写】。**
+
+| ★ 步 | ★ 内容 |
+|---|---|
+| ★★ **1** | ★ **用 Sionna 2.x**（★ Apache-2.0、★ **PyTorch 原生**）做**符合 3GPP 的数据生成**（★ PUSCH/DMRS/LDPC/TB）|
+| ★★ **2** | ★ **自己写模型**，★ 架构参考 R&S / neural_rx（★ 后者**只看不抄**，★ 许可不允许）|
+| ★★★ **3** | ★★★ **在"对一个 checkpoint 产生感情"【之前】就先按 ANE 重写** —— ★ 布局 BC1S、★ 通道 pad 到 8/16、★ `Linear`→1×1 `Conv2d`、★ **dilation 分解掉（⇒ 必须重训）**、★ 无 fp32 字面量、★ FFT 留主机 |
+| ★★ **4** | ★★ **三级基线 + 三条引擎臂**（★ 见 §7.8）|
+| ★★ **5** | ★★ **主指标 = 经真实 LDPC 译码后的 coded BLER** + 逐槽 P50/P99 + 三引擎功率 |
+
+★★★ **而 §10.7 那条 OAI/dlopen 先例给了我们一条省事的路**：
+★★ **不必 fork OCUDU 上游 —— 用 dlopen 插件注入神经接收机是已被验证可行的**
+（★ 上游 OAI 主线 PHY **零 ML**，★ 其贡献正是那个通用 loader）。
