@@ -165,15 +165,26 @@ bash doc_chinese/llr_ai_detection/wip/next_leg_label.sh baseline        # → ai
 ★★ **⇒ 判据很硬**：★ **一个 `.md` 是"给人读的规划/调研"还是"下一腿要用的工具"？**
 ★ 前者进 `llr_ai_detection/`，★ 后者留 `wip/`。
 
-★★ **本次执行（2026-10-08）**：
+★★ **本次执行（2026-10-08）** ★ 两份文档都已上移，★ **`wip/` 里现在没有文档**：
 ```
 doc_chinese/llr_ai_detection/wip/model_build_reconnaissance.md
-  → doc_chinese/llr_ai_detection/model_build_reconnaissance.md
+  → doc_chinese/llr_ai_detection/model_build_reconnaissance.md     ✅
 doc_chinese/llr_ai_detection/wip/model_network_design.md
-  → doc_chinese/llr_ai_detection/model_network_design.md
+  → doc_chinese/llr_ai_detection/model_network_design.md          ✅
 ```
 ★ 同时更新了 `llr_ai_detection_design_and_implementation.md` §15 与
 `llr_ai_detection_high_level_status_and_plan.md` 第八次更新里的引用。
+
+★★★ **一次真实的返工（★ 记下来，★ 因为它正好是本条判例的反面教材）**：
+★ 上移之后，★ **给 `model_network_design.md` 追加 §14 时又写回了 `wip/` 的旧路径**
+（★ 追加是用旧路径的字符串做的，★ 而那个路径当时已经不存在）⇒ ★★ **重新造出一个
+`wip/model_network_design.md`，★ 且被 commit 收了进去**（★ `26f1e5ee0e`）。
+★★ **症状很隐蔽**：★ `git status` 显示干净（★ 因为新文件**被 add 过了**），
+★★★ **而正文其实躺在 `wip/` 里、顶层那份缺了 §14。**
+★★ **修法**：★ 把 §14 合并回顶层（★ 逐字节校验与已提交版本一致），★ 删掉 `wip/` 那份。
+★★★ **教训**：★★ **移动文件之后，追加内容的路径必须重新确认** ——
+★ 一个"曾经正确"的路径字符串会在移动后**静默地创建一个新文件**，
+★ 而 `git status` **不会**因此报警。
 
 ★★ **为什么保留为独立文件、而不是并进设计文档**（★ 与 §4.1 的张力，★ 记录在案）：
 ★ §4.1 说"设计、方案、判据 → 设计文档，追加新小节"，★ **严格按字面这两份也该并进去**。
