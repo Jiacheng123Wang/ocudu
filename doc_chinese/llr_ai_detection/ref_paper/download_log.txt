@@ -139,12 +139,12 @@ SKIP	2607.26016	MDTransformer-A Hardware-Software Co-Design of Mode-Division Pho
 SKIP	2608.23582	Transformer Accelerator (TFA)-A Macro-Op INT8 Hardware Chip for Transformer Inference and Machine Translation
 SKIP	2609.14735	HELENA for 5G NR LEO NTN Channel Estimation-A Comparative Evaluation
 SKIP	2609.25847	Common-Loss Parameter-Efficiency Analysis of MLP and KAN Neural Receivers for Digital Communications
-OK	1903.04766	Artificial Intelligence-aided Receiver for A CP-Free OFDM System-Design, Simulation, and Experimental Test
-OK	1909.01683	Deep Learning-Aided Tabu Search Detection for Large MIMO Systems
-OK	2401.04077	LoFi User Scheduling for Multiuser MIMO Wireless Systems
-OK	2505.09076	AdaFortiTran-An Adaptive Transformer Model for Robust OFDM Channel Estimation
-OK	2602.04728	Scalable Cross-Attention Transformer for Cooperative Multi-AP OFDM Uplink Reception
-OK	2602.11951	Learning-Enhanced Composite DNA Data Storage Under Sampling Randomness and IDS Errors
-OK	2602.15458	A Universal Neural Receiver that Learns at the Speed of Wireless
+SKIP	1903.04766	Artificial Intelligence-aided Receiver for A CP-Free OFDM System-Design, Simulation, and Experimental Test
+SKIP	1909.01683	Deep Learning-Aided Tabu Search Detection for Large MIMO Systems
+SKIP	2401.04077	LoFi User Scheduling for Multiuser MIMO Wireless Systems
+SKIP	2505.09076	AdaFortiTran-An Adaptive Transformer Model for Robust OFDM Channel Estimation
+SKIP	2602.04728	Scalable Cross-Attention Transformer for Cooperative Multi-AP OFDM Uplink Reception
+SKIP	2602.11951	Learning-Enhanced Composite DNA Data Storage Under Sampling Randomness and IDS Errors
+SKIP	2602.15458	A Universal Neural Receiver that Learns at the Speed of Wireless
 
-=== 7 downloaded, 141 already present, 0 failed (of 148) ===
+=== 0 downloaded, 148 already present, 0 failed (of 148) ===
