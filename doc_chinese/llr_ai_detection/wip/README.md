@@ -204,3 +204,43 @@ doc_chinese/llr_ai_detection/wip/model_network_design.md
 | `A6_capture_fields_plan.md` | ★ **A6 实现方案**（采集字段补齐）：JSONL sidecar、布局自描述、A6a/A6b 拆分、验收判据 |
 
 ★ **本目录只放"工具、脚本、臂配置"。文档不放这里** —— 见 §4.2。
+
+---
+
+## 6. ★★★ 检索取向纪律（★ 2026-10-08，★ 用户更正）
+
+> ★★★ 用户：★ **"Apple silicon 的 ANE 只是 wireless PHY 的 AI 算法（网络）的一个具体承载方式，
+> 我们做文件检索和调研的时候，应该更加专注在算法层面和 inference 前向网络的架构设计方面。"**
+
+### 6.1 ★★★ 纪律
+
+★★★ **任何文献检索必须先覆盖【算法与架构】维度，再覆盖【载体/实现】维度。**
+★ **载体维度的空白不等于学术空白** —— ★★ 它只说明"没人把它放到那块硅上"。
+
+| ★ 维度 | ★ 该用的检索词举例 | ★ **它能回答什么** |
+|---|---|---|
+| ★★★ **算法** | ★ `neural receiver`、`learned demapper`、`LLR estimation`、`quantization-aware`、`fixed-point`、`iterative detection and decoding` | ★★ **有没有人做过这件事，★ 做到什么程度**（★ **这才是贡献的判据**）|
+| ★★★ **架构** | ★ `receptive field`、`parameter count`、`FLOPs`、`depthwise separable`、`dilated convolution`、`attention factorization`、`activation quantization` | ★★ **同类问题的最优形态与已知边界** |
+| ★★ **载体/实现** | ★ `Apple Neural Engine`、`CoreML`、`NPU inference`、`edge deployment` | ★★ **可行性，★ 不构成贡献** |
+
+### 6.2 ★★ 一次真实的教训（★ 记下来）
+
+★★ **我在 `model_build_reconnaissance.md` §9.3 做过一次结构化 arXiv 检索，★ 全部用载体词**
+（★ `abs:"Apple Neural Engine"` 13 条、★ `abs:"CoreML" AND (wireless|radio|signal)` 2 条），
+★ 结论写成 **"没有任何已发表工作把无线 PHY 跑在 ANE 上 ⇒ 我们是第一个"**，
+★★★ **并把它当成"有据可查的新贡献"。**
+
+★★★ **换成算法/架构词，同一个 arXiv 立刻命中**：
+★ **神经网络接收机的 int8 PTQ**（[arXiv:2508.06275](https://ar5iv.labs.arxiv.org/html/2508.06275)，
+★ **同为深度 3 + 64QAM + LLR**）、★ **axial self-attention 高效神经接收机**
+（[arXiv:2510.12941](https://arxiv.org/abs/2510.12941)，★ SPAWC 2026）、
+★ **微格式浮点量化 + 剪枝**（[arXiv:2609.31177](https://arxiv.org/pdf/2609.31177v1.pdf)）
+⇒ ★★★ **"空白"是检索取向造出来的，★ 不是领域的事实。**
+
+★★★ **教训（★ 可迁移）**：★★ **检索词的取向决定了你会不会误以为自己是第一个。**
+★★ **一个只覆盖载体的检索，★ 会给出"零先例"的假象，★ 而那个"零"只对检索词成立。**
+
+### 6.3 ★★ 相关落点
+
+★ **完整更正与重新检索的结果**：★ `model_build_reconnaissance.md` §17；
+★ **对设计的直接影响与四个可检验目标（G-1…G-4）**：★ `model_network_design.md` §17。
