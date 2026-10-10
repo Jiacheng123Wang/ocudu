@@ -1868,7 +1868,7 @@ H-C 的根因、β=2 的五次独立吻合，以及把 P0-c 的每一个可查�
 
 > ★ 本节按 §③ 的交接开工。★★ **结论：P0-c 仍未出裁决，但本轮把"哪些度量不能用"钉死了，
 > 并留下一个可用于裁决的、自洽的实测数。**
-> ★ 工具：`work_tmp/p0c_residual.py`、`work_tmp/p0c_budget.py`、`work_tmp/p0c_synth.py`（均不进 git）。
+> ★ 工具：`doc_chinese/llr_ai_detection/work_tmp/p0c_residual.py`、`doc_chinese/llr_ai_detection/work_tmp/p0c_budget.py`、`doc_chinese/llr_ai_detection/work_tmp/p0c_synth.py`（均不进 git）。
 
 ### 22.1 ★★ 判据 1（残差 / 热噪声）—— **被证伪，且是我自己的两个错**
 
@@ -1894,7 +1894,7 @@ H-C 的根因、β=2 的五次独立吻合，以及把 P0-c 的每一个可查�
 ★ 且**在 64QAM 的 15–24 dB 四个分层里几乎不动（1.52 / 1.53 / 1.56 / 1.32）**。
 
 ★★ **看起来像一个漂亮的结论**（"判决误差使残差增大 50%"）。★ **我用合成基线把它否掉了**
-（`work_tmp/p0c_synth.py`，★ **F8 的合成版**：符号已知、信道误差已知、期望值可解析算出）：
+（`doc_chinese/llr_ai_detection/work_tmp/p0c_synth.py`，★ **F8 的合成版**：符号已知、信道误差已知、期望值可解析算出）：
 
 | 合成档 | ★ 实测 `excess` | ★ 应有值 |
 |---|---|---|
@@ -1981,7 +1981,7 @@ H-C 的根因、β=2 的五次独立吻合，以及把 P0-c 的每一个可查�
 
 ### 22.7 ★★ 第三次尝试：噪声扫描做对了，但**三个测量互相矛盾**（未解决）
 
-★ §22.5 的实验做了（`work_tmp/p0c_final.py`）：在真实网格上叠加**已知**噪声、
+★ §22.5 的实验做了（`doc_chinese/llr_ai_detection/work_tmp/p0c_final.py`）：在真实网格上叠加**已知**噪声、
 ★★ **按 `H` 加权注入**（这样 `X = Y/H` 域的噪声恰好同方差，理论曲线才适用）、
 两臂共用**同一个 `h`**、判据是**判决翻转率**。
 
@@ -2114,7 +2114,7 @@ H-C 的根因、β=2 的五次独立吻合，以及把 P0-c 的每一个可查�
 |---|---|
 | ★ 确认 `ul_chain_replay` 是**格子的消费者**：它读 `<prefix>.txt` + `.bin` 重建网格，**不需要 `_h.bin`** | ✅ 契约已读清（`ul_chain_replay.cpp:1184-1247`）|
 | ★ 它会打印 **`crc / iterations / sinr / epre / rsrp`**（`:1399`），且 `pusch_sinr_calc_method = post_equalization` | ✅ ★ **这正是我需要的独立通道** |
-| ★★ **把链自己的 PRG 编译出来做对照**（`work_tmp/prg_dump.cpp`，只链 `pseudo_random_generator_impl.cpp.o`）| ✅ |
+| ★★ **把链自己的 PRG 编译出来做对照**（`doc_chinese/llr_ai_detection/work_tmp/prg_dump.cpp`，只链 `pseudo_random_generator_impl.cpp.o`）| ✅ |
 | ★★★ **我的 Python Gold 复刻与链的实现【逐位相同】** | ✅ **已验证**（`c_init=12345`，64 bit 全等；★ 另外 5 个种子也对）|
 
 ### 23.2 ★★★ 但卡住了：**实测的 DM-RS 序列与标准 Gold 生成对不上**
@@ -2169,8 +2169,8 @@ H-C 的根因、β=2 的五次独立吻合，以及把 P0-c 的每一个可查�
 ★★ **建议先做 A2**：★ 它**最小、最确定**，★★ **而且它能直接回答 §22.9 那个悬着的问题**
 （"链的 `nv` 是否偏悲观"）—— ★ **不需要任何参考序列、不需要重飞、不需要合成网格。**
 
-★ 工具（均不进 git）：`work_tmp/prg_dump.cpp`（★ 链 PRG 的对照程序）、
-`work_tmp/synth_capture.py`（★ DM-RS 复刻尝试，★ **结论：不可用**）、`work_tmp/p0c_final.py`。
+★ 工具（均不进 git）：`doc_chinese/llr_ai_detection/work_tmp/prg_dump.cpp`（★ 链 PRG 的对照程序）、
+`doc_chinese/llr_ai_detection/work_tmp/synth_capture.py`（★ DM-RS 复刻尝试，★ **结论：不可用**）、`doc_chinese/llr_ai_detection/work_tmp/p0c_final.py`。
 
 ---
 
@@ -2589,7 +2589,7 @@ Test 9: worst cross-path noise variance difference 0.81 dB ...
 #undef private
 ```
 ★ 宏只在**这一个头**上生效、**立即 undef**，★ **产品头一行未改**，★ 且**不进任何构建目标**。
-★ 程序：`work_tmp/dmrs_reference_dump.cpp`。
+★ 程序：`doc_chinese/llr_ai_detection/work_tmp/dmrs_reference_dump.cpp`。
 
 ★★ **过程中两个真实的坑**（★ 都留了注释）：
 1. ★★ **PRG 不能传 null** —— `generate()` 会 `prg->init()`，★ 传 null **段错误**（★ 第一次跑就是）；
@@ -2643,7 +2643,7 @@ Test 9: worst cross-path noise variance difference 0.81 dB ...
 "热噪声 + 量化"的水平，★ 则★★ **联合单元那一支的余量也接近于零**，
 ★ 整个工作流就可以**明确收口**（★ "判决器无余量" + "CE 内部无余量"）。
 
-★ **工具**：★ `work_tmp/dmrs_reference_dump.cpp`（★ **不进 git**，★ 用宏取 private 的探针）。
+★ **工具**：★ `doc_chinese/llr_ai_detection/work_tmp/dmrs_reference_dump.cpp`（★ **不进 git**，★ 用宏取 private 的探针）。
 ★ **用法**：`./dmrs_reference_dump <slot> <n_id> <n_scid> <layers> <first_prb> <nof_prb> <sym_a> <sym_b> <scaling>`
 
 ---
@@ -2651,7 +2651,7 @@ Test 9: worst cross-path noise variance difference 0.81 dB ...
 ## 30. ★★ CE 余量的仪器**是瞎的**，而且 A/B 之间仍有 26% 说不通（2026-10-08）
 
 > ★ 承接 §29.4 的"排除边缘块重做 CE 余量"。★ **仪器先过了 F8 式的对照，然后对照说它瞎了。**
-> ★ 工具：`work_tmp/ce_headroom.py`（★ 不进 git）。
+> ★ 工具：`doc_chinese/llr_ai_detection/work_tmp/ce_headroom.py`（★ 不进 git）。
 
 ### 30.1 ★★★ 对照：**故意把 `A` 弄坏，仪器几乎不动**
 

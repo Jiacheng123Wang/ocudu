@@ -184,15 +184,27 @@
 | `wip/README.md` | ✅ **§4.1 文档落点规则**（★ 增补进现有文件、取下一个空号、**不重编号**、不新建 memo 文件）|
 | ★ `session_handoff_2026-10-08-2.md` | ✅ **本文件**（`1b313108d6`）|
 
-### 2.3 语料状态（★ 在 `~/ocudu_capture/`，**不在仓库里**）
+### 2.3 语料状态（★ 在 `doc_chinese/llr_ai_detection/work_tmp/corpus/`）
+
+> ★★★ **2026-10-10 迁移更正（★ 本节原文写的是 `~/ocudu_capture/` 且注明"不在仓库里"）**：
+> ★★ **语料与 P0 工具已于 2026-10-10 迁入仓库内的规范位置** ——
+> ★★★ **`doc_chinese/llr_ai_detection/work_tmp/corpus/{aillr_cap001,aillr_cap002}`**，
+> ★ **工具在同目录**（★ 原先散在**仓库根 `work_tmp/`**）。
+> ★★ **依据**：`wip/README.md` §1.1 —— ★ **"本工作流统一用 `llr_ai_detection/work_tmp/`，不再往仓库外放东西"**。
+> ★★ **两个具体理由**：★ ① **仓库根的 `work_tmp/` 只被 `~/.git/info/exclude` 忽略（本机专属、不随仓库走）**，
+> 换机器后那些文件会暴露为未跟踪 ⇒ **有误提交风险**；★ 机器内位置则被 `doc_chinese/.gitignore` 的 `**/work_tmp/` 忽略（**随仓库走**）。
+> ★ ② 语料原本在仓库外 ⇒ **不在版本控制、备份或交接口径内**，而它**不可再生**（重飞要动设备）。
+> ★★ **搬迁已校验**：`rsync --checksum` 无差异、逐 stem 一致（cap001 5955 / cap002 5868 个唯一 stem）、
+> `git status` 未跟踪文件 **0**。★ **脚本已改为按 `__file__` 相对解析**（不再钉死某个家目录）。
+> ★ 本节下面的清点数字**未变**（搬迁是移动，不是重新采集）。
 
 ★★ **清点方式（★ 见 §⑤ 的 F11）**：★ **按 stem 归并**，不要用 `ls C_*.bin | wc -l`
 （★ 那个通配符**也匹配 `_h.bin`**，会数出 2 倍）。
 
 | 腿 | 路径 | ★ 接收单元 | ★ 文件组合 | 调制分布 |
 |---|---|---|---|---|
-| `aillr-cap001` | `~/ocudu_capture/aillr_cap001/` | **1985** | ★ **全部五件套**（唯一组合）| — |
-| `aillr-cap002` | `~/ocudu_capture/aillr_cap002/` | **1956** | ★ **全部五件套**（唯一组合）| 256QAM 1563 / 64QAM **339** / 16QAM **51** / QPSK 3 |
+| `aillr-cap001` | `doc_chinese/llr_ai_detection/work_tmp/corpus/aillr_cap001/` | **1985** | ★ **全部五件套**（唯一组合）| — |
+| `aillr-cap002` | `doc_chinese/llr_ai_detection/work_tmp/corpus/aillr_cap002/` | **1956** | ★ **全部五件套**（唯一组合）| 256QAM 1563 / 64QAM **339** / 16QAM **51** / QPSK 3 |
 
 ★ **每个单元 5 个文件**：`C_<x>_<y>.txt`（★ 含 `bwp_start_rb`/`bwp_size_rb`/`modulation`/`alloc_*`）、
 `C_<x>_<y>.bin`（网格）、`C_<x>_<y>_h.bin`（★ **链自己的 H**）、`C_<x>_<y>_llr.bin`、`C_<x>_<y>_ce.txt`（★ 含 `snr`/`noise_variance`）。
@@ -259,7 +271,7 @@ cmake --build build -j 14 && cmake --build build --target test
 python3 - <<'EOF'
 import os, collections, glob
 for leg in ('aillr_cap001', 'aillr_cap002'):
-    d = os.path.expanduser(f'~/ocudu_capture/{leg}')
+    d = os.path.expanduser(f'{REPO}/doc_chinese/llr_ai_detection/work_tmp/corpus/{leg}')
     n = len(glob.glob(f'{d}/C_*_ce.txt'))
     print(f'{leg}: {n} units, {len(os.listdir(d))} files, expect {n*5}')
 EOF
@@ -267,7 +279,7 @@ EOF
 # ★ 按调制筛样本（P0-c 只判 64QAM 及以下）
 python3 - <<'EOF'
 import glob, os, re, collections
-d = os.path.expanduser('~/ocudu_capture/aillr_cap002')
+d = os.path.expanduser(f'{REPO}/doc_chinese/llr_ai_detection/work_tmp/corpus/aillr_cap002')
 c = collections.Counter()
 for f in glob.glob(f'{d}/C_*.txt'):
     if f.endswith('_ce.txt'): continue
@@ -342,13 +354,13 @@ OCUDU_RECEIVER_PROBE=1 <跑一次> 2>&1 | grep receiver_seam
 # ★ 飞行（若需要新语料）
 sudo -E env \
   LEG_CONFIG=$HOME/dev/ocudu/configs/gnb_rf_b200_tdd_n78_20mhz.yml \
-  OCUDU_UL_DUMP=$HOME/ocudu_capture/aillr_cap003/C \
+  OCUDU_UL_DUMP=$REPO/doc_chinese/llr_ai_detection/work_tmp/corpus/aillr_cap003/C \
   OCUDU_UL_DUMP_COUNT=2000 OCUDU_UL_DUMP_LLR=1 OCUDU_RECEIVER_PROBE=1 \
   bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-cap003
 # ★ 注意：LEG_CONFIG（不是 LEG_CFG）；★ EXIT_TIMEOUT 已是 30（见 build/CMakeCache.txt）
 
 # ★ 飞完检查
-C=$HOME/ocudu_capture/aillr_cap003
+C=$REPO/doc_chinese/llr_ai_detection/work_tmp/corpus/aillr_cap003
 ls $C/C_*.bin | wc -l ; ls $C/C_*_h.bin | wc -l
 grep -E "bwp_start_rb|bwp_size_rb|dmrs_type|modulation" $(ls $C/C_*.txt | head -1)
 ```
