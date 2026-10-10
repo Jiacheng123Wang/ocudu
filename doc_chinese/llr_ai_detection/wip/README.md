@@ -1,6 +1,6 @@
 # `llr_ai_detection/wip/` —— 本工作流的**工作目录约定**
 
-> 版本：v1.0 ｜ 日期：2026-10-08
+> 版本：**v1.1** ｜ 日期：**2026-10-10**（★ v1.0 建于 2026-10-08；★ **§6 检索取向纪律为 2026-10-10 新增**）
 > 目的：把本工作流的**目录、命名与出处**三件事一次定清楚，避免重演历史工作流里
 > "腿名不可比、语料散落 `/tmp`、工具找不到出处"这几类问题。
 
@@ -152,7 +152,7 @@ bash doc_chinese/llr_ai_detection/wip/next_leg_label.sh baseline        # → ai
 
 ---
 
-### 4.2 ★★ 文档**不进** `wip/`（★ 2026-10-08 判例）
+### 4.2 ★★ 文档**不进** `wip/`（★ **2026-10-10 判例**）
 
 ★ 用户问：★ **`wip/` 里的设计文档是否应当上移到 `llr_ai_detection/`？**
 ★★ **答案：是。** ★ 依据是本文件 §1 的目录地图自己写的定义 ——
@@ -165,7 +165,7 @@ bash doc_chinese/llr_ai_detection/wip/next_leg_label.sh baseline        # → ai
 ★★ **⇒ 判据很硬**：★ **一个 `.md` 是"给人读的规划/调研"还是"下一腿要用的工具"？**
 ★ 前者进 `llr_ai_detection/`，★ 后者留 `wip/`。
 
-★★ **本次执行（2026-10-08）** ★ 两份文档都已上移，★ **`wip/` 里现在没有文档**：
+★★ **本次执行（2026-10-10）** ★ 两份文档都已上移，★ **`wip/` 里现在没有文档**：
 ```
 doc_chinese/llr_ai_detection/wip/model_build_reconnaissance.md
   → doc_chinese/llr_ai_detection/model_build_reconnaissance.md     ✅
@@ -207,7 +207,7 @@ doc_chinese/llr_ai_detection/wip/model_network_design.md
 
 ---
 
-## 6. ★★★ 检索取向纪律（★ 2026-10-08，★ 用户更正）
+## 6. ★★★ 检索取向纪律（★ 2026-10-10，★ 用户更正）
 
 > ★★★ 用户：★ **"Apple silicon 的 ANE 只是 wireless PHY 的 AI 算法（网络）的一个具体承载方式，
 > 我们做文件检索和调研的时候，应该更加专注在算法层面和 inference 前向网络的架构设计方面。"**
