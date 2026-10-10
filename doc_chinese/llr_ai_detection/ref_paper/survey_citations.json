@@ -1,0 +1,1864 @@
+[
+  {
+    "id": "1011.2113",
+    "title": "Complexity Adjusted Soft-Output Sphere Decoding by Adaptive LLR Clipping",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/llr_ai_detection_design_and_implementation.md",
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 6,
+    "first_context": "arXiv 2208.05186）、自适应 LLR 裁剪（arXiv 1011.2113）、学习型标度因子（多篇专利）。",
+    "why": "**验收**：量化**前**与量化**后**的 CRC 差异 ≤ 预登记阈值。 ★ **可抄的具体数字**（`memo_03` §7bis.L）：Sionna 的神经解映射器输出 **int16 LLR，用 `np.ldexp(llrs,8)` （2⁸ 缩放）**，并**实测到相对 OAI 参考 2.42× 的标度失配**；其 `LDPC5GDecoder` 内部裁剪 **`llr_max = 20.0`**， 且指出 **min-sum 对 LLR 标度失配天然鲁棒**（⇒ 我们也可以在译码器侧买鲁棒性）。 ★ 注意 **他们的 20.0 与我们的 `LLR_MAX = 120` 不是同一层的东西**（译码器内部裁剪 vs int8 量化上限）—— \"LLR 动态范围取多大\"是**必须自己测**的量，不能照抄。 ★ **这不是我们的特殊困难，而是已被命名的成熟问题**（`memo_03`"
+  },
+  {
+    "id": "1607.04793",
+    "title": "Learning to Decode Linear Codes Using Deep Learning",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md"
+    ],
+    "n_citations": 1,
+    "first_context": "**Learning to Decode Linear Codes Using Deep Learning** — Allerton Conf. 2016 — [arXiv:1607.04793](https://arxiv.org/abs/1607.04793) — Nachmani, Be'ery, Burshtein.",
+    "why": ""
+  },
+  {
+    "id": "1612.01183",
+    "title": "AMP-Inspired Deep Networks for Sparse Linear Inverse Problems",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_part2.md"
+    ],
+    "n_citations": 1,
+    "first_context": "**Borgerding, Schniter, Rangan, \"AMP-Inspired Deep Networks for Sparse Linear Inverse Problems,\" IEEE TSP 2017** (arXiv 1612.01183v2). ACM DL: https://dl.acm.org/doi/abs/10.1109/TSP.2017.2708040 ; https://arxiv.org/abs/1612.01183",
+    "why": ""
+  },
+  {
+    "id": "1701.05931",
+    "title": "Neural Offset Min-Sum Decoding",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md"
+    ],
+    "n_citations": 1,
+    "first_context": "**Neural Offset Min-Sum Decoding** — IEEE ISIT 2017 — [arXiv:1701.05931](https://arxiv.org/abs/1701.05931) — Lugosch & Gross.",
+    "why": ""
+  },
+  {
+    "id": "1702.00832",
+    "title": "An Introduction to Deep Learning for the Physical Layer",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md"
+    ],
+    "n_citations": 2,
+    "first_context": "**An Introduction to Deep Learning for the Physical Layer** — IEEE Trans. Cognitive Communications and Networking 3(4):563–575, 2017 — [arXiv:1702.00832](https://arxiv.org/abs/1702.00832) — O'Shea & Hoydis.",
+    "why": "**SNR generalisation is a stated failure mode.** \"A **separate NN is trained for each SNR value** as the trained NNs struggle to generalize to other SNR values.\" — [arXiv:1812.05929](https://arxiv.org/abs/1812.05929). And in the foundational paper: \"we have observed that **training at certain SNRs or SNR ranges does not translate obviously to test performance. Training at low SNR for instance does"
+  },
+  {
+    "id": "1706.01151",
+    "title": "Deep MIMO Detection",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 6,
+    "first_context": "| DetNet 2017 发表在 IEEE SPL | **IEEE SPAWC 2017**（arXiv 1706.01151）；期刊版 \"Learning to Detect\", IEEE TSP 67(10):2554, 2019 |",
+    "why": "Links: [IEEE Xplore document 8227772](https://ieeexplore.ieee.org/document/8227772) · [arXiv:1706.01151v1](https://arxiv.org/abs/1706.01151v1) · [ar5iv HTML](https://ar5iv.labs.arxiv.org/html/1706.01151) Verbatim passages actually seen: > \"[IEEE 2017 IEEE 18th International Workshop on Signal Processing Advances in Wireless Communications (SPAWC) - Sapporo (2017.7.3-2017.7.6)] 2017 IEEE 18th Inter"
+  },
+  {
+    "id": "1706.07043",
+    "title": "Deep Learning Methods for Improved Decoding of Linear Codes",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 4,
+    "first_context": "**Deep Learning Methods for Improved Decoding of Linear Codes** — IEEE JSTSP 12(1):119–131, 2018 — [arXiv:1706.07043](https://arxiv.org/abs/1706.07043) — Nachmani, Marciano, Lugosch, Gross, Burshtein, Be'ery.",
+    "why": "**Non-differentiable decoder/detector operations.** Min-sum check nodes have \"**non-differentiable kinks**\" and require **subgradient descent** — [arXiv:1706.07043](https://arxiv.org/abs/1706.07043). The exact Viterbi state-equality criterion \"is **non-differentiable**, thus we minimize a multi-class cross entropy loss, **acting as a surrogate loss**\" — [arXiv:2009.02591](https://arxiv.org/abs/200"
+  },
+  {
+    "id": "1707.03384",
+    "title": "Deep Learning-Based Communication Over the Air",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 5,
+    "first_context": "**Deep Learning-Based Communication Over the Air** — IEEE JSTSP 12(1):132–143, 2018 — [arXiv:1707.03384](https://arxiv.org/abs/1707.03384) — Dörner, Cammerer, Hoydis, ten Brink.",
+    "why": "**High error floor produced by the finetuning recipe itself.** Finetuning the OTA prototype on sequences with BLER worse than ~10⁻² \"improved… the low SNR range. However, it also led to a **high error floor in the high SNR range**\" because noisy finetuning data \"obscures important structure in the data\" — [arXiv:1707.03384](https://arxiv.org/abs/1707.03384). **[verified]**"
+  },
+  {
+    "id": "1802.04741",
+    "title": "Deep Learning for Decoding of Linear Codes - A Syndrome-Based Approach",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md"
+    ],
+    "n_citations": 1,
+    "first_context": "**Deep Learning for Decoding of Linear Codes — A Syndrome-Based Approach** — IEEE ISIT 2018 — [arXiv:1802.04741](https://arxiv.org/abs/1802.04741) — Bennatan, Choukroun, Kisilev.",
+    "why": ""
+  },
+  {
+    "id": "1805.07631",
+    "title": "Learning to Detect",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 9,
+    "first_context": "**Learning to Detect** — IEEE Transactions on Signal Processing, vol. 67, no. 10, p. 2554, 2019, DOI 10.1109/TSP.2019.2899805 — [arXiv:1805.07631](https://arxiv.org/abs/1805.07631) · [ar5iv](https://ar5iv.labs.arxiv.org/html/1805.07631) · [ADS](https://ui.adsabs.harvard.edu/abs/2019ITSP...67.2554S/abstract)",
+    "why": "Links: [IEEE Xplore 8642915](https://ieeexplore.ieee.org/abstract/document/8642915) · [NASA ADS 2019ITSP...67.2554S](https://ui.adsabs.harvard.edu/abs/2019ITSP...67.2554S/abstract) · [arXiv:1805.07631v1](https://arxiv.org/abs/1805.07631v1) · [ar5iv HTML](https://ar5iv.labs.arxiv.org/html/1805.07631) Verbatim passages actually seen: > \"Learning to Detect\" — https://ui.adsabs.harvard.edu/abs/2019ITS"
+  },
+  {
+    "id": "1805.09317",
+    "title": "Communication Algorithms via Deep Learning",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md"
+    ],
+    "n_citations": 1,
+    "first_context": "**Communication Algorithms via Deep Learning** — ICLR 2018 — [arXiv:1805.09317](https://arxiv.org/abs/1805.09317) — Kim, Jiang, Rana, Kannan, Oh, Viswanath.",
+    "why": ""
+  },
+  {
+    "id": "1807.00801",
+    "title": "Deepcode-Feedback Codes via Deep Learning",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md"
+    ],
+    "n_citations": 1,
+    "first_context": "**Deepcode: Feedback Codes via Deep Learning** — NeurIPS 2018 — [arXiv:1807.00801](https://arxiv.org/abs/1807.00801) — Kim, Jiang, Kannan, Oh, Viswanath.",
+    "why": ""
+  },
+  {
+    "id": "1809.01022",
+    "title": "A Neural Network Aided Approach for LDPC Coded DCO-OFDM with Clipping Distortion",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md"
+    ],
+    "n_citations": 3,
+    "first_context": "**A Neural Network Aided Approach for LDPC Coded DCO-OFDM with Clipping Distortion** — [arXiv:1809.01022](https://browse.arxiv.org/abs/1809.01022) — NN-aided LLR handling in front of an LDPC decoder under a nonlinear channel.",
+    "why": "**A Neural Network Aided Approach for LDPC Coded DCO-OFDM with Clipping Distortion** — [arXiv:1809.01022](https://browse.arxiv.org/abs/1809.01022). NN-aided LLR handling in front of an LDPC decoder under a nonlinear (clipping) channel."
+  },
+  {
+    "id": "1809.09336",
+    "title": "A Model-Driven Deep Learning Network for MIMO Detection",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 8,
+    "first_context": "| OAMP-Net 是 GLOBECOM | **IEEE GlobalSIP 2018**（arXiv 1809.09336）；OAMP-Net2 = **IEEE TSP 68:1702–1715, 2020**（不是 JSTSP）。混淆源：arXiv 1907.09439 的 **v1→v2 改了标题** |",
+    "why": "**P4** — arXiv 1809.09336 is **GlobalSIP 2018**, not GLOBECOM 2018 (SIGPORT PDF is literally named `IEEE_Globalsip_2018.pdf`)."
+  },
+  {
+    "id": "1812.01571",
+    "title": "Multilevel MIMO Detection with Deep Learning",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md"
+    ],
+    "n_citations": 1,
+    "first_context": "| Multilevel MIMO Detection with Deep Learning (Corlay, Boutros) | arXiv 1812.01571; ADS `2018arXiv181201571C` | [arXiv listing](https://ui.adsabs.harvard.edu/abs/2018arXiv181201571C/abstract) · [ar5iv](https://ar5iv.labs.arxiv.org/html/1812.01571) |",
+    "why": ""
+  },
+  {
+    "id": "1812.05929",
+    "title": "Model-free Training of End-to-end Communication Systems",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 9,
+    "first_context": "- **Model-Free Training of End-to-End Communication Systems** — IEEE JSAC 2019, DOI 10.1109/JSAC.2019.2933891 — [arXiv:1812.05929](https://arxiv.org/html/1812.05929v3): categorical cross-entropy loss; **no LLR occurrence in the full text**; SDR prototype.",
+    "why": "**Model-Free Training of End-to-End Communication Systems** — IEEE JSAC 2019, DOI 10.1109/JSAC.2019.2933891 — [arXiv:1812.05929](https://arxiv.org/html/1812.05929v3): categorical cross-entropy loss; **no LLR occurrence in the full text**; SDR prototype."
+  },
+  {
+    "id": "1812.10044",
+    "title": "Trainable Projected Gradient Detector for Massive Overloaded MIMO Channels-Data-driven Tuning Approach",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md"
+    ],
+    "n_citations": 2,
+    "first_context": "- **Trainable Projected Gradient Detector for Massive Overloaded MIMO Channels: Data-Driven Tuning** (TPG) — [arXiv:1812.10044](https://ar5iv.labs.arxiv.org/html/1812.10044) · [IEEE 8759948](https://xplorestaging.ieee.org/document/8759948) — symbol estimates; a standard OAMP-Net2 baseline.",
+    "why": "**Trainable Projected Gradient Detector for Massive Overloaded MIMO Channels: Data-Driven Tuning** (TPG) — [arXiv:1812.10044](https://ar5iv.labs.arxiv.org/html/1812.10044) · [IEEE 8759948](https://xplorestaging.ieee.org/document/8759948) — symbol estimates; a standard OAMP-Net2 baseline."
+  },
+  {
+    "id": "1902.06939",
+    "title": "Towards Hardware Implementation of Neural Network-based Communication Algorithms",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md"
+    ],
+    "n_citations": 4,
+    "first_context": "- **Towards Hardware Implementation of Neural Network-based Communication Algorithms** — IEEE SPAWC 2019, DOI 10.1109/SPAWC.2019.8815398 — [arXiv:1902.06939](https://arxiv.org/abs/1902.06939): fixed-point/quantised weights for FPGA/ASIC; no LLR content.",
+    "why": "**Towards Hardware Implementation of Neural Network-based Communication Algorithms** — IEEE SPAWC 2019, DOI 10.1109/SPAWC.2019.8815398 — [arXiv:1902.06939](https://arxiv.org/abs/1902.06939): fixed-point/quantised weights for FPGA/ASIC; no LLR content."
+  },
+  {
+    "id": "1903.02865",
+    "title": "Deep Learning for Channel Coding via Neural Mutual Information Estimation",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 6,
+    "first_context": "**Fritschek / Schaefer / Wunder:** *Deep Learning for Channel Coding via Neural Mutual Information Estimation* — IEEE SPAWC 2019, DOI 10.1109/SPAWC.2019.8815464 — [IEEE 8815464](https://ieeexplore.ieee.org/document/8815464) · [arXiv:1903.02865](https://ar5iv.labs.arxiv.org/html/1903.02865) · [code](https://github.com/Fritschek/Wireless_encoding_with_MI_estimation); and *Neural Mutual Information E",
+    "why": "**Bit-wise losses:** a non-BCE form `L_bit(a,b)=(1−b)^a b^{1−a}` ([Chalmers](https://research.chalmers.se/publication/513449/file/513449_Fulltext.pdf)); symbol-posterior cross-entropy for CMDNet; per-stage cross-entropy for SICNN. **Bit-wise MSE against true LLRs: no paper found (negative evidence).** **Fritschek / Schaefer / Wunder:** *Deep Learning for Channel Coding via Neural Mutual Informatio"
+  },
+  {
+    "id": "1903.04766",
+    "title": "Artificial Intelligence-aided Receiver for A CP-Free OFDM System-Design, Simulation, and Experimental Test",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md"
+    ],
+    "n_citations": 1,
+    "first_context": "> — http://export.arxiv.org/pdf/1903.04766#4#4",
+    "why": "Links: [SIGPORT PDF (filename `IEEE_Globalsip_2018.pdf`)](https://sigport.org/sites/default/files/docs/IEEE_Globalsip_2018.pdf) · [IEEE Xplore 8646357](https://ieeexplore.ieee.org/abstract/document/8646357) · [arXiv:1809.09336](https://arxiv.org/abs/1809.09336) · [ar5iv HTML](https://ar5iv.labs.arxiv.org/html/1809.09336) · [HKUST IR record](https://lbnx03.ust.hk/ir/Record/1783.1-126247) Verbatim p"
+  },
+  {
+    "id": "1906.04610",
+    "title": "Adaptive Neural Signal Detection for Massive MIMO",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part2.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 7,
+    "first_context": "**Adaptive Neural Signal Detection for Massive MIMO (MMNet)** — IEEE Transactions on Wireless Communications, vol. 19, no. 8, pp. 5635–5648, 2020, DOI 10.1109/TWC.2020.2996144 — [arXiv:1906.04610](https://arxiv.org/abs/1906.04610) · [Nokia Bell Labs](https://www.nokia.com/bell-labs/publications-and-media/publications/adaptive-neural-signal-detection-for-massive-mimo/) · [MIT thesis](https://dspace",
+    "why": "**MMNet — IEEE TWC vol. 19 no. 8 pp. 5635–5648, 2020, DOI 10.1109/TWC.2020.2996144** ([arXiv 1906.04610](https://arxiv.org/abs/1906.04610)). [FT] 10 layers; per layer a learned complex linear operator `Θ_t` (`N_t×N_r`) plus a per-symbol noise-variance scaling `θ_t`, then a **model-based posterior-mean denoiser**; `2N_t(N_r+1)` parameters (20 K–41 K). **Output = soft symbols internally, then hard s"
+  },
+  {
+    "id": "1907.01512",
+    "title": "Machine LLRning-Learning to Softly Demodulate",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md",
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 7,
+    "first_context": "arXiv 1907.01512）**就是用 MSE 对参考 LLR 训练**的。",
+    "why": "\"LLRNet: Model training and testing\": https://docs.nvidia.com/aerial/cuda-accelerated-ran/latest/content/notebooks/llrnet_model_training.html > \"**The LLRNet is plugged in the PUSCH receiver chain in place of the conventional soft demapper.**\" > \"The LLRNet model follows the original paper … Shental, J. Hoydis, “'Machine LLRning': Learning to Softly Demodulate”, https://arxiv.org/abs/1907.01512\" M"
+  },
+  {
+    "id": "1907.09439",
+    "title": "Model-Driven Deep Learning for MIMO Detection",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md",
+      "llr_ai_detection/survey/survey_line_a_part2.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 19,
+    "first_context": "| OAMP-Net 是 GLOBECOM | **IEEE GlobalSIP 2018**（arXiv 1809.09336）；OAMP-Net2 = **IEEE TSP 68:1702–1715, 2020**（不是 JSTSP）。混淆源：arXiv 1907.09439 的 **v1→v2 改了标题** |",
+    "why": "**LLRs do appear in this paper**: an indexed passage reads *\"where b_{j,k} is the k-th bit in the transmitted symbol x_j, and S_j⁺ and S_j⁻ denote the su[bsets]…\"* ([arXiv:1907.09439 §VI](http://arxiv.org/pdf/1907.09439v1)), i.e. the paper writes down a per-bit LLR expression for the detector output. Whether those LLRs are used with a real decoder, and whether any scaling is applied, is **not veri"
+  },
+  {
+    "id": "1909.01683",
+    "title": "Deep Learning-Aided Tabu Search Detection for Large MIMO Systems",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md"
+    ],
+    "n_citations": 1,
+    "first_context": "| Deep Learning-Aided Tabu Search Detection for Large MIMO Systems | IEEE **TWC**, DOI 10.1109/TWC.2020.2981915/2981919 | [ar5iv 1909.01683](https://ar5iv.labs.arxiv.org/html/1909.01683) |",
+    "why": ""
+  },
+  {
+    "id": "1911.13055",
+    "title": "Trainable Communication Systems-Concepts and Prototype",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 14,
+    "first_context": "| Cammerer TCOM 2020（1911.13055） | OTA **+1.3 dB（vs 256QAM + 802.11n LDPC）**；+0.6 dB 是对 **AWGN-MAP demapper** 的——两个数字都对，回答的是不同问题 |",
+    "why": "**Trainable Communication Systems: Concepts and Prototype** — Cammerer, Aït Aoudia, Dörner, Stark, Hoydis, ten Brink — IEEE Transactions on Communications 2020, DOI 10.1109/TCOMM.2020.3002915 — [arXiv:1911.13055](https://browse.arxiv.org/abs/1911.13055) · [IEEE 9118963](https://ieeexplore.ieee.org/document/9118963). **[full text]** *\"the learned demapper outputs LLR and can therefore be smoothly i"
+  },
+  {
+    "id": "2002.02750",
+    "title": "Deep HyperNetwork-Based MIMO Detection",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part2.md"
+    ],
+    "n_citations": 7,
+    "first_context": "- **Deep HyperNetwork-Based MIMO Detection (HyperMIMO)** — [arXiv:2002.02750](https://arxiv.org/abs/2002.02750) — T=5, 3-layer hypernetwork (75 units), **hard-decision output**, loss `E‖r_x^T − x‖₂²`; *\"to achieve a SER of 10⁻³, HyperMIMO exhibits a loss of 0.65 dB compared to MMNet, but a gain of 1.85 dB over OAMPNet and 2.85 dB over LMMSE\"*; no LDPC.",
+    "why": "**Deep HyperNetwork-Based MIMO Detection (HyperMIMO)** — [arXiv:2002.02750](https://arxiv.org/abs/2002.02750) — T=5, 3-layer hypernetwork (75 units), **hard-decision output**, loss `E‖r_x^T − x‖₂²`; *\"to achieve a SER of 10⁻³, HyperMIMO exhibits a loss of 0.65 dB compared to MMNet, but a gain of 1.85 dB over OAMPNet and 2.85 dB over LMMSE\"*; no LDPC."
+  },
+  {
+    "id": "2004.05062",
+    "title": "Joint Learning of Probabilistic and Geometric Shaping for Coded Modulation Systems",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md"
+    ],
+    "n_citations": 4,
+    "first_context": "- **MI / achievable-rate losses** — Donsker–Varadhan bound (Fritschek et al.), max-achievable-rate / BMD rate (Sionna OFDM SIMO; [IEEE 9903445](https://ieeexplore.ieee.org/abstract/document/9903445/figures)), BMI ≈ total BCE ([IEEE Globecom 2020, arXiv:2004.05062](https://arxiv.org/html/2004.05062v2)).",
+    "why": "**MI / achievable-rate losses** — Donsker–Varadhan bound (Fritschek et al.), max-achievable-rate / BMD rate (Sionna OFDM SIMO; [IEEE 9903445](https://ieeexplore.ieee.org/abstract/document/9903445/figures)), BMI ≈ total BCE ([IEEE Globecom 2020, arXiv:2004.05062](https://arxiv.org/html/2004.05062v2))."
+  },
+  {
+    "id": "2005.01494",
+    "title": "DeepRx-Fully Convolutional Deep Learning Receiver",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 8,
+    "first_context": "| ★★★ **DeepRx**（Nokia Bell Labs，IEEE TWC 2021，arXiv:2005.01494）★ **就是\"一个 CNN 取代 CE+均衡+解映射、输出 LLR\"那篇** | ★★ 编码 BER 相对**实用 LMMSE（LS+插值）**增益 **~2 dB**；★ 而它 **\"can essentially match the performance of the LMMSE receiver with FULL channel knowledge\"** ⇒ ★★★ **它打不过 genie/完美 CSI 的 LMMSE**。★ 它对 genie 的唯一优势来自**小区间干扰**（+2 dB），★ 而作者紧接着注明：★ 那个差 **\"could likely be reduced if the LMMSE receivers were utilizing",
+    "why": "*Use coded BER, not uncoded BER, as the deployment metric* — \"Investigating the coded BER reveals whether the LLRs … sufficiently capture the uncertainty of the detected bits for the purposes of LDPC decoding. The coded BER can also be seen as a proxy to the accuracy of the LLRs themselves\" — [arXiv:2005.01494](https://arxiv.org/abs/2005.01494). **[verified]**"
+  },
+  {
+    "id": "2005.02262",
+    "title": "PolymoRF-Polymorphic Wireless Receivers Through Physical-Layer Deep Learning",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md"
+    ],
+    "n_citations": 3,
+    "first_context": "**PolymoRF: Polymorphic Wireless Receivers Through Physical-Layer Deep Learning** — arXiv 2005.02262 (Restuccia, Melodia) — [link](https://arxiv.org/abs/2005.02262)",
+    "why": ""
+  },
+  {
+    "id": "2006.16015",
+    "title": "Neural Mutual Information Estimation for Channel Coding-State-of-the-Art Estimators, Analysis, and Performance Comparison",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 5,
+    "first_context": "**Fritschek / Schaefer / Wunder:** *Deep Learning for Channel Coding via Neural Mutual Information Estimation* — IEEE SPAWC 2019, DOI 10.1109/SPAWC.2019.8815464 — [IEEE 8815464](https://ieeexplore.ieee.org/document/8815464) · [arXiv:1903.02865](https://ar5iv.labs.arxiv.org/html/1903.02865) · [code](https://github.com/Fritschek/Wireless_encoding_with_MI_estimation); and *Neural Mutual Information E",
+    "why": "**Bit-wise losses:** a non-BCE form `L_bit(a,b)=(1−b)^a b^{1−a}` ([Chalmers](https://research.chalmers.se/publication/513449/file/513449_Fulltext.pdf)); symbol-posterior cross-entropy for CMDNet; per-stage cross-entropy for SICNN. **Bit-wise MSE against true LLRs: no paper found (negative evidence).** **Fritschek / Schaefer / Wunder:** *Deep Learning for Channel Coding via Neural Mutual Informatio"
+  },
+  {
+    "id": "2008.08264",
+    "title": "Intelligent Radio Signal Processing-A Survey",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md"
+    ],
+    "n_citations": 2,
+    "first_context": "- Also: **Model-Based Machine Learning for Communications** ([arXiv:2101.04726](https://ar5iv.labs.arxiv.org/html/2101.04726)), **Leveraging Deep Neural Networks for Massive MIMO Data Detection** (Nguyen & Nguyen, [arXiv:2204.05350](https://ar5iv.labs.arxiv.org/html/2204.05350)), **Intelligent Radio Signal Processing: A Survey** ([arXiv:2008.08264](https://ar5iv.labs.arxiv.org/html/2008.08264)), *",
+    "why": "Also: **Model-Based Machine Learning for Communications** ([arXiv:2101.04726](https://ar5iv.labs.arxiv.org/html/2101.04726)), **Leveraging Deep Neural Networks for Massive MIMO Data Detection** (Nguyen & Nguyen, [arXiv:2204.05350](https://ar5iv.labs.arxiv.org/html/2204.05350)), **Intelligent Radio Signal Processing: A Survey** ([arXiv:2008.08264](https://ar5iv.labs.arxiv.org/html/2008.08264)), **D"
+  },
+  {
+    "id": "2009.02591",
+    "title": "Deep Ensemble of Weighted Viterbi Decoders for Tail-Biting Convolutional Codes",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 4,
+    "first_context": "**Deep Ensemble of Weighted Viterbi Decoders for Tail-Biting Convolutional Codes** — Entropy 23(1):93, 2021 — [arXiv:2009.02591](https://arxiv.org/abs/2009.02591) — Raviv, Schwartz, Be'ery.",
+    "why": "*LLR clipping to a per-modulation, per-channel-model maximum* — [arXiv:2601.16586](https://arxiv.org/abs/2601.16586); an \"LLR clipping parameter λ_max = 20\" is also listed among the decoder hyper-parameters in [arXiv:2009.02591](https://arxiv.org/abs/2009.02591). **[verified]**"
+  },
+  {
+    "id": "2009.05261",
+    "title": "End-to-end Learning for OFDM-From Neural Receivers to Pilotless Communication",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md"
+    ],
+    "n_citations": 4,
+    "first_context": "- **End-to-End Learning for OFDM: From Neural Receivers to Pilotless Communication** — IEEE TWC 2021, DOI 10.1109/TWC.2021.3101364 — [arXiv:2009.05261](https://arxiv.org/html/2009.05261v2): total BCE loss; LLRs from Gaussian/APP demapping fed to BP; **+7% throughput at equal BER** vs the pilot-based baseline; simulation. ⚠ **The title \"...to Hardware Feasibility\" does not exist** — that is a mis-c",
+    "why": "**End-to-End Learning for OFDM: From Neural Receivers to Pilotless Communication** — IEEE TWC 2021, DOI 10.1109/TWC.2021.3101364 — [arXiv:2009.05261](https://arxiv.org/html/2009.05261v2): total BCE loss; LLRs from Gaussian/APP demapping fed to BP; **+7% throughput at equal BER** vs the pilot-based baseline; simulation. ⚠ **The title \"...to Hardware Feasibility\" does not exist** — that is a mis-cit"
+  },
+  {
+    "id": "2010.16283",
+    "title": "DeepRx MIMO-Convolutional MIMO Detection with Learned Multiplicative Transformations",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 6,
+    "first_context": "- DeepRx MIMO（2010.16283）在 ~14 dB 出现 *\"a BER floor\"*；★ 但**没有人把神经接收机的 BLER",
+    "why": "DeepRx MIMO（2010.16283）在 ~14 dB 出现 *\"a BER floor\"*；★ 但**没有人把神经接收机的 BLER 画到 1e-5 做错误平台研究**。"
+  },
+  {
+    "id": "2012.08405",
+    "title": "Model-Based Deep Learning",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part2.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 4,
+    "first_context": "- **Model-Based Deep Learning** — Shlezinger, Whang, Eldar, Dimakis — **Proceedings of the IEEE, vol. 111, no. 5, pp. 465–499, May 2023, DOI 10.1109/JPROC.2023.3247480** — [arXiv:2012.08405](https://ar5iv.labs.arxiv.org/html/2012.08405) · [Technion](https://cris.technion.ac.il/en/publications/model-based-deep-learning). Has a \"Deep Unfolding\" subsection and a \"Deep Unfolded Projected Gradient Desc",
+    "why": "**Model-Based Deep Learning** — Shlezinger, Whang, Eldar, Dimakis — **Proceedings of the IEEE, vol. 111, no. 5, pp. 465–499, May 2023, DOI 10.1109/JPROC.2023.3247480** — [arXiv:2012.08405](https://ar5iv.labs.arxiv.org/html/2012.08405) · [Technion](https://cris.technion.ac.il/en/publications/model-based-deep-learning). Has a \"Deep Unfolding\" subsection and a \"Deep Unfolded Projected Gradient Descen"
+  },
+  {
+    "id": "2013.0471",
+    "title": "",
+    "archived": false,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 4,
+    "first_context": "11. **Classical constraints**: internal LLR clipping (`llr_max=20.0` in Sionna); adaptive quantisation *\"applies a scaling to the log-likelihood ratios (LLRs) and messages\"* ([UNC thesis](https://rdu.unc.edu.ar/bitstream/handle/11086/1463/Morero_Tesis.pdf)); *\"the least amount of saturation occurs for a given application, as oversaturation…\"* ([PolyMtl thesis](https://publications.polymtl.ca/10295",
+    "why": "**SNR-mismatch-aware decoding.** A decoder that *\"is not only aware of the SNR mismatch, but can also estimate the magnitude of the mismatch\"* — IET Communications, DOI 10.1049/iet-com.2013.0471 ([Wiley](https://onlinelibrary.wiley.com/doi/pdfdirect/10.1049/iet-com.2013.0471)) — classical evidence that LLR magnitude/scale errors are a known decoder-side failure mode, which is exactly the risk when"
+  },
+  {
+    "id": "2101.04726",
+    "title": "Model-Based Machine Learning for Communications",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 5,
+    "first_context": "- Also: **Model-Based Machine Learning for Communications** ([arXiv:2101.04726](https://ar5iv.labs.arxiv.org/html/2101.04726)), **Leveraging Deep Neural Networks for Massive MIMO Data Detection** (Nguyen & Nguyen, [arXiv:2204.05350](https://ar5iv.labs.arxiv.org/html/2204.05350)), **Intelligent Radio Signal Processing: A Survey** ([arXiv:2008.08264](https://ar5iv.labs.arxiv.org/html/2008.08264)), *",
+    "why": "Also: **Model-Based Machine Learning for Communications** ([arXiv:2101.04726](https://ar5iv.labs.arxiv.org/html/2101.04726)), **Leveraging Deep Neural Networks for Massive MIMO Data Detection** (Nguyen & Nguyen, [arXiv:2204.05350](https://ar5iv.labs.arxiv.org/html/2204.05350)), **Intelligent Radio Signal Processing: A Survey** ([arXiv:2008.08264](https://ar5iv.labs.arxiv.org/html/2008.08264)), **D"
+  },
+  {
+    "id": "2102.02993",
+    "title": "LoRD-Net-Unfolded Deep Detection Network with Low-Resolution Receivers",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 4,
+    "first_context": "**LoRD-Net: Unfolded Deep Detection Network With Low-Resolution Receivers** — IEEE TSP, vol. 69, p. 5651, 2021, DOI 10.1109/TSP.2021.3117503 — [ar5iv 2102.02993](https://ar5iv.labs.arxiv.org/html/2102.02993) · [ADS](https://ui.adsabs.harvard.edu/abs/2021ITSP...69.5651K/abstract). Unfolded detection for low-resolution (incl. 1-bit) receivers; also at ISIT 2021 as \"Model-Inspired Deep Detection with",
+    "why": "**LoRD-Net: Unfolded Deep Detection Network With Low-Resolution Receivers** — IEEE Transactions on Signal Processing 2021, DOI 10.1109/TSP.2021.3117503 — [arXiv:2102.02993](https://ar5iv.labs.arxiv.org/html/2102.02993) · [ACM DL entry](https://dl.acm.org/doi/10.1109/TSP.2021.3117503). Unfolded detection explicitly for low-resolution (incl. 1-bit) receivers; also presented as *\"Model-Inspired Deep "
+  },
+  {
+    "id": "2102.03828",
+    "title": "Learning to Decode Protograph LDPC Codes",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 4,
+    "first_context": "**Learning to Decode Protograph LDPC Codes** — IEEE JSAC, 2021 — [arXiv:2102.03828](https://arxiv.org/abs/2102.03828) — Dai, Tan, Si, Niu, Chen, Poor, Cui.",
+    "why": "*EXIT-chart-based degree-profile matching of the code to the learned demapper's LLR statistics, with a stability condition λ₂ ≤ β to avoid an error floor* — [arXiv:1911.13055](https://arxiv.org/abs/1911.13055); T-EXIT analysis of learned min-sum decoders in [arXiv:2102.03828](https://arxiv.org/abs/2102.03828). **[verified]**"
+  },
+  {
+    "id": "2102.12756",
+    "title": "CMDNet-Learning a Probabilistic Relaxation of Discrete Variables for Soft Detection with Low Complexity",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md",
+      "llr_ai_detection/survey/survey_line_a_part2.md",
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 14,
+    "first_context": "**CMDNet**（IEEE TCOM 69(12):8214–8227, 2021，arXiv 2102.12756）用直方图实测：",
+    "why": "**CMDNet: Learning a Probabilistic Relaxation of Discrete Variables for Soft Detection With Low Complexity** — Beck, Bockelmann, Dekorsy — IEEE Transactions on Communications 69(12), 8214–8227, 2021 — [arXiv:2102.12756](https://ar5iv.labs.arxiv.org/html/2102.12756) · [IEEE 9546779](https://ieeexplore.ieee.org/abstract/document/9546779). **The key calibration datapoint for DetNet:** *\"the soft outp"
+  },
+  {
+    "id": "2105.05044",
+    "title": "Understanding Deep MIMO Detection",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md"
+    ],
+    "n_citations": 6,
+    "first_context": "and analyses it in *\"Understanding Deep MIMO Detection\"* — IEEE Transactions on Wireless Communications 2023, DOI 10.1109/TWC.2023.3272525 ([arXiv:2105.05044](https://ar5iv.labs.arxiv.org/html/2105.05044)).",
+    "why": "Links: [IEEE Xplore 10121671](https://ieeexplore.ieee.org/abstract/document/10121671) · [NASA ADS 2023ITWC...22.9626H](https://ui.adsabs.harvard.edu/abs/2023ITWC...22.9626H/abstract) · [ACM DL](https://dl.acm.org/doi/abs/10.1109/TWC.2023.3272525) · [arXiv:2105.05044v1](https://arxiv.org/abs/2105.05044v1) · [ar5iv HTML](https://ar5iv.labs.arxiv.org/html/2105.05044) · [ResearchGate PDF listing](http"
+  },
+  {
+    "id": "2106.16079",
+    "title": "HybridDeepRx-Deep Learning Receiver for High-EVM Signals",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/model_build_reconnaissance.md"
+    ],
+    "n_citations": 1,
+    "first_context": "（★ HybridDeepRx，arXiv:2106.16079 —— ★ **唯一在高 SNR 显示真实增益的机制**）、",
+    "why": ""
+  },
+  {
+    "id": "2107.11958",
+    "title": "Deep Learning for Estimation and Pilot Signal Design in Few-Bit Massive MIMO Systems",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md"
+    ],
+    "n_citations": 3,
+    "first_context": "**Deep Learning for Estimation and Pilot Signal Design in Few-Bit Massive MIMO Systems** — [IEEE 9847603](https://ieeexplore.ieee.org/abstract/document/9847603) · [arXiv:2107.11958](http://export.arxiv.org/pdf/2107.11958) (explicit b-bit quantiser `Q_b(r)`).",
+    "why": "**Deep Learning for Estimation and Pilot Signal Design in Few-Bit Massive MIMO Systems** — [arXiv:2107.11958](http://export.arxiv.org/pdf/2107.11958)"
+  },
+  {
+    "id": "2201.03866",
+    "title": "Deep Learning-Aided 6G Wireless Networks-A Comprehensive Survey of Revolutionary PHY Architectures",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part2.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 5,
+    "first_context": "- **Deep Learning-Aided 6G Wireless Networks: A Comprehensive Survey of Revolutionary PHY Architectures** — **IEEE Open Journal of the Communications Society 2022, DOI 10.1109/OJCOMS.2022.3210648** — [arXiv:2201.03866](https://arxiv.org/html/2201.03866v3).",
+    "why": "**Deep Learning-Aided 6G Wireless Networks: A Comprehensive Survey of Revolutionary PHY Architectures** — **IEEE Open Journal of the Communications Society 2022, DOI 10.1109/OJCOMS.2022.3210648** — [arXiv:2201.03866](https://arxiv.org/html/2201.03866v3)."
+  },
+  {
+    "id": "2201.11779",
+    "title": "Convolutional Self-Attention-Based Multi-User MIMO Demapper",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md"
+    ],
+    "n_citations": 4,
+    "first_context": "**Convolutional Self-Attention-Based Multi-User MIMO Demapper** — [arXiv:2201.11779](https://ar5iv.labs.arxiv.org/html/2201.11779). Attention-based MU-MIMO demapper with learned parameters; soft output.",
+    "why": "**Convolutional Self-Attention-Based Multi-User MIMO Demapper** — [arXiv:2201.11779](https://ar5iv.labs.arxiv.org/html/2201.11779). Attention-based demapper operating on multi-user MIMO signals (outputs soft information per bit)."
+  },
+  {
+    "id": "2203.11854",
+    "title": "Sionna-An Open-Source Library for Next-Generation Physical Layer Research",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md"
+    ],
+    "n_citations": 6,
+    "first_context": "**Sionna: An Open-Source Library for Next-Generation Physical Layer Research** — [arXiv:2203.11854](https://arxiv.org/abs/2203.11854) (Hoydis et al.; **no peer-reviewed venue found — arXiv preprint**)",
+    "why": "URLs: https://arxiv.org/abs/2203.11854 · https://arxiv.org/html/2203.11854v1 · https://doi.org/10.48550/arXiv.2203.11854 **(i) What it provides for learned demappers/receivers and LLRs** > \"Sionna enables seamless integration of NNs in the physical layer signal processing chain. As most building blocks are differentiable, gradients can be backpropagated through an entire system, which is the key e"
+  },
+  {
+    "id": "2204.05350",
+    "title": "Leveraging Deep Neural Networks for Massive MIMO Data Detection",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md"
+    ],
+    "n_citations": 3,
+    "first_context": "- Also: **Model-Based Machine Learning for Communications** ([arXiv:2101.04726](https://ar5iv.labs.arxiv.org/html/2101.04726)), **Leveraging Deep Neural Networks for Massive MIMO Data Detection** (Nguyen & Nguyen, [arXiv:2204.05350](https://ar5iv.labs.arxiv.org/html/2204.05350)), **Intelligent Radio Signal Processing: A Survey** ([arXiv:2008.08264](https://ar5iv.labs.arxiv.org/html/2008.08264)), *",
+    "why": "Also: **Model-Based Machine Learning for Communications** ([arXiv:2101.04726](https://ar5iv.labs.arxiv.org/html/2101.04726)), **Leveraging Deep Neural Networks for Massive MIMO Data Detection** (Nguyen & Nguyen, [arXiv:2204.05350](https://ar5iv.labs.arxiv.org/html/2204.05350)), **Intelligent Radio Signal Processing: A Survey** ([arXiv:2008.08264](https://ar5iv.labs.arxiv.org/html/2008.08264)), **D"
+  },
+  {
+    "id": "2208.05186",
+    "title": "Learning Quantization in LDPC Decoders",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/llr_ai_detection_design_and_implementation.md",
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 7,
+    "first_context": "arXiv 2208.05186）、自适应 LLR 裁剪（arXiv 1011.2113）、学习型标度因子（多篇专利）。",
+    "why": "**验收**：量化**前**与量化**后**的 CRC 差异 ≤ 预登记阈值。 ★ **可抄的具体数字**（`memo_03` §7bis.L）：Sionna 的神经解映射器输出 **int16 LLR，用 `np.ldexp(llrs,8)` （2⁸ 缩放）**，并**实测到相对 OAI 参考 2.42× 的标度失配**；其 `LDPC5GDecoder` 内部裁剪 **`llr_max = 20.0`**， 且指出 **min-sum 对 LLR 标度失配天然鲁棒**（⇒ 我们也可以在译码器侧买鲁棒性）。 ★ 注意 **他们的 20.0 与我们的 `LLR_MAX = 120` 不是同一层的东西**（译码器内部裁剪 vs int8 量化上限）—— \"LLR 动态范围取多大\"是**必须自己测**的量，不能照抄。 ★ **这不是我们的特殊困难，而是已被命名的成熟问题**（`memo_03`"
+  },
+  {
+    "id": "2210.03888",
+    "title": "Accelerated and Deep Expectation Maximization for One-Bit MIMO-OFDM Detection",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md"
+    ],
+    "n_citations": 2,
+    "first_context": "**Accelerated and Deep Expectation Maximization for One-Bit MIMO-OFDM Detection** — IEEE TSP 2024, DOI 10.1109/TSP.2024.3359083 — [arXiv:2210.03888](https://arxiv.org/abs/2210.03888).",
+    "why": ""
+  },
+  {
+    "id": "2210.14103",
+    "title": "Bit Error and Block Error Rate Training for ML-Assisted Communication",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md"
+    ],
+    "n_citations": 8,
+    "first_context": "- **BER/BLER-metric training** — *\"Bit Error and Block Error Rate Training for ML-Assisted Communication\"*, [arXiv:2210.14103](https://arxiv.org/html/2210.14103); ⚠ its losses, venue and numbers were **not** verified.",
+    "why": "**BER/BLER-metric training** — *\"Bit Error and Block Error Rate Training for ML-Assisted Communication\"*, [arXiv:2210.14103](https://arxiv.org/html/2210.14103); ⚠ its losses, venue and numbers were **not** verified."
+  },
+  {
+    "id": "2211.06054",
+    "title": "Neural Network Approaches for Data Estimation in Unique Word OFDM Systems",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 3,
+    "first_context": "⇒ 也给出一个我们**应当复现的测量**：Baumgartner 等（arXiv 2211.06054）的",
+    "why": "**Neural Network Approaches for Data Estimation in Unique Word OFDM Systems** — Baumgartner, Bognár, Lang, Huemer — [arXiv:2211.06054](https://arxiv.org/abs/2211.06054). **[full text: abstract]** Contains a DetNet-vs-**MDetNet** comparison table with parameter-like counts (100000 / 31783 for \"System I / System II\") **and** an empirical reliability metric `P_emp,k = (# wrong hard decisions in bin k"
+  },
+  {
+    "id": "2212.03839",
+    "title": "End-to-end Optimization of Constellation Shaping for Wiener Phase Noise Channels with a Differentiable Blind Phase Search",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md"
+    ],
+    "n_citations": 1,
+    "first_context": "- **End-to-end Optimization of Constellation Shaping for Wiener Phase Noise Channels with a Differentiable Blind Phase Search** — [arXiv:2212.03839](https://ar5iv.labs.arxiv.org/html/2212.03839). End-to-end system with a *learned neural demapper* whose decision regions are inspected.",
+    "why": "**End-to-end Optimization of Constellation Shaping for Wiener Phase Noise Channels with a Differentiable Blind Phase Search** — [arXiv:2212.03839](https://ar5iv.labs.arxiv.org/html/2212.03839). End-to-end system with a *learned neural demapper* whose decision regions are inspected."
+  },
+  {
+    "id": "2212.07816",
+    "title": "DUIDD-Deep-Unfolded Interleaved Detection and Decoding for MIMO Wireless Systems",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 3,
+    "first_context": "- **DUIDD: Deep-Unfolded Interleaved Detection and Decoding for MIMO Wireless Systems** — [arXiv:2212.07816](https://ar5iv.labs.arxiv.org/html/2212.07816) — *\"the extrinsic LLR values are then fed back to the data detector\"*; LLR-domain IDD.",
+    "why": "**DUIDD: Deep-Unfolded Interleaved Detection and Decoding for MIMO Wireless Systems** — [arXiv:2212.07816](https://ar5iv.labs.arxiv.org/html/2212.07816) — *\"the extrinsic LLR values are then fed back to the data detector\"*; LLR-domain IDD."
+  },
+  {
+    "id": "2302.02436",
+    "title": "Uncertainty-Aware and Reliable Neural MIMO Receivers via Modular Bayesian Deep Learning",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 4,
+    "first_context": "**Uncertainty-Aware and Reliable Neural MIMO Receivers via Modular Bayesian Deep Learning** — [arXiv:2302.02436](https://arxiv.org/abs/2302.02436) (2023, v4 2024) — Raviv, Park, Simeone, Shlezinger.",
+    "why": "**Neural modules are systematically overconfident, and the overconfidence is *architectural*, not fixed by end-to-end calibration.** \"Conventionally trained DNN-based modules are known to produce **poorly calibrated, typically overconfident, decisions**… the **confidence level produced by the receiver is typically larger than the actual test accuracy**.\" And on the remedy: end-to-end Bayesian trai"
+  },
+  {
+    "id": "2304.07696",
+    "title": "Learning-Based One-Bit Maximum Likelihood Detection for Massive MIMO Systems-Dithering-Aided Adaptive Approach",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md"
+    ],
+    "n_citations": 2,
+    "first_context": "**Regularized Neural Detection for One-Bit Massive MIMO** — [arXiv:2305.15543](https://ar5iv.labs.arxiv.org/html/2305.15543); **Learning-Based One-Bit ML Detection: Dithering-Aided Adaptive** — [arXiv:2304.07696](http://arxiv.org/pdf/2304.07696v2); **Deep Signal Recovery with One-Bit Quantization** (ICASSP 2019) and **Model-Based Deep Learning for One-Bit Compressive Sensing** (IEEE TSP, [9187438]",
+    "why": ""
+  },
+  {
+    "id": "2305.07309",
+    "title": "Adaptive and Flexible Model-Based AI for Deep Receivers in Dynamic Channels",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md"
+    ],
+    "n_citations": 2,
+    "first_context": "**Adaptive and Flexible Model-Based AI for Deep Receivers in Dynamic Channels** — IEEE Wireless Communications (2024; arXiv 2023) — [arXiv:2305.07309](https://arxiv.org/abs/2305.07309) — Raviv, Park, Simeone, Eldar, Shlezinger.",
+    "why": "**Framing of the underlying difficulty** (the reason SNR/channel generalisation is not just a data-augmentation problem): receiver design \"poses unique challenges that fundamentally differ from those encountered in traditional deep learning domains… the **dynamic nature of wireless communications … causes continual changes to the data distribution**.\" — [arXiv:2305.07309](https://arxiv.org/abs/230"
+  },
+  {
+    "id": "2305.15543",
+    "title": "Regularized Neural Detection for One-Bit Massive MIMO Communication Systems",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 5,
+    "first_context": "**Regularized Neural Detection for One-Bit Massive MIMO** — [arXiv:2305.15543](https://ar5iv.labs.arxiv.org/html/2305.15543); **Learning-Based One-Bit ML Detection: Dithering-Aided Adaptive** — [arXiv:2304.07696](http://arxiv.org/pdf/2304.07696v2); **Deep Signal Recovery with One-Bit Quantization** (ICASSP 2019) and **Model-Based Deep Learning for One-Bit Compressive Sensing** (IEEE TSP, [9187438]",
+    "why": "**Regularized Neural Detection for One-Bit Massive MIMO Communication Systems** — [arXiv:2305.15543](https://ar5iv.labs.arxiv.org/html/2305.15543)"
+  },
+  {
+    "id": "2307.12575",
+    "title": "Robust MIMO Detection With Imperfect CSI-A Neural Network Solution",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_part2.md"
+    ],
+    "n_citations": 1,
+    "first_context": "- Related ADMM unfoldings: **RADMMNet / LCRADMMNet** for imperfect CSI (arXiv 2307.12575, https://arxiv.org/abs/2307.12575); **\"Learnable binary MIMO detection with negative penalty based on inexact ADMM,\"** Electronics Letters 2024, DOI 10.1049/ell2.13155 (one-bit ADCs).",
+    "why": "Related ADMM unfoldings: **RADMMNet / LCRADMMNet** for imperfect CSI (arXiv 2307.12575, https://arxiv.org/abs/2307.12575); **\"Learnable binary MIMO detection with negative penalty based on inexact ADMM,\"** Electronics Letters 2024, DOI 10.1049/ell2.13155 (one-bit ADCs)."
+  },
+  {
+    "id": "2308.11335",
+    "title": "Graph Neural Network-Enhanced Expectation Propagation Algorithm for MIMO Turbo Receivers",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md"
+    ],
+    "n_citations": 2,
+    "first_context": "- **Graph Neural Network-Enhanced Expectation Propagation Algorithm for MIMO Turbo Receivers** — IEEE TSP 2023, DOI 10.1109/TSP.2023.3310279 — [ar5iv 2308.11335](https://ar5iv.labs.arxiv.org/html/2308.11335) — learned EP inside a turbo (detection–decoding) loop; LLR-domain.",
+    "why": "**Graph Neural Network-Enhanced Expectation Propagation Algorithm for MIMO Turbo Receivers** — IEEE TSP 2023, DOI 10.1109/TSP.2023.3310279 — [ar5iv 2308.11335](https://ar5iv.labs.arxiv.org/html/2308.11335) — learned EP inside a turbo (detection–decoding) loop; LLR-domain."
+  },
+  {
+    "id": "2308.12591",
+    "title": "SICNN-Soft Interference Cancellation Inspired Neural Network Equalizers",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part2.md"
+    ],
+    "n_citations": 3,
+    "first_context": "- **SICNN: Soft Interference Cancellation Inspired Neural Network Equalizers** — IEEE TMLCN 2024, DOI 10.1109/TMLCN.2024.3377174 — [arXiv:2308.12591](https://arxiv.org/pdf/2308.12591) — an **equalizer** (SC-FDE/UW-OFDM), not a MIMO symbol detector; per-stage posterior symbol probabilities, custom cross-entropy loss, closed-form real-multiplication counts.",
+    "why": "**SICNN: Soft Interference Cancellation Inspired Neural Network Equalizers** — IEEE TMLCN 2024, DOI 10.1109/TMLCN.2024.3377174 — [arXiv:2308.12591](https://arxiv.org/pdf/2308.12591) — an **equalizer** (SC-FDE/UW-OFDM), not a MIMO symbol detector; per-stage posterior symbol probabilities, custom cross-entropy loss, closed-form real-multiplication counts. **Unfolded detectors that DO target LLRs / c"
+  },
+  {
+    "id": "2311.00226",
+    "title": "Transformers are Provably Optimal In-context Estimators for Wireless Communications",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 1,
+    "first_context": "* **Transformers are Provably Optimal / Provably Efficient In-context Estimators for Wireless Communications** — Vaibhav Tripathi Kunde et al., **AISTATS 2025**, [PMLR v258](https://proceedings.mlr.press/v258/kunde25a.html), [PDF](https://raw.githubusercontent.com/mlresearch/v258/main/assets/kunde25a/kunde25a.pdf), earlier version [arXiv 2311.00226](https://browse.dev.arxiv.org/pdf/2311.00226). Th",
+    "why": "**Transformers are Provably Optimal / Provably Efficient In-context Estimators for Wireless Communications** — Vaibhav Tripathi Kunde et al., **AISTATS 2025**, [PMLR v258](https://proceedings.mlr.press/v258/kunde25a.html), [PDF](https://raw.githubusercontent.com/mlresearch/v258/main/assets/kunde25a/kunde25a.pdf), earlier version [arXiv 2311.00226](https://browse.dev.arxiv.org/pdf/2311.00226). The "
+  },
+  {
+    "id": "2312.02601",
+    "title": "A Neural Receiver for 5G NR Multi-user MIMO",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/llr_ai_detection_design_and_implementation.md",
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 25,
+    "first_context": "mixed-to-weak——arXiv 2312.02601 用了可微 LDPC 译码器却报告 *\"we empirically did not observe",
+    "why": "**BCE on (LDPC-)coded bits** — the dominant choice: Sionna library listings, Sionna PUSCH neural receiver, neural_rx (`BCE on LLRs`), arXiv 2409.02912, arXiv 2312.02601, arXiv 2406.18993, arXiv 2603.09644. Explicit quote: *\"The training for each receiver is performed using the binary cross entropy (CE) as the loss function\"* ([IEEE 10017176](https://ieeexplore.ieee.org/abstract/document/10017176/f"
+  },
+  {
+    "id": "2401.04077",
+    "title": "LoFi User Scheduling for Multiuser MIMO Wireless Systems",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md"
+    ],
+    "n_citations": 1,
+    "first_context": "- Authors partially verified: Semantic Scholar slug `...-for-Wiesmayr-Marti-...`; [arXiv endorser page](http://web3.arxiv.org/auth/show-endorsers/2401.04077) verbatim: *\"Gian Marti and Reinhard Wiesmayr are qualified to endorse.\"*",
+    "why": "Authors partially verified: Semantic Scholar slug `...-for-Wiesmayr-Marti-...`; [arXiv endorser page](http://web3.arxiv.org/auth/show-endorsers/2401.04077) verbatim: *\"Gian Marti and Reinhard Wiesmayr are qualified to endorse.\"*"
+  },
+  {
+    "id": "2401.07515",
+    "title": "On Purely Data-Driven Massive MIMO Detectors",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md"
+    ],
+    "n_citations": 3,
+    "first_context": "- **On Purely Data-Driven Massive MIMO Detectors** — [arXiv:2401.07515](https://ar5iv.labs.arxiv.org/html/2401.07515) (2024).",
+    "why": "**On Purely Data-Driven Massive MIMO Detectors** — [arXiv:2401.07515](https://ar5iv.labs.arxiv.org/html/2401.07515) (2024)."
+  },
+  {
+    "id": "2403.01098",
+    "title": "Low Complexity Deep Learning Augmented Wireless Channel Estimation for Pilot-Based OFDM on Zynq System on Chip",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md"
+    ],
+    "n_citations": 2,
+    "first_context": "**Low Complexity Deep Learning Augmented Wireless Channel Estimation for Pilot-Based OFDM on Zynq System on Chip** — arXiv 2403.01098 (Sharma, Haq, Darak) — [link](https://arxiv.org/abs/2403.01098)",
+    "why": ""
+  },
+  {
+    "id": "2404.05538",
+    "title": "Cell-Free Multi-User MIMO Equalization via In-Context Learning",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 1,
+    "first_context": "* **Cell-Free Multi-User MIMO Equalization via In-Context Learning** — [arXiv 2404.05538](https://export-test.arxiv.org/pdf/2404.05538v1). ICL equalisation with explicit complex→real token mapping by concatenating I and Q **[verified snippet]**; the multi-user cell-free setting is closer to a real gNB than the single-link toy setup.",
+    "why": "**Cell-Free Multi-User MIMO Equalization via In-Context Learning** — [arXiv 2404.05538](https://export-test.arxiv.org/pdf/2404.05538v1). ICL equalisation with explicit complex→real token mapping by concatenating I and Q **[verified snippet]**; the multi-user cell-free setting is closer to a real gNB than the single-link toy setup."
+  },
+  {
+    "id": "2404.06469",
+    "title": "Neuromorphic In-Context Learning for Energy-Efficient MIMO Symbol Detection",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md"
+    ],
+    "n_citations": 3,
+    "first_context": "**Neuromorphic In-Context Learning for Energy-Efficient MIMO Symbol Detection** — arXiv 2404.06469 / IEEE (Song, Simeone, Rajendran) — [link](https://arxiv.org/abs/2404.06469)",
+    "why": ""
+  },
+  {
+    "id": "2405.13413",
+    "title": "Boosted Neural Decoders-Achieving Extreme Reliability of LDPC Codes for 6G Networks",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 5,
+    "first_context": "**Boosted Neural Decoders: Achieving Extreme Reliability of LDPC Codes for 6G Networks** — IEEE JSAC, 2025 — [arXiv:2405.13413](https://arxiv.org/abs/2405.13413) — Kwak, Yun, Kim, Kim, No.",
+    "why": "**The classic decoder-side framing of the same problem, and the current state of the art for fixing it.** 5G-NR LDPC codes \"suffer from the error floor phenomenon, which hinders the achievement of extremely low FERs\"; 6G xURLLC needs FER < 10⁻⁹; the boosted neural min-sum decoder is reported to meet that requirement \"without a severe error floor\", but only after adding block-wise training, boostin"
+  },
+  {
+    "id": "2406.18993",
+    "title": "Interference Cancellation Based Neural Receiver for Superimposed Pilot in Multi-Layer Transmission",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md"
+    ],
+    "n_citations": 6,
+    "first_context": "- **BCE on (LDPC-)coded bits** — the dominant choice: Sionna library listings, Sionna PUSCH neural receiver, neural_rx (`BCE on LLRs`), arXiv 2409.02912, arXiv 2312.02601, arXiv 2406.18993, arXiv 2603.09644. Explicit quote: *\"The training for each receiver is performed using the binary cross entropy (CE) as the loss function\"* ([IEEE 10017176](https://ieeexplore.ieee.org/abstract/document/10017176",
+    "why": "**BCE on (LDPC-)coded bits** — the dominant choice: Sionna library listings, Sionna PUSCH neural receiver, neural_rx (`BCE on LLRs`), arXiv 2409.02912, arXiv 2312.02601, arXiv 2406.18993, arXiv 2603.09644. Explicit quote: *\"The training for each receiver is performed using the binary cross entropy (CE) as the loss function\"* ([IEEE 10017176](https://ieeexplore.ieee.org/abstract/document/10017176/f"
+  },
+  {
+    "id": "2408.04182",
+    "title": "Adapting to Reality-Over-the-Air Validation of AI-Based Receivers Trained with Simulated Channels",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 7,
+    "first_context": "4. **Nokia OTA（arXiv 2408.04182）**：LOS 训练的 DeepRx 模型",
+    "why": "**LOS/NLOS mismatch is a real, measured failure — and it is invisible in simulation.** DeepRx models trained on LOS channel models \"**failed the over-the-air tests despite converging well during training**\" (TDL-D, TDL-E, CDL-D, CDL-E), and were worse than LS/LMMSE in the higher-SINR region; CDL-A also performed poorly. — [arXiv:2408.04182](https://arxiv.org/abs/2408.04182) **[verified]**"
+  },
+  {
+    "id": "2409.00124",
+    "title": "Leveraging Large Language Models for Wireless Symbol Detection via In-Context Learning",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 1,
+    "first_context": "* **Leveraging Large Language Models for Wireless Symbol Detection via In-Context Learning** — [arXiv 2409.00124](https://ar5iv.labs.arxiv.org/html/2409.00124v2), IEEE [Xplore 10901317](https://ieeexplore.ieee.org/abstract/document/10901317), [NSF PAR](https://par.nsf.gov/biblio/10581289-leveraging-large-language-models-wireless-symbol-detection-via-context-learning). Uses a GPT-2-class pretrained",
+    "why": "**Leveraging Large Language Models for Wireless Symbol Detection via In-Context Learning** — [arXiv 2409.00124](https://ar5iv.labs.arxiv.org/html/2409.00124v2), IEEE [Xplore 10901317](https://ieeexplore.ieee.org/abstract/document/10901317), [NSF PAR](https://par.nsf.gov/biblio/10581289-leveraging-large-language-models-wireless-symbol-detection-via-context-learning). Uses a GPT-2-class pretrained L"
+  },
+  {
+    "id": "2409.02912",
+    "title": "Design of a Standard-Compliant Real-Time Neural Receiver for 5G NR",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 29,
+    "first_context": "- 标准合规实时 NRX：**A100 + TensorRT < 1 ms，代价是 SNR 损失 < 0.7 dB**（arXiv 2409.02912）。",
+    "why": "标准合规实时 NRX：**A100 + TensorRT < 1 ms，代价是 SNR 损失 < 0.7 dB**（arXiv 2409.02912）。"
+  },
+  {
+    "id": "2409.05610",
+    "title": "SpikingRx-From Neural to Spiking Receiver",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 1,
+    "first_context": "* [SpikingRx: From Neural to Spiking Receiver](https://ar5iv.labs.arxiv.org/html/2409.05610) (energy-efficient spiking alternative)",
+    "why": "[SpikingRx: From Neural to Spiking Receiver](https://ar5iv.labs.arxiv.org/html/2409.05610) (energy-efficient spiking alternative)"
+  },
+  {
+    "id": "2411.04136",
+    "title": "Large Language Models for Wireless Networks-An Overview from the Prompt Engineering Perspective",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 1,
+    "first_context": "* *Large Language Models (LLMs) for Wireless Networks: An Overview from the Prompt Engineering Perspective* — [arXiv 2411.04136](https://ar5iv.labs.arxiv.org/html/2411.04136) — survey of prompt engineering for wireless, useful as the umbrella citation.",
+    "why": "*Large Language Models (LLMs) for Wireless Networks: An Overview from the Prompt Engineering Perspective* — [arXiv 2411.04136](https://ar5iv.labs.arxiv.org/html/2411.04136) — survey of prompt engineering for wireless, useful as the umbrella citation."
+  },
+  {
+    "id": "2411.07600",
+    "title": "Decision Feedback In-Context Symbol Detection over Block-Fading Channels",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_02_paper_2503.16594_reading.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 2,
+    "first_context": ">   Block-Fading Channels*（IEEE Xplore 11161684；预印本 arXiv 2411.07600）",
+    "why": ""
+  },
+  {
+    "id": "2411.10178",
+    "title": "Channel-Adaptive Wireless Image Semantic Transmission with Learnable Prompts",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 1,
+    "first_context": "* *Channel-Adaptive Wireless Image Semantic Transmission with Learnable Prompts* — [arXiv 2411.10178](https://ar5iv.labs.arxiv.org/html/2411.10178) — learnable prompt tensors `{p^e, p^d}` for semantic transmission; again not PHY detection.",
+    "why": "*Channel-Adaptive Wireless Image Semantic Transmission with Learnable Prompts* — [arXiv 2411.10178](https://ar5iv.labs.arxiv.org/html/2411.10178) — learnable prompt tensors `{p^e, p^d}` for semantic transmission; again not PHY detection."
+  },
+  {
+    "id": "2501.09761",
+    "title": "VERITAS-Verifying the Performance of AI-native Transceiver Actions in Base-Stations",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md"
+    ],
+    "n_citations": 2,
+    "first_context": "- **VERITAS: Verifying the Performance of AI-native Transceiver Actions in Base-Stations** — [arXiv:2501.09761](https://ar5iv.labs.arxiv.org/html/2501.09761v3). Framework for deciding whether an AI-native receiver meets the performance of the conventional one — relevant to *deployment* acceptance of learned LLR sources.",
+    "why": "**VERITAS: Verifying the Performance of AI-native Transceiver Actions in Base-Stations** — [arXiv:2501.09761](https://ar5iv.labs.arxiv.org/html/2501.09761v3). Framework for deciding whether an AI-native receiver meets the performance of the conventional one — relevant to *deployment* acceptance of learned LLR sources."
+  },
+  {
+    "id": "2501.14861",
+    "title": "A Deep-Unfolding-Optimized Coordinate-Descent Data-Detector ASIC for mmWave Massive MIMO",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md"
+    ],
+    "n_citations": 2,
+    "first_context": "- **A Deep-Unfolding-Optimized Coordinate-Descent Data-Detector ASIC for mmWave Massive MIMO** — IEEE JSAC 2025, DOI 10.1109/JSAC.2025.3531558 — [arXiv:2501.14861](https://ar5iv.labs.arxiv.org/html/2501.14861) — ASIC realisation; works with *\"the soft estimate of the u-th UE's symbol\"* → **soft symbols, not LLRs**.",
+    "why": "**A Deep-Unfolding-Optimized Coordinate-Descent Data-Detector ASIC for mmWave Massive MIMO** — IEEE JSAC 2025, DOI 10.1109/JSAC.2025.3531558 — [arXiv:2501.14861](https://ar5iv.labs.arxiv.org/html/2501.14861) — ASIC realisation; works with *\"the soft estimate of the u-th UE's symbol\"* → **soft symbols, not LLRs**."
+  },
+  {
+    "id": "2502.05952",
+    "title": "Comprehensive Review of Deep Unfolding Techniques for Next-Generation Wireless Communication Systems",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part1_detnet_oampnet.md",
+      "llr_ai_detection/survey/survey_line_a_part2.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 16,
+    "first_context": "| 深度展开综述 arXiv 2502.05952 有期刊版 | **仅预印本**。要引期刊综述用 **IEEE Communications Magazine 2026, DOI 10.1109/MCOM.001.2500444**；Model-Based Deep Learning = **Proc. IEEE 111(5):465–499, 2023** |",
+    "why": "**Comprehensive Review of Deep Unfolding Techniques for Next-Generation Wireless Communication Systems** — Deka et al. — [arXiv:2502.05952](https://ar5iv.labs.arxiv.org/html/2502.05952v2); **no journal venue established** (v4 dated 14 Jan 2026; OpenAlex: preprint). Table III (\"Comparison of Classical vs Unfolded methods for Signal Detection\") rows: DetNet `(6N_rN_t+2N_r+N_r)T`, 30 layers vs ~1000 "
+  },
+  {
+    "id": "2502.09326",
+    "title": "Uplink OFDM Channel Prediction with Hybrid CNN-LSTM for 6G Non-Terrestrial Networks",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md"
+    ],
+    "n_citations": 1,
+    "first_context": "* **The SNR/dataset-mismatch admission in a prediction-based receiver:** \"such findings **may not translate well to different channel conditions, as the predictor has been trained on a dataset with a fixed Doppler spread and NTN-TDL-C channel model**.\" — [arXiv:2502.09326](https://arxiv.org/abs/2502.09326) **[verified]**",
+    "why": "**The SNR/dataset-mismatch admission in a prediction-based receiver:** \"such findings **may not translate well to different channel conditions, as the predictor has been trained on a dataset with a fixed Doppler spread and NTN-TDL-C channel model**.\" — [arXiv:2502.09326](https://arxiv.org/abs/2502.09326) **[verified]**"
+  },
+  {
+    "id": "2503.16594",
+    "title": "Decision Feedback In-Context Learning for Wireless Symbol Detection",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_02_paper_2503.16594_reading.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 4,
+    "first_context": "> **论文**：Fan Li / Yang / Shen（UVA），arXiv **2503.16594**。",
+    "why": "同组前作：[Transformer-based Wireless Symbol Detection Over Fading Channels](https://ar5iv.labs.arxiv.org/html/2503.16594) > ★ 引用纪律：本备忘中标注【读全文】的数字，在写入任何对外材料（论文、报告、PPT）之前 > **必须重新核对原文**——本沙箱当前无法 `web_fetch`，本次只能复核到版本与指标的层面。"
+  },
+  {
+    "id": "2503.20500",
+    "title": "Novel Deep Neural OFDM Receiver Architectures for LLR Estimation",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md",
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md"
+    ],
+    "n_citations": 8,
+    "first_context": "**Novel Deep Neural OFDM Receiver Architectures for LLR Estimation** — arXiv 2503.20500 (Karakoca, Çevik, Hökelek, Görçin) — [link](https://arxiv.org/abs/2503.20500)",
+    "why": "**CPMamba (2512.16315)**, **KAN vs. MLP receivers (2609.25847)**, **DAT/RDNLA (2503.20500)**, **CSI-free atomic MIMO ICL (2507.04040)**, **Unified Transformer (2508.17960** — partly real via OAI+Aerial, but no numbers)."
+  },
+  {
+    "id": "2505.06175",
+    "title": "Turbo-ICL-In-Context Learning-Based Turbo Equalization",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 1,
+    "first_context": "* **Turbo-ICL: In-Context Learning-Based Turbo Equalization** — [arXiv 2505.06175](https://ar5iv.labs.arxiv.org/html/2505.06175) (2025). ICL-based turbo equaliser; results are reported against baselines *\"at the fifth turbo iteration\"* **[verified snippet]**, so it is an iterative detector with an external iteration budget — the same latency/iterations trade-off the DEFINED decision-feedback loop ",
+    "why": "**Turbo-ICL: In-Context Learning-Based Turbo Equalization** — [arXiv 2505.06175](https://ar5iv.labs.arxiv.org/html/2505.06175) (2025). ICL-based turbo equaliser; results are reported against baselines *\"at the fifth turbo iteration\"* **[verified snippet]**, so it is an iterative detector with an external iteration budget — the same latency/iterations trade-off the DEFINED decision-feedback loop ha"
+  },
+  {
+    "id": "2505.06671",
+    "title": "RADE-A Neural Codec for Transmitting Speech over HF Radio Channels",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/model_build_reconnaissance.md"
+    ],
+    "n_citations": 1,
+    "first_context": "★ **最接近的\"无线 PHY 跑在 iPhone 上\"的真正先例**：★ **RADE**（arXiv:2505.06671, WASPAA 2025），",
+    "why": ""
+  },
+  {
+    "id": "2505.09076",
+    "title": "AdaFortiTran-An Adaptive Transformer Model for Robust OFDM Channel Estimation",
+    "archived": true,
+    "files": [
+      "ai_ce/AI_channel_estimation_implementation_plan.md"
+    ],
+    "n_citations": 1,
+    "first_context": "Channel Estimation,\" arXiv:2505.09076, 2025.（否决记录）",
+    "why": ""
+  },
+  {
+    "id": "2505.12736",
+    "title": "Deep Unfolding with Kernel-based Quantization in MIMO Detection",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_a_part2.md"
+    ],
+    "n_citations": 3,
+    "first_context": "- **Deep Unfolding with Kernel-based Quantization in MIMO Detection** — [arXiv:2505.12736](https://ar5iv.labs.arxiv.org/html/2505.12736), ICML 2025 ML4Wireless workshop — quantises **PGD-Net and ADMM-Net**; loss = MSE + MMD; K=5 layers; *\"the inference latency of the quantized models using KAQ is reduced in 20% compared to the full precision version\"*; metric BER.",
+    "why": "**Deep Unfolding with Kernel-based Quantization in MIMO Detection** — [arXiv:2505.12736](https://ar5iv.labs.arxiv.org/html/2505.12736), ICML 2025 ML4Wireless workshop — quantises **PGD-Net and ADMM-Net**; loss = MSE + MMD; K=5 layers; *\"the inference latency of the quantized models using KAQ is reduced in 20% compared to the full precision version\"*; metric BER."
+  },
+  {
+    "id": "2505.15848",
+    "title": "Sionna Research Kit-A GPU-Accelerated Research Platform for AI-RAN",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 12,
+    "first_context": "- Sionna Research Kit 实时 TensorRT 接收机：**Jetson AGX Orin + 商用 UE**（arXiv 2505.15848）。",
+    "why": "Sionna Research Kit 实时 TensorRT 接收机：**Jetson AGX Orin + 商用 UE**（arXiv 2505.15848）。"
+  },
+  {
+    "id": "2506.00368",
+    "title": "Neural Network-based Information-Theoretic Transceivers for High-Order Modulation Schemes",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md"
+    ],
+    "n_citations": 1,
+    "first_context": "- **Neural Network-based Information-Theoretic Transceivers for High-Order Modulation Schemes**, arXiv 2506.00368 — [arXiv](https://www.arxiv.org/pdf/2506.00368).",
+    "why": "**Neural Network-based Information-Theoretic Transceivers for High-Order Modulation Schemes**, arXiv 2506.00368 — [arXiv](https://www.arxiv.org/pdf/2506.00368)."
+  },
+  {
+    "id": "2506.13408",
+    "title": "HELENA-High-Efficiency Learning-based channel Estimation using dual Neural Attention",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 4,
+    "first_context": "**HELENA: High-Efficiency Learning-based Channel Estimation using dual Neural Attention** — arXiv 2506.13408 / IEEE (Camelo Botero, Aycan Beyazit, Slamnik-Kriještorac, Marquez-Barja) — [link](https://arxiv.org/abs/2506.13408)",
+    "why": "**Real-time receiver on conventional hardware:** *Design and Real-Time Implementation of an Intelligent Wireless Receiver System* ([KCI](https://www.kci.go.kr/kciportal/ci/sereArticleSearch/ciSereArtiView.kci?sereArticleSearchBean.artiId=ART003304335)). **Measured-on-hardware results (LINE 6 survey; the numbers that actually matter).** | Work | Hardware | Reported result | Measured? | |---|---|---"
+  },
+  {
+    "id": "2506.15176",
+    "title": "In-Context Learning for Gradient-Free Receiver Adaptation-Principles, Applications, and Theory",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 2,
+    "first_context": "* **In-Context Learning for Gradient-Free Receiver Adaptation: Principles, Applications, and Theory** — Zecchin, Raviv et al., [arXiv 2506.15176](https://ar5iv.labs.arxiv.org/html/2506.15176), IEEE [Xplore 11499401](https://ieeexplore.ieee.org/abstract/document/11499401). The reference formulation of pilot-prompt ICL: *\"Based on the received pilot signals and knowledge of the pilot sequences, the ",
+    "why": "**In-Context Learning for Gradient-Free Receiver Adaptation: Principles, Applications, and Theory** — Zecchin, Raviv et al., [arXiv 2506.15176](https://ar5iv.labs.arxiv.org/html/2506.15176), IEEE [Xplore 11499401](https://ieeexplore.ieee.org/abstract/document/11499401). The reference formulation of pilot-prompt ICL: *\"Based on the received pilot signals and knowledge of the pilot sequences, the pr"
+  },
+  {
+    "id": "2506.21093",
+    "title": "Chain-of-Thought Enhanced Shallow Transformers for Wireless Symbol Detection",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 7,
+    "first_context": "**Chain-of-Thought Enhanced Shallow Transformers for Wireless Symbol Detection (CHOOSE)** — arXiv 2506.21093 (Li Fan, Peng Wang, Jing Yang, Cong Shen) — [link](https://arxiv.org/abs/2506.21093)",
+    "why": "**CHOOSE (2506.21093)** — the headline \"small transformer receiver\" paper. 1–2 layer shallow transformer with latent CoT; **no params, no FLOPs, no latency, no hardware.**"
+  },
+  {
+    "id": "2507.04040",
+    "title": "CSI-Free Symbol Detection for Atomic MIMO Receivers via In-Context Learning",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md"
+    ],
+    "n_citations": 2,
+    "first_context": "**CSI-Free Symbol Detection for Atomic MIMO Receivers via In-Context Learning** — arXiv 2507.04040 (Song, Peng, Xiao, Rajendran, Simeone) — [link](https://arxiv.org/abs/2507.04040)",
+    "why": "**CPMamba (2512.16315)**, **KAN vs. MLP receivers (2609.25847)**, **DAT/RDNLA (2503.20500)**, **CSI-free atomic MIMO ICL (2507.04040)**, **Unified Transformer (2508.17960** — partly real via OAI+Aerial, but no numbers)."
+  },
+  {
+    "id": "2507.10409",
+    "title": "Energy Efficiency in AI for 5G and Beyond-A DeepRx Case Study",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/model_build_reconnaissance.md"
+    ],
+    "n_citations": 1,
+    "first_context": "| ★★ **知识蒸馏是缩小的成熟手段** | ★ DeepRx KD（arXiv:2507.10409）：★ 11 TFLOPs 学生（教师 30 TFLOPs）★ 在 BER=1e-3 处 **+4 dB** vs 同尺寸从零训；★ 且给出能量锚点 **2 mJ/推理**（Coral Edge TPU）|",
+    "why": ""
+  },
+  {
+    "id": "2508.00587",
+    "title": "Uncertainty-Aware Likelihood Ratio Estimation for Pixel-Wise Out-of-Distribution Detection",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md"
+    ],
+    "n_citations": 1,
+    "first_context": "- **BCE-trained binary NN classifier (probability output)** — [arXiv 2508.00587](https://browse-export.arxiv.org/pdf/2508.00587): *\"We propose to train a binary NN classifier \\(p_{\\theta}(y_{i}^{\\mathrm{out}}|\\mathbf{x}_{i})\\) , based on Eq\"*",
+    "why": "**BCE-trained binary NN classifier (probability output)** — [arXiv 2508.00587](https://browse-export.arxiv.org/pdf/2508.00587): *\"We propose to train a binary NN classifier \\(p_{\\theta}(y_{i}^{\\mathrm{out}}|\\mathbf{x}_{i})\\) , based on Eq\"*"
+  },
+  {
+    "id": "2508.02314",
+    "title": "Large AI Models for Wireless Physical Layer",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md"
+    ],
+    "n_citations": 2,
+    "first_context": "**Large AI Models for Wireless Physical Layer** — arXiv 2508.02314 — [link](https://arxiv.org/abs/2508.02314) — and **Large Wireless Foundation Models: Stronger over Bigger** — arXiv 2601.10963 — [link](https://arxiv.org/abs/2601.10963)",
+    "why": "**Online/edge-survey material**: 2508.02314, 2601.10963, 11478444, 2604.00529."
+  },
+  {
+    "id": "2508.06275",
+    "title": "Efficient Deep Neural Receiver with Post-Training Quantization",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/llr_ai_detection_design_and_implementation.md",
+      "llr_ai_detection/llr_ai_detection_high_level_status_and_plan.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/model_network_design.md",
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/wip/README.md"
+    ],
+    "n_citations": 16,
+    "first_context": "★ [arXiv:2508.06275](https://ar5iv.labs.arxiv.org/html/2508.06275)（★ **同为深度 3 + 64QAM + LLR，",
+    "why": "**All four quantization papers (2508.06275, 2509.13786, 2609.31177, Data-Free Quantization)** — BLER/bit-op/compression results only; the 66× bit-op and 8.8× storage figures in 2609.31177 are from an **analytic cost model**."
+  },
+  {
+    "id": "2508.08790",
+    "title": "ReQuestNet-A Foundational Learning model for Channel Estimation",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/model_build_reconnaissance.md"
+    ],
+    "n_citations": 1,
+    "first_context": "| ★ **代码从未发布** | ★ `ReQuestNet`（Qualcomm，arXiv 2508.08790，仅 CE）；★ **`ReEsNet` 无法核实存在**（★ arXiv 全文零命中）|",
+    "why": ""
+  },
+  {
+    "id": "2508.12892",
+    "title": "A Compute&Memory Efficient Model-Driven Neural 5G Receiver for Edge AI-assisted RAN",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md"
+    ],
+    "n_citations": 1,
+    "first_context": "* **A Compute & Memory Efficient Model-Driven Neural 5G Receiver for Edge AI-assisted RAN** — IEEE GLOBECOM 2025 — [arXiv:2508.12892](https://arxiv.org/abs/2508.12892) — Abdollahpour, Bertuletti, Zhang, Li, Benini, Vanelli-Coralli. The MDX-style model-driven receiver, trained with a BCE loss on the final LLRs **plus an intermediate BCE loss on data-aided LS demapper LLRs** and an MSE channel-estim",
+    "why": "**A Compute & Memory Efficient Model-Driven Neural 5G Receiver for Edge AI-assisted RAN** — IEEE GLOBECOM 2025 — [arXiv:2508.12892](https://arxiv.org/abs/2508.12892) — Abdollahpour, Bertuletti, Zhang, Li, Benini, Vanelli-Coralli. The MDX-style model-driven receiver, trained with a BCE loss on the final LLRs **plus an intermediate BCE loss on data-aided LS demapper LLRs** and an MSE channel-estimat"
+  },
+  {
+    "id": "2508.17960",
+    "title": "A Unified Transformer Architecture for Low-Latency and Scalable Wireless Signal Processing",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 3,
+    "first_context": "**A Unified Transformer Architecture for Low-Latency and Scalable Wireless Signal Processing** — arXiv 2508.17960 (Kawai, Koodli) — [link](https://arxiv.org/abs/2508.17960)",
+    "why": "**CPMamba (2512.16315)**, **KAN vs. MLP receivers (2609.25847)**, **DAT/RDNLA (2503.20500)**, **CSI-free atomic MIMO ICL (2507.04040)**, **Unified Transformer (2508.17960** — partly real via OAI+Aerial, but no numbers)."
+  },
+  {
+    "id": "2509.12694",
+    "title": "Soft Graph Transformer for MIMO Detection",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md"
+    ],
+    "n_citations": 2,
+    "first_context": "- **Soft Graph Transformer for MIMO Detection** — [arXiv:2509.12694](https://arxiv.org/html/2509.12694v1) (2025) — probabilistic/\"soft\" multi-stage detector.",
+    "why": "**Soft Graph Transformer for MIMO Detection** — [arXiv:2509.12694](https://arxiv.org/html/2509.12694v1) (2025) — probabilistic/\"soft\" multi-stage detector."
+  },
+  {
+    "id": "2509.13786",
+    "title": "Efficient Quantization-Aware Neural Receivers-Beyond Post-Training Quantization",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/llr_ai_detection_high_level_status_and_plan.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md"
+    ],
+    "n_citations": 6,
+    "first_context": "★ **2509.13786 更进一步做了 QAT + 可学习裁剪 + per-channel 尺度** ⇒ ★★ **\"量化激活\"也不是空白。**",
+    "why": "**All four quantization papers (2508.06275, 2509.13786, 2609.31177, Data-Free Quantization)** — BLER/bit-op/compression results only; the 66× bit-op and 8.8× storage figures in 2609.31177 are from an **analytic cost model**."
+  },
+  {
+    "id": "2509.18574",
+    "title": "Hybrid Neural-Traditional OFDM Receiver with Learnable Decider",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md"
+    ],
+    "n_citations": 4,
+    "first_context": "| ★ **arXiv:2509.18574** | ★ 存在的目的就是**逐块挑选**经典还是神经 ⇒ ★ **证明 DL 不是一致更好** |",
+    "why": "**Evidence that modulation is a real generalisation axis in the learned-demapper literature.** The Sionna OFDM reference recipe is QPSK-only and uses a 5G NR LDPC outer code — [Sionna tutorial](https://nvlabs.github.io/sionna/phy/tutorials/notebooks/Neural_Receiver.html); the hybrid-decider work trains and evaluates separately at 4-QAM and 64-QAM using two different training levels — [arXiv:2509.1"
+  },
+  {
+    "id": "2510.01533",
+    "title": "NVIDIA AI Aerial-AI-Native Wireless Communications",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 1,
+    "first_context": "* [NVIDIA AI Aerial: AI-Native Wireless Communications](https://browse-export.arxiv.org/pdf/2510.01533) · [Aerial cuPHY docs](https://docs.nvidia.com/aerial/cuda-accelerated-ran/latest/aerial-cuda-accelerated-ran.pdf)",
+    "why": "[NVIDIA AI Aerial: AI-Native Wireless Communications](https://browse-export.arxiv.org/pdf/2510.01533) · [Aerial cuPHY docs](https://docs.nvidia.com/aerial/cuda-accelerated-ran/latest/aerial-cuda-accelerated-ran.pdf)"
+  },
+  {
+    "id": "2510.12941",
+    "title": "Computationally Efficient Neural Receivers via Axial Self-Attention",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/llr_ai_detection_design_and_implementation.md",
+      "llr_ai_detection/llr_ai_detection_high_level_status_and_plan.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/model_network_design.md",
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md",
+      "llr_ai_detection/wip/README.md"
+    ],
+    "n_citations": 13,
+    "first_context": "★ [arXiv:2510.12941](https://arxiv.org/abs/2510.12941)（★ axial self-attention，★ SPAWC 2026）",
+    "why": "**Axial self-attention neural receiver (2510.12941)** — clean O((TF)²) → O(T²F + TF²) complexity result and FLOP reduction, but **no device measurement**."
+  },
+  {
+    "id": "2510.22608",
+    "title": "End-to-end Learning of Probabilistic and Geometric Constellation Shaping with Iterative Receivers",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md"
+    ],
+    "n_citations": 2,
+    "first_context": "* **End-to-end Learning of Probabilistic and Geometric Constellation Shaping with Iterative Receivers** — [arXiv:2510.22608](https://arxiv.org/abs/2510.22608) (2025) — Jayarathne, Marasinghe, Rajatheva, Latva-aho. Joint shaping-encoder/constellation learning evaluated under two iterative receivers, then extended \"to incorporate the **full iterative detection and decoding loop, using the deep unfol",
+    "why": "**End-to-end Learning of Probabilistic and Geometric Constellation Shaping with Iterative Receivers** — [arXiv:2510.22608](https://arxiv.org/abs/2510.22608) (2025) — Jayarathne, Marasinghe, Rajatheva, Latva-aho. Joint shaping-encoder/constellation learning evaluated under two iterative receivers, then extended \"to incorporate the **full iterative detection and decoding loop, using the deep unfoldi"
+  },
+  {
+    "id": "2511.03923",
+    "title": "Adaptive Phase Shift Information Compression for IRS Systems-A Prompt Conditioned Variable Rate Framework",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 1,
+    "first_context": "* *Adaptive Phase Shift Information Compression for IRS Systems: A Prompt Conditioned Variable Rate Framework* — [arXiv 2511.03923](https://ar5iv.labs.arxiv.org/html/2511.03923), which uses **soft prompts + FiLM conditioning** (its results table literally lists `+Soft + FiLM (proposed)`) **[verified snippet]**. It is a compression/CSI task, **not** a detector.",
+    "why": "*Adaptive Phase Shift Information Compression for IRS Systems: A Prompt Conditioned Variable Rate Framework* — [arXiv 2511.03923](https://ar5iv.labs.arxiv.org/html/2511.03923), which uses **soft prompts + FiLM conditioning** (its results table literally lists `+Soft + FiLM (proposed)`) **[verified snippet]**. It is a compression/CSI task, **not** a detector."
+  },
+  {
+    "id": "2511.05502",
+    "title": "Production-Grade Local LLM Inference on Apple Silicon-A Comparative Study of MLX, MLC-LLM, Ollama, llama.cpp, and PyTorch MPS",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line7_apple_silicon_inference.md"
+    ],
+    "n_citations": 2,
+    "first_context": "**Runtime cross-comparison, Mac Studio M2 Ultra, 192 GB, Qwen-2.5 family, up to 100 k tokens** (arXiv:2511.05502, *Production-Grade Local LLM",
+    "why": ""
+  },
+  {
+    "id": "2512.13263",
+    "title": "An End-to-End Neural Network Transceiver Design for OFDM System with FPGA-Accelerated Implementation",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md"
+    ],
+    "n_citations": 3,
+    "first_context": "★ 另有 arXiv 2512.13263（2025-12）**DFT-Net + Demod-Net 在 FPGA 上**，",
+    "why": ""
+  },
+  {
+    "id": "2512.16315",
+    "title": "CPMamba-Selective State Space Models for MIMO Channel Prediction in High-Mobility Environments",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md"
+    ],
+    "n_citations": 2,
+    "first_context": "**CPMamba: Selective State Space Models for MIMO Channel Prediction in High-Mobility Environments** — arXiv 2512.16315 (Luo, Xie, Che, Yao, Tian, Feng, Wu) — [link](https://arxiv.org/abs/2512.16315)",
+    "why": "**CPMamba (2512.16315)**, **KAN vs. MLP receivers (2609.25847)**, **DAT/RDNLA (2503.20500)**, **CSI-free atomic MIMO ICL (2507.04040)**, **Unified Transformer (2508.17960** — partly real via OAI+Aerial, but no numbers)."
+  },
+  {
+    "id": "2601.10963",
+    "title": "Large Wireless Foundation Models-Stronger over Bigger",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md"
+    ],
+    "n_citations": 2,
+    "first_context": "**Large AI Models for Wireless Physical Layer** — arXiv 2508.02314 — [link](https://arxiv.org/abs/2508.02314) — and **Large Wireless Foundation Models: Stronger over Bigger** — arXiv 2601.10963 — [link](https://arxiv.org/abs/2601.10963)",
+    "why": "**Online/edge-survey material**: 2508.02314, 2601.10963, 11478444, 2604.00529."
+  },
+  {
+    "id": "2601.16586",
+    "title": "Learning Successive Interference Cancellation for Low-Complexity Soft-Output MIMO Detection",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 13,
+    "first_context": "- ★ 最好的一条命中（arXiv **2601.16586**，2026）原文：",
+    "why": "★ 最好的一条命中（arXiv **2601.16586**，2026）原文： > \"To ensure stable and well-calibrated soft outputs, the computed LLRs are subject to **scaling and > clipping**, which is a well-known …\"【已核实片段】"
+  },
+  {
+    "id": "2602.04652",
+    "title": "Six Times to Spare-Characterizing GPU-Accelerated 5G LDPC Decoding for Edge-RSU Communications",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_line7_apple_silicon_inference.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 5,
+    "first_context": "（arXiv 2602.04652）★ 这条对我们的\"整链预算\"很重要：**译码器本身就可能吃掉整个时隙**。",
+    "why": "**DGX Spark 上 LDPC：CPU = 0.71 ms/码字 @20 迭代（超过 0.5 ms 时隙），GPU 只占时隙的 6–24%** （arXiv 2602.04652）★ 这条对我们的\"整链预算\"很重要：**译码器本身就可能吃掉整个时隙**。"
+  },
+  {
+    "id": "2602.04728",
+    "title": "Scalable Cross-Attention Transformer for Cooperative Multi-AP OFDM Uplink Reception",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md"
+    ],
+    "n_citations": 2,
+    "first_context": "- **LLR → decoder interface, stated generically**: *\"Following the neural receiver, the estimated LLRs \\(\\mathbf{LLR}_\\theta\\) are fed into a standard channel decoder\"* ([2602.04728](https://arxiv.org/pdf/2602.04728v3)); *\"The corresponding LLRs required by the LDPC decoder are obtained as\"* ([2602.11951](https://arxiv-org.ezproxy.obspm.fr/pdf/2602.11951)); *\"Unlike hard- decision outputs, soft- o",
+    "why": "**LLR → decoder interface, stated generically**: *\"Following the neural receiver, the estimated LLRs \\(\\mathbf{LLR}_\\theta\\) are fed into a standard channel decoder\"* ([2602.04728](https://arxiv.org/pdf/2602.04728v3)); *\"The corresponding LLRs required by the LDPC decoder are obtained as\"* ([2602.11951](https://arxiv-org.ezproxy.obspm.fr/pdf/2602.11951)); *\"Unlike hard- decision outputs, soft- out"
+  },
+  {
+    "id": "2602.11834",
+    "title": "EqDeepRx-Learning a Scalable and Interference Mitigating MIMO Receiver",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md"
+    ],
+    "n_citations": 1,
+    "first_context": "11. **EqDeepRx (arXiv 2602.11834)**, **\"When Does a Neural Receiver Help?\" (2605.26157)**, **\"Data-Free Quantization of Neural Receivers: When 4-Bit Succeeds, Why 6-Bit Matters for 6G\" (NeurIPS 2025, OpenReview 4NsiKauceB)**, **\"A Universal Neural Receiver that Learns at the Speed of Wireless\" (2602.15458)**, **\"On the Impact of Site-Specific Training for a Real-World 5G NR System\" (2609.04004)** ",
+    "why": ""
+  },
+  {
+    "id": "2602.11951",
+    "title": "Learning-Enhanced Composite DNA Data Storage Under Sampling Randomness and IDS Errors",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md"
+    ],
+    "n_citations": 2,
+    "first_context": "- **LLR → decoder interface, stated generically**: *\"Following the neural receiver, the estimated LLRs \\(\\mathbf{LLR}_\\theta\\) are fed into a standard channel decoder\"* ([2602.04728](https://arxiv.org/pdf/2602.04728v3)); *\"The corresponding LLRs required by the LDPC decoder are obtained as\"* ([2602.11951](https://arxiv-org.ezproxy.obspm.fr/pdf/2602.11951)); *\"Unlike hard- decision outputs, soft- o",
+    "why": "**LLR → decoder interface, stated generically**: *\"Following the neural receiver, the estimated LLRs \\(\\mathbf{LLR}_\\theta\\) are fed into a standard channel decoder\"* ([2602.04728](https://arxiv.org/pdf/2602.04728v3)); *\"The corresponding LLRs required by the LDPC decoder are obtained as\"* ([2602.11951](https://arxiv-org.ezproxy.obspm.fr/pdf/2602.11951)); *\"Unlike hard- decision outputs, soft- out"
+  },
+  {
+    "id": "2602.15458",
+    "title": "A Universal Neural Receiver that Learns at the Speed of Wireless",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md"
+    ],
+    "n_citations": 1,
+    "first_context": "11. **EqDeepRx (arXiv 2602.11834)**, **\"When Does a Neural Receiver Help?\" (2605.26157)**, **\"Data-Free Quantization of Neural Receivers: When 4-Bit Succeeds, Why 6-Bit Matters for 6G\" (NeurIPS 2025, OpenReview 4NsiKauceB)**, **\"A Universal Neural Receiver that Learns at the Speed of Wireless\" (2602.15458)**, **\"On the Impact of Site-Specific Training for a Real-World 5G NR System\" (2609.04004)** ",
+    "why": ""
+  },
+  {
+    "id": "2603.09644",
+    "title": "Site-Specific Finetuning of Neural Receivers with Real-World 5G NR Measurements",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md"
+    ],
+    "n_citations": 5,
+    "first_context": "- **BCE on (LDPC-)coded bits** — the dominant choice: Sionna library listings, Sionna PUSCH neural receiver, neural_rx (`BCE on LLRs`), arXiv 2409.02912, arXiv 2312.02601, arXiv 2406.18993, arXiv 2603.09644. Explicit quote: *\"The training for each receiver is performed using the binary cross entropy (CE) as the loss function\"* ([IEEE 10017176](https://ieeexplore.ieee.org/abstract/document/10017176",
+    "why": "**BCE on (LDPC-)coded bits** — the dominant choice: Sionna library listings, Sionna PUSCH neural receiver, neural_rx (`BCE on LLRs`), arXiv 2409.02912, arXiv 2312.02601, arXiv 2406.18993, arXiv 2603.09644. Explicit quote: *\"The training for each receiver is performed using the binary cross entropy (CE) as the loss function\"* ([IEEE 10017176](https://ieeexplore.ieee.org/abstract/document/10017176/f"
+  },
+  {
+    "id": "2603.14661",
+    "title": "AtlasRAN-Timing-Aware Evaluation of Open-source 5G Platforms for Integrated Wireless Testbeds",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 3,
+    "first_context": "**AtlasRAN: Modeling and Performance Evaluation of Open 5G Platforms for Ubiquitous Wireless Networks** — arXiv 2603.14661 (Barker, Seyfi, Dorcheh, Boone, Afghah, Boccuzzi) — [link](https://arxiv.org/abs/2603.14661)",
+    "why": "**AtlasRAN** ([arXiv 2603.14661](https://arxiv.org/abs/2603.14661)): a reported goodput collapse from 1→12 users turned out to be **harness time-scale dilation / I/O starvation, not decoder saturation**. Read every \"the receiver is the bottleneck\" claim with that in mind."
+  },
+  {
+    "id": "2604.00529",
+    "title": "MF-QAT-Multi-Format Quantization-Aware Training for Elastic Inference",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md"
+    ],
+    "n_citations": 2,
+    "first_context": "**Other quantization-adjacent work:** **Model Compression for Sustainable AI in xG Wireless Networks** — IEEE — [link](https://ieeexplore.ieee.org/document/11478444) (survey of pruning/quantization for xG energy); **MF-QAT: Multi-Format Quantization-Aware Training for Elastic Inference** — arXiv 2604.00529 — [link](https://arxiv.org/abs/2604.00529) (one model robust across MXINT/MXFP formats, **Sl",
+    "why": "**Online/edge-survey material**: 2508.02314, 2601.10963, 11478444, 2604.00529."
+  },
+  {
+    "id": "2604.03585",
+    "title": "From 8 Seconds to 370ms-Kernel-Fused SAR Imaging on Apple Silicon via Single-Dispatch FFT Pipelines",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line7_apple_silicon_inference.md"
+    ],
+    "n_citations": 2,
+    "first_context": "* **Kernel-fused SAR on Apple Silicon** (arXiv:2604.03585, Bergach): first kernel-fused SAR Range-Doppler pipeline on any GPU — FFT + matched-filter",
+    "why": "**Kernel-fused SAR on Apple Silicon** (arXiv:2604.03585, Bergach): first kernel-fused SAR Range-Doppler pipeline on any GPU — FFT + matched-filter multiply + IFFT fused into **one Metal compute dispatch**, intermediates kept in **32 KiB on-chip threadgroup memory**; a 4096×4096 complex scene in **370 ms on an M1 GPU**, a **22× speedup over the 8.16 s multi-dispatch baseline**; first FFT to use App"
+  },
+  {
+    "id": "2604.27279",
+    "title": "Predicting Upcoming Stuttering Events from Three-Second Audio-Stratified Evaluation Reveals Severity-Selective Precursors, and the Model Deploys Fully On-Device",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/model_build_reconnaissance.md"
+    ],
+    "n_citations": 1,
+    "first_context": "★ **找到的最佳端侧 ANE 时延数据点**（arXiv:2604.27279）：★ 616K 参数 CNN 在 iPhone 17 Pro Max",
+    "why": ""
+  },
+  {
+    "id": "2605.01931",
+    "title": "SwiftChannel-Algorithm-Hardware Co-Design for Deep Learning-Based 5G Channel Estimation",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md"
+    ],
+    "n_citations": 2,
+    "first_context": "**SwiftChannel: Algorithm-Hardware Co-Design for Deep Learning-Based 5G Channel Estimation** — arXiv 2605.01931 / IEEE TMC (Lyu, She, Duan, Ni, Chan, Luo, Cheung, Xu) — [link](https://arxiv.org/abs/2605.01931)",
+    "why": ""
+  },
+  {
+    "id": "2605.13507",
+    "title": "Implementation of an Adaptive Transformer Accelerator for Accurate Outdoor Localization with Massive MIMO",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md"
+    ],
+    "n_citations": 5,
+    "first_context": "**Efficient Implementation of an Adaptive Transformer Accelerator for Massive MIMO Outdoor Localization** — arXiv 2605.13507 (Yaman, Cheng, Edfors, Liu) — [link](https://arxiv.org/abs/2605.13507)",
+    "why": ""
+  },
+  {
+    "id": "2605.26157",
+    "title": "When Does a Neural Receiver Help? Calibration-Drift Benchmarking and Detect-and-Rollback for 5G-6G NR",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/llr_ai_detection_design_and_implementation.md",
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/memo_06_ocudu_dapp_platform_survey.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 22,
+    "first_context": "| ★ **文献建议**（calibration-drift, arXiv 2605.26157） | 逐时隙**神经+经典并行仲裁**，代价 <5% 时延；因为 **500 Hz Doppler 下经典先崩**，\"AI 差就退回经典\"是错的 |",
+    "why": "[When Does a Neural Receiver Help? (2605.26157)](https://arxiv.org/pdf/2605.26157) · [Input-Correlated Supervision Noise (2608.12918)](https://browse-export.arxiv.org/pdf/2608.12918)"
+  },
+  {
+    "id": "2605.28451",
+    "title": "Range, Not Precision-Block-Floating-Point Half-Precision FFT and SAR Imaging on Apple Silicon",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/llr_ai_detection_design_and_implementation.md",
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/survey/survey_line7_apple_silicon_inference.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 9,
+    "first_context": "用 **1/N 块浮点缩放**才修好（arXiv 2605.28451）。",
+    "why": "★ LLR 布局与我们**同约定**（`[re][bit]`、bit 最快变化）；差别只在**他们恒 pad 到 8**、我们不 pad。 ★ **fp16 的约束是\"量程\"不是\"尾数\"**：朴素 fp16 流水线曾因中间量达到 **5e6 ≫ 65504** 而**全 NaN**， 用 **1/N 块浮点缩放**才修好（arXiv 2605.28451）。 ⇒ **LLR 头必须有显式 clamp / tanh，绝不能接近 65504**——这与 §3.3 的标度校准是同一件事的两面。 ★ 并且 **没有任何人发表过 LLR 的\"精度-性能\"曲线**（`memo_03` §7bis.C）—— **这条曲线本身就是本工作流的一个可交付结果**。 ★ 参照 `memo_05` §2.2，建议的对比臂至少三条：**int8-uniform（我们的链） / fp16（NVIDIA 出货口径） /"
+  },
+  {
+    "id": "2605.29995",
+    "title": "Low-Overhead Receiver Design for Data-Dependent Superimposed Training via Deep Learning",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line7_apple_silicon_inference.md"
+    ],
+    "n_citations": 1,
+    "first_context": "| ViT-based neural receiver for data-dependent superimposed training (arXiv:2605.29995) | ViT encoder + CNN decoder for channel estimation, CNN-LSTM demappers; **no runtime/latency figure published** | [vendor-independent benchmark] <https://arxiv.org/abs/2605.29995> |",
+    "why": ""
+  },
+  {
+    "id": "2606.06239",
+    "title": "Foundation Models for Wireless Communications-From PHY Intelligence to Network Autonomy",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 1,
+    "first_context": "([arXiv 2606.06239](https://arxiv.org/abs/2606.06239), [HF papers](https://huggingface.co/papers/2606.06239));",
+    "why": "**Surveys / entry points:** *Comprehensive Review of Deep Unfolding Techniques for Next-Generation Wireless Communication Systems* ([arXiv 2502.05952](https://ar5iv.labs.arxiv.org/html/2502.05952v2), Feb 2025 → 2026 revisions) — the most systematic recent survey, with cross-method comparison tables; *Model-Based Deep Learning*, Shlezinger, Whang, Eldar, Dimakis, **Proceedings of the IEEE 2023** (["
+  },
+  {
+    "id": "2606.17090",
+    "title": "ANEForge-Python for direct computation on the Apple Neural Engine",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/llr_ai_detection_design_and_implementation.md",
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_line7_apple_silicon_inference.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 13,
+    "first_context": "**ANE 的单次 dispatch 地板本身就是几十到几百微秒**（arXiv 2606.22283 / 2606.17090）。",
+    "why": "[Apple Neural Engine: Architecture, Programming, and Performance (2606.22283)](https://arxiv.org/abs/2606.22283) · [ANEForge (2606.17090)](https://huggingface.co/papers/2606.17090)"
+  },
+  {
+    "id": "2606.22283",
+    "title": "Apple Neural Engine-Architecture, Programming, and Performance",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/llr_ai_detection_design_and_implementation.md",
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_line7_apple_silicon_inference.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 13,
+    "first_context": "**ANE 的单次 dispatch 地板本身就是几十到几百微秒**（arXiv 2606.22283 / 2606.17090）。",
+    "why": "[Apple Neural Engine: Architecture, Programming, and Performance (2606.22283)](https://arxiv.org/abs/2606.22283) · [ANEForge (2606.17090)](https://huggingface.co/papers/2606.17090)"
+  },
+  {
+    "id": "2606.27466",
+    "title": "Toward AI-Native 6G Air Interface-A 3GPP Perspective on Protocol Framework",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 2,
+    "first_context": "* **Standards framing:** 3GPP **TR 38.753** (Study on AI/ML for the NR air interface, V19.0.0, 2025-09) — [copy](https://whatthespec.net/friendlyspec/pdf/38753/38753-j00.pdf); Rel-18 study = TR 38.843; Rel-19 brought the first normative WI on AI/ML for the NR air interface. See also [*Toward AI-Native 6G Air Interface: A 3GPP Perspective on Protocol Framework*](https://arxiv.org/pdf/2606.27466v2) ",
+    "why": "**Standards framing:** 3GPP **TR 38.753** (Study on AI/ML for the NR air interface, V19.0.0, 2025-09) — [copy](https://whatthespec.net/friendlyspec/pdf/38753/38753-j00.pdf); Rel-18 study = TR 38.843; Rel-19 brought the first normative WI on AI/ML for the NR air interface. See also [*Toward AI-Native 6G Air Interface: A 3GPP Perspective on Protocol Framework*](https://arxiv.org/pdf/2606.27466v2) an"
+  },
+  {
+    "id": "2606.29345",
+    "title": "Neural Augmentation of MIMO-OFDM Receivers for Universal LLR Reconstruction",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_line_a_b_output_types_llr_calibration_deep_dive.md",
+      "llr_ai_detection/survey/survey_line_a_model_based_mimo_detection.md",
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 18,
+    "first_context": "（arXiv 2606.29345）。",
+    "why": "★ **互信息（MI）不能预测 BLER**：一个接收机可以有近最优的 MI 却仍落在错误平台上 （arXiv 2606.29345）。"
+  },
+  {
+    "id": "2607.08717",
+    "title": "Deep Learning for Joint Narrowband Interference Cancellation and Soft Demodulation in OFDM Systems",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md"
+    ],
+    "n_citations": 1,
+    "first_context": "- **Deep Learning for Joint Narrowband Interference Cancellation and Soft Demodulation in OFDM Systems**, arXiv 2607.08717 — [arXiv HTML](https://arxiv-org.ezproxy.obspm.fr/html/2607.08717v1).",
+    "why": "**Deep Learning for Joint Narrowband Interference Cancellation and Soft Demodulation in OFDM Systems**, arXiv 2607.08717 — [arXiv HTML](https://arxiv-org.ezproxy.obspm.fr/html/2607.08717v1)."
+  },
+  {
+    "id": "2607.12555",
+    "title": "FM-Receiver-A Foundation Model Enabled Unified Inner and Outer Neural Receiver Towards AI-Native Wireless Communications",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 2,
+    "first_context": "* **FM-Receiver: A Foundation Model Enabled Unified Inner and Outer Neural Receiver Towards AI-Native Wireless Communications** — [arXiv:2607.12555](https://arxiv.org/abs/2607.12555) (2026) — Zheng, Jiang, Dai. Foundation-model receiver with readout LLR and readout channel-estimation modules, trained with BCE plus an MSE channel-estimation term. **[verified]**",
+    "why": "**FM-Receiver: A Foundation Model Enabled Unified Inner and Outer Neural Receiver Towards AI-Native Wireless Communications** — [arXiv:2607.12555](https://arxiv.org/abs/2607.12555) (2026) — Zheng, Jiang, Dai. Foundation-model receiver with readout LLR and readout channel-estimation modules, trained with BCE plus an MSE channel-estimation term. **[verified]**"
+  },
+  {
+    "id": "2607.18285",
+    "title": "Edge-Efficient Transformer for End-to-End RF Spectrum Monitoring",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 1,
+    "first_context": "[arXiv 2607.18285](https://browse-export.arxiv.org/pdf/2607.18285). **[These are individual datapoints,",
+    "why": "Edge/hardware comparisons exist but are scattered: e.g. a hardware-platform table reporting *average inference time (ms/sample)* and throughput across platforms/precisions ([EURASIP J. Adv. Signal Process. 2026](https://link.springer.com/content/pdf/10.1186/s13634-026-01368-2_reference.pdf)), an FP16-vs-FP32 datapoint of *\"(FP16) inference, which reduces latency by 30 % compared with FP32 with neg"
+  },
+  {
+    "id": "2607.24669",
+    "title": "A Heterogeneous Neural Network Accelerator for End-to-End Multitask RF Signal Recognition",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md"
+    ],
+    "n_citations": 3,
+    "first_context": "**A Heterogeneous Neural Network Accelerator for End-to-End Multitask RF Signal Recognition** — arXiv 2607.24669 (Song, Stratigopoulos, Aboushady) — [link](https://arxiv.org/abs/2607.24669)",
+    "why": ""
+  },
+  {
+    "id": "2607.26016",
+    "title": "MDTransformer-A Hardware-Software Co-Design of Mode-Division Photonic Transformer Accelerator with Inverse-Designed Coherent Crossbar",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md"
+    ],
+    "n_citations": 1,
+    "first_context": "**RF-Photonic / photonic attention (context only, not PHY receivers):** **Optical Comb-Based Monolithic Photonic-Electronic Accelerators for Self-Attention Computation** — [link](https://par.nsf.gov/servlets/purl/10553811); **MDTransformer: A Hardware-Software Co-Design of Mode-Division Photonic Transformer Accelerator** — arXiv 2607.26016 — [link](https://arxiv.org/abs/2607.26016). MDTransformer ",
+    "why": ""
+  },
+  {
+    "id": "2608.12918",
+    "title": "Input-Correlated Supervision Noise Limits the Benefits of OTA Training for Learned Receivers",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/llr_ai_detection_design_and_implementation.md",
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md"
+    ],
+    "n_citations": 6,
+    "first_context": "Benefits of OTA Training for Learned Receivers*（arXiv 2608.12918, 2026）指出**训练信号失配**会削弱",
+    "why": "[When Does a Neural Receiver Help? (2605.26157)](https://arxiv.org/pdf/2605.26157) · [Input-Correlated Supervision Noise (2608.12918)](https://browse-export.arxiv.org/pdf/2608.12918)"
+  },
+  {
+    "id": "2608.22110",
+    "title": "How Weight Encoding Affects Language Model Placement and Performance on the Apple Neural Engine",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line7_apple_silicon_inference.md"
+    ],
+    "n_citations": 2,
+    "first_context": "**On-device model placement depends on weight encoding, not on intent** (arXiv:2608.22110, M1 + M3, five checkpoints, fixed single-token forward,",
+    "why": "Energy/thermals: *\"the GPU runtimes (MLX, LiteRT-LM) heat up and shed ~50–60 % of their throughput under sustained load, while the ANE barely moves (retains ~65 %)… The ANE draws ~half the package power (measured on Mac via `powermetrics`).\"* `[third-party measurement]` <https://github.com/john-rocky/apple-silicon-llm-bench> **On-device model placement depends on weight encoding, not on intent** ("
+  },
+  {
+    "id": "2608.23582",
+    "title": "Transformer Accelerator (TFA)-A Macro-Op INT8 Hardware Chip for Transformer Inference and Machine Translation",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md"
+    ],
+    "n_citations": 1,
+    "first_context": "**Transformer Accelerator (TFA): A Macro-Op INT8 Hardware Chip for Transformer Inference and Machine Translation** — arXiv 2608.23582 (Shashank) — [link](https://arxiv.org/abs/2608.23582)",
+    "why": ""
+  },
+  {
+    "id": "2609.04004",
+    "title": "On the Impact of Site-Specific Training for a Real-World 5G NR System",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/llr_ai_detection_design_and_implementation.md",
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 17,
+    "first_context": "| ★★★ **ETH Zurich 真实 5G NR 试验台**（arXiv:2609.04004）| ★★★ **site-tuned 经典 LMMSE + 经典 IDD 误差最低**，★ 胜过所有被测神经接收机 |",
+    "why": "*Training with the decoder in the loop so that the decoder shapes the LLR statistics* — [arXiv:1911.13055](https://arxiv.org/abs/1911.13055), [arXiv:2609.04004](https://arxiv.org/abs/2609.04004) (DUIDD), [arXiv:2510.22608](https://arxiv.org/abs/2510.22608). **[verified]**"
+  },
+  {
+    "id": "2609.07805",
+    "title": "Real-Time dApps for AI-RAN-Measured Interface Requirements for Inline PHY and Slot-Level Control",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 10,
+    "first_context": "论文 *Real-Time dApps for AI-RAN*（arXiv 2609.07805，同作者）：",
+    "why": "**实测部署**：*\"On a GB10 gNB with attached handsets, dApps of all three classes, **including an out-of-tree neural equalizer, ran together on a live cell without a single fallback**\"*。 且该神经均衡器**不在 SDK 里**：*\"a package built out of source tree, against the public SDK alone, **by a separate team**\"*。 论文 *Real-Time dApps for AI-RAN*（arXiv 2609.07805，同作者）： | 行 | \"字节 / 预算\"（**预算，非实测**） | 驻留/有界（in-process ABI"
+  },
+  {
+    "id": "2609.07843",
+    "title": "The OCUDU dApp Platform-An Open Runtime and E3 Interface for Real-Time AI-RAN",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/memo_01_repo_seams_and_llr_contract.md",
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_line7_apple_silicon_inference.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 15,
+    "first_context": "#### 证据一：OCUDU dApp 的 Class A 契约（逐字，arXiv 2609.07843）",
+    "why": "[Real-Time dApps for AI-RAN (2609.07805)](https://arxiv.org/pdf/2609.07805v1.pdf) · [The OCUDU dApp Platform (2609.07843)](https://arxiv.org/pdf/2609.07843v1.pdf)"
+  },
+  {
+    "id": "2609.14735",
+    "title": "HELENA for 5G NR LEO NTN Channel Estimation-A Comparative Evaluation",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md"
+    ],
+    "n_citations": 6,
+    "first_context": "**HELENA for 5G NR LEO NTN Channel Estimation: A Comparative Evaluation** — arXiv 2609.14735 (Camelo Botero, Slamnik-Kriještorac, Marquez-Barja) — [link](https://arxiv.org/abs/2609.14735)",
+    "why": "**Real-time receiver on conventional hardware:** *Design and Real-Time Implementation of an Intelligent Wireless Receiver System* ([KCI](https://www.kci.go.kr/kciportal/ci/sereArticleSearch/ciSereArtiView.kci?sereArticleSearchBean.artiId=ART003304335)). **Measured-on-hardware results (LINE 6 survey; the numbers that actually matter).** | Work | Hardware | Reported result | Measured? | |---|---|---"
+  },
+  {
+    "id": "2609.25847",
+    "title": "Common-Loss Parameter-Efficiency Analysis of MLP and KAN Neural Receivers for Digital Communications",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md"
+    ],
+    "n_citations": 2,
+    "first_context": "**Common-Loss Parameter-Efficiency Analysis of MLP and KAN Neural Receivers for Digital Communications** — arXiv 2609.25847 (Ertan, Tokluoglu, Cavus) — [link](https://arxiv.org/abs/2609.25847)",
+    "why": "**CPMamba (2512.16315)**, **KAN vs. MLP receivers (2609.25847)**, **DAT/RDNLA (2503.20500)**, **CSI-free atomic MIMO ICL (2507.04040)**, **Unified Transformer (2508.17960** — partly real via OAI+Aerial, but no numbers)."
+  },
+  {
+    "id": "2609.28852",
+    "title": "Has The Physical Layer Matured?",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line_b_llr_output_receivers.md",
+      "llr_ai_detection/survey/survey_line_c_decoder_in_the_loop.md"
+    ],
+    "n_citations": 3,
+    "first_context": "- **LLR → decoder interface, stated generically**: *\"Following the neural receiver, the estimated LLRs \\(\\mathbf{LLR}_\\theta\\) are fed into a standard channel decoder\"* ([2602.04728](https://arxiv.org/pdf/2602.04728v3)); *\"The corresponding LLRs required by the LDPC decoder are obtained as\"* ([2602.11951](https://arxiv-org.ezproxy.obspm.fr/pdf/2602.11951)); *\"Unlike hard- decision outputs, soft- o",
+    "why": "**LLR → decoder interface, stated generically**: *\"Following the neural receiver, the estimated LLRs \\(\\mathbf{LLR}_\\theta\\) are fed into a standard channel decoder\"* ([2602.04728](https://arxiv.org/pdf/2602.04728v3)); *\"The corresponding LLRs required by the LDPC decoder are obtained as\"* ([2602.11951](https://arxiv-org.ezproxy.obspm.fr/pdf/2602.11951)); *\"Unlike hard- decision outputs, soft- out"
+  },
+  {
+    "id": "2609.30459",
+    "title": "VkVIO-Cross-platform GPU Acceleration for Visual-Inertial Odometry with Vulkan",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/survey/survey_line7_apple_silicon_inference.md"
+    ],
+    "n_citations": 2,
+    "first_context": "* **Cross-platform GPU compute with deadline/jitter reporting on Apple Silicon** — VkVIO (arXiv:2609.30459) runs a visual-inertial-odometry frontend on",
+    "why": "**Cross-platform GPU compute with deadline/jitter reporting on Apple Silicon** — VkVIO (arXiv:2609.30459) runs a visual-inertial-odometry frontend on any Vulkan GPU. **On Apple M3 specifically**: frontend speedup **1.4× (TR2) to 6.8× (HF151)**, E2E **1.2–3.9×**; on a 36.5-minute endurance session (MIPB08) VkVIO finished in **384 s vs 1257 s** for the CPU baseline at equal accuracy (ATE 0.603 m vs "
+  },
+  {
+    "id": "2609.31177",
+    "title": "Floating-Point Microformat Quantization and Pruning for Efficient MU-MIMO Neural Receivers",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/llr_ai_detection_high_level_status_and_plan.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/model_network_design.md",
+      "llr_ai_detection/survey/survey_line6_complexity_latency_energy.md",
+      "llr_ai_detection/survey/survey_line_b2_neural_receivers.md",
+      "llr_ai_detection/wip/README.md"
+    ],
+    "n_citations": 9,
+    "first_context": "从 `O((TF)²)` 降到 `O(T²F+TF²)`**；★ ③ **[arXiv:2609.31177](https://arxiv.org/pdf/2609.31177v1.pdf)**：",
+    "why": "**All four quantization papers (2508.06275, 2509.13786, 2609.31177, Data-Free Quantization)** — BLER/bit-op/compression results only; the 66× bit-op and 8.8× storage figures in 2609.31177 are from an **analytic cost model**."
+  },
+  {
+    "id": "2609.32237",
+    "title": "Bandwidth, Not FLOPS-FFT Kernels, Matrix Units and SAR Imaging on Apple M6",
+    "archived": true,
+    "files": [
+      "llr_ai_detection/llr_ai_detection_design_and_implementation.md",
+      "llr_ai_detection/memo_03_literature_survey.md",
+      "llr_ai_detection/model_build_reconnaissance.md",
+      "llr_ai_detection/survey/survey_master_ai_receiver_literature_review.md",
+      "phy_latency/gpu_phy_latency_optimization_design_and_implementation.md"
+    ],
+    "n_citations": 6,
+    "first_context": "**Apple GPU 的 DSP 是带宽瓶颈而非算力瓶颈**（*Bandwidth, Not FLOPS*, arXiv 2609.32237），",
+    "why": "[Range, Not Precision (2605.28451)](https://export.arxiv.org/pdf/2605.28451) · [Bandwidth, Not FLOPS (2609.32237)](https://ar5iv.labs.arxiv.org/html/2609.32237v1)"
+  }
+]

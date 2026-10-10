@@ -1,40 +1,150 @@
-OK    2503.16594   2.7M   Decision Feedback In-Context Learning for Wireless Symbol Detection
-OK    2411.07600   2.1M   Decision Feedback In-Context Symbol Detection over Block-Fading Channels
-OK    2609.07805   344K   Real-Time dApps for AI-RAN-Measured Interface Requirements for Inline PHY and Slot-Level Control
-OK    2609.07843   396K   The OCUDU dApp Platform-An Open Runtime and E3 Interface for Real-Time AI-RAN
-OK    2606.22283   3.0M   Apple Neural Engine-Architecture, Programming, and Performance
-OK    2606.17090   520K   ANEForge-Python for direct computation on the Apple Neural Engine
-OK    2605.26157   1.0M   When Does a Neural Receiver Help? Calibration-Drift Benchmarking and Detect-and-Rollback for 5G-6G NR
-OK    2608.12918   488K   Input-Correlated Supervision Noise Limits the Benefits of OTA Training for Learned Receivers
-OK    2605.28451   268K   Range, Not Precision-Block-Floating-Point Half-Precision FFT and SAR Imaging on Apple Silicon
-OK    2609.32237   328K   Bandwidth, Not FLOPS-FFT Kernels, Matrix Units and SAR Imaging on Apple M6
-OK    2005.01494   1.1M   DeepRx-Fully Convolutional Deep Learning Receiver
-OK    2010.16283   516K   DeepRx MIMO-Convolutional MIMO Detection with Learned Multiplicative Transformations
-OK    2507.10409   832K   Energy Efficiency in AI for 5G and Beyond-A DeepRx Case Study
-OK    2606.29345   1.2M   Neural Augmentation of MIMO-OFDM Receivers for Universal LLR Reconstruction
-OK    1911.13055   744K   Trainable Communication Systems-Concepts and Prototype
-OK    2609.04004   2.0M   On the Impact of Site-Specific Training for a Real-World 5G NR System
-OK    2408.04182   3.3M   Adapting to Reality-Over-the-Air Validation of AI-Based Receivers Trained with Simulated Channels
-OK    2208.05186   708K   Learning Quantization in LDPC Decoders
-OK    1011.2113     92K   Complexity Adjusted Soft-Output Sphere Decoding by Adaptive LLR Clipping
-OK    2601.16586   444K   Learning Successive Interference Cancellation for Low-Complexity Soft-Output MIMO Detection
-OK    2102.12756   656K   CMDNet-Learning a Probabilistic Relaxation of Discrete Variables for Soft Detection with Low Complexity
-OK    1903.02865   364K   Deep Learning for Channel Coding via Neural Mutual Information Estimation
-OK    1706.01151   312K   Deep MIMO Detection
-OK    2212.07816   780K   DUIDD-Deep-Unfolded Interleaved Detection and Decoding for MIMO Wireless Systems
-OK    2505.15848   1.8M   Sionna Research Kit-A GPU-Accelerated Research Platform for AI-RAN
-OK    2506.15176   2.1M   In-Context Learning for Gradient-Free Receiver Adaptation-Principles, Applications, and Theory
-OK    2506.21093   1.9M   Chain-of-Thought Enhanced Shallow Transformers for Wireless Symbol Detection
-OK    2404.05538   1.0M   Cell-Free Multi-User MIMO Equalization via In-Context Learning
-OK    2510.12941   1.4M   Computationally Efficient Neural Receivers via Axial Self-Attention
-OK    2210.14103   772K   Bit Error and Block Error Rate Training for ML-Assisted Communication
-OK    2502.05952   3.0M   Comprehensive Review of Deep Unfolding Techniques for Next-Generation Wireless Communication Systems
-OK    2102.02993   1.1M   LoRD-Net-Unfolded Deep Detection Network with Low-Resolution Receivers
-OK    2409.02912   1.3M   Design of a Standard-Compliant Real-Time Neural Receiver for 5G NR
-OK    2602.04652   2.0M   Six Times to Spare-Characterizing GPU-Accelerated 5G LDPC Decoding for Edge-RSU Communications
-OK    2609.31177   356K   Floating-Point Microformat Quantization and Pruning for Efficient MU-MIMO Neural Receivers
-OK    2409.05610   932K   SpikingRx-From Neural to Spiking Receiver
-OK    2510.01533   612K   NVIDIA AI Aerial-AI-Native Wireless Communications
-OK    2507.18538   908K   AI-ML Life Cycle Management for Interoperable AI Native RAN
+SKIP	2503.16594	Decision Feedback In-Context Learning for Wireless Symbol Detection
+SKIP	2411.07600	Decision Feedback In-Context Symbol Detection over Block-Fading Channels
+SKIP	2609.07805	Real-Time dApps for AI-RAN-Measured Interface Requirements for Inline PHY and Slot-Level Control
+SKIP	2609.07843	The OCUDU dApp Platform-An Open Runtime and E3 Interface for Real-Time AI-RAN
+SKIP	2606.22283	Apple Neural Engine-Architecture, Programming, and Performance
+SKIP	2606.17090	ANEForge-Python for direct computation on the Apple Neural Engine
+SKIP	2605.26157	When Does a Neural Receiver Help? Calibration-Drift Benchmarking and Detect-and-Rollback for 5G-6G NR
+SKIP	2608.12918	Input-Correlated Supervision Noise Limits the Benefits of OTA Training for Learned Receivers
+SKIP	2605.28451	Range, Not Precision-Block-Floating-Point Half-Precision FFT and SAR Imaging on Apple Silicon
+SKIP	2609.32237	Bandwidth, Not FLOPS-FFT Kernels, Matrix Units and SAR Imaging on Apple M6
+SKIP	2005.01494	DeepRx-Fully Convolutional Deep Learning Receiver
+SKIP	2010.16283	DeepRx MIMO-Convolutional MIMO Detection with Learned Multiplicative Transformations
+SKIP	2507.10409	Energy Efficiency in AI for 5G and Beyond-A DeepRx Case Study
+SKIP	2606.29345	Neural Augmentation of MIMO-OFDM Receivers for Universal LLR Reconstruction
+SKIP	1911.13055	Trainable Communication Systems-Concepts and Prototype
+SKIP	2609.04004	On the Impact of Site-Specific Training for a Real-World 5G NR System
+SKIP	2408.04182	Adapting to Reality-Over-the-Air Validation of AI-Based Receivers Trained with Simulated Channels
+SKIP	2208.05186	Learning Quantization in LDPC Decoders
+SKIP	1011.2113	Complexity Adjusted Soft-Output Sphere Decoding by Adaptive LLR Clipping
+SKIP	2601.16586	Learning Successive Interference Cancellation for Low-Complexity Soft-Output MIMO Detection
+SKIP	2102.12756	CMDNet-Learning a Probabilistic Relaxation of Discrete Variables for Soft Detection with Low Complexity
+SKIP	1903.02865	Deep Learning for Channel Coding via Neural Mutual Information Estimation
+SKIP	1706.01151	Deep MIMO Detection
+SKIP	2212.07816	DUIDD-Deep-Unfolded Interleaved Detection and Decoding for MIMO Wireless Systems
+SKIP	2505.15848	Sionna Research Kit-A GPU-Accelerated Research Platform for AI-RAN
+SKIP	2506.15176	In-Context Learning for Gradient-Free Receiver Adaptation-Principles, Applications, and Theory
+SKIP	2506.21093	Chain-of-Thought Enhanced Shallow Transformers for Wireless Symbol Detection
+SKIP	2404.05538	Cell-Free Multi-User MIMO Equalization via In-Context Learning
+SKIP	2510.12941	Computationally Efficient Neural Receivers via Axial Self-Attention
+SKIP	2210.14103	Bit Error and Block Error Rate Training for ML-Assisted Communication
+SKIP	2502.05952	Comprehensive Review of Deep Unfolding Techniques for Next-Generation Wireless Communication Systems
+SKIP	2102.02993	LoRD-Net-Unfolded Deep Detection Network with Low-Resolution Receivers
+SKIP	2409.02912	Design of a Standard-Compliant Real-Time Neural Receiver for 5G NR
+SKIP	2602.04652	Six Times to Spare-Characterizing GPU-Accelerated 5G LDPC Decoding for Edge-RSU Communications
+SKIP	2609.31177	Floating-Point Microformat Quantization and Pruning for Efficient MU-MIMO Neural Receivers
+SKIP	2409.05610	SpikingRx-From Neural to Spiking Receiver
+SKIP	2510.01533	NVIDIA AI Aerial-AI-Native Wireless Communications
+SKIP	2507.18538	AI-ML Life Cycle Management for Interoperable AI Native RAN
+SKIP	2508.06275	Efficient Deep Neural Receiver with Post-Training Quantization
+SKIP	2509.13786	Efficient Quantization-Aware Neural Receivers-Beyond Post-Training Quantization
+SKIP	2603.09644	Site-Specific Finetuning of Neural Receivers with Real-World 5G NR Measurements
+SKIP	1607.04793	Learning to Decode Linear Codes Using Deep Learning
+SKIP	1701.05931	Neural Offset Min-Sum Decoding
+SKIP	1702.00832	An Introduction to Deep Learning for the Physical Layer
+SKIP	1706.07043	Deep Learning Methods for Improved Decoding of Linear Codes
+SKIP	1707.03384	Deep Learning-Based Communication Over the Air
+SKIP	1802.04741	Deep Learning for Decoding of Linear Codes - A Syndrome-Based Approach
+SKIP	1805.07631	Learning to Detect
+SKIP	1805.09317	Communication Algorithms via Deep Learning
+SKIP	1807.00801	Deepcode-Feedback Codes via Deep Learning
+SKIP	1809.01022	A Neural Network Aided Approach for LDPC Coded DCO-OFDM with Clipping Distortion
+SKIP	1809.09336	A Model-Driven Deep Learning Network for MIMO Detection
+SKIP	1812.05929	Model-free Training of End-to-end Communication Systems
+SKIP	1812.10044	Trainable Projected Gradient Detector for Massive Overloaded MIMO Channels-Data-driven Tuning Approach
+SKIP	1902.06939	Towards Hardware Implementation of Neural Network-based Communication Algorithms
+SKIP	1906.04610	Adaptive Neural Signal Detection for Massive MIMO
+SKIP	1907.01512	Machine LLRning-Learning to Softly Demodulate
+SKIP	1907.09439	Model-Driven Deep Learning for MIMO Detection
+SKIP	2002.02750	Deep HyperNetwork-Based MIMO Detection
+SKIP	2004.05062	Joint Learning of Probabilistic and Geometric Shaping for Coded Modulation Systems
+SKIP	2006.16015	Neural Mutual Information Estimation for Channel Coding-State-of-the-Art Estimators, Analysis, and Performance Comparison
+SKIP	2008.08264	Intelligent Radio Signal Processing-A Survey
+SKIP	2009.02591	Deep Ensemble of Weighted Viterbi Decoders for Tail-Biting Convolutional Codes
+SKIP	2009.05261	End-to-end Learning for OFDM-From Neural Receivers to Pilotless Communication
+SKIP	2012.08405	Model-Based Deep Learning
+SKIP	2101.04726	Model-Based Machine Learning for Communications
+SKIP	2102.03828	Learning to Decode Protograph LDPC Codes
+SKIP	2105.05044	Understanding Deep MIMO Detection
+SKIP	2106.16079	HybridDeepRx-Deep Learning Receiver for High-EVM Signals
+SKIP	2107.11958	Deep Learning for Estimation and Pilot Signal Design in Few-Bit Massive MIMO Systems
+SKIP	2201.03866	Deep Learning-Aided 6G Wireless Networks-A Comprehensive Survey of Revolutionary PHY Architectures
+SKIP	2201.11779	Convolutional Self-Attention-Based Multi-User MIMO Demapper
+SKIP	2203.11854	Sionna-An Open-Source Library for Next-Generation Physical Layer Research
+SKIP	2204.05350	Leveraging Deep Neural Networks for Massive MIMO Data Detection
+SKIP	2210.03888	Accelerated and Deep Expectation Maximization for One-Bit MIMO-OFDM Detection
+SKIP	2211.06054	Neural Network Approaches for Data Estimation in Unique Word OFDM Systems
+SKIP	2212.03839	End-to-end Optimization of Constellation Shaping for Wiener Phase Noise Channels with a Differentiable Blind Phase Search
+SKIP	2302.02436	Uncertainty-Aware and Reliable Neural MIMO Receivers via Modular Bayesian Deep Learning
+SKIP	2304.07696	Learning-Based One-Bit Maximum Likelihood Detection for Massive MIMO Systems-Dithering-Aided Adaptive Approach
+SKIP	2305.07309	Adaptive and Flexible Model-Based AI for Deep Receivers in Dynamic Channels
+SKIP	2305.15543	Regularized Neural Detection for One-Bit Massive MIMO Communication Systems
+SKIP	2308.12591	SICNN-Soft Interference Cancellation Inspired Neural Network Equalizers
+SKIP	2312.02601	A Neural Receiver for 5G NR Multi-user MIMO
+SKIP	2401.07515	On Purely Data-Driven Massive MIMO Detectors
+SKIP	2405.13413	Boosted Neural Decoders-Achieving Extreme Reliability of LDPC Codes for 6G Networks
+SKIP	2406.18993	Interference Cancellation Based Neural Receiver for Superimposed Pilot in Multi-Layer Transmission
+SKIP	2501.09761	VERITAS-Verifying the Performance of AI-native Transceiver Actions in Base-Stations
+SKIP	2501.14861	A Deep-Unfolding-Optimized Coordinate-Descent Data-Detector ASIC for mmWave Massive MIMO
+SKIP	2502.09326	Uplink OFDM Channel Prediction with Hybrid CNN-LSTM for 6G Non-Terrestrial Networks
+SKIP	2503.20500	Novel Deep Neural OFDM Receiver Architectures for LLR Estimation
+SKIP	2505.06671	RADE-A Neural Codec for Transmitting Speech over HF Radio Channels
+SKIP	2505.12736	Deep Unfolding with Kernel-based Quantization in MIMO Detection
+SKIP	2508.12892	A Compute&Memory Efficient Model-Driven Neural 5G Receiver for Edge AI-assisted RAN
+SKIP	2509.12694	Soft Graph Transformer for MIMO Detection
+SKIP	2509.18574	Hybrid Neural-Traditional OFDM Receiver with Learnable Decider
+SKIP	2510.22608	End-to-end Learning of Probabilistic and Geometric Constellation Shaping with Iterative Receivers
+SKIP	2511.05502	Production-Grade Local LLM Inference on Apple Silicon-A Comparative Study of MLX, MLC-LLM, Ollama, llama.cpp, and PyTorch MPS
+SKIP	2604.03585	From 8 Seconds to 370ms-Kernel-Fused SAR Imaging on Apple Silicon via Single-Dispatch FFT Pipelines
+SKIP	2604.27279	Predicting Upcoming Stuttering Events from Three-Second Audio-Stratified Evaluation Reveals Severity-Selective Precursors, and the Model Deploys Fully On-Device
+SKIP	2605.29995	Low-Overhead Receiver Design for Data-Dependent Superimposed Training via Deep Learning
+SKIP	2607.12555	FM-Receiver-A Foundation Model Enabled Unified Inner and Outer Neural Receiver Towards AI-Native Wireless Communications
+SKIP	2608.22110	How Weight Encoding Affects Language Model Placement and Performance on the Apple Neural Engine
+SKIP	2609.28852	Has The Physical Layer Matured?
+SKIP	2609.30459	VkVIO-Cross-platform GPU Acceleration for Visual-Inertial Odometry with Vulkan
+SKIP	1612.01183	AMP-Inspired Deep Networks for Sparse Linear Inverse Problems
+SKIP	1812.01571	Multilevel MIMO Detection with Deep Learning
+SKIP	2005.02262	PolymoRF-Polymorphic Wireless Receivers Through Physical-Layer Deep Learning
+SKIP	2307.12575	Robust MIMO Detection With Imperfect CSI-A Neural Network Solution
+SKIP	2308.11335	Graph Neural Network-Enhanced Expectation Propagation Algorithm for MIMO Turbo Receivers
+SKIP	2311.00226	Transformers are Provably Optimal In-context Estimators for Wireless Communications
+SKIP	2403.01098	Low Complexity Deep Learning Augmented Wireless Channel Estimation for Pilot-Based OFDM on Zynq System on Chip
+SKIP	2404.06469	Neuromorphic In-Context Learning for Energy-Efficient MIMO Symbol Detection
+SKIP	2409.00124	Leveraging Large Language Models for Wireless Symbol Detection via In-Context Learning
+SKIP	2411.04136	Large Language Models for Wireless Networks-An Overview from the Prompt Engineering Perspective
+SKIP	2411.10178	Channel-Adaptive Wireless Image Semantic Transmission with Learnable Prompts
+SKIP	2505.06175	Turbo-ICL-In-Context Learning-Based Turbo Equalization
+SKIP	2506.00368	Neural Network-based Information-Theoretic Transceivers for High-Order Modulation Schemes
+SKIP	2506.13408	HELENA-High-Efficiency Learning-based channel Estimation using dual Neural Attention
+SKIP	2507.04040	CSI-Free Symbol Detection for Atomic MIMO Receivers via In-Context Learning
+SKIP	2508.00587	Uncertainty-Aware Likelihood Ratio Estimation for Pixel-Wise Out-of-Distribution Detection
+SKIP	2508.02314	Large AI Models for Wireless Physical Layer
+SKIP	2508.08790	ReQuestNet-A Foundational Learning model for Channel Estimation
+SKIP	2508.17960	A Unified Transformer Architecture for Low-Latency and Scalable Wireless Signal Processing
+SKIP	2511.03923	Adaptive Phase Shift Information Compression for IRS Systems-A Prompt Conditioned Variable Rate Framework
+SKIP	2512.13263	An End-to-End Neural Network Transceiver Design for OFDM System with FPGA-Accelerated Implementation
+SKIP	2512.16315	CPMamba-Selective State Space Models for MIMO Channel Prediction in High-Mobility Environments
+SKIP	2601.10963	Large Wireless Foundation Models-Stronger over Bigger
+SKIP	2602.11834	EqDeepRx-Learning a Scalable and Interference Mitigating MIMO Receiver
+SKIP	2603.14661	AtlasRAN-Timing-Aware Evaluation of Open-source 5G Platforms for Integrated Wireless Testbeds
+SKIP	2604.00529	MF-QAT-Multi-Format Quantization-Aware Training for Elastic Inference
+SKIP	2605.01931	SwiftChannel-Algorithm-Hardware Co-Design for Deep Learning-Based 5G Channel Estimation
+SKIP	2605.13507	Implementation of an Adaptive Transformer Accelerator for Accurate Outdoor Localization with Massive MIMO
+SKIP	2606.06239	Foundation Models for Wireless Communications-From PHY Intelligence to Network Autonomy
+SKIP	2606.27466	Toward AI-Native 6G Air Interface-A 3GPP Perspective on Protocol Framework
+SKIP	2607.08717	Deep Learning for Joint Narrowband Interference Cancellation and Soft Demodulation in OFDM Systems
+SKIP	2607.18285	Edge-Efficient Transformer for End-to-End RF Spectrum Monitoring
+SKIP	2607.24669	A Heterogeneous Neural Network Accelerator for End-to-End Multitask RF Signal Recognition
+SKIP	2607.26016	MDTransformer-A Hardware-Software Co-Design of Mode-Division Photonic Transformer Accelerator with Inverse-Designed Coherent Crossbar
+SKIP	2608.23582	Transformer Accelerator (TFA)-A Macro-Op INT8 Hardware Chip for Transformer Inference and Machine Translation
+SKIP	2609.14735	HELENA for 5G NR LEO NTN Channel Estimation-A Comparative Evaluation
+SKIP	2609.25847	Common-Loss Parameter-Efficiency Analysis of MLP and KAN Neural Receivers for Digital Communications
+OK	1903.04766	Artificial Intelligence-aided Receiver for A CP-Free OFDM System-Design, Simulation, and Experimental Test
+OK	1909.01683	Deep Learning-Aided Tabu Search Detection for Large MIMO Systems
+OK	2401.04077	LoFi User Scheduling for Multiuser MIMO Wireless Systems
+OK	2505.09076	AdaFortiTran-An Adaptive Transformer Model for Robust OFDM Channel Estimation
+OK	2602.04728	Scalable Cross-Attention Transformer for Cooperative Multi-AP OFDM Uplink Reception
+OK	2602.11951	Learning-Enhanced Composite DNA Data Storage Under Sampling Randomness and IDS Errors
+OK	2602.15458	A Universal Neural Receiver that Learns at the Speed of Wireless
 
-=== 38 downloaded, 0 failed ===
+=== 7 downloaded, 141 already present, 0 failed (of 148) ===
