@@ -140,11 +140,51 @@ def truth_from_pilots(prefix, cfg, alloc, sub, H):
 
 
 def _pair_nmse(estimate, target):
-    """Scalar NMSE of `estimate` against `target` after removing the best complex gain."""
-    a = np.asarray(target).ravel()
-    b = np.asarray(estimate).ravel()
-    gain = np.vdot(a, b) / np.vdot(a, a)
-    return 10 * np.log10(np.sum(np.abs(b - gain * a) ** 2) / np.sum(np.abs(gain * a) ** 2))
+    """Complex-array form of `pair_nmse_db`, for the in-loop quality gate.
+
+    Kept as a separate entry point only because the gate works on the [symbol, subcarrier] arrays
+    it already holds; it forwards to the same formula.
+    """
+    return pair_nmse_db(estimate, target)
+
+
+def pair_nmse_db(estimate, target):
+    """Scale-invariant NMSE of `estimate` against `target`, in dB, as complex arrays.
+
+    The gain maps the ESTIMATE onto the TARGET (the estimate is the thing being corrected), so
+    `g = <target, estimate> / <estimate, estimate>` and the residual is `target - g * estimate`.
+    Both directions were tried while this was being pinned down and they differ by the whole
+    scale convention, so the formula is stated here once rather than open-coded at call sites.
+    """
+    estimate = np.asarray(estimate).ravel()
+    target = np.asarray(target).ravel()
+    gain = np.vdot(target, estimate) / (np.vdot(estimate, estimate) + 1e-30)
+    residual = target - gain * estimate
+    reference = gain * estimate
+    return 10 * np.log10(np.sum(np.abs(residual) ** 2) / (np.sum(np.abs(reference) ** 2) + 1e-30))
+
+
+def pairs_from_npz(path):
+    """Yield (estimate, target) complex pairs from a dataset produced by this tool."""
+    data = np.load(path)
+    X, Y, widths = data["X"], data["Y"], data["width"]
+    for k in range(len(X)):
+        n = int(widths[k])
+        yield (X[k, :n, :, 0] + 1j * X[k, :n, :, 1],
+               Y[k, :n, :, 0] + 1j * Y[k, :n, :, 1])
+
+
+def selfcheck(path):
+    """Recompute the per-pair NMSE from the stored file, so the number has one authority."""
+    data = np.load(path)
+    snr = data["snr_train"]
+    values = np.array([pair_nmse_db(e, t) for e, t in pairs_from_npz(path)])
+    print(f"{path}: {len(values)} pairs")
+    for level in sorted(set(snr)):
+        print(f"  {level:5.1f} dB : median {np.median(values[snr == level]):+7.2f} dB "
+              f"(n={int((snr == level).sum())})")
+    print(f"  overall    : median {np.median(values):+7.2f} dB")
+    return values
 
 
 def build_and_replay(cfg, tb_bits, H, alloc, snr_db, seed, staged,
@@ -187,9 +227,9 @@ def build_and_replay(cfg, tb_bits, H, alloc, snr_db, seed, staged,
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--units", required=True)
-    parser.add_argument("--tb", required=True)
-    parser.add_argument("--corpus", required=True)
+    parser.add_argument("--units")
+    parser.add_argument("--tb")
+    parser.add_argument("--corpus")
     parser.add_argument("--out", required=True)
     parser.add_argument("--name", default="synth_dataset",
                         help="output basename, so several corpora can be built into one "
@@ -202,6 +242,9 @@ def main():
                              "target independent of the estimator being measured; 'hbin' uses "
                              "the channel recorded next to the capture, which is the chain's own "
                              "estimate and therefore folds its error into the answer.")
+    parser.add_argument("--selfcheck", action="store_true",
+                        help="recompute the per-pair NMSE of an existing dataset and exit; "
+                             "use with --out pointing at the .npz file")
     parser.add_argument("--min-prb", type=int, default=43,
                         help="minimum allocation width in PRB. The network's window is 612 "
                              "subcarriers (51 PRB), so a narrow allocation would leave most of "
@@ -211,6 +254,13 @@ def main():
     parser.add_argument("--seed", type=int, default=20261010)
     parser.add_argument("--staged", default="/tmp/synth_stage")
     args = parser.parse_args()
+
+    if args.selfcheck:
+        selfcheck(args.out)
+        return 0
+    missing = [n for n in ("units", "tb", "corpus") if getattr(args, n) is None]
+    if missing:
+        parser.error("missing required arguments: " + ", ".join("--" + m for m in missing))
 
     snrs = [float(x) for x in args.snrs.split(",")]
     os.makedirs(args.out, exist_ok=True)
