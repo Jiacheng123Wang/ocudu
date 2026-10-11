@@ -40,17 +40,30 @@ import sys
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-AI_TRAIN = os.path.abspath(os.path.join(HERE, "..", "..", "..", "lib", "phy", "upper",
-                                        "signal_processors", "channel_estimator",
-                                        "metal", "ai_train"))
-REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+AI_TRAIN = HERE
+# The repository root is found by walking up to the directory that holds `build/`, rather than
+# by counting ".." levels from here. The counting version breaks the moment this file is
+# imported from a copy living somewhere else, which silently pointed the replay path at
+# `signal_processors/build/...` and made every run produce garbage instead of failing loudly.
+def _find_repo(start):
+    path = start
+    for _ in range(12):
+        if os.path.isdir(os.path.join(path, "build")) and os.path.isdir(os.path.join(path, "lib")):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    raise SystemExit(f"cannot locate the repository root from {start}")
+
+
+REPO = _find_repo(HERE)
 REPLAY = os.path.join(REPO, "build", "lib", "phy", "upper", "channel_processors",
                       "metal", "ul_chain_replay")
 
 sys.path.insert(0, AI_TRAIN)
-sys.path.insert(0, HERE)
 import dmrs as DV              # noqa: E402
-import synth_noisy as SN       # noqa: E402
+import synth as SN             # noqa: E402  (the shared, tracked synthesis core)
 
 NOF_SYMBOLS = 14
 BUCKET_SUBCARRIERS = 612       # the window the network works on (51 PRB)
@@ -58,14 +71,7 @@ BUCKET_SUBCARRIERS = 612       # the window the network works on (51 PRB)
 TDL_CACHE = {}
 
 
-def read_config(prefix):
-    cfg = {}
-    with open(prefix + ".txt") as handle:
-        for line in handle:
-            if "=" in line:
-                key, _, value = line.partition("=")
-                cfg[key.strip()] = value.strip()
-    return cfg
+read_config = SN.read_config
 
 
 def fit_tdl_coefficients(observed, subcarriers, nof_taps=16, fft_len=1024):
@@ -133,21 +139,31 @@ def truth_from_pilots(prefix, cfg, alloc, sub, H):
     return clean
 
 
-def build_and_replay(cfg, tb_bits, H, alloc, snr_db, seed, staged, truth=None, keep=None):
-    """Return the chain's channel estimate for a synthetic grid at `snr_db`."""
+def _pair_nmse(estimate, target):
+    """Scalar NMSE of `estimate` against `target` after removing the best complex gain."""
+    a = np.asarray(target).ravel()
+    b = np.asarray(estimate).ravel()
+    gain = np.vdot(a, b) / np.vdot(a, a)
+    return 10 * np.log10(np.sum(np.abs(b - gain * a) ** 2) / np.sum(np.abs(gain * a) ** 2))
+
+
+def build_and_replay(cfg, tb_bits, H, alloc, snr_db, seed, staged,
+                     truth_channel=None):
+    """Return the chain's channel estimate for a synthetic grid at `snr_db`.
+
+    `truth_channel` is a full-width [symbol, subcarrier] channel to BUILD the grid from when the
+    target is a physical fit rather than the recorded estimate. Passing a subcarrier subset here
+    would leave the rest of the band empty, and the chain estimates the whole BWP, so it must be
+    full width - a narrow array is what silently turned the estimate into noise before.
+    """
     dmrs_syms = [int(x) for x in cfg["dmrs_symbols"].split(",")]
     dmrs_mask = sum(1 << s for s in dmrs_syms)
     mod_enum = {"QPSK": 2, "16QAM": 4, "64QAM": 6, "256QAM": 8}[cfg["modulation"]]
 
     X, data_pos = SN.encode_symbols(tb_bits, len(alloc), NOF_SYMBOLS, mod_enum, dmrs_mask,
                                     int(cfg["n_id"]), int(cfg["rnti"]), int(cfg["rv"]))
-    grid = SN.build_clean(cfg, H, X, data_pos, alloc, dmrs_syms)
-    if truth is not None:
-        # Overwrite the whole allocation with the clean channel, so the grid the chain sees and
-        # the target it is compared against are the same channel by construction.
-        full = np.zeros_like(H)
-        full[:, keep] = truth
-        grid = SN.build_clean(cfg, full, X, data_pos, alloc, dmrs_syms)
+    grid_channel = truth_channel if truth_channel is not None else H
+    grid = SN.build_clean(cfg, grid_channel, X, data_pos, alloc, dmrs_syms)
 
     sig = float(np.mean(np.abs(grid[np.abs(grid) > 0]) ** 2))
     sigma2 = sig / (10.0 ** (snr_db / 10.0))
@@ -175,6 +191,9 @@ def main():
     parser.add_argument("--tb", required=True)
     parser.add_argument("--corpus", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--name", default="synth_dataset",
+                        help="output basename, so several corpora can be built into one "
+                             "directory without overwriting each other")
     parser.add_argument("--snrs", default="12,18,24")
     parser.add_argument("--max-units", type=int, default=0)
     parser.add_argument("--truth", choices=("tdl", "hbin"), default="tdl",
@@ -228,6 +247,7 @@ def main():
           f"(allocation off PRB 0, absolute slot > 40, width >= {args.min_prb} PRB)")
 
     inputs, targets, meta = [], [], []
+    pair_nmse_log = []
     for i, (name, prefix, cfg, alloc) in enumerate(candidates):
         bwp = int(cfg["bwp_size_rb"])
         H = np.fromfile(prefix + "_h.bin", dtype=np.complex64).reshape(NOF_SYMBOLS, bwp * 12)
@@ -246,6 +266,9 @@ def main():
         # --truth tdl this is the physical fit rather than the recorded estimate, so the pair
         # does not inherit the estimator's own error; see the docstring of `fit_tdl`. It does
         # not depend on the SNR, so it is computed once per unit.
+        # `truth` is what the pair is SUPERVISED against (restricted to the kept subcarriers).
+        # `grid_channel` is what the grid is BUILT from and must span the whole BWP. With
+        # --truth hbin they are the same channel, so no rebuild is needed.
         truth = TDL_CACHE.get(name)
         if truth is None:
             truth = (truth_from_pilots(prefix, cfg, alloc, keep, H) if args.truth == "tdl"
@@ -254,18 +277,37 @@ def main():
         if truth.shape != (NOF_SYMBOLS, len(keep)):
             print(f"  {name}: truth shape {truth.shape} unexpected, skipped")
             continue
+        grid_channel = None
+        if args.truth == "tdl":
+            grid_channel = np.zeros_like(H)
+            grid_channel[:, keep] = truth
 
         for snr in snrs:
             hat, sigma2 = build_and_replay(cfg, tb_bits, H, alloc, snr, args.seed + i, staged,
-                                           truth=truth, keep=keep)
+                                           truth_channel=grid_channel)
             if hat is None:
                 continue
             hat = hat.reshape(NOF_SYMBOLS, bwp * 12)
             if hat.shape != H.shape:
                 continue
 
-            inputs.append(hat[:, keep].astype(np.complex64))
-            targets.append(truth.astype(np.complex64))
+            # Per-pair diagnostic. A pair whose input does not track its target is worthless,
+            # and the failure mode is silent (the chain still returns an array), so the NMSE is
+            # computed and printed as the set is built rather than only at the end.
+            reference = truth.astype(np.complex64)
+            estimate = hat[:, keep].astype(np.complex64)
+            aa = reference.ravel()
+            bb = estimate.ravel()
+            gain = np.vdot(aa, bb) / np.vdot(aa, aa)
+            pair_nmse = _pair_nmse(estimate, reference)
+            if pair_nmse > -6.0:
+                print(f"  {name} @ {snr} dB: NMSE {pair_nmse:+.2f} dB looks wrong, dropped "
+                      f"(|hat|/|H| = {np.abs(bb).mean() / np.abs(aa).mean():.3f})")
+                continue
+            pair_nmse_log.append(pair_nmse)
+
+            inputs.append(estimate)
+            targets.append(reference)
             meta.append((name, snr, float(np.mean(np.abs(truth[0]) ** 2)), float(sigma2)))
 
         if (i + 1) % 10 == 0:
@@ -282,6 +324,7 @@ def main():
     Y = np.zeros_like(X)
     width_arr = np.zeros(len(inputs), dtype=np.int64)
     for k, (a, b) in enumerate(zip(inputs, targets)):
+        # `a`/`b` are [symbol, subcarrier]; the window is [subcarrier, symbol].
         n = min(a.shape[1], BUCKET_SUBCARRIERS)
         width_arr[k] = n
         a = a[:, :n].T          # [symbol, subcarrier] -> [subcarrier, symbol]
@@ -291,27 +334,53 @@ def main():
         Y[k, :n, :, 0] = b.real
         Y[k, :n, :, 1] = b.imag
 
+    # Cross-check the packed arrays against the values measured while building. The window
+    # stores complex samples as a trailing [re, im] pair, so a magnitude MUST be taken as
+    # hypot(re, im): `np.abs()` on that pair yields |re| and |im| separately, and averaging those
+    # understates the modulus by a factor that looks exactly like a scale error (measured: 0.64,
+    # i.e. -3.9 dB, which is the size of the "zero-output" score the file reports). Getting this
+    # wrong silently makes a usable set look broken.
+    for k in range(min(2, len(inputs))):
+        n = int(width_arr[k])
+        packed_a = Y[k, :n]
+        packed_b = X[k, :n]
+        packed_nmse = _pair_nmse(packed_b[:, :, 0] + 1j * packed_b[:, :, 1],
+                                 packed_a[:, :, 0] + 1j * packed_a[:, :, 1])
+        direct_nmse = _pair_nmse(inputs[k], targets[k])
+        print(f"  check pair {k} (width {n}): packed {packed_nmse:+.2f} dB, "
+              f"from arrays {direct_nmse:+.2f} dB")
+
     snr_arr = np.array([m[1] for m in meta], dtype=np.float64)
-    np.savez_compressed(os.path.join(args.out, "synth_dataset.npz"),
+    np.savez_compressed(os.path.join(args.out, args.name + ".npz"),
                         X=X, Y=Y, snr_train=snr_arr, width=width_arr)
 
     # A per-pair NMSE tells immediately whether the set is usable at all.
     # Norms are taken over the valid [0, width) rows only, so the zero padding does not dilute.
-    num = np.zeros(len(X))
-    den = np.zeros(len(X))
-    for k in range(len(X)):
-        n = width_arr[k]
-        num[k] = np.sum(np.abs(X[k, :n] - Y[k, :n]) ** 2)
-        den[k] = np.sum(np.abs(Y[k, :n]) ** 2)
-    nmse = 10 * np.log10(num / den)
+    def _as_complex(block):
+        """[subcarrier, symbol, (re, im)] -> [subcarrier, symbol] complex."""
+        return block[:, :, 0] + 1j * block[:, :, 1]
+
+    def _nmse_after_gain(estimate, target):
+        """Scalar NMSE once the best single complex gain is removed."""
+        a = target.ravel()
+        b = estimate.ravel()
+        gain = np.vdot(a, b) / np.vdot(a, a)
+        return float(np.sum(np.abs(b - gain * a) ** 2) / np.sum(np.abs(gain * a) ** 2))
+
+    nmse = np.array([10 * np.log10(_nmse_after_gain(
+        _as_complex(X[k, :width_arr[k]]), _as_complex(Y[k, :width_arr[k]])))
+        for k in range(len(X))])
     print()
-    print(f"wrote {args.out}/synth_dataset.npz  X{X.shape} Y{Y.shape} "
+    print(f"wrote {args.out}/{args.name}.npz  X{X.shape} Y{Y.shape} "
           f"widths {int(width_arr.min())}..{int(width_arr.max())}")
+    if pair_nmse_log:
+        print(f"per-pair NMSE of the input against its target: median "
+              f"{np.median(pair_nmse_log):+.2f} dB over {len(pair_nmse_log)} pairs")
     print("per-pair |X-Y|^2/|Y|^2 (dB), i.e. what a zero-output network would score:")
     for snr in sorted(set(snr_arr)):
         sel = snr_arr == snr
         print(f"  {snr:5.1f} dB : median {np.median(nmse[sel]):+7.2f} dB  (n={int(sel.sum())})")
-    with open(os.path.join(args.out, "meta.csv"), "w") as handle:
+    with open(os.path.join(args.out, args.name + "_meta.csv"), "w") as handle:
         handle.write("unit,snr_db,channel_power,noise_variance\n")
         for name, snr, cp, s2 in meta:
             handle.write(f"{name},{snr},{cp:.6g},{s2:.6g}\n")

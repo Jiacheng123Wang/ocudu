@@ -42,17 +42,31 @@ import sys
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-AI_TRAIN = os.path.abspath(os.path.join(HERE, "..", "..", "..", "lib", "phy", "upper",
-                                        "signal_processors", "channel_estimator",
-                                        "metal", "ai_train"))
-REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+AI_TRAIN = HERE
+# The repository root is found by walking up to the directory that holds `build/`, rather than
+# by counting ".." levels from here. The counting version breaks the moment this file is
+# imported from a copy living somewhere else, which silently pointed the replay path at
+# `signal_processors/build/...` and made every run produce garbage instead of failing loudly.
+def _find_repo(start):
+    path = start
+    for _ in range(12):
+        if os.path.isdir(os.path.join(path, "build")) and os.path.isdir(os.path.join(path, "lib")):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    raise SystemExit(f"cannot locate the repository root from {start}")
+
+
+REPO = _find_repo(HERE)
 REPLAY = os.path.join(REPO, "build", "lib", "phy", "upper", "channel_processors",
                       "metal", "ul_chain_replay")
 
 sys.path.insert(0, AI_TRAIN)
 sys.path.insert(0, HERE)
 import dmrs as DV              # noqa: E402
-import synth_noisy as SN       # noqa: E402
+import synth as SN             # noqa: E402  (the shared, tracked synthesis core)
 
 NOF_SYMBOLS = 14
 SLOTS_PER_FRAME_30KHZ = 20
@@ -61,14 +75,7 @@ SLOTS_PER_FRAME_30KHZ = 20
 EDGE_FRACTION = 0.03
 
 
-def read_config(prefix):
-    cfg = {}
-    with open(prefix + ".txt") as handle:
-        for line in handle:
-            if "=" in line:
-                key, _, value = line.partition("=")
-                cfg[key.strip()] = value.strip()
-    return cfg
+read_config = SN.read_config
 
 
 def build_grid(cfg, tb_bits, H, snr_db, seed):
