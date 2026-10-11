@@ -248,6 +248,7 @@ def main():
 
     inputs, targets, meta = [], [], []
     pair_nmse_log = []
+    skipped = []
     for i, (name, prefix, cfg, alloc) in enumerate(candidates):
         bwp = int(cfg["bwp_size_rb"])
         H = np.fromfile(prefix + "_h.bin", dtype=np.complex64).reshape(NOF_SYMBOLS, bwp * 12)
@@ -283,8 +284,15 @@ def main():
             grid_channel[:, keep] = truth
 
         for snr in snrs:
-            hat, sigma2 = build_and_replay(cfg, tb_bits, H, alloc, snr, args.seed + i, staged,
-                                           truth_channel=grid_channel)
+            # A unit whose transport block does not match its allocation cannot be re-encoded at
+            # all. That is a property of the capture, not of this tool, so it is recorded and
+            # skipped rather than allowed to abort the whole corpus.
+            try:
+                hat, sigma2 = build_and_replay(cfg, tb_bits, H, alloc, snr, args.seed + i,
+                                               staged, truth_channel=grid_channel)
+            except (AssertionError, ValueError) as error:
+                skipped.append((name, str(error).split("\n")[0][:120]))
+                break
             if hat is None:
                 continue
             hat = hat.reshape(NOF_SYMBOLS, bwp * 12)
@@ -312,6 +320,13 @@ def main():
 
         if (i + 1) % 10 == 0:
             print(f"  ... {i + 1}/{len(candidates)} units, {len(inputs)} pairs")
+
+    if skipped:
+        print(f"{len(skipped)} unit(s) could not be re-encoded and were skipped:")
+        for name, reason in skipped[:5]:
+            print(f"  {name}: {reason}")
+        if len(skipped) > 5:
+            print(f"  ... and {len(skipped) - 5} more")
 
     if not inputs:
         raise SystemExit("no pairs produced")
