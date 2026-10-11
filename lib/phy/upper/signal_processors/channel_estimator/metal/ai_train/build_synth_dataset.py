@@ -156,11 +156,35 @@ def pair_nmse_db(estimate, target):
     Both directions were tried while this was being pinned down and they differ by the whole
     scale convention, so the formula is stated here once rather than open-coded at call sites.
     """
-    estimate = np.asarray(estimate).ravel()
-    target = np.asarray(target).ravel()
-    gain = np.vdot(target, estimate) / (np.vdot(estimate, estimate) + 1e-30)
+    # The two arguments MUST be complex. A real array shaped [..., 2] holding (re, im) pairs
+    # accepted here would be flattened into independent real numbers, which is a different
+    # quantity entirely and reads about 17 dB better than the truth (measured: -0.64 dB where the
+    # complex value is -17.57 dB). Callers convert via `pairs_from_npz`.
+    estimate = np.asarray(estimate)
+    target = np.asarray(target)
+    assert np.iscomplexobj(estimate) and np.iscomplexobj(target), (
+        "pair_nmse_db needs complex arrays; a real (re, im) array would be flattened into "
+        "independent real numbers and report a completely different number")
+    estimate = estimate.ravel()
+    target = target.ravel()
+    # `np.vdot(a, b)` conjugates its FIRST argument, so `<estimate, target>` is
+    # `np.vdot(estimate, target)`. Writing the arguments the other way round silently applies the
+    # conjugate on the wrong side: the fitted gain then has the wrong PHASE (its magnitude still
+    # comes out right, because |<target, estimate>| = |<estimate, target>|), the residual is no
+    # longer orthogonal to the estimate, and the answer is wrong by a large factor - measured at
+    # +2.82 dB where the truth is -17.57 dB on the same pair.
+    gain = np.vdot(estimate, target) / (np.vdot(estimate, estimate) + 1e-30)
     residual = target - gain * estimate
     reference = gain * estimate
+    # At the optimal gain the residual is orthogonal to the estimate. Asserting it turns a silent
+    # phase error into a loud failure; the tolerance is loose enough to survive float32 data.
+    orthogonality = abs(np.vdot(residual, estimate)) / (
+        np.sqrt(np.sum(np.abs(residual) ** 2) * np.sum(np.abs(estimate) ** 2)) + 1e-30)
+    # float32 capture data leaves the residual only approximately orthogonal; 1e-3 is far below
+    # the ~0.9 that a wrong conjugate produces, and far above the ~5e-5 seen with float32.
+    assert orthogonality < 1e-3, (
+        f"the fitted gain is not the least-squares optimum (|<residual, estimate>| / "
+        f"|residual||estimate| = {orthogonality:.3e}); the conjugate is probably on the wrong side")
     return 10 * np.log10(np.sum(np.abs(residual) ** 2) / (np.sum(np.abs(reference) ** 2) + 1e-30))
 
 
