@@ -7,6 +7,9 @@
 #include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/ocuduvec/sc_prod.h"
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 
 using namespace ocudu;
 
@@ -105,6 +108,53 @@ void dmrs_pusch_estimator_impl::sequence_generation(span<cf_t>           sequenc
   // Generate sequence.
   dmrs_sequence_generate(
       sequence, *prg, amplitude, DMRS_REF_POINT_K_TO_POINT_A, get_nof_re_per_prb(sequence_config.type), config.rb_mask);
+
+  // Reference-pilot dump. The DM-RS sequence is a deterministic function of the slot, the
+  // symbol and the scrambling identity, so an offline tool can regenerate it -- but only if
+  // it reproduces every convention exactly (bit-reversed PRG seeding, the reference point,
+  // the per-PRB RE pattern). Dumping what this function actually produced removes that risk
+  // at the source, which is the same reason prg_dump.cpp exists for the PRG itself.
+  //
+  // Off unless OCUDU_HELENA_DMRS_DUMP is set to a directory.
+  if (const char* dump_dir = std::getenv("OCUDU_HELENA_DMRS_DUMP"); dump_dir != nullptr) {
+    static std::atomic<unsigned> dmrs_idx{0};
+    const unsigned               idx = dmrs_idx.fetch_add(1, std::memory_order_relaxed);
+    char                         path[512];
+    std::snprintf(path, sizeof(path), "%s/dmrs_%08u_slot%u_sym%u.f32", dump_dir, idx, nslot, symbol);
+    if (FILE* f = std::fopen(path, "wb")) {
+      for (cf_t value : sequence) {
+        const float pair[2] = {value.real(), value.imag()};
+        std::fwrite(pair, sizeof(float), 2, f);
+      }
+      std::fclose(f);
+    }
+    std::snprintf(path, sizeof(path), "%s/dmrs_meta.csv", dump_dir);
+    if (FILE* f = std::fopen(path, "a")) {
+      // The first allocated PRB matters as much as the parameters: the PRG advances 6 RE per
+      // PRB from reference point k=0 (`dmrs_helper.cpp:64`), so an offline reproduction needs
+      // to know how far into the Gold sequence this allocation starts. Without it an
+      // allocation not starting at PRB 0 cannot be checked at all.
+      unsigned first_prb = 0;
+      for (unsigned i_prb = 0; i_prb != config.rb_mask.size(); ++i_prb) {
+        if (config.rb_mask.test(i_prb)) {
+          first_prb = i_prb;
+          break;
+        }
+      }
+      std::fprintf(f,
+                   "%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
+                   idx,
+                   nslot,
+                   symbol,
+                   c_init,
+                   static_cast<unsigned>(sequence.size()),
+                   nidnscid,
+                   nscid,
+                   static_cast<unsigned>(config.rb_mask.count()),
+                   first_prb);
+      std::fclose(f);
+    }
+  }
 }
 
 void dmrs_pusch_estimator_impl::generate(dmrs_symbol_list&        symbols,
