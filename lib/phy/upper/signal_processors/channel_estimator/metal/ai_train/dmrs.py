@@ -100,6 +100,14 @@ def gold_sequence(c_init_value: int, length: int) -> np.ndarray:
 def sequence(nslot: int, symbol: int, nidnscid: int, nscid: int, alloc_prb) -> np.ndarray:
     """DM-RS reference symbols for one symbol, in allocation order.
 
+    `nslot` is the slot number the estimator seeds the PRG with. The estimator takes it from
+    `slot_point::slot_index()` (`dmrs_pusch_estimator_impl.cpp:97`), which is the slot number
+    **within the radio frame** - `count % slots_per_frame`, i.e. modulo 20 at 30 kHz - not the
+    absolute slot count. A capture recorded at slot 1747 therefore uses the sequence of slot 7,
+    and passing 1747 produces a different, wrong sequence. This is a live trap rather than a
+    formality: the two conventions agree whenever the absolute slot happens to be below the
+    slots-per-frame count, so a capture taken early in a run cannot reveal the difference.
+
     `alloc_prb` is the allocation as PRB indices inside the BWP. It may contain gaps: the
     generator advances over them, so the result is a function of absolute PRB position.
 
