@@ -45,8 +45,16 @@ public:
 
   /// \brief Whether this estimator will refine the host grid for the current hop.
   ///
-  /// Set by the depth-3 AI arm through set_ai_refinement(); false unless a model was bound, so the classical
+  /// Set by the AI depth-3 arm through set_ai_refinement(); false unless a model was bound, so the classical
   /// path is the default by construction rather than by the absence of an environment variable.
+  ///
+  /// \warning WHAT THIS IS NOT. This refinement is a DEPTH-1 VARIANT, not the depth-3 unit the workstream
+  /// designs: it consumes this estimator's own channel estimate and rewrites it, while the classical equaliser
+  /// and demapper still run afterwards. Depth 3 is ONE network from the time-frequency grid to pre-descrambling
+  /// LLRs, with equalisation and demapping inside it, and this shape violates invariant I4 of
+  /// llr_ai_detection_design_and_implementation.md (a channel estimate on the path is a lossy bottleneck).
+  /// It is kept because it is the ablation arm that measures what the joint network buys over refining the
+  /// classical estimate - see section 12 of that document for the deviation and the re-plan.
   bool refiner_active = false;
 
   /// \brief Compiled model bound to this estimator, empty when none is.
@@ -1200,9 +1208,12 @@ private:
   // and Core ML reads host memory, so refining the device buffer would mean a device-to-host copy
   // per hop that cancels the zero-copy that route exists to provide. Refining grid_est keeps the
   // integration out of that path. The consequence is that this first wiring takes effect only on
-  // the host-estimate route, which the operator accepted: depth-3 is an intermediate state and
-  // CP/FFT and LDPC will eventually live in the network, where zero copy is not a question of
-  // moving an estimate at all.
+  // the host-estimate route, which the operator accepted - depth 3 is an intermediate state and CP/FFT and
+  // LDPC will eventually live in the network, where zero copy is not a question of moving an estimate at all.
+  //
+  // NOTE (see the warning on refiner_active): this refinement is a DEPTH-1 VARIANT, not the depth-3 unit.
+  // The depth-3 contract is grid -> LLR in one forward pass; this rewrites an estimate and leaves the
+  // classical equaliser and demapper in place.
   //
   // The engine is created lazily and only when the environment asks for it, so a build that never
   // enables the feature neither pays the model load nor needs the bundle to exist.

@@ -4115,7 +4115,15 @@ void port_channel_estimator_metal_mmse_impl::materialize_host_grid() const
   refine_host_grid();
 }
 
-// ---- Depth-3 neural refinement of the host grid (bound by the AI depth-3 arm) --------------------
+// ---- Neural refinement of the host grid (bound by the AI depth-3 arm) ---------------------------
+//
+// DEPTH-1 VARIANT, NOT DEPTH 3. The depth-3 contract this workstream designs is ONE network from the
+// time-frequency grid to pre-descrambling LLRs, with channel estimation, equalisation and demapping all inside
+// it (llr_ai_detection_design_and_implementation.md sections 1.0 and 0/I4). The refinement below instead
+// consumes this estimator's own estimate and rewrites it, leaving the classical equaliser and demapper in
+// place - so an intermediate channel estimate sits on the path, which is the lossy bottleneck I4 warns about.
+// Kept as the ablation arm that measures what the joint network buys over refining the classical estimate;
+// section 12 of that document carries the deviation and the re-plan.
 //
 // The model and every number below come from the training run in
 // doc_chinese/llr_ai_detection/work_tmp/data/final/, and the conventions are the ones the training
