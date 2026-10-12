@@ -18,9 +18,13 @@
 
 #include "../port_channel_estimator_average_impl.h"
 #include "channel_statistics_estimator.h"
+#include "ocudu_coreml_nn_engine.h"
 #include "ocudu_metal_mmse_engine.h"
 #include "ocudu_mmse_refusals.h"
 #include "ocudu/ocudulog/ocudulog.h"
+#include <atomic>
+#include <memory>
+#include <vector>
 
 namespace ocudu {
 
@@ -1169,6 +1173,55 @@ private:
   /// Mutable because the host copy of the non-DM-RS symbols is materialized on demand, from a const
   /// consumer (see materialize_host_grid()).
   mutable static_re_buffer<MAX_LAYERS * MAX_NSYMB_PER_SLOT, MAX_NOF_SUBCARRIERS> grid_est;
+
+  // ---- Depth-3 neural refinement of the host grid (OCUDU_CE_REFINER) -------------------------
+  //
+  // The trained network takes the chain's own channel estimate and returns a refined one, so it is
+  // applied to grid_est IN PLACE after the grid is materialised: every consumer of
+  // get_symbol_ch_estimate() - the equaliser and the hop statistics - then sees the refined
+  // estimate without any of them knowing about the network.
+  //
+  // Why the host grid and not the device buffer the equaliser reads: the network is a Core ML model
+  // and Core ML reads host memory, so refining the device buffer would mean a device-to-host copy
+  // per hop that cancels the zero-copy that route exists to provide. Refining grid_est keeps the
+  // integration out of that path. The consequence is that this first wiring takes effect only on
+  // the host-estimate route, which the operator accepted: depth-3 is an intermediate state and
+  // CP/FFT and LDPC will eventually live in the network, where zero copy is not a question of
+  // moving an estimate at all.
+  //
+  // The engine is created lazily and only when the environment asks for it, so a build that never
+  // enables the feature neither pays the model load nor needs the bundle to exist.
+
+  /// \brief The refinement engine, or nullptr when the feature is off or the model did not load.
+  ///
+  /// Mutable because materialize_host_grid() is const, on the same reasoning as grid_est.
+  mutable std::shared_ptr<metal::coreml_nn_engine> refiner_engine;
+
+  /// Whether the lazy engine creation has been attempted, so a failure is not retried on every hop
+  /// (a retry would stat and open the model bundle again).
+  mutable bool refiner_engine_tried = false;
+
+  /// Model input and output on the padded window, [subcarrier][symbol][re,im] - the layout the
+  /// in-tree Core ML engine wraps zero-copy and the layout the deployed model was trained in.
+  mutable std::vector<float> refiner_in;
+  mutable std::vector<float> refiner_out;
+
+  /// \brief Creates the refinement engine on first use, if OCUDU_CE_REFINER names a model.
+  ///
+  /// Returns nullptr when the feature is off, which is the default and leaves every other path
+  /// byte for byte unchanged.
+  metal::coreml_nn_engine* refiner_engine_get() const;
+
+  /// \brief Refines the whole host grid in place, one layer at a time, when the engine is available.
+  ///
+  /// Called once per hop from materialize_host_grid(), where the grid is complete.
+  void refine_host_grid() const;
+
+  /// Hops the refiner actually ran on, and hops it skipped; the offline harnesses read these so
+  /// "the feature was on" is asserted rather than assumed - a switch that silently did nothing
+  /// looks exactly like a switch that helped nothing.
+  static std::atomic<uint64_t>& refiner_hops();
+  static std::atomic<uint64_t>& refiner_skips();
 
   /// DM-RS symbols of the hop being completed, and how many: the symbols unpack_engine_group()
   /// materializes eagerly, and whether the hop hops (see materialize_host_grid()).

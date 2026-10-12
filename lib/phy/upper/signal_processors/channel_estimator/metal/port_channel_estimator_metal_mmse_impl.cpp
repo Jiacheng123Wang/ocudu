@@ -4102,6 +4102,184 @@ void port_channel_estimator_metal_mmse_impl::materialize_host_grid() const
     unpack_engine_group(
         u.gb_start, u.n_blk, u.b_prb, u.nout, u.nof_layers, u.sys_offset, u.st, /*all_symbols=*/true);
   }
+
+  // Depth-3 neural refinement (OCUDU_CE_REFINER). This is the one place the host grid is completed,
+  // and get_symbol_ch_estimate() serves out of it, so refining here reaches the equaliser and the
+  // hop statistics with nothing else in the receive path having to know about the network.
+  //
+  // It is deliberately AFTER the unpacks and BEFORE any consumer runs: refining a partial grid
+  // would mix refined and unrefined symbols, and the callers that reach this through
+  // materialize_host_grid() all read the grid afterwards.
+  refine_host_grid();
+}
+
+// ---- Depth-3 neural refinement of the host grid (OCUDU_CE_REFINER) -----------------------------
+//
+// The model and every number below come from the training run in
+// doc_chinese/llr_ai_detection/work_tmp/data/final/, and the conventions are the ones the training
+// pipeline established. Each of them is a way the integration can silently produce garbage, so
+// they are stated rather than left to the reader:
+//
+//   * LAYOUT. The window is [subcarrier][symbol][re,im] fp32 - the layout
+//     `ocudu_coreml_nn_engine` wraps zero-copy and the layout the deployed model was trained in.
+//     The dataset's own on-disk layout is the transpose of this, and reading one as the other
+//     mixes real and imaginary parts.
+//   * SCALE. Training divided BOTH sides by the target's per-sample RMS, so the model expects an
+//     input whose RMS over the active region is kRefinerInputRms (measured on the training set:
+//     0.7105). The chain's estimate is not at that scale, and HELENA's record is explicit that
+//     skipping this step broke the attach (the model amplified a weak input 2.2x and 45 of 45
+//     decodes failed). The factor is applied before the prediction and undone after.
+//   * WINDOW. The model is 612 subcarriers wide (51 PRB) while an allocation can be narrower. The
+//     active region is placed at the START of the window rather than at its true frequency offset,
+//     because that is the only part of the window the model ever saw populated during training;
+//     placing it at an offset would put real data where the model saw zeros. The output is written
+//     back to the same slots it was read from.
+
+namespace {
+
+/// RMS the model expects over the active region (measured, see above).
+constexpr float kRefinerInputRms = 0.7105F;
+
+/// Window width in subcarriers: the model's trained width.
+constexpr unsigned kRefinerWidth = 612;
+
+/// rief Whether to print a line per refined hop (OCUDU_CE_REFINER_VERBOSE).
+///
+/// Off by default: a line per hop would flood a live run. The per-hop COUNTERS are always kept, so
+/// an offline harness can assert the feature ran without turning logging on.
+bool refiner_verbose()
+{
+  static const bool on = (std::getenv("OCUDU_CE_REFINER_VERBOSE") != nullptr);
+  return on;
+}
+
+/// Symbols in the window: a normal-CP slot.
+constexpr unsigned kRefinerSymbols = MAX_NSYMB_PER_SLOT;
+
+} // namespace
+
+std::atomic<uint64_t>& port_channel_estimator_metal_mmse_impl::refiner_hops()
+{
+  static std::atomic<uint64_t> v{0};
+  return v;
+}
+
+std::atomic<uint64_t>& port_channel_estimator_metal_mmse_impl::refiner_skips()
+{
+  static std::atomic<uint64_t> v{0};
+  return v;
+}
+
+metal::coreml_nn_engine* port_channel_estimator_metal_mmse_impl::refiner_engine_get() const
+{
+  if (refiner_engine_tried) {
+    return refiner_engine.get();
+  }
+  refiner_engine_tried = true;
+  // Off by default: without the variable this whole path is never entered and the estimator behaves
+  // exactly as it did before.
+  const char* path = std::getenv("OCUDU_CE_REFINER");
+  if (path == nullptr) {
+    return nullptr;
+  }
+  // One line when the variable is set, because "the switch was on and did nothing" and "the switch
+  // worked" are indistinguishable from the outside otherwise: the estimator's own diagnostics are
+  // debug-level and a release log shows neither.
+  std::fprintf(stderr, "[ce_refiner] requested, model %s\n", path);
+
+  auto nn = std::make_shared<metal::coreml_nn_engine>();
+  if (!nn->init(path)) {
+    logger.warning("CE refiner: model '{}' failed to load - the classical estimate is used for "
+                   "every hop",
+                   path);
+    return nullptr;
+  }
+
+  // The FIRST Core ML prediction compiles the program (~15 ms, the same cost HELENA moves off the
+  // slot critical path by warming up at construction). Doing it here keeps it off the first hop
+  // that needs it.
+  refiner_in.assign(kRefinerWidth * kRefinerSymbols * 2, 0.0F);
+  refiner_out.assign(kRefinerWidth * kRefinerSymbols * 2, 0.0F);
+  if (!nn->predict(refiner_in.data(), refiner_out.data(), kRefinerWidth)) {
+    logger.warning("CE refiner: warm-up prediction failed - the classical estimate is used");
+    return nullptr;
+  }
+
+  refiner_engine = std::move(nn);
+  refiner_verbose() && std::fprintf(stderr, "[ce_refiner] enabled, model %s (warm-up done)\n", path);
+  return refiner_engine.get();
+}
+
+void port_channel_estimator_metal_mmse_impl::refine_host_grid() const
+{
+  metal::coreml_nn_engine* nn = refiner_engine_get();
+  if (nn == nullptr) {
+    return;
+  }
+
+  // The window is fixed; a wider allocation than the model was trained for is not supported, and
+  // saying so once is better than refining half of it.
+  const unsigned nof_subc = grid_est.get_slice(0).size();
+  if ((nof_subc == 0) || (nof_subc > kRefinerWidth)) {
+    refiner_verbose() &&
+        std::fprintf(stderr, "[ce_refiner] skipped: width %u outside (0, %u]\n", nof_subc, kRefinerWidth);
+    refiner_skips().fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+
+  const unsigned nof_layers = grid_est.get_nof_slices() / MAX_NSYMB_PER_SLOT;
+  const unsigned active_len = nof_subc * kRefinerSymbols * 2;
+
+
+  for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+    // --- input: active region at the start of the window, zero elsewhere
+    std::fill(refiner_in.begin(), refiner_in.end(), 0.0F);
+    float rms2 = 0.0F;
+    for (unsigned i_sym = 0; i_sym != kRefinerSymbols; ++i_sym) {
+      span<const cf_t> src = grid_est.get_slice(i_layer * MAX_NSYMB_PER_SLOT + i_sym);
+      for (unsigned k = 0; k != nof_subc; ++k) {
+        const cf_t v = src[k];
+        refiner_in[2 * (k * kRefinerSymbols + i_sym)]     = v.real();
+        refiner_in[2 * (k * kRefinerSymbols + i_sym) + 1] = v.imag();
+        rms2 += v.real() * v.real() + v.imag() * v.imag();
+      }
+    }
+
+    // --- normalise to the scale the model was trained at (see the note above)
+    const float rms  = std::sqrt(rms2 / static_cast<float>(active_len));
+    const float gain = (rms > 1e-9F) ? (kRefinerInputRms / rms) : 1.0F;
+    for (unsigned i = 0; i != active_len; ++i) {
+      refiner_in[i] *= gain;
+    }
+
+    if (!nn->predict(refiner_in.data(), refiner_out.data(), kRefinerWidth)) {
+      // A failed prediction leaves the classical estimate in place. Returning here rather than
+      // half-writing the grid is deliberate: a partly refined grid is worse than either.
+      refiner_skips().fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+
+    const float inv_gain = 1.0F / gain;
+    for (unsigned i_sym = 0; i_sym != kRefinerSymbols; ++i_sym) {
+      span<cf_t> dst = grid_est.get_slice(i_layer * MAX_NSYMB_PER_SLOT + i_sym);
+      for (unsigned k = 0; k != nof_subc; ++k) {
+        dst[k] = cf_t{refiner_out[2 * (k * kRefinerSymbols + i_sym)] * inv_gain,
+                      refiner_out[2 * (k * kRefinerSymbols + i_sym) + 1] * inv_gain};
+      }
+    }
+  }
+
+  refiner_hops().fetch_add(1, std::memory_order_relaxed);
+  refiner_verbose() && std::fprintf(stderr,
+                                    "[ce_refiner] refined %u layer(s) over %u subcarriers x %u "
+                                    "symbols (hops=%llu skips=%llu)\n",
+                                    nof_layers,
+                                    nof_subc,
+                                    kRefinerSymbols,
+                                    static_cast<unsigned long long>(
+                                        refiner_hops().load(std::memory_order_relaxed)),
+                                    static_cast<unsigned long long>(
+                                        refiner_skips().load(std::memory_order_relaxed)));
 }
 
 port_channel_estimator_metal_mmse_impl::epoch_geometry
