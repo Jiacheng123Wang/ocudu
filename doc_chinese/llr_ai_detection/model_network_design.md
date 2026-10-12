@@ -3243,3 +3243,43 @@ ul_chain_replay --metal           -> crc=OK  iterations=10  sinr=30.22 dB
 
 ★★★ **教训（★ 与 §39.4 同一条）**：★★ **动手做大改动之前，先测清楚时间花在哪里。**
 ★ 本轮如果直接按 §27 去融合前端，★ 工作量很大而收益上限只有 13%。
+
+### 41.5 ★★★ 真正该融合的是 **LDPC 自己**
+
+★★ 顺着 §41.1 的时间预算查下去，★ 发现 LDPC 的耗时**不是计算量决定的**：
+
+| ★ 单元 | ★★ 平均迭代数 | ★★ GPU 时间 |
+|---|---|---|
+| ★ C_1147 | ★★ **10.00** | ★ 7813 µs |
+| ★ C_1327 | ★★ **3.67** | ★ 7215 µs |
+
+★★★ **迭代数差 2.7 倍，时间只差 8%** ⇒ ★★ **LDPC 的时间花在【每次迭代的派发次数】上，不是花在算术上。**
+
+★★ 而 `ocudu_metal_decoder_engine.h` 里写明：★★★ **`algo::layered`（当前默认）每次迭代约 46 次 dispatch**
+★ ⇒ ★★ **10 迭代 × 6 码块 ≈ 2760 次 dispatch / 每个 TB**。
+
+★★★ **同一个头文件里已经有解**：★★ **`algo::layered_persistent`** ——
+> *"Layered NMS as ONE persistent dispatch: a single resident threadgroup of 1024 threads runs
+> the (iteration, layer) loops inside the kernel, serialized by threadgroup_barrier."*
+
+★★★ **⇒ 这就是 §27 说的"把多次小负载变成一次大负载"，★ 而且它【已经实现了】，★ 只是默认没开。**
+
+★ 可选算法（★ `channel_coding_factories.cpp`）：★ `metal`（layered，★ 默认）、★ `metal_flooding`（★ 2 dispatch/轮）、
+★ **`metal_persistent`（★ 单次派发）**、★ `metal_async`（★ 无栅栏持久网格）、★ `lls`。
+
+★★★ **建议的下一步（★ 按预期回报排序）**：
+
+| ★ 优先级 | ★★ 事项 | ★★ 预期 |
+|---|---|---|
+| ★★★ **1** | ★★ **A/B `metal_persistent`**（★ 与 `metal_flooding`、★ `metal_async` 一起）★ 在**同一批捕获**上比 **延迟 + BLER** | ★★ 若 2760 次派发降到 6 次，★ **这一项可能比整个前端融合大一个数量级** |
+| ★★ 2 | ★★ 把训练好的 refiner 接进链路（★ 交付物）| ★★ 上限 13%（★ §41.4）|
+| ★★ 3 | ★★ 前端融合 | ★★ 上限 13%，★ **降级为次要** |
+
+★★ **注意**：★ `ul_chain_replay` 用的是 **CPU 版 LDPC 工厂**（★ `create_ldpc_decoder_factory_sw`），
+★ 所以 **replay 路径切换不到 metal 算法** —— ★★ 要 A/B 需要**另一条测量路径**（★ 直接用 metal 解码器的
+bler/unit 测试程序，★ 或给 replay 加一个 `--ldpc-algo` 开关）。★ 这是下一轮的第一件事。
+
+★★★ **一个仍未核实的疑点**：★★ **30 kHz 时隙是 500 µs，而单个 TB 的 LDPC 是 6–10 ms**
+（★ 且是**量化台阶**：★ 实测 5822 / 6029 / 10080 / 10310 µs，★ 说明大量时间是空闲/同步而非运算）。
+★ 这比时隙预算大一个数量级，★ **值得单独查清**—— ★ 它可能是整个上行链路真正的瓶颈，
+★ 比前端、★ 比 refiner 都重要。
