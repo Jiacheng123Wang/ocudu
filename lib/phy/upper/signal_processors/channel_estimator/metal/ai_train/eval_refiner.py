@@ -30,15 +30,18 @@ sys.path.insert(0, HERE)
 import train_refiner as T  # noqa: E402
 
 
-def complex_pair(block, width):
-    """[2, symbol, subcarrier] real/imag -> [subcarrier, symbol] complex, first `width` columns.
+def complex_pair(block, width, layout="nchw"):
+    """Complex channel over the first `width` subcarriers.
 
-    The two real channels are the FIRST axis in `load`'s layout, not the last. Getting that wrong
-    silently mixes real and imaginary parts and produces a large, plausible-looking error.
+    Two layouts are supported because the model is trained in the deployment one:
+      training   [2, symbol, subcarrier] - the real/imag pair is the FIRST axis
+      deployment [subcarrier, symbol, 2] - the pair is the LAST axis
+    Getting this wrong silently mixes real and imaginary parts and produces a large,
+    plausible-looking error, so the layout is a parameter rather than an assumption.
     """
-    real = block[0][:, :width]
-    imag = block[1][:, :width]
-    return real + 1j * imag
+    if layout == "nhwc":
+        return block[:width, :, 0] + 1j * block[:width, :, 1]
+    return block[0][:, :width] + 1j * block[1][:, :width]
 
 
 def nmse_db(estimate, target):
@@ -68,12 +71,14 @@ def main():
     parser.add_argument("--data", required=True)
     parser.add_argument("--meta", help="the dataset's _meta.csv, to attribute results to units")
     parser.add_argument("--per-unit", action="store_true")
+    parser.add_argument("--layout", choices=("nchw", "nhwc"), default="nchw",
+                        help="the model's tensor layout, which must match how it was trained")
     args = parser.parse_args()
 
     import tensorflow as tf
     import train_refiner as TR
 
-    x, y, snr, widths = T.load(args.data)
+    x, y, snr, widths = T.load(args.data, layout=args.layout)
     model = tf.keras.models.load_model(args.model,
                                        custom_objects={"Scale": TR.Scale})
     prediction = model.predict(x, batch_size=32, verbose=0)
@@ -83,8 +88,8 @@ def main():
     # the layout is wrong and nothing below is worth reading.
     probe = 0
     width = int(widths[probe])
-    est = complex_pair(x[probe], width)
-    tgt = complex_pair(y[probe], width)
+    est = complex_pair(x[probe], width, args.layout)
+    tgt = complex_pair(y[probe], width, args.layout)
     gain = np.vdot(est.ravel(), tgt.ravel()) / (np.vdot(est.ravel(), est.ravel()) + 1e-30)
     print(f"sanity on sample {probe} (width {width}):")
     print(f"  |estimate| {np.abs(est).mean():.5f}   |target| {np.abs(tgt).mean():.5f}   "
@@ -95,10 +100,12 @@ def main():
     print(f"  identity NMSE here: {nmse_db(est, tgt):+.2f} dB "
           f"(must match `build_synth_dataset --selfcheck`)")
 
-    base = np.array([nmse_db(complex_pair(x[k], int(widths[k])),
-                             complex_pair(y[k], int(widths[k]))) for k in range(len(x))])
-    net = np.array([nmse_db(complex_pair(prediction[k], int(widths[k])),
-                            complex_pair(y[k], int(widths[k]))) for k in range(len(x))])
+    base = np.array([nmse_db(complex_pair(x[k], int(widths[k]), args.layout),
+                             complex_pair(y[k], int(widths[k]), args.layout))
+                     for k in range(len(x))])
+    net = np.array([nmse_db(complex_pair(prediction[k], int(widths[k]), args.layout),
+                            complex_pair(y[k], int(widths[k]), args.layout))
+                    for k in range(len(x))])
 
     print()
     print("  SNR        chain      network     improvement")
