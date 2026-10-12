@@ -78,7 +78,7 @@ class Scale(tf.keras.layers.Layer):
         return inputs * self.scale
 
 
-def build(blocks=18, c_hid=C_HID, width=WIDTH, symbols=NOF_SYMBOLS):
+def build(blocks=18, c_hid=C_HID, width=WIDTH, symbols=NOF_SYMBOLS, layout="nchw"):
     """The v1 graph: dilated depthwise/pointwise residual blocks, NCHW in and out.
 
     Dilations cycle 1,2,4,8 so the receptive field grows without spending FLOPs - dilation was
@@ -89,8 +89,23 @@ def build(blocks=18, c_hid=C_HID, width=WIDTH, symbols=NOF_SYMBOLS):
     because a Keras conv is channels-last and the CoreML export feeds this layout directly.
     """
     dilations = [1, 2, 4, 8]
-    inp = tf.keras.Input(shape=(2, symbols, width), batch_size=None, name="x")
-    y = tf.keras.layers.Permute((2, 3, 1), name="to_nhwc")(inp)
+    # `layout` decides the INPUT/OUTPUT tensor layout only; the graph in between is channels-last
+    # either way, because that is what a Keras convolution wants.
+    #
+    #   "nchw" - [1, 2, symbol, width], which is what the datasets are packed into and what the
+    #            first trained checkpoints use.
+    #   "nhwc" - [1, width, symbol, 2], i.e. [1, subcarrier, symbol, re/im], which is EXACTLY the
+    #            MLMultiArray the in-tree Core ML engine wraps zero-copy
+    #            (`ocudu_coreml_nn_engine.mm`: shape @[@1, @nsc, @14, @2], strides
+    #            @[@(nsc*14*2), @(14*2), @2, @1]). Training in the deployment layout removes any
+    #            transpose from the receive path, and the receive path is the one place where an
+    #            extra pass over 612*14 complex values is worth avoiding.
+    if layout == "nhwc":
+        inp = tf.keras.Input(shape=(width, symbols, 2), batch_size=None, name="x")
+        y = inp
+    else:
+        inp = tf.keras.Input(shape=(2, symbols, width), batch_size=None, name="x")
+        y = tf.keras.layers.Permute((2, 3, 1), name="to_nhwc")(inp)
     for i in range(blocks):
         block = tf.keras.layers.DepthwiseConv2D(
             3, padding="same", dilation_rate=dilations[i % len(dilations)],
@@ -107,7 +122,13 @@ def build(blocks=18, c_hid=C_HID, width=WIDTH, symbols=NOF_SYMBOLS):
     # random weights and begins by destroying the signal it was given, and it has to spend
     # training rediscovering the identity map before it can improve on it (measured: the loss sat
     # at ~1.0, "no better than predicting nothing", while the identity it needed scores 0.0125).
-    y = tf.keras.layers.Add(name="residual_add")([y, tf.keras.layers.Permute((2, 3, 1))(inp)])
+    if layout == "nhwc":
+        skip = inp
+    else:
+        skip = tf.keras.layers.Permute((2, 3, 1))(inp)
+    y = tf.keras.layers.Add(name="residual_add")([y, skip])
+    if layout == "nhwc":
+        return tf.keras.Model(inp, y)
     return tf.keras.Model(inp, tf.keras.layers.Permute((3, 1, 2), name="to_nchw")(y))
 
 
@@ -156,12 +177,45 @@ def masked_mse(y_true, y_pred, mask):
     target's per-sample RMS, so the arbitrary scale convention between the chain's estimate and
     the true channel is already removed, and the loss then measures shape only.
     """
-    squared = tf.square(y_true - y_pred) * mask[:, None, None, :]
-    count = tf.reduce_sum(mask) * tf.cast(tf.shape(y_true)[1] * tf.shape(y_true)[2], tf.float32)
+    mask_b = _mask_for(y_true, mask)
+    squared = tf.square(y_true - y_pred) * mask_b
+    # The divisor is the number of valid SCALAR entries. Neither `y_true`'s axes nor the broadcast
+    # mask's axes can supply that portably: the two layouts swap which axis is the width, and the
+    # mask's trailing axes are the symbols and the pair in one layout but both 1 in the other
+    # (the broadcast puts the width there instead). So the count is derived from the FRACTION of
+    # valid columns, which is layout-independent:
+    #
+    #     valid entries = total entries * (valid columns / total columns)
+    #
+    # Deriving it from axis positions instead is how identical data produced a 312x different
+    # loss (0.4408 against 0.0014) with an identical numerator, and then a 600x one after the
+    # first attempt to fix it.
+    total_entries = tf.size(y_true, out_type=tf.float32)
+    valid_fraction = tf.reduce_sum(mask) / (
+        tf.cast(tf.shape(mask)[0] * tf.shape(mask)[1], tf.float32) + 1e-30)
+    count = total_entries * valid_fraction
     return tf.reduce_sum(squared) / tf.maximum(count, 1.0)
 
 
-def load(path, width=WIDTH):
+def _mask_for(reference, mask):
+    """Broadcast a [batch, width] mask against a [batch, ...] tensor in either supported layout.
+
+    The two layouts put the complex pair on OPPOSITE axes:
+
+        training   [batch, 2, symbol, width] - pair on axis 1, width on the last axis
+        deployment [batch, width, symbol, 2] - pair on the last axis, width on axis 1
+
+    Testing `shape[-1] == 2` is not sufficient to tell them apart: the training layout's last axis
+    is the width (624), so that test picks the deployment branch and the broadcast fails with
+    "[8,624,14,2] vs [8,1,1,624]". The complex pair's axis is the reliable discriminator, and it is
+    the only one that works for both.
+    """
+    if int(reference.shape[1]) == 2:
+        return mask[:, None, None, :]      # [batch, 2, symbol, width]
+    return mask[:, :, None, None]          # [batch, width, symbol, 2]
+
+
+def load(path, width=WIDTH, layout="nchw"):
     """Load a dataset as [n, 2, symbol, subcarrier], padded to `width`.
 
     The padding columns are zero in both tensors, which is what `masked_nmse` keys on: it derives
@@ -175,6 +229,12 @@ def load(path, width=WIDTH):
     y = np.transpose(data["Y"], (0, 3, 2, 1)).astype(np.float32)
     widths = data["width"]
 
+    # Everything below happens in the CANONICAL layout [n, 2, symbol, subcarrier], and the
+    # transpose to the requested layout is the LAST step. Doing it any earlier silently breaks
+    # both the per-sample normalisation and the padding, which hard-code axis positions: with the
+    # reference taken over the wrong axes the scale is off by a factor of ~312 and the identity
+    # loss reads -28.5 dB instead of -3.6 dB on identical data.
+    #
     # Normalise BOTH sides by the target's own scale, per sample, over the valid width.
     #
     # This is what makes a plain MSE the right loss. The chain applies a scale convention of its
@@ -192,13 +252,24 @@ def load(path, width=WIDTH):
         pad = [(0, 0), (0, 0), (0, 0), (0, width - x.shape[3])]
         x = np.pad(x, pad)
         y = np.pad(y, pad)
+    if layout == "nhwc":
+        # [n, 2, symbol, subcarrier] -> [n, subcarrier, symbol, 2], the engine's layout.
+        x = np.transpose(x, (0, 3, 2, 1))
+        y = np.transpose(y, (0, 3, 2, 1))
     return x, y, data["snr_train"], widths
 
 
 def nmse_db(x, y, width):
-    """Reference: the scale-invariant NMSE of `x` against `y`, restricted to `width`."""
-    a = (y[:, 0] + 1j * y[:, 1])[:, :, :width]
-    b = (x[:, 0] + 1j * x[:, 1])[:, :, :width]
+    """Reference: the scale-invariant NMSE of `x` against `y`, restricted to `width`.
+
+    Handles both layouts by looking at where the complex pair lives.
+    """
+    if x.shape[-1] == 2:                      # [n, subcarrier, symbol, 2]
+        a = (y[..., 0] + 1j * y[..., 1])[:, :width, :]
+        b = (x[..., 0] + 1j * x[..., 1])[:, :width, :]
+    else:                                     # [n, 2, symbol, subcarrier]
+        a = (y[:, 0] + 1j * y[:, 1])[:, :, :width]
+        b = (x[:, 0] + 1j * x[:, 1])[:, :, :width]
     af = a.reshape(len(a), -1)
     bf = b.reshape(len(b), -1)
     gain = np.sum(af * np.conj(bf), axis=1) / (np.sum(np.abs(bf) ** 2, axis=1) + 1e-12)
@@ -217,6 +288,10 @@ def main():
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--blocks", type=int, default=18)
+    parser.add_argument("--layout", choices=("nchw", "nhwc"), default="nchw",
+                        help="tensor layout of the model's input/output. 'nhwc' is the in-tree "
+                             "Core ML engine's layout, so training in it avoids a transpose on "
+                             "the receive path")
     parser.add_argument("--seed", type=int, default=20261010)
     parser.add_argument("--warmup", type=int, default=5,
                         help="epochs of linear warm-up before the decay starts")
@@ -240,8 +315,8 @@ def main():
     tf.keras.utils.set_random_seed(args.seed)
     os.makedirs(args.out, exist_ok=True)
 
-    x_train, y_train, snr_train, widths_train = load(args.train)
-    x_val, y_val, snr_val, widths_val = load(args.val)
+    x_train, y_train, snr_train, widths_train = load(args.train, layout=args.layout)
+    x_val, y_val, snr_val, widths_val = load(args.val, layout=args.layout)
     print(f"train {x_train.shape}  val {x_val.shape}")
 
     # The baseline the network has to beat. Its input IS the chain's estimate, so the identity
@@ -267,7 +342,7 @@ def main():
         print(f"  val @ {snr:4.1f} dB  median {np.median(base_val[sel]):+7.2f} dB  "
               f"(n={int(sel.sum())})")
 
-    model = build(args.blocks)
+    model = build(args.blocks, layout=args.layout)
     # `width` comes from the dataset, not from the padding: see MaskedNMSE.
     print(f"loss: plain MSE over each sample's own width "
           f"({int(widths_train.min())}..{int(widths_train.max())} subcarriers); the scale "
