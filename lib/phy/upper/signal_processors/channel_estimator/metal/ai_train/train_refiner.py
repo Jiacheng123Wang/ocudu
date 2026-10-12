@@ -218,6 +218,23 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--blocks", type=int, default=18)
     parser.add_argument("--seed", type=int, default=20261010)
+    parser.add_argument("--warmup", type=int, default=5,
+                        help="epochs of linear warm-up before the decay starts")
+    parser.add_argument("--min-lr", type=float, default=0.0,
+                        help="floor for the cosine decay; 0 is the usual choice")
+    parser.add_argument("--patience", type=int, default=0,
+                        help="stop after this many epochs without a validation improvement "
+                             "(0 disables). The best checkpoint is always the one saved")
+    parser.add_argument("--train-fraction", type=float, default=1.0,
+                        help="use this fraction of the TRAINING corpus. Holding everything else "
+                             "fixed, the drop in validation accuracy measures whether the model "
+                             "is data-limited or capacity-limited: a large drop means more data "
+                             "would help, a small one means the model has already extracted what "
+                             "this input contains")
+    parser.add_argument("--val-fraction", type=float, default=0.0,
+                        help="if >0, also split this fraction off the TRAINING corpus and report "
+                             "on it, which measures generalisation within one capture session "
+                             "as opposed to across the two")
     args = parser.parse_args()
 
     tf.keras.utils.set_random_seed(args.seed)
@@ -229,6 +246,13 @@ def main():
 
     # The baseline the network has to beat. Its input IS the chain's estimate, so the identity
     # predictor is exactly the chain, and this number is the chain's own error.
+    if args.train_fraction < 1.0:
+        keep = max(1, int(len(x_train) * args.train_fraction))
+        rng = np.random.default_rng(args.seed)
+        subset = rng.permutation(len(x_train))[:keep]
+        x_train, y_train = x_train[subset], y_train[subset]
+        widths_train = widths_train[subset]
+        print(f"train fraction {args.train_fraction}: {keep} of the training pairs")
     widths_train = widths_train.astype(np.int32)
     base_train = nmse_db(x_train, y_train, USED_SUBCARRIERS)
     print()
@@ -248,6 +272,21 @@ def main():
     print(f"loss: plain MSE over each sample's own width "
           f"({int(widths_train.min())}..{int(widths_train.max())} subcarriers); the scale "
           f"convention is removed at evaluation time instead")
+    # Cosine decay with a short warm-up. The first attempt used a constant rate and the
+    # validation loss was still falling at the last epoch (0.160 train vs 0.117 val, i.e. the
+    # model was underfitting, not overfitting), so the schedule and the epoch budget are the
+    # first things to change rather than the architecture.
+    steps_per_epoch = max(1, int(np.ceil(len(x_train) / args.batch_size)))
+    total_steps = max(1, args.epochs * steps_per_epoch)
+    warmup_steps = args.warmup * steps_per_epoch
+
+    def lr_at(step):
+        if step < warmup_steps:
+            return args.lr * (step + 1) / max(1, warmup_steps)
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        cosine = 0.5 * (1.0 + np.cos(np.pi * min(1.0, progress)))
+        return args.min_lr + (args.lr - args.min_lr) * cosine
+
     optimizer = tf.keras.optimizers.Adam(args.lr)
     model.summary(expand_nested=False)
     mask_train = np.stack([np.concatenate([np.ones(int(w)), np.zeros(WIDTH - int(w))])
@@ -256,12 +295,17 @@ def main():
                          for w in widths_val]).astype(np.float32)
     history = []
     best_val = float("inf")
+    best_epoch = 0
     best_path = os.path.join(args.out, "best.keras")
+    step = 0
+    epochs_without_improvement = 0
     for epoch in range(args.epochs):
         order = np.random.permutation(len(x_train))
         train_losses = []
         for start in range(0, len(order), args.batch_size):
             batch = order[start:start + args.batch_size]
+            optimizer.learning_rate.assign(lr_at(step))
+            step += 1
             with tf.GradientTape() as tape:
                 prediction = model(x_train[batch], training=True)
                 loss = masked_mse(y_train[batch], prediction, mask_train[batch])
@@ -280,9 +324,18 @@ def main():
         history.append((epoch + 1, train_loss, val_loss))
         if val_loss < best_val:
             best_val = val_loss
+            best_epoch = epoch + 1
+            epochs_without_improvement = 0
             model.save(best_path)
+        else:
+            epochs_without_improvement += 1
         print(f"  epoch {epoch + 1:3d}/{args.epochs}  train {train_loss:.6f}  "
-              f"val {val_loss:.6f}{'  *' if val_loss == best_val else ''}", flush=True)
+              f"val {val_loss:.6f}  lr {lr_at(step):.2e}"
+              f"{'  *' if val_loss == best_val else ''}", flush=True)
+        if args.patience and epochs_without_improvement >= args.patience:
+            print(f"  no improvement for {args.patience} epochs, stopping "
+                  f"(best {best_val:.6f} at epoch {best_epoch})", flush=True)
+            break
 
     with open(os.path.join(args.out, "history.csv"), "w") as handle:
         handle.write("epoch,loss,val_loss\n")

@@ -67,6 +67,8 @@ import synth as SN             # noqa: E402  (the shared, tracked synthesis core
 
 NOF_SYMBOLS = 14
 BUCKET_SUBCARRIERS = 612       # the window the network works on (51 PRB)
+# `slot_point::slot_index()` reduces modulo this, and the DM-RS PRG is seeded from it.
+SLOTS_PER_FRAME_30KHZ = 20
 # The clean target is a property of the unit, not of the SNR, so it is computed once.
 TDL_CACHE = {}
 
@@ -211,6 +213,32 @@ def selfcheck(path):
     return values
 
 
+def pilot_observations(prefix, cfg, alloc, bwp):
+    """The raw pilot LS estimate on the full BWP grid, plus a validity mask.
+
+    This is the network's second input and the only place genuinely NEW information can come from.
+    The chain's own estimate is smoothed in the delay domain, which is visible in the data
+    (adjacent-subcarrier phase step std 0.037 rad for the chain against 0.052 for the raw pilot
+    LS), so refining it alone is bounded by what the smoothing preserved. Giving the network the
+    unfiltered observations lets it use the part the chain discarded.
+
+    Returns two [symbol, subcarrier] arrays: the LS values at the pilot REs (zero elsewhere) and
+    a 1.0/0.0 mask marking where they are valid.
+    """
+    grid = np.fromfile(prefix + ".bin", dtype=np.complex64)
+    grid = grid[:NOF_SYMBOLS * bwp * 12].reshape(NOF_SYMBOLS, bwp * 12)
+    pilots = DV.pilot_subcarriers(alloc, dmrs_type=int(cfg["dmrs_type"]))
+    slot = int(cfg["slot"]) % SLOTS_PER_FRAME_30KHZ
+    values = np.zeros((NOF_SYMBOLS, bwp * 12), dtype=np.complex64)
+    mask = np.zeros((NOF_SYMBOLS, bwp * 12), dtype=np.float32)
+    for symbol in [int(x) for x in cfg["dmrs_symbols"].split(",")]:
+        sequence = DV.sequence(slot, symbol, int(cfg["dmrs_scrambling_id"]),
+                               int(cfg["dmrs_n_scid"]), alloc)
+        values[symbol, pilots] = grid[symbol, pilots] / sequence
+        mask[symbol, pilots] = 1.0
+    return values, mask
+
+
 def build_and_replay(cfg, tb_bits, H, alloc, snr_db, seed, staged,
                      truth_channel=None):
     """Return the chain's channel estimate for a synthetic grid at `snr_db`.
@@ -321,6 +349,7 @@ def main():
           f"(allocation off PRB 0, absolute slot > 40, width >= {args.min_prb} PRB)")
 
     inputs, targets, meta = [], [], []
+    pilots_in, pilot_masks = [], []
     pair_nmse_log = []
     skipped = []
     for i, (name, prefix, cfg, alloc) in enumerate(candidates):
@@ -352,6 +381,12 @@ def main():
         if truth.shape != (NOF_SYMBOLS, len(keep)):
             print(f"  {name}: truth shape {truth.shape} unexpected, skipped")
             continue
+        # The pilot observations are a property of the capture, not of the SNR, so they are read
+        # once per unit and reused for every SNR point.
+        pilot_vals, pilot_mask = pilot_observations(prefix, cfg, alloc, bwp)
+        pilot_vals = pilot_vals[:, keep]
+        pilot_mask = pilot_mask[:, keep].astype(np.float32)
+
         grid_channel = None
         if args.truth == "tdl":
             grid_channel = np.zeros_like(H)
@@ -390,6 +425,8 @@ def main():
 
             inputs.append(estimate)
             targets.append(reference)
+            pilots_in.append(pilot_vals.astype(np.complex64))
+            pilot_masks.append(pilot_mask)
             meta.append((name, snr, float(np.mean(np.abs(truth[0]) ** 2)), float(sigma2)))
 
         if (i + 1) % 10 == 0:
@@ -411,6 +448,8 @@ def main():
     # into the fixed window on its own rather than assuming one common width.
     X = np.zeros((len(inputs), BUCKET_SUBCARRIERS, NOF_SYMBOLS, 2), dtype=np.float32)
     Y = np.zeros_like(X)
+    P = np.zeros_like(X)                     # pilot LS observations, same layout as X
+    Pm = np.zeros((len(inputs), BUCKET_SUBCARRIERS, NOF_SYMBOLS), dtype=np.float32)
     width_arr = np.zeros(len(inputs), dtype=np.int64)
     for k, (a, b) in enumerate(zip(inputs, targets)):
         # `a`/`b` are [symbol, subcarrier]; the window is [subcarrier, symbol].
@@ -422,6 +461,10 @@ def main():
         X[k, :n, :, 1] = a.imag
         Y[k, :n, :, 0] = b.real
         Y[k, :n, :, 1] = b.imag
+        pv = pilots_in[k][:, :n].T          # [symbol, subcarrier] -> [subcarrier, symbol]
+        P[k, :n, :, 0] = pv.real
+        P[k, :n, :, 1] = pv.imag
+        Pm[k, :n, :] = pilot_masks[k][:, :n].T
 
     # Cross-check the packed arrays against the values measured while building. The window
     # stores complex samples as a trailing [re, im] pair, so a magnitude MUST be taken as
@@ -441,7 +484,7 @@ def main():
 
     snr_arr = np.array([m[1] for m in meta], dtype=np.float64)
     np.savez_compressed(os.path.join(args.out, args.name + ".npz"),
-                        X=X, Y=Y, snr_train=snr_arr, width=width_arr)
+                        X=X, Y=Y, P=P, P_mask=Pm, snr_train=snr_arr, width=width_arr)
 
     # A per-pair NMSE tells immediately whether the set is usable at all.
     # Norms are taken over the valid [0, width) rows only, so the zero padding does not dilute.
