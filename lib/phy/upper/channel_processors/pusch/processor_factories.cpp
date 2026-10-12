@@ -153,17 +153,17 @@ public:
     dec_enable_early_stop(config.dec_enable_early_stop),
     depth3_kind(config.pusch_receiver_backend == "ai" ? pusch_depth3_kind::ai_identity
                                                        : pusch_depth3_kind::classic),
+    depth3_model_path(config.pusch_receiver_model_path),
     csi_sinr_calc_method(config.csi_sinr_calc_method)
   {
-    if (depth3_kind == pusch_depth3_kind::ai_identity) {
-      // Say it in as many words. Stage S-1 constructs a REAL object on its own call path, but that object
-      // forwards to the classical units, so nothing downstream may report an AI result from this run.
+    if (depth3_kind == pusch_depth3_kind::ai_identity && depth3_model_path.empty()) {
+      // The arm was SELECTED but has nothing to compute with. Said here rather than at startup because only the
+      // arm knows whether the estimator accepted a binding; a run that reports "ai" while the classical chain
+      // executes is the failure mode this workstream's discipline exists to catch.
       fmt::print(stderr,
-                 "[pusch_receiver] backend=ai: STAGE S-1 IDENTITY. The AI arm is constructed and both depth-3 "
-                 "entry points go through it, but it forwards to the classical estimator and demodulator, so "
-                 "the output is bit-identical to backend=classic and is NOT an AI result. A real forward pass "
-                 "replaces that delegation; until then this run may be used to prove the seam, never to "
-                 "measure a model.\n");
+                 "[pusch_receiver] backend=ai WITHOUT a model: the AI depth-3 arm is constructed but has no "
+                 "model to run, so it forwards to the classical estimator and demodulator and its output is NOT "
+                 "an AI result. Pass --expert_phy.pusch_receiver_model <model.mlmodelc>.\n");
     }
     ocudu_assert(estimator_factory, "Invalid channel estimation factory.");
     ocudu_assert(demodulator_factory, "Invalid demodulation factory.");
@@ -186,9 +186,30 @@ public:
           uci_dec_factory->create(), ch_estimate_dimensions);
 
       dependencies->set_depth3(create_pusch_depth3_receiver(
-          depth3_kind, dependencies->get_estimator(), dependencies->get_demodulator()));
+          depth3_kind, dependencies->get_estimator(), dependencies->get_demodulator(), depth3_model_path));
       return dependencies;
     });
+
+    // The binding's OUTCOME, reported once for the whole pool. The arm decides, the estimator refines, and this
+    // line is what tells an operator which of the two actually happened: "ai" on the command line is a request,
+    // not a fact, and a run must never be read as an AI result on the strength of the request alone.
+    if (depth3_kind == pusch_depth3_kind::ai_identity) {
+      const bool bound = dependencies.front()->depth3_refinement_bound();
+      if (bound) {
+        fmt::print(stderr,
+                   "[pusch_receiver] backend=ai: AI ARM ACTIVE. The depth-3 forward pass is bound to model '{}' "
+                   "and the estimator will refine its estimate; the equaliser and demapper are the arm's own "
+                   "call path. A reception whose equaliser reads the DEVICE estimate does not consume the "
+                   "refinement - the host-grid route does.\n",
+                   depth3_model_path);
+      } else {
+        fmt::print(stderr,
+                   "[pusch_receiver] backend=ai: AI ARM INACTIVE (the estimator could not bind model '{}'). "
+                   "This run's depth-3 output is the CLASSICAL result and must NOT be reported as an AI "
+                   "result.\n",
+                   depth3_model_path);
+      }
+    }
 
     // Create common dependencies pool.
     dependencies_pool = std::make_shared<pusch_processor_impl::concurrent_dependencies_pool_type>(dependencies);
@@ -224,6 +245,8 @@ private:
   /// Which depth-3 arm to build. Resolved from pusch_receiver_backend by the upper PHY factory, which already
   /// refuses any value it cannot honour.
   pusch_depth3_kind                                                        depth3_kind;
+  /// Compiled model the ai arm binds; empty means it cannot compute, which the constructor reports.
+  std::string                                                              depth3_model_path;
   channel_state_information::sinr_type                                     csi_sinr_calc_method;
 };
 

@@ -14,6 +14,7 @@
 #include "ocudu/ran/slot_point.h"
 #include "ocudu/ran/subcarrier_spacing.h"
 #include <optional>
+#include <string>
 
 namespace ocudu {
 
@@ -160,6 +161,21 @@ public:
   ///         the results must not be used.
   /// \note The default implementation has nothing to do (submit() completed the estimation).
   virtual bool finish(const dmrs_symbol_list& /*pilots*/) { return true; }
+
+  /// \brief Tells the estimator whether the depth-3 AI arm has claimed this hop.
+  ///
+  /// It exists so that the ACTIVATION of the neural refinement lives on the depth-3 arm rather than in an
+  /// environment variable, while the refinement itself stays next to the grid it rewrites. The arm cannot do
+  /// the refinement on its own: the unit's output contract is `dmrs_pusch_estimator_results`, which only the
+  /// estimator implements, so what crosses the seam has to be "you are on the AI arm", not "here is a grid".
+  ///
+  /// \param[in] claimed  True when the depth-3 arm selected for this reception is the AI arm.
+  /// \param[in] model    Filesystem path of the compiled model, empty to keep the classical estimate.
+  /// \return True when the estimator will compute a refined estimate, i.e. when the caller must NOT report
+  ///         an identity arm. A backend that cannot refine returns false, which is how the arm discovers that
+  ///         its selection cannot be honoured on this build rather than silently forwarding.
+  /// \note The default implementation cannot refine and says so.
+  virtual bool set_ai_refinement(bool /*claimed*/, const std::string& /*model*/) { return false; }
 };
 
 /// \brief Port channel estimator reader.

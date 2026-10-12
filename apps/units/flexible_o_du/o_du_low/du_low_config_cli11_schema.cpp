@@ -268,11 +268,25 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              "(the effective mode's classic receiver, bit for bit), classic (the same, said explicitly) and ai (the "
              "learned depth-3 receiver of the LLR AI detection workflow).\nOne knob, not three: depth 3 is one unit, "
              "and the grid's writer stays a separate knob (--pusch_dft_type), so an A/B against the fused lane "
-             "changes exactly one thing. Only meaningful with --phy_pipeline gpu.\nSTAGE 1: 'ai' is accepted and "
-             "reported but not yet bound to a backend - it resolves to the classic receiver, and the startup log "
-             "says so. Selecting it therefore changes nothing measurable yet.")
+             "changes exactly one thing.\n"
+             "LEGAL COMBINATIONS: gpu + auto/classic (bit-for-bit the classic receiver, the regression gate); "
+             "gpu + ai (the AI arm - needs --pusch_receiver_model, and the startup log says whether the forward "
+             "pass is actually bound); cpu_gpu + classic; and gpu + ai + --pusch_dft_type metal, which is a "
+             "SEPARATE arm because the grid writer changes with it.\n"
+             "ILLEGAL: cpu + ai (the cpu mode forbids every offload) and cpu_gpu + ai (per-module offload cannot "
+             "express 'these three modules at once') - both are refused with an error rather than silently "
+             "overridden.\n"
+             "An 'ai' run without a bound model reports that its output is the CLASSICAL result; never read such "
+             "a run as an AI result.")
       ->capture_default_str()
       ->check(pusch_receiver_backend_check);
+  add_option(app,
+             "--pusch_receiver_model",
+             expert_phy_params.pusch_receiver_model,
+             "Compiled Core ML model (a .mlmodelc directory) the ai receiver binds. Empty leaves the AI arm "
+             "unable to compute, and the run reports that rather than claiming an AI result. A source "
+             ".mlpackage is not accepted: compile it with `xcrun coremlcompiler compile` first.")
+      ->capture_default_str();
   add_option(app,
              "--max_proc_delay",
              expert_phy_params.max_processing_delay_slots,

@@ -113,6 +113,8 @@ struct pusch_processor_factory_sw_configuration {
   /// pusch_depth3_receiver.h). The upper PHY factory resolves this from the expert_phy knob and refuses any
   /// value it cannot honour, so a value reaching here is always one of these two.
   std::string pusch_receiver_backend = "classic";
+  /// Compiled model the `ai` depth-3 arm binds (a `.mlmodelc` directory). Empty means the arm cannot compute.
+  std::string pusch_receiver_model_path;
 };
 
 std::shared_ptr<pusch_processor_factory>

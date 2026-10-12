@@ -369,6 +369,13 @@ struct upper_phy_factory_configuration {
   /// silent fallback: a run that reports \c ai while the classic chain executes is exactly the kind of
   /// value that looks plausible and means nothing.
   std::string pusch_receiver_backend = "classic";
+  /// \brief Compiled model (a `.mlmodelc` DIRECTORY) the AI depth-3 arm binds, empty for none.
+  ///
+  /// The AI arm runs the depth-3 unit through a neural forward pass; without a model bound the selection
+  /// cannot be honoured and the arm is classical in fact, which the factory reports in as many words rather
+  /// than letting a run claim an AI result it never computed. A source `.mlpackage` is NOT accepted: it has to
+  /// be compiled with `xcrun coremlcompiler compile`.
+  std::string pusch_receiver_model_path;
   /// \brief MMSE estimator: fixed RMS delay spread (in microseconds) - v1 constant.
   /// \remark The estimation-backed provider arrives with the v2 statistics module.
   float pusch_channel_estimator_mmse_tau_rms_us = 0.37F;

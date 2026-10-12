@@ -166,7 +166,8 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
   // merely describing it: the factory refuses a value it cannot honour (see the assertion in
   // create_ul_processor_factory), so an "ai" that reached it would be a hard failure and not a
   // classic chain wearing an AI label.
-  upper_phy_factory_config.pusch_receiver_backend = effective.receiver;
+  upper_phy_factory_config.pusch_receiver_backend  = effective.receiver;
+  upper_phy_factory_config.pusch_receiver_model_path = du_low.expert_phy_cfg.pusch_receiver_model;
   upper_phy_factory_config.pusch_channel_estimator_mmse_tau_rms_us =
       du_low.expert_phy_cfg.pusch_channel_estimator_mmse_tau_rms_us;
   upper_phy_factory_config.pusch_channel_estimator_mmse_fd_hz =

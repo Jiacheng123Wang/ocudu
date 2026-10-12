@@ -13,6 +13,18 @@
 
 using namespace ocudu;
 
+bool dmrs_pusch_estimator_impl::set_ai_refinement(bool claimed, const std::string& model)
+{
+  // Every port's estimator is told, and the answer is the conjunction: a port that cannot refine would leave
+  // that port's estimate classical, so the arm must not be reported as computing an AI result unless all of
+  // them will. Ports within one reception share a backend, so in practice they agree.
+  bool all = true;
+  for (const auto& ch : ch_estimator) {
+    all = ch->set_ai_refinement(claimed, model) && all;
+  }
+  return all;
+}
+
 void dmrs_pusch_estimator_impl::estimate(dmrs_pusch_estimator_notifier& notifier,
                                          const resource_grid_reader&    grid,
                                          const configuration&           config)

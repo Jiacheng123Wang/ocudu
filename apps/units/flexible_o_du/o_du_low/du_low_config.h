@@ -61,6 +61,9 @@ struct du_low_unit_expert_upper_phy_config {
   ///          that silently ran the classic chain is the failure mode this workflow keeps correcting (design
   ///          document, section 1.5).
   std::string pusch_receiver_backend = "auto";
+  /// Compiled model (`.mlmodelc` directory) the `ai` receiver binds. Empty means the AI arm cannot run and the
+  /// run says so; ignored for `classic`/`auto`.
+  std::string pusch_receiver_model;
   /// \brief Sets the maximum allowed downlink processing delay in slots.
   ///
   /// Higher values increase the downlink processing pipeline length, which improves performance and stability for

@@ -43,6 +43,9 @@ public:
                 const resource_grid_reader&    grid,
                 const configuration&           config) override;
 
+  // See the dmrs_pusch_estimator interface for the documentation.
+  bool set_ai_refinement(bool claimed, const std::string& model) override;
+
 private:
   /// Maximum supported number of transmission layers.
   static constexpr unsigned MAX_TX_LAYERS = pusch_constants::MAX_NOF_LAYERS;

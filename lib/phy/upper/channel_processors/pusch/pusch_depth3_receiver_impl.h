@@ -64,20 +64,36 @@ private:
 class pusch_depth3_receiver_ai_identity : public pusch_depth3_receiver
 {
 public:
-  pusch_depth3_receiver_ai_identity(dmrs_pusch_estimator& estimator_, pusch_demodulator& demodulator_) :
+  pusch_depth3_receiver_ai_identity(dmrs_pusch_estimator& estimator_,
+                                    pusch_demodulator&    demodulator_,
+                                    const std::string&    model_path_) :
     estimator(estimator_), demodulator(demodulator_)
   {
-    // No null checks: these are references, and the dependencies that own them already asserted them.
+    // No null checks on the references: the dependencies that own them already asserted them.
+    //
+    // The model is bound HERE, at construction, and the return value is kept, because the arm's honesty
+    // depends on it: an arm that was SELECTED but cannot compute must not be reported as an AI result. The
+    // estimator answers whether it will refine, and a backend that cannot refine says so rather than
+    // silently forwarding (see port_channel_estimator::set_ai_refinement).
+    refinement_bound = estimator.set_ai_refinement(true, model_path_);
   }
 
   pusch_depth3_kind kind() const override { return pusch_depth3_kind::ai_identity; }
+
+  /// See the seam interface. True only when the estimator accepted the model, because only then does anything
+  /// beyond the classical chain run.
+  bool computes_itself() const override { return refinement_bound; }
+
+  /// \brief Whether this arm will actually compute a refined estimate (the same answer, named for this arm).
+  bool is_refinement_bound() const { return refinement_bound; }
 
   void estimate(dmrs_pusch_estimator_notifier&            notifier,
                 const resource_grid_reader&                grid,
                 const dmrs_pusch_estimator::configuration& config) override
   {
-    // STAGE S-1: the forward pass will be inserted HERE. Until it is, the classical result is forwarded
-    // unchanged, which is what makes this step inert and therefore safe to fly.
+    // The forward pass runs INSIDE the estimator, next to the grid it rewrites, and it is activated by the
+    // binding made in the constructor. Forwarding the call is therefore all this arm has to do, and the
+    // refinement it causes is the one this arm selected - not a side effect of an environment variable.
     estimator.estimate(notifier, grid, config);
   }
 
@@ -95,6 +111,8 @@ public:
 private:
   dmrs_pusch_estimator& estimator;
   pusch_demodulator&    demodulator;
+  /// Whether the estimator accepted the refinement binding (see the constructor).
+  bool refinement_bound = false;
 };
 
 /// \brief Builds the depth-3 arm the configuration asked for.
@@ -103,6 +121,7 @@ private:
 /// \param[in] demodulator The classical demodulator, already built by the per-module backends.
 std::unique_ptr<pusch_depth3_receiver> create_pusch_depth3_receiver(pusch_depth3_kind     kind,
                                                                     dmrs_pusch_estimator& estimator,
-                                                                    pusch_demodulator&    demodulator);
+                                                                    pusch_demodulator&    demodulator,
+                                                                    const std::string&    model_path = {});
 
 } // namespace ocudu

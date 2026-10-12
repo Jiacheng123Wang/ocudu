@@ -1106,9 +1106,19 @@ int main(int argc, char** argv)
   // estimator and demodulator), and that is the point of the stage rather than a defect in it: it is the
   // control that must hold before any forward pass is inserted. A difference found today would therefore mean
   // the substitution itself broke something -- which is the only thing this stage can find.
+  // The depth-3 arm, selected the same way the gNB selects it. The replay mirrors the application's knob
+  // rather than inventing one of its own, so an arm measured here is the arm the application would run:
+  //   OCUDU_REPLAY_RECEIVER = classic | ai      (the --expert_phy.pusch_receiver_backend values)
+  //   OCUDU_REPLAY_MODEL    = <model.mlmodelc>  (the --expert_phy.pusch_receiver_model value)
+  // Whether the network actually RUNS is decided by the arm's binding, not by these variables being set: an
+  // `ai` arm without a model reports that its output is the classical result.
   if (const char* receiver_env = std::getenv("OCUDU_REPLAY_RECEIVER")) {
     proc_cfg.pusch_receiver_backend = receiver_env;
     std::printf("depth-3 receiver arm: %s (OCUDU_REPLAY_RECEIVER)\n", receiver_env);
+  }
+  if (const char* model_env = std::getenv("OCUDU_REPLAY_MODEL")) {
+    proc_cfg.pusch_receiver_model_path = model_env;
+    std::printf("depth-3 receiver model: %s (OCUDU_REPLAY_MODEL)\n", model_env);
   }
   std::shared_ptr<pusch_processor_factory> proc_factory = create_pusch_processor_factory_sw(proc_cfg);
   check(proc_factory, "proc_factory");

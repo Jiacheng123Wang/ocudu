@@ -15,6 +15,8 @@
 #include "ocudu/ran/slot_point.h"
 #include <variant>
 
+#include <string>
+
 namespace ocudu {
 
 class resource_grid_reader;
@@ -115,6 +117,19 @@ public:
 
   /// Default destructor.
   virtual ~dmrs_pusch_estimator() = default;
+
+  /// \brief Declares whether this estimator's port channel estimators must refine their estimate for the AI
+  ///        depth-3 arm, and with which model.
+  ///
+  /// The depth-3 arm can only speak to the estimator through the interfaces the processor holds, and the
+  /// refinement belongs to the port channel estimator that owns the grid. This is the pass-through between the
+  /// two, so that the arm's SELECTION decides whether the network runs while no environment variable does.
+  ///
+  /// \param[in] claimed True when the AI arm was selected for this reception.
+  /// \param[in] model   Compiled model path; empty means the classical estimate.
+  /// \return True when the estimator will produce a refined estimate, i.e. when the caller must NOT report an
+  ///         identity arm. False means the selection cannot be honoured and the arm is classical in fact.
+  virtual bool set_ai_refinement(bool /*claimed*/, const std::string& /*model*/) { return false; }
 
   /// \brief Estimates the PUSCH propagation channel.
   /// \param[in]  notifier Notifier to communicate the end of the estimation process.

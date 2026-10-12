@@ -26,6 +26,7 @@ using ocudu::metal::mmse_refusals;
 #include <map>
 #include <algorithm>
 #include <mutex>
+#include <set>
 #include <vector>
 
 namespace {
@@ -4103,7 +4104,8 @@ void port_channel_estimator_metal_mmse_impl::materialize_host_grid() const
         u.gb_start, u.n_blk, u.b_prb, u.nout, u.nof_layers, u.sys_offset, u.st, /*all_symbols=*/true);
   }
 
-  // Depth-3 neural refinement (OCUDU_CE_REFINER). This is the one place the host grid is completed,
+  // Depth-3 neural refinement, when the AI arm bound a model (see set_ai_refinement). This is the one place the
+  // host grid is completed,
   // and get_symbol_ch_estimate() serves out of it, so refining here reaches the equaliser and the
   // hop statistics with nothing else in the receive path having to know about the network.
   //
@@ -4113,7 +4115,7 @@ void port_channel_estimator_metal_mmse_impl::materialize_host_grid() const
   refine_host_grid();
 }
 
-// ---- Depth-3 neural refinement of the host grid (OCUDU_CE_REFINER) -----------------------------
+// ---- Depth-3 neural refinement of the host grid (bound by the AI depth-3 arm) --------------------
 //
 // The model and every number below come from the training run in
 // doc_chinese/llr_ai_detection/work_tmp/data/final/, and the conventions are the ones the training
@@ -4153,6 +4155,22 @@ bool refiner_verbose()
   return on;
 }
 
+/// \brief Prints \p message once per process, with this path's tag.
+///
+/// The processor builds one estimator per concurrent dependency (seven on this machine), so a line reported
+/// unconditionally would appear seven times and read as seven problems. Reporting ONCE is what makes it
+/// something an operator can act on, and its content is what says whether the AI arm will compute.
+void refiner_report_once(const std::string& message)
+{
+  static std::mutex            once_mutex;
+  static std::set<std::string> reported;
+  std::lock_guard<std::mutex>  lock(once_mutex);
+  if (!reported.insert(message).second) {
+    return;
+  }
+  std::fprintf(stderr, "[ce_refiner] %s\n", message.c_str());
+}
+
 /// Symbols in the window: a normal-CP slot.
 constexpr unsigned kRefinerSymbols = MAX_NSYMB_PER_SLOT;
 
@@ -4170,52 +4188,60 @@ std::atomic<uint64_t>& port_channel_estimator_metal_mmse_impl::refiner_skips()
   return v;
 }
 
-metal::coreml_nn_engine* port_channel_estimator_metal_mmse_impl::refiner_engine_get() const
+bool port_channel_estimator_metal_mmse_impl::set_ai_refinement(bool claimed, const std::string& model)
 {
-  if (refiner_engine_tried) {
-    return refiner_engine.get();
+  // The arm owns the DECISION, the estimator owns the REFINEMENT. That split is deliberate: the unit's output
+  // contract is dmrs_pusch_estimator_results, which only the estimator implements, so nothing but "you are on
+  // the AI arm" can cross the seam. See port_channel_estimator::set_ai_refinement.
+  refiner_engine.reset();
+  refiner_active     = false;
+  refiner_model_path = claimed ? model : std::string();
+
+  if (!claimed) {
+    return false;
   }
-  refiner_engine_tried = true;
-  // Off by default: without the variable this whole path is never entered and the estimator behaves
-  // exactly as it did before.
-  const char* path = std::getenv("OCUDU_CE_REFINER");
-  if (path == nullptr) {
-    return nullptr;
+  if (model.empty()) {
+    // Once, not once per estimator: the processor builds one estimator per concurrent dependency, and the same
+    // reason printed seven times reads as seven problems.
+    refiner_report_once("ai arm selected but NO MODEL is bound (expert_phy --pusch_receiver_backend ai needs a "
+                        "compiled model path); falling back to the classical estimate");
+    return false;
   }
-  // One line when the variable is set, because "the switch was on and did nothing" and "the switch
-  // worked" are indistinguishable from the outside otherwise: the estimator's own diagnostics are
-  // debug-level and a release log shows neither.
-  std::fprintf(stderr, "[ce_refiner] requested, model %s\n", path);
 
   auto nn = std::make_shared<metal::coreml_nn_engine>();
-  if (!nn->init(path)) {
-    logger.warning("CE refiner: model '{}' failed to load - the classical estimate is used for "
-                   "every hop",
-                   path);
-    return nullptr;
+  if (!nn->init(model.c_str())) {
+    // Reported here rather than by the caller, because the caller would otherwise have to distinguish "the file
+    // is missing" from "the arm was never selected" with less information than this has.
+    refiner_report_once("model '" + model +
+                        "' failed to load (a COMPILED .mlmodelc is required, not .mlpackage); falling back to "
+                        "the classical estimate");
+    return false;
   }
 
-  // The FIRST Core ML prediction compiles the program (~15 ms, the same cost HELENA moves off the
-  // slot critical path by warming up at construction). Doing it here keeps it off the first hop
-  // that needs it.
   refiner_in.assign(kRefinerWidth * kRefinerSymbols * 2, 0.0F);
   refiner_out.assign(kRefinerWidth * kRefinerSymbols * 2, 0.0F);
+
+  // The FIRST Core ML prediction compiles the program (~15 ms). Done here, at construction, so it is off the
+  // first hop's critical path -- the same reason HELENA warms up in its constructor.
   if (!nn->predict(refiner_in.data(), refiner_out.data(), kRefinerWidth)) {
-    logger.warning("CE refiner: warm-up prediction failed - the classical estimate is used");
-    return nullptr;
+    refiner_report_once("warm-up prediction failed; falling back to the classical estimate");
+    return false;
   }
 
   refiner_engine = std::move(nn);
-  refiner_verbose() && std::fprintf(stderr, "[ce_refiner] enabled, model %s (warm-up done)\n", path);
-  return refiner_engine.get();
+  refiner_active = true;
+  refiner_report_once("AI arm BOUND: model " + model + ", " + std::to_string(kRefinerWidth) +
+                      " subcarriers, warm-up done. The refinement runs on the HOST grid; a reception whose "
+                      "equaliser reads the DEVICE estimate does not consume it.");
+  return true;
 }
 
 void port_channel_estimator_metal_mmse_impl::refine_host_grid() const
 {
-  metal::coreml_nn_engine* nn = refiner_engine_get();
-  if (nn == nullptr) {
+  if (!refiner_active || (refiner_engine == nullptr)) {
     return;
   }
+  metal::coreml_nn_engine* nn = refiner_engine.get();
 
   // The window is fixed; a wider allocation than the model was trained for is not supported, and
   // saying so once is better than refining half of it.

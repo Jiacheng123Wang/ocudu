@@ -43,6 +43,21 @@ public:
   /// How many hops the OCUDU_CE_TA_CHECK probe has compared.
   static unsigned device_ta_probe_checks();
 
+  /// \brief Whether this estimator will refine the host grid for the current hop.
+  ///
+  /// Set by the depth-3 AI arm through set_ai_refinement(); false unless a model was bound, so the classical
+  /// path is the default by construction rather than by the absence of an environment variable.
+  bool refiner_active = false;
+
+  /// \brief Compiled model bound to this estimator, empty when none is.
+  std::string refiner_model_path;
+
+  /// \brief See port_channel_estimator::set_ai_refinement.
+  ///
+  /// Loads the engine eagerly rather than on the first hop: the arm has to know NOW whether the AI selection
+  /// can be honoured, because that is what decides whether the run may be reported as an AI result at all.
+  bool set_ai_refinement(bool claimed, const std::string& model) override;
+
   /// \brief Whether the engine still holds a submission this hop has not collected (S13-P2/P3).
   ///
   /// The completion takes the route that MATCHES where the dispatches went (see pending_fused_burst):
@@ -1197,20 +1212,10 @@ private:
   /// Mutable because materialize_host_grid() is const, on the same reasoning as grid_est.
   mutable std::shared_ptr<metal::coreml_nn_engine> refiner_engine;
 
-  /// Whether the lazy engine creation has been attempted, so a failure is not retried on every hop
-  /// (a retry would stat and open the model bundle again).
-  mutable bool refiner_engine_tried = false;
-
   /// Model input and output on the padded window, [subcarrier][symbol][re,im] - the layout the
   /// in-tree Core ML engine wraps zero-copy and the layout the deployed model was trained in.
   mutable std::vector<float> refiner_in;
   mutable std::vector<float> refiner_out;
-
-  /// \brief Creates the refinement engine on first use, if OCUDU_CE_REFINER names a model.
-  ///
-  /// Returns nullptr when the feature is off, which is the default and leaves every other path
-  /// byte for byte unchanged.
-  metal::coreml_nn_engine* refiner_engine_get() const;
 
   /// \brief Refines the whole host grid in place, one layer at a time, when the engine is available.
   ///

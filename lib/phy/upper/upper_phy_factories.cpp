@@ -973,7 +973,8 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
   pusch_config.max_nof_concurrent_threads = dependencies.executors.pusch_executor.max_concurrency;
   // The DEPTH-3 arm. The value was already resolved and checked by the caller (the flexible O-DU refuses
   // anything but "classic" until an AI backend exists), so this is a pass-through with no second policy.
-  pusch_config.pusch_receiver_backend = config.pusch_receiver_backend;
+  pusch_config.pusch_receiver_backend    = config.pusch_receiver_backend;
+  pusch_config.pusch_receiver_model_path = config.pusch_receiver_model_path;
 
   // :TODO: check these values in the future. Extract them to more public config.
   pusch_config.ch_estimate_dimensions.nof_symbols        = MAX_NSYMB_PER_SLOT;

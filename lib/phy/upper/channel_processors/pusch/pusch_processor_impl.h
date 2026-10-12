@@ -71,6 +71,12 @@ public:
     /// to interrogate the very modules the unit runs.
     void set_depth3(std::unique_ptr<pusch_depth3_receiver> receiver_) { receiver = std::move(receiver_); }
 
+    /// \brief Whether the depth-3 arm will compute the unit rather than forward it.
+    ///
+    /// Read by the factory to report what the run actually does: "ai" on the command line is a request, and a
+    /// run must never be read as an AI result on the strength of the request alone.
+    bool depth3_refinement_bound() const { return (receiver != nullptr) && receiver->computes_itself(); }
+
     /// The depth-3 unit. The two seam calls go through this; see pusch_depth3_receiver.h.
     pusch_depth3_receiver&     get_depth3() { return *receiver; }
     /// The classical estimator, kept OUTSIDE the seam for the strict policy's interrogation (see the

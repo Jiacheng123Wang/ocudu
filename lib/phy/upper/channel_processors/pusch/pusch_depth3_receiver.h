@@ -72,6 +72,14 @@ public:
   /// and report the substitution instead.
   bool is_identity() const { return kind() == pusch_depth3_kind::ai_identity; }
 
+  /// \brief Whether this arm will actually COMPUTE the unit itself rather than forward it.
+  ///
+  /// \ref is_identity answers "which arm is this"; this answers "did anything compute", and the two differ
+  /// exactly in the case this workstream has to catch: an arm that was selected and cannot run. The stage-S-1
+  /// lesson is that a value carried but not honoured is worse than a missing one, because it looks like a
+  /// result - so every report of an AI arm consults this, not the selection.
+  virtual bool computes_itself() const { return !is_identity(); }
+
   /// \brief Runs the channel estimation entry point of the unit.
   /// \param[in] notifier Notifier to communicate the end of the estimation process.
   /// \param[in] grid     Received resource grid.
