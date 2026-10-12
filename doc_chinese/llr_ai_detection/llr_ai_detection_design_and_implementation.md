@@ -1947,3 +1947,74 @@ slot=1207 rnti=17921 64QAM: crc=KO iterations=0
 ★ **③ 经典链结构上不具备的上下文机制**（★ 跨时隙 / CP+时域 / 译码器软反馈，★ **唯一可能超过经典的机制**）；
 ★ **④ ANE 承载**（★ 落地，★ 不是卖点）。
 ★★ **四者的可检验形式见 `model_network_design.md` §17.3 的 G-1…G-4。**
+
+---
+
+#### 1.5.9 ★★★ 落地：★★ `ai` 臂已绑定模型，控制变量成为唯一决定者（★ 2026-10-13）
+
+★★ 提交 **`ab0dde0fb1`**。★★ **§1.5 的臂 1 阶段 2 完成**：`ai` 臂不再是 identity，它**真的计算**。
+
+★★★ **用户的要求**（★ 2026-10-13）：
+> ★ *"确保深度-3 网络接入 PHY pipeline 的控制变量 `--expert_phy.pusch_receiver_backend = auto|classic|ai`
+> 与设计一致，并确保检验哪些组合是合法的，哪些是不合法的（输出必要的 log 提示信息）。"*
+
+★★★ **与 §1.5.2 的一致性**：★ **一致**。★ 控制变量**粒度是深度-3 这一个单元**（★ 一次选定 CE+均衡+解映射），
+★ 命名与既有"旋钮选 backend"语法同形，★ **未新增 mode 枚举**。★ `auto == classic` 逐位成立（★ 见判据 0 验证）。
+
+##### ★★★ 新增的第二个旋钮
+
+★★ `ai` 臂需要一个模型才能真正计算，★ 故新增 **`--expert_phy.pusch_receiver_model <model.mlmodelc>`**。
+★★ **注意**：★ 它**不是"第二个 A/B 变量"** —— ★ α 为 `classic`/`auto` 时**完全被忽略**，
+★ 只在 `ai` 臂里被读取 ⇒ ★★ **A/B 仍然只差一个变量**（§1.5.2 的要求保持）。
+★ 模型必须是**编译后的 `.mlmodelc` 目录**（★ `xcrun coremlcompiler compile`），★ 给 `.mlpackage` 会加载失败并如实上报。
+
+##### ★★★ 激活通路（★ 按 §1.5.4 的落点）
+
+```
+CLI --expert_phy.pusch_receiver_backend
+  → du_low_config  → du_low_config_validator（冲突矩阵）
+  → resolve_phy_pipeline()（§1.5.3 的裁决）
+  → upper_phy_factories → PUSCH processor_factories
+  → pusch_depth3_receiver（臂）        ← 在这里 DECIDE
+  → port_channel_estimator             ← 在这里 REFINE
+```
+
+★★★ **为什么"臂决定、估计器细化"**：★ 深度-3 的输出契约是 `dmrs_pusch_estimator_results`，
+★ **只有估计器实现它** ⇒ ★★ **能跨过接缝的只能是"你在 AI 臂上"这个事实，而不是一张网格**。
+★ 三个 pass-through 承载它：★ `port_channel_estimator::set_ai_refinement`、
+★ `dmrs_pusch_estimator::set_ai_refinement`（★ 对各端口取**合取**——一个端口不能细化就会留下经典估计）、
+★ `pusch_depth3_receiver::computes_itself`。
+
+##### ★★★ 环境变量不再决定任何事
+
+★★ 此前的 `OCUDU_CE_REFINER` **已从决策中移除**。★ 本路径上只剩 `OCUDU_CE_REFINER_VERBOSE`，
+★ 而它是**诊断**。
+★★★ **⇒ 一次运行不可能因为设了一个环境变量而变成 AI 运行** —— ★ 这与 §1.5.8 的 pin 纪律同向。
+
+##### ★★★ 合法/非法组合（★ 实测）
+
+| ★ backend | ★ model | ★★ 结果 | ★★ SINR | ★★ 判定 |
+|---|---|---|---|---|
+| ★ `classic` | ★ — | ★ 静默 | ★ −3.16 | ✅ 合法（★ 今天的行为）|
+| ★ `auto` | ★ — | ★ 静默 | ★★ **24.18**（★ 与既有基线**逐位相同**）| ✅ **判据 0 回归门通过** |
+| ★★ `ai` | ★ 无 | ★★ **AI ARM INACTIVE**（★ 输出是经典结果，★ 不得当作 AI 结果）| ★ −3.16（★ =classic）| ✅ 合法但**无法计算** |
+| ★★ `ai` | ★ 路径错误 | ★★ 加载失败（★ 报一次）+ **INACTIVE** | ★ −3.16 | ✅ 同上 |
+| ★★★ `ai` | ★ **有效** | ★★★ **AI ARM ACTIVE**，★ refined 552 subcarriers | ★★ **−0.56** | ✅ **AI 真正生效** |
+| ★ `cpu` + `ai` | ★ — | ★★ **报错**：*"the CPU pipeline requires a CPU backend for every module"* | — | ❌ **非法** |
+| ★ `cpu_gpu` + `ai` | ★ — | ★★ **报错**：*"per-module offload cannot express - use --phy_pipeline gpu"* | — | ❌ **非法** |
+| ★ `cpu_gpu` + `classic` | ★ — | ★ 启动运行 | — | ✅ 合法 |
+| ★ `gpu` + `ai` + `--pusch_dft_type metal` | ★ — | ★ 允许，★ 但**是独立一臂**（★ §1.5.3 末行）| — | ✅ 合法（★ 需显式声明）|
+
+★★ **非法组合的错误信息在启动时打印并终止**，★ 不会静默降级（★ 实测两条都报错退出）。
+
+##### ★★ 上报纪律
+
+★★ 两条消息**互斥且指名模型**：
+
+- ★★ **AI ARM ACTIVE** —— 绑定成功，★ 同时**主动写明局限**：
+  *"A reception whose equaliser reads the DEVICE estimate does not consume the refinement -
+  the host-grid route does"*（★ §43.3 的后果，★ 用户已接受）
+- ★★ **AI ARM INACTIVE** —— 明确写 **"must NOT be reported as an AI result"**
+
+★★ **消息按进程只打印一次**（★ 处理器为每个并发依赖建一个估计器，★ 本机 7 个）
+★ —— ★ 否则同一原因打印 7 次会被读成 7 个问题。
