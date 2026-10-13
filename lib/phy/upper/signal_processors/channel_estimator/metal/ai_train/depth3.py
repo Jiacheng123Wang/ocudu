@@ -268,6 +268,20 @@ def data_re_mask(alloc_prb, dmrs_symbols):
     return mask
 
 
+def data_re_indices(alloc_prb, dmrs_symbols):
+    """The data resource elements in the chain's order, as `(subcarrier, symbol)` index arrays.
+
+    Symbol major, then ascending allocated subcarrier, which is the order the chain maps
+    rate-matched bits onto resource elements. Both `label_plane` and `llr_gather` walk this order,
+    so they stay exact inverses.
+    """
+    dmrs = set(int(s) for s in dmrs_symbols)
+    subcarriers = np.flatnonzero(allocated_subcarriers(alloc_prb))
+    symbols = np.concatenate([np.full(subcarriers.size, symbol, dtype=np.int64)
+                              for symbol in range(NOF_SYMBOLS) if symbol not in dmrs])
+    return np.tile(subcarriers, NOF_SYMBOLS - len(dmrs)), symbols
+
+
 def llr_valid_mask(alloc_prb, dmrs_symbols, modulation):
     """Boolean `[subcarrier, 14 * Qm]` mask of the LLR channels that carry a coded bit."""
     mask = np.zeros((NOF_SUBCARRIERS, llr_channels(modulation)), dtype=bool)
@@ -292,19 +306,22 @@ def label_plane(bits, alloc_prb, dmrs_symbols, modulation):
     """
     qm = BITS_PER_SYMBOL[modulation]
     expected = int(data_re_mask(alloc_prb, dmrs_symbols).sum()) * qm
+    bits = np.asarray(bits)
     if len(bits) != expected:
         raise ValueError(f"{len(bits)} bits for {expected} data bits in this allocation")
+
+    # The chain consumes bits symbol major, then ascending allocated subcarrier, then the Qm bits
+    # of that resource element with the bit index fastest. Building the two index arrays that walk
+    # that order keeps the operation vectorized: a training batch is tens of thousands of entries,
+    # and a Python loop over them costs more than the forward pass.
+    subcarriers, symbols = data_re_indices(alloc_prb, dmrs_symbols)
+    nof_re = subcarriers.size
+    if len(bits) != nof_re * qm:
+        raise ValueError(f"{len(bits)} bits for {nof_re * qm} data bits in this allocation")
+    resource_element = np.arange(len(bits)) // qm
+    bit_index = np.arange(len(bits)) % qm
     plane = np.zeros((NOF_SUBCARRIERS, llr_channels(modulation)), dtype=np.float32)
-    cursor = 0
-    for symbol in range(NOF_SYMBOLS):
-        if symbol in set(int(s) for s in dmrs_symbols):
-            continue
-        for subcarrier in np.flatnonzero(allocated_subcarriers(alloc_prb)):
-            for bit in range(qm):
-                plane[subcarrier, symbol * qm + bit] = 1.0 - float(bits[cursor])
-                cursor += 1
-    if cursor != len(bits):
-        raise ValueError(f"scattered {cursor} of {len(bits)} bits")
+    plane[subcarriers[resource_element], symbols[resource_element] * qm + bit_index] = 1.0 - bits
     return plane
 
 
@@ -315,13 +332,9 @@ def llr_gather(plane, alloc_prb, dmrs_symbols, modulation):
     that, so a model scored through this function is scored in the order the LDPC decoder reads.
     """
     qm = BITS_PER_SYMBOL[modulation]
-    out = []
-    for symbol in range(NOF_SYMBOLS):
-        if symbol in set(int(s) for s in dmrs_symbols):
-            continue
-        for subcarrier in np.flatnonzero(allocated_subcarriers(alloc_prb)):
-            out.extend(plane[subcarrier, symbol * qm:(symbol + 1) * qm])
-    return np.asarray(out, dtype=np.float32)
+    subcarriers, symbols = data_re_indices(alloc_prb, dmrs_symbols)
+    channels = (symbols[:, None] * qm + np.arange(qm)[None, :]).reshape(-1)
+    return np.asarray(plane[subcarriers.repeat(qm), channels], dtype=np.float32)
 
 
 def llr_from_logits(logits, modulation, scale=None):
