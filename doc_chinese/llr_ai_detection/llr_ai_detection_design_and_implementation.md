@@ -3196,3 +3196,48 @@ train_depth3.py --layout spatial --c-hid 64 --w-ch 0 --w-noise 0 \
 ★★ **模型**：★ `work_tmp/data/runs/d3_full_spatial/depth3_best.keras`（★ 89 164 参数、★ 四头架构、★ 辅助头未训）。
 ★★ **第二段已启动**：★ `--init` 该模型、★ 辅助权重 `0.01/0.001`、★ `lr 1e-4`、★ 12 epoch
 （★ 期望：★ 主干几乎不动、★ 辅助头在冻结主干上快速收敛；★ 判据 = **主头 BER/BLER 不劣化** ✓）。
+
+### 19.11 ★★★ R5.2a + R5.2b 完成：**C++ 组装器与 Python 打包器逐位一致**（★ 2026-10-13）
+
+★★ **新增件**：
+| ★ | ★★ 文件 | ★★ 作用 |
+|---|---|---|
+| ★★★ | ★ `lib/phy/upper/channel_processors/pusch/pusch_depth3_input_plane.{h,cpp}` | ★★ **契约空间面的接缝侧唯一实现**（★ 逐通道算法 + 包络拒绝 + 返回 `r`）|
+| ★★ | ★ 同上 `pusch_depth3_dmrs_context` | ★★ **导频序列上下文**（★ `slot` / `n_id` / `n_scid` / `low_papr`）★ —— ★ 见下面的接口缺口 ✓ |
+| ★★ | ★ `.../pusch/test/pusch_depth3_input_plane_check.cpp` + CMake 目标 | ★★ **与 Python 打包器逐点对照** + ★ **两个负向用例** |
+| ★★ | ★ `work_tmp/probe/make_input_plane_fixture.py` | ★★ **fixture 生成器**（★ 同一份采集 → 原始网格 + 期望 fp16 张量 + `r`）|
+
+★★★ **实测（★ 一份刻意难做的采集：★ 频率选择性信道、★ 分配从 PRB 5 开始（⇒ 序列参考点起作用）、★ 两个 DM-RS 符号、★ DC 在分配内、★ 每个 RE 都有噪声）**：
+```
+amplitude    2.382100 vs python 2.382101 (relative error 1.00e-07)
+plane        102816 values, 69373 nonzero, 0 beyond one fp16 ulp
+worst        0.000000
+negative     two layers returns 'more than one layer', transform precoding returns '...contract'
+PASS
+```
+★★★ **⇒ C++ 与 Python 产出【同一个张量】（★ 102816 个值全部在 fp16 的一个 ulp 内，★ 最差 0.000000）** ✓
+⇒ ★★ **"训练用什么面、接收就用什么面"从断言变成了测量** ✓（★ F19 在数据侧的闭环）。
+
+★★★ **两条新事实（★ 都是这轮跑出来的，★ 都影响后面的工作）**：
+
+1. ★★★ **接口缺口：`pusch_demodulator::configuration` 里没有 `n_slot` / `n_scid`** ✗。
+   ★★ 导频参考序列是 `(slot, symbol, scrambling id)` 的函数，★ **只有【估计器】的配置带这三样**
+   （★ `dmrs_pusch_estimator::configuration::slot` 与 `sequence_config`）⇒
+   ★★★ **`estimate()` 必须把序列上下文缓存下来供 `demodulate()` 用** ✓ ——
+   ★★ 这**不是权宜之计，而是设计**：★★ §17.1 那句"两个入口是同一个对象"正是为此 ✓（★ 已写进 §19.9）。
+   ★★ 缓存缺失时组装器**返回 `unsupported_configuration` 并降级**（★ 可计数 ✓ 不静默 ✗）。
+
+2. ★★★ **链的资源网格内部存的是 `cbf16_t`（bfloat16）** —— ★ `ocudu/adt/complex.h:30`，
+   ★ 而**训练数据是 float32** ⇒ ★★ **网络接收时看到的网格比它训练时粗**（★ 8 位尾数 vs 23 位）✓。
+   ★★ **本轮它差点被当成组装器的 bug**（★ 第一版比较有 241 个值超差、最差 0.78% ✗）——
+   ★★ 直到把 fixture 的网格按 `to_bf16` **逐位舍入**后，★ 两边才**完全相同** ✓
+   ⇒ ★★ **这条现在有了一个可复现的判据**，★ 并**记入待办**：★ **量化到 bf16 的输入对 coded BLER 的影响要单独测**
+   （★ 属于 R4.5 标度校准的同一类问题，★ 但作用在【输入】而不是输出）。
+
+★★ **其它两处实现要点（★ 都是"想当然就会错"的地方，★ 已写进代码注释）**：
+- ★★ **`grid.get()` 返回的是目标缓冲区的【未用尾部】，不是写入长度** ✗
+  （★ 把它当长度校验 ⇒ 整个窗口的掩码下尾长为 0 ⇒ **假失败** ✗）；
+- ★★ **导频位置是【本端口的 comb】**（★ `get_pxsch_dmrs_params(type, port).re_pattern`，★ 每 PRB 6 个）★ **不是**
+  `get_dmrs_prb_mask(type, nof_cdm_groups)`（★ 后者给"被 DM-RS 占用的全部 RE"，★ 2 个 CDM 组时是 **12/12** ✗）——
+  ★★ 后者是经典解调器用来取**数据 RE** 的（★ 取反 ✓），★ 两者**只差一个 `~`，★ 而错了会喂进错一半的梳齿** ✓
+  （★ 序列长度 `6/PRB` 是判据：★ 用错时序列只被消费一半，★ 自检直接抓住 ✓）。
