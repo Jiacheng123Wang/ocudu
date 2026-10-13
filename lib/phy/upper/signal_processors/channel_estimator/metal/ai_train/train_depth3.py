@@ -37,8 +37,13 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import tensorflow as tf
+
+import dd_label as DL              # noqa: E402
 import depth3 as D3                # noqa: E402
 import depth3_loss as L            # noqa: E402
+import ldpc_decode as LD           # noqa: E402
+import synth as SN                 # noqa: E402
 # The canonical LayerScale for this workstream lives next to the refiner that needed it first.
 from train_refiner import Scale    # noqa: E402
 
@@ -46,8 +51,48 @@ NOF_SYMBOLS = D3.NOF_SYMBOLS
 DILATIONS = (1, 2, 4, 8)
 
 
+@tf.keras.utils.register_keras_serializable(package="ocudu")
+class FoldedScaleConv(tf.keras.layers.Layer):
+    """A 1x1 convolution whose output channels carry a trainable positive gain.
+
+    `gamma * relu(W x + b)` equals `relu((gamma W) x + gamma b)` while `gamma` stays positive, so
+    the LayerScale the residual blocks need costs no operator of its own: the gain folds into the
+    convolution's weights. A separate multiply doubles the operator count on the ANE, which
+    section 45.8 measured as about 200 us across 18 blocks.
+
+    The gain is parameterised through softplus, which keeps it strictly positive without a
+    constraint, and the bias is scaled with it because the scale sits after the affine map.
+    """
+
+    def __init__(self, filters, initial_gain=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.filters = int(filters)
+        self.initial_gain = float(initial_gain)
+
+    def get_config(self):
+        return {**super().get_config(), "filters": self.filters,
+                "initial_gain": self.initial_gain}
+
+    def build(self, input_shape):
+        channels = int(input_shape[-1])
+        self.kernel = self.add_weight(name="kernel", shape=(1, 1, channels, self.filters),
+                                      initializer="glorot_uniform", trainable=True)
+        self.bias = self.add_weight(name="bias", shape=(self.filters,), initializer="zeros",
+                                    trainable=True)
+        # softplus(x) = initial_gain, so training starts where a plain LayerScale would.
+        inverse = float(np.log(np.expm1(self.initial_gain)))
+        self.gain = self.add_weight(name="gain", shape=(self.filters,),
+                                    initializer=tf.keras.initializers.Constant(inverse),
+                                    trainable=True)
+
+    def call(self, inputs):
+        gamma = tf.nn.softplus(self.gain)
+        kernel = self.kernel * gamma[None, None, None, :]
+        return tf.nn.conv2d(inputs, kernel, strides=1, padding="SAME") + gamma * self.bias
+
+
 def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, residual=True,
-          dtype="float32"):
+          dtype="float32", fold_scale=True):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -62,8 +107,6 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
     * training in fp16 stalls; the deployed artifact is fp16 either way, because the conversion
       chooses that, so the graph dtype here is a training decision only.
     """
-    import tensorflow as tf
-
     keras_dtype = tf.float32 if dtype == "float32" else tf.float16
     inp = tf.keras.Input(shape=(width, 1, D3.NOF_CHANNELS), batch_size=None, dtype=keras_dtype,
                          name="x")
@@ -73,13 +116,18 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         block = tf.keras.layers.DepthwiseConv2D(3, padding="same", dilation_rate=(dilation, 1),
                                                 dtype=keras_dtype, name=f"dw{i}_3x3_d{dilation}")(y)
         block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}")(block)
-        block = tf.keras.layers.Conv2D(c_hid, 1, dtype=keras_dtype, name=f"pw{i}_1x1")(block)
-        block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}b")(block)
-        if residual:
-            block = Scale(name=f"scale{i}", dtype=keras_dtype)(block)
+        if residual and fold_scale:
+            block = FoldedScaleConv(c_hid, dtype=keras_dtype, name=f"pw{i}_1x1")(block)
+            block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}b")(block)
             y = tf.keras.layers.Add(name=f"add{i}", dtype=keras_dtype)([y, block])
         else:
-            y = block
+            block = tf.keras.layers.Conv2D(c_hid, 1, dtype=keras_dtype, name=f"pw{i}_1x1")(block)
+            block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}b")(block)
+            if residual:
+                block = Scale(name=f"scale{i}", dtype=keras_dtype)(block)
+                y = tf.keras.layers.Add(name=f"add{i}", dtype=keras_dtype)([y, block])
+            else:
+                y = block
 
     outputs = {"llr": tf.keras.layers.Activation(
         "tanh", dtype=keras_dtype, name="llr")(
@@ -104,7 +152,8 @@ class Batches:
     """
 
     ARRAYS = ("X", "H", "bits", "nof_bits", "alloc_first_prb", "alloc_nof_prb", "dmrs_bitmap",
-              "qm", "sigma2_over_r2", "snr_nominal")
+              "qm", "sigma2_over_r2", "snr_nominal", "tb_bits", "nof_tb_bits", "rnti", "n_id",
+              "rv")
 
     def __init__(self, path, modulation, max_samples=0, seed=0):
         # Read every array once, eagerly. The file is a compressed archive, and accessing
@@ -119,14 +168,22 @@ class Batches:
         self.order = np.arange(self.n)
         self.rng = np.random.default_rng(seed)
 
+    def allocation_of(self, index):
+        first_prb = int(self.data["alloc_first_prb"][index])
+        return list(range(first_prb, first_prb + int(self.data["alloc_nof_prb"][index])))
+
+    def dmrs_symbols_of(self, index):
+        bitmap = int(self.data["dmrs_bitmap"][index])
+        return [s for s in range(NOF_SYMBOLS) if (bitmap >> s) & 1]
+
+    def modulation_of(self, index):
+        return {v: k for k, v in D3.BITS_PER_SYMBOL.items()}[int(self.data["qm"][index])]
+
     def sample(self, index):
         data = self.data
-        first_prb = int(data["alloc_first_prb"][index])
-        nof_prb = int(data["alloc_nof_prb"][index])
-        alloc = list(range(first_prb, first_prb + nof_prb))
-        bitmap = int(data["dmrs_bitmap"][index])
-        dmrs_symbols = [s for s in range(NOF_SYMBOLS) if (bitmap >> s) & 1]
-        modulation = {v: k for k, v in D3.BITS_PER_SYMBOL.items()}[int(data["qm"][index])]
+        alloc = self.allocation_of(index)
+        dmrs_symbols = self.dmrs_symbols_of(index)
+        modulation = self.modulation_of(index)
         bits = np.unpackbits(data["bits"][index])[:int(data["nof_bits"][index])]
 
         plane = data["X"][index].astype(np.float32)
@@ -147,6 +204,7 @@ class Batches:
         noise_weights = (ch_weights > 0) & noise_target[1]
 
         return {
+            "index": index,
             "x": plane[:, None, :],
             "llr_shape": label,
             "llr_weights": llr_weights,
@@ -163,6 +221,95 @@ class Batches:
         for start in range(0, self.n, batch_size):
             indices = self.order[start:start + batch_size]
             yield [self.sample(int(i)) for i in indices]
+
+
+class CodedBler:
+    """Coded block error rate of the main head, through the real LDPC code.
+
+    Uncoded BER says the LLRs point the right way; only decoding says whether the code can still
+    correct what they got wrong, and `design` section 2.3 makes coded BLER the criterion. Each
+    sample is decoded block by block: the LLRs are descrambled, deinterleaved and deposited into
+    the codeblock's circular buffer, then decoded, and a block counts as an error unless
+    re-encoding the decoded word reproduces the transmitted bits exactly. That last step is what a
+    receiver's codeblock CRC decides, and it needs no reference codeword.
+
+    The decoders are cached per (base graph, lifting size): building the QC structures costs more
+    than decoding one block.
+    """
+
+    def __init__(self, batches, max_iterations=25):
+        self.batches = batches
+        self.decoders = {}
+        self.max_iterations = max_iterations
+        self.blocks = 0
+        self.errors = 0
+        self.skipped = 0
+
+    def decoder(self, bg, zc):
+        key = (int(bg), int(zc))
+        if key not in self.decoders:
+            self.decoders[key] = LD.MinSum(bg, zc, max_iterations=self.max_iterations)
+        return self.decoders[key]
+
+    def add(self, index, llr_chain):
+        """Decode one sample's LLRs, in the chain's codeword order."""
+        data = self.batches.data
+        alloc = self.batches.allocation_of(index)
+        dmrs_symbols = self.batches.dmrs_symbols_of(index)
+        modulation = self.batches.modulation_of(index)
+        qm = D3.BITS_PER_SYMBOL[modulation]
+        nof_tb = int(data["nof_tb_bits"][index])
+        tb_bits = np.unpackbits(data["tb_bits"][index])[:nof_tb]
+        transmitted = np.unpackbits(data["bits"][index])[:int(data["nof_bits"][index])]
+        if transmitted.size != llr_chain.size:
+            raise ValueError(f"{llr_chain.size} LLRs for {transmitted.size} transmitted bits")
+
+        dmrs_mask = sum(1 << s for s in dmrs_symbols)
+        code_blocks, bg, zc, kb, e_total, lengths = SN.codeblock_layout(
+            tb_bits, len(alloc), NOF_SYMBOLS, qm, dmrs_mask)
+        rv = int(data["rv"][index])
+        sequence = np.asarray(DL.gold_seq((int(data["rnti"][index]) << 15)
+                                          + int(data["n_id"][index]), transmitted.size),
+                              dtype=np.uint8)
+        descrambled = llr_chain * (1.0 - 2.0 * sequence.astype(np.float64))
+        # The scrambling sequence covers the whole codeword, so the comparison below stays in the
+        # descrambled domain. Re-scrambling one block on its own would restart the sequence at
+        # position 0 and mismatch everything except the first block, which is exactly how this
+        # looked before it was fixed: every block decoded exactly and five of six "failed".
+        descrambled_bits = transmitted ^ sequence
+        decoder = self.decoder(bg, zc)
+
+        offset = 0
+        for block, e_cb in enumerate(lengths):
+            block_llr = descrambled[offset:offset + e_cb]
+            offset += e_cb
+            # A retransmission that carries almost no systematic bits cannot be decoded on its own:
+            # the receiver is expected to combine it with an earlier transmission first. Counting
+            # it as a block error would report the HARQ design as a network failure.
+            if LD.systematic_share(len(code_blocks[block]), kb, zc, e_cb, rv, bg) < 0.2:
+                self.skipped += 1
+                continue
+            buffer, _ = LD.rate_dematch(LD.deinterleave(block_llr, qm), len(code_blocks[block]), kb,
+                                        zc, e_cb, rv, bg)
+            decoded, converged, _ = decoder.decode(buffer)
+            # Re-encoding the decoded word and comparing with what was transmitted is the same
+            # decision a codeblock CRC makes, and it needs no reference codeword.
+            rematched = np.asarray(DL.rate_match(list(decoded), len(code_blocks[block]), kb, zc,
+                                                 e_cb, rv, bg), dtype=np.uint8)
+            rematched = np.asarray(DL.bit_interleave(rematched.tolist(), qm), dtype=np.uint8)
+            self.blocks += 1
+            self.errors += int(not np.array_equal(rematched,
+                                                  descrambled_bits[offset - e_cb:offset]))
+        assert offset == transmitted.size, (offset, transmitted.size)
+
+    def rate(self):
+        """Block error rate over the blocks that are decodable alone, and how many were not."""
+        if not self.blocks:
+            return float("nan")
+        return self.errors / self.blocks
+
+    def summary(self):
+        return f"{self.rate():.4f} over {self.blocks} blocks ({self.skipped} skipped as HARQ)"
 
 
 def stack(samples, key):
@@ -199,15 +346,30 @@ def main():
     parser.add_argument("--w-ch", type=float, default=L.DEFAULT_WEIGHTS["ch_est"])
     parser.add_argument("--w-noise", type=float, default=L.DEFAULT_WEIGHTS["post_eq_noise"])
     parser.add_argument("--no-aux", action="store_true", help="LLR head only, for the R2.4 ablation")
+    parser.add_argument("--no-fold-scale", action="store_true",
+                        help="keep the LayerScale as a separate multiply. Costs about 200 us on "
+                             "the ANE (section 45.8); the default folds it into the convolution")
+    parser.add_argument("--export-probe", default="",
+                        help="also write the graph as a CoreML mlpackage, so the ANE probe "
+                             "measures the artifact this script trains rather than a copy of it")
     parser.add_argument("--no-residual", action="store_true",
                         help="plain block stack. It collapses (section 12.9); kept so the "
                              "failure can be reproduced rather than remembered")
     parser.add_argument("--dtype", choices=("float32", "float16"), default="float32",
                         help="training dtype. The exported artifact is fp16 regardless")
+    parser.add_argument("--bler-every", type=int, default=5,
+                        help="evaluate coded BLER every N epochs. Decoding dominates the "
+                             "validation cost, so it is sampled rather than run every epoch")
+    parser.add_argument("--bler-check", action="store_true",
+                        help="decode PERFECT LLRs on a few validation samples and exit. The rate "
+                             "must be zero, which is what proves the metric can reach zero rather "
+                             "than merely being small")
+    parser.add_argument("--bler-samples", type=int, default=24,
+                        help="validation samples to decode for the coded BLER. Decoding is far "
+                             "more expensive than a forward pass, so this is a subset; 0 skips it")
     parser.add_argument("--seed", type=int, default=20261013)
     args = parser.parse_args()
 
-    import tensorflow as tf
     tf.get_logger().setLevel("ERROR")
     tf.random.set_seed(args.seed)
 
@@ -217,9 +379,23 @@ def main():
     print(f"train {train.n} samples, val {val.n} samples, {args.modulation} (Qm={qm})")
 
     model = build(blocks=args.blocks, qm=qm, aux_heads=not args.no_aux,
-                  residual=not args.no_residual, dtype=args.dtype)
+                  residual=not args.no_residual, dtype=args.dtype,
+                  fold_scale=not args.no_fold_scale)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}")
+
+    if args.export_probe:
+        import coremltools as ct
+        probe = build(blocks=args.blocks, qm=qm, aux_heads=not args.no_aux,
+                      residual=not args.no_residual, dtype="float16",
+                      fold_scale=not args.no_fold_scale)
+        ct.convert(probe,
+                   inputs=[ct.TensorType(name="x", shape=(1, D3.NOF_SUBCARRIERS, 1, D3.NOF_CHANNELS),
+                                         dtype=np.float16)],
+                   compute_precision=ct.precision.FLOAT16,
+                   minimum_deployment_target=ct.target.iOS17,
+                   convert_to="mlprogram").save(args.export_probe)
+        print(f"wrote the fp16 deployment graph to {args.export_probe}")
 
     # The scale is model-external per the contract, so the loss sees the LLR the quantizer sees.
     scale = D3.RANGE_LIMIT_FLOAT[args.modulation]
@@ -261,8 +437,47 @@ def main():
             },
         )
 
-    def evaluate():
+    def perfect_llr(sample):
+        """The LLRs a perfect model would emit, from the contract's label plane.
+
+        The label is `1 - b` and a positive LLR means bit 0, so `(2 * label - 1) * large` is the
+        ideal LLR on every channel that carries a coded bit.
+        """
+        return (2.0 * sample["llr_shape"] - 1.0) * LD.KNOWN_LLR
+
+    def coded_rate(samples, use_perfect):
+        """The coded BLER of one batch of samples, capped by `--bler-samples`."""
+        bler = CodedBler(val)
+        for row, sample in enumerate(samples):
+            index = int(sample["index"])
+            plane = perfect_llr(sample) if use_perfect else sample["llr_prediction"]
+            bler.add(index, D3.llr_gather(plane, val.allocation_of(index),
+                                          val.dmrs_symbols_of(index), val.modulation_of(index)))
+        return bler.rate()
+
+    if args.bler_check:
+        bler = CodedBler(val)
+        checked = 0
+        for samples in val.epoch(args.batch):
+            for index_sample in range(len(samples)):
+                if checked >= max(1, min(args.bler_samples, 8)):
+                    break
+                index = int(samples[index_sample]["index"])
+                bler.add(index, D3.llr_gather(perfect_llr(samples[index_sample]),
+                                              val.allocation_of(index), val.dmrs_symbols_of(index),
+                                              val.modulation_of(index)))
+                checked += 1
+            break
+        print(f"coded BLER on perfect LLRs: {bler.summary()}")
+        assert bler.blocks > 0, "no decodable block in the validation set"
+        assert bler.rate() == 0.0, (
+            "the metric cannot reach zero, so it would never accept a good model")
+        return 0
+
+    def evaluate(use_bler):
         totals, errors, magnitudes = [], [], []
+        bler = CodedBler(val) if use_bler else None
+        decoded = 0
         for samples in val.epoch(args.batch):
             x, targets = tensors(samples)
             total, _, llr = step(x, targets, training=False)
@@ -271,7 +486,18 @@ def main():
             totals.append(float(total))
             errors.append(ber)
             magnitudes.append(mag)
-        return float(np.mean(totals)), float(np.mean(errors)), float(np.mean(magnitudes))
+            if bler is not None and decoded < args.bler_samples:
+                for row in range(llr.shape[0]):
+                    if decoded >= args.bler_samples:
+                        break
+                    index = int(samples[row]["index"])
+                    gathered = D3.llr_gather(llr.numpy()[row], val.allocation_of(index),
+                                             val.dmrs_symbols_of(index), val.modulation_of(index))
+                    bler.add(index, gathered)
+                    decoded += 1
+        return (float(np.mean(totals)), float(np.mean(errors)), float(np.mean(magnitudes)),
+                bler.rate() if bler is not None else float("nan"),
+                bler.skipped if bler is not None else 0)
 
     os.makedirs(args.out, exist_ok=True)
     history = []
@@ -283,13 +509,16 @@ def main():
             x, targets = tensors(samples)
             total, _, _ = step(x, targets, training=True)
             losses.append(float(total))
-        val_loss, val_ber, val_mag = evaluate()
+        want_bler = args.bler_samples > 0 and (epoch % max(1, args.bler_every) == 0
+                                               or epoch == args.epochs)
+        val_loss, val_ber, val_mag, val_bler, val_skipped = evaluate(want_bler)
         history.append({"epoch": epoch, "train": float(np.mean(losses)), "val": val_loss,
-                        "val_ber": val_ber, "val_llr_mean": val_mag})
+                        "val_ber": val_ber, "val_llr_mean": val_mag, "val_bler": val_bler,
+                        "val_bler_skipped": val_skipped})
         if epoch == 1 or epoch % max(1, args.epochs // 20) == 0 or epoch == args.epochs:
             print(f"epoch {epoch:4d}  train {np.mean(losses):.5f}  val {val_loss:.5f}  "
-                  f"uncoded BER {val_ber:.4f}  mean|LLR| {val_mag:6.1f}  "
-                  f"({time.time() - started:.0f}s)")
+                  f"uncoded BER {val_ber:.4f}  coded BLER {val_bler:.4f}  "
+                  f"mean|LLR| {val_mag:6.1f}  ({time.time() - started:.0f}s)")
         if val_loss < best:
             best = val_loss
             model.save(os.path.join(args.out, "depth3_best.keras"))
@@ -299,7 +528,7 @@ def main():
                    "weights": weights, "scale": scale, "modulation": args.modulation}, handle,
                   indent=1)
     np.save(os.path.join(args.out, "val_llr_stats.npy"),
-            np.array([[h["val_ber"], h["val_llr_mean"]] for h in history]))
+            np.array([[h["val_ber"], h["val_llr_mean"], h["val_bler"]] for h in history]))
     print(f"best val loss {best:.5f}; wrote {args.out}/depth3_best.keras and history.json")
     return 0
 

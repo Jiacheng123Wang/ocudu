@@ -28,6 +28,9 @@ What the file holds
     sigma2_over_r2 [N] float32          noise variance in units of r^2
     bits         [N, max_bytes] uint8   packed scrambled coded bits, chain order
     nof_bits     [N] int32
+    tb_bits      [N, max_bytes] uint8   packed transport block
+    nof_tb_bits  [N] int32
+    rnti, n_id, rv [N]                  scrambling and redundancy version of the transmission
     alloc_first_prb, alloc_nof_prb [N] uint8
     dmrs_bitmap  [N] uint8              DM-RS symbol positions, one bit per symbol
     qm           [N] uint8              bits per resource element of this sample
@@ -274,13 +277,22 @@ def build_sample(name, prefix, cfg, alloc, tb_path, source, snr_db, seed, payloa
     grid_file = np.fromfile(prefix + ".bin", dtype=np.complex64)
     grid_file = grid_file[:NOF_SYMBOLS * bwp * 12].reshape(NOF_SYMBOLS, bwp * 12)
 
+    # The redundancy version of a SYNTHETIC sample is ours to choose, and it has to be 0. The
+    # captures are mostly rv=2, which selects from the circular buffer with a start offset that
+    # carries almost no systematic bits: measured on a 46 PRB unit, rv=2 transmits 0.0 percent
+    # systematic, rv=1 7.8 percent, against rv=0 79 percent. An rv=2 transmission is a HARQ
+    # RETRANSMISSION and is only decodable once combined with an earlier one in the soft buffer,
+    # which a single-slot replay does not have. Training targets are unaffected either way, but a
+    # coded-BLER criterion is meaningless on a block that cannot be decoded alone.
+    rv = 0 if source == "synthetic" else int(cfg["rv"])
+
     tb_bits = load_transport_block(tb_path, source)
     if payload == "random":
         # The synthetic route chooses its own payload, so the dump only supplies the size. The
         # bits are then exact by construction, which is the whole point of building the pair.
         tb_bits = np.random.default_rng(seed).integers(0, 2, size=tb_bits.size).astype(np.uint8)
     symbols, data_pos, bits = SN.encode_symbols(tb_bits, len(alloc), NOF_SYMBOLS, qm, dmrs_mask,
-                                                int(cfg["n_id"]), int(cfg["rnti"]), int(cfg["rv"]),
+                                                int(cfg["n_id"]), int(cfg["rnti"]), rv,
                                                 return_bits=True)
 
     sub = allocation_subcarriers(alloc)
@@ -372,6 +384,16 @@ def build_sample(name, prefix, cfg, alloc, tb_path, source, snr_db, seed, payloa
         "X": plane.astype(np.float16),
         "H": channel_norm,
         "r": np.float32(r),
+        # The transport block itself, not only the coded bits: the codeblock layout
+        # (segmentation, base graph, lifting size, per-block rate-matched length) follows from it,
+        # so a coded-BLER evaluation can be reproduced from the file alone. Without it the
+        # synthetic payload is unrecoverable, which is exactly the kind of hole that makes a
+        # dataset unusable six months later.
+        "tb_bits": np.packbits(tb_bits.astype(np.uint8)),
+        "nof_tb_bits": np.int32(tb_bits.size),
+        "rnti": np.uint16(int(cfg["rnti"])),
+        "n_id": np.uint16(int(cfg["n_id"])),
+        "rv": np.uint8(rv),
         "sigma2_over_r2": np.float32(sigma2 / (r * r)),
         "pilot_ls_ratio": np.float32(ratio),
         "bits": np.packbits(bits),
@@ -399,7 +421,13 @@ def assemble(samples, keys_arrays):
     for index, sample in enumerate(samples):
         bits[index, :len(sample["bits"])] = sample["bits"]
     out["bits"] = bits
-    for name in ("nof_bits", "alloc_first_prb", "alloc_nof_prb", "dmrs_bitmap", "qm", "snr_nominal"):
+    max_tb_bytes = max(len(s["tb_bits"]) for s in samples)
+    transport = np.zeros((len(samples), max_tb_bytes), dtype=np.uint8)
+    for index, sample in enumerate(samples):
+        transport[index, :len(sample["tb_bits"])] = sample["tb_bits"]
+    out["tb_bits"] = transport
+    for name in ("nof_bits", "nof_tb_bits", "alloc_first_prb", "alloc_nof_prb", "dmrs_bitmap",
+                 "qm", "snr_nominal", "rnti", "n_id", "rv"):
         out[name] = np.array([s[name] for s in samples])
     out["source"] = np.array([s["source"] for s in samples], dtype=np.uint8)
     out["unit"] = np.array(keys_arrays, dtype=object)
@@ -492,6 +520,11 @@ def selfcheck(path):
         assert 0.5 < ratio_ls < 2.0, (
             f"sample {index} ({data['unit'][index]}): the pilot LS is not the channel "
             f"(ratio {ratio_ls:.3f})")
+
+        # The payload must be recoverable, because the codeblock layout follows from its length.
+        nof_tb = int(data["nof_tb_bits"][index])
+        tb_bits = np.unpackbits(data["tb_bits"][index])[:nof_tb]
+        assert tb_bits.size == nof_tb, "the stored transport block is shorter than it claims"
 
         # The label plane, the bits and the gather must agree in the chain's order.
         label = D3.label_plane(bits, alloc, dmrs_symbols, modulation)

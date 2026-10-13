@@ -61,7 +61,51 @@ def encode_symbols(tb_bits, n_prb, n_syms, mod, dmrs_mask, n_id, rnti, rv, n_lay
     n_sc = n_prb * NOF_SUBCARRIERS_PER_RB
     dmrs_syms = [s for s in range(NOF_SYMBOLS) if (dmrs_mask >> s) & 1]
     data_pos = [(s, sc) for s in range(n_syms) if s not in dmrs_syms for sc in range(n_sc)]
-    e_total = len(data_pos) * mod
+
+    code_blocks, bg, zc, kb, e_total, lengths = codeblock_layout(tb_bits, n_prb, n_syms, mod,
+                                                                dmrs_mask)
+
+    coded = []
+    for index, e_cb in enumerate(lengths):
+        if kb < len(code_blocks[index]):
+            raise ValueError(f"K_b {kb} < code block {len(code_blocks[index])}")
+        padded = list(code_blocks[index]) + [0] * (kb - len(code_blocks[index]))
+        codeword = BL.nr_ldpc.ldpc_encode(bg, zc, padded)
+        coded.extend(BL.bit_interleave(
+            BL.rate_match(codeword, len(code_blocks[index]), kb, zc, e_cb, rv, bg), mod))
+    assert len(coded) == e_total, f"E mismatch {len(coded)} vs {e_total}"
+
+    scrambled = BL.scramble(coded, (rnti << 15) + n_id)
+    symbols = np.array(BL.modulate(scrambled, mod), dtype=np.complex64)
+    assert len(symbols) == len(data_pos)
+    if return_bits:
+        return symbols, data_pos, np.asarray(scrambled, dtype=np.uint8)
+    return symbols, data_pos
+
+
+def codeblock_layout(tb_bits, n_prb, n_syms, mod, dmrs_mask):
+    """The codeblock segmentation and rate-matching geometry of one transmission.
+
+    Returns `(code_blocks, bg, zc, kb, e_total, lengths)`:
+
+    * `code_blocks` are the segmented blocks, each with its own CRC, in transmission order;
+    * `bg` and `zc` are the LDPC base graph and lifting size the rate matching uses;
+    * `kb` is the information length INCLUDING the filler, i.e. where the parity starts;
+    * `e_total` is the number of coded bits the allocation carries;
+    * `lengths` is the rate-matched length of each code block. The short blocks absorb the
+      remainder, so the split is not `e_total / nof_blocks`.
+
+    It exists so that a DECODER can rebuild the same geometry the encoder used: deriving it twice
+    would let the two directions drift, and a drift here produces a plausible BLER rather than an
+    error.
+
+    `n_prb` is the ALLOCATION width, in the allocation's own coordinates.
+    """
+    import build_labels as BL
+
+    n_sc = n_prb * NOF_SUBCARRIERS_PER_RB
+    dmrs_syms = [s for s in range(NOF_SYMBOLS) if (dmrs_mask >> s) & 1]
+    e_total = (n_syms - len(dmrs_syms)) * n_sc * mod
 
     code_blocks = BL.segment(tb_bits)
     nof_cb = len(code_blocks)
@@ -82,27 +126,9 @@ def encode_symbols(tb_bits, n_prb, n_syms, mod, dmrs_mask, n_id, rnti, rv, n_lay
     kb = kb_info * zc
     e_symbols = e_total // mod
     nof_short = nof_cb - (e_symbols % nof_cb)
-
-    coded = []
-    for index in range(nof_cb):
-        if kb < len(code_blocks[index]):
-            raise ValueError(f"K_b {kb} < code block {len(code_blocks[index])}")
-        padded = list(code_blocks[index]) + [0] * (kb - len(code_blocks[index]))
-        codeword = BL.nr_ldpc.ldpc_encode(bg, zc, padded)
-        # Code blocks are rate-matched to slightly different lengths: the short ones absorb the
-        # remainder so the concatenation lands exactly on the allocation's bit count.
-        e_cb = ((e_symbols // nof_cb) * mod if index < nof_short
-                else ((e_symbols + nof_cb - 1) // nof_cb) * mod)
-        coded.extend(BL.bit_interleave(
-            BL.rate_match(codeword, len(code_blocks[index]), kb, zc, e_cb, rv, bg), mod))
-    assert len(coded) == e_total, f"E mismatch {len(coded)} vs {e_total}"
-
-    scrambled = BL.scramble(coded, (rnti << 15) + n_id)
-    symbols = np.array(BL.modulate(scrambled, mod), dtype=np.complex64)
-    assert len(symbols) == len(data_pos)
-    if return_bits:
-        return symbols, data_pos, np.asarray(scrambled, dtype=np.uint8)
-    return symbols, data_pos
+    lengths = [(e_symbols // nof_cb) * mod if index < nof_short
+               else ((e_symbols + nof_cb - 1) // nof_cb) * mod for index in range(nof_cb)]
+    return code_blocks, bg, zc, kb, e_total, lengths
 
 
 def build_clean(cfg, H, X_true, data_pos, alloc_rb, dmrs_syms, dmrs_ref="prg_skip"):
