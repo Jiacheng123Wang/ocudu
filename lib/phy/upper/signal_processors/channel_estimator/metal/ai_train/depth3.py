@@ -64,6 +64,20 @@ CH_DC = 51
 SLICE_METADATA = slice(52, 63)
 CH_RESERVED = 63
 
+# The spatial plane's channel map, `[612, 14, 12]`: the symbol axis is a spatial axis, so each
+# per-(symbol, subcarrier) field keeps its own channel at its own symbol, while the per-subcarrier
+# fields (allocation, DC) and the five scalars are broadcast over the symbol axis. This is the
+# layout the section 0.2 revision block froze after the folded layout measured 13x worse.
+NOF_CHANNELS_SPATIAL = 12
+SP_GRID_RE = 0
+SP_GRID_IM = 1
+SP_DMRS_MASK = 2
+SP_ALLOCATION = 3
+SP_DC = 4
+SP_LS_RE = 5
+SP_LS_IM = 6
+SP_SCALARS = slice(7, 12)
+
 NOF_LS_SLOTS = 4
 NOF_DMRS_RE_PER_PRB_TYPE1 = 6
 
@@ -240,6 +254,116 @@ def unpack_input(plane, alloc_prb, dmrs_symbols, dmrs_type):
         "metadata": metadata,
         "reserved": plane[:, CH_RESERVED].copy(),
     }
+
+
+def spatial_scalars(dmrs_symbols, meta, scaling):
+    """The five scalar channels the spatial plane broadcasts, in the contract's order.
+
+    They are redundant with the masks (that is deliberate, see the contract), and they are what
+    makes one input tensor self-describing: a debugging session can read the configuration off a
+    dump instead of reconstructing it from the caller's state.
+    """
+    return (
+        float(meta["nof_tx_layers"]),
+        float(meta["nof_cdm_groups_without_data"]),
+        float(int(meta["dmrs_type"])),
+        float(len(sorted(int(s) for s in dmrs_symbols))),
+        float(scaling),
+    )
+
+
+def pack_input_spatial(grid, alloc_prb, dmrs_symbols, meta):
+    """Assemble the contract's SPATIAL plane `[612, 14, 12]` from a received grid.
+
+    The section 0.2 revision block folds nothing: the symbol axis is a spatial axis, so a 3x3
+    kernel mixes time as well as frequency. Every per-(symbol, subcarrier) field therefore keeps
+    its own channel at its own symbol, the per-subcarrier fields (allocation, DC) and the scalars
+    are broadcast over the symbol axis, and the pilot LS sits at the symbol it was measured on
+    instead of in a numbered slot.
+
+    Returns `(plane, r)` exactly like the folded `pack_input`, with the same `r`: both packings
+    divide the same field quantities by the same reference amplitude, so a model trained on one is
+    comparable with a model trained on the other.
+    """
+    dmrs_symbols = sorted(int(s) for s in dmrs_symbols)
+    dmrs_type = int(meta["dmrs_type"])
+    scaling = dmrs_amplitude_scaling(meta["nof_cdm_groups_without_data"])
+
+    ls = pilot_ls(grid, alloc_prb, dmrs_symbols, meta["nslot"], meta["n_id"], meta["n_scid"],
+                  dmrs_type, scaling)
+    ls_mask = pilot_ls_mask(alloc_prb, dmrs_symbols, dmrs_type)
+    r = reference_amplitude(ls, ls_mask)
+    if not np.isfinite(r) or r <= 0.0:
+        raise ValueError(f"reference amplitude r={r} is unusable; the arm must not run")
+
+    plane = np.zeros((NOF_SUBCARRIERS, NOF_SYMBOLS, NOF_CHANNELS_SPATIAL), dtype=np.float32)
+    normalized = (grid / r).T                      # [symbol, subcarrier] -> [subcarrier, symbol]
+    plane[:, :, SP_GRID_RE] = normalized.real
+    plane[:, :, SP_GRID_IM] = normalized.imag
+    plane[:, :, SP_DMRS_MASK] = ls_mask.T
+    plane[:, :, SP_ALLOCATION] = allocated_subcarriers(alloc_prb)[:, None]
+    if meta.get("dc_position") is not None:
+        plane[int(meta["dc_position"]), :, SP_DC] = 1.0
+    plane[:, :, SP_LS_RE] = (ls / r).real.T
+    plane[:, :, SP_LS_IM] = (ls / r).imag.T
+    plane[:, :, SP_SCALARS] = np.asarray(spatial_scalars(dmrs_symbols, meta, scaling),
+                                         dtype=np.float32)
+    return plane, r
+
+
+def unpack_input_spatial(plane, alloc_prb, dmrs_symbols):
+    """Recover every spatial-plane field, for checking a producer against the contract.
+
+    Like `unpack_input`, nothing here runs on the receive path: it exists so the packing can be
+    checked against the table rather than against another copy of itself.
+    """
+    dmrs_symbols = sorted(int(s) for s in dmrs_symbols)
+    grid = (plane[:, :, SP_GRID_RE] + 1j * plane[:, :, SP_GRID_IM]).T
+    values = plane[0, 0, SP_SCALARS]
+    metadata = {name: float(values[index])
+                for index, name in enumerate(("nof_tx_layers", "nof_cdm_groups_without_data",
+                                              "dmrs_type", "nof_dmrs_symbols", "scaling"))}
+    return {
+        "grid": grid,
+        "dmrs_mask": plane[:, :, SP_DMRS_MASK].T.astype(bool),
+        "pilot_ls": (plane[:, :, SP_LS_RE] + 1j * plane[:, :, SP_LS_IM]).T,
+        "allocation_mask": plane[:, :, SP_ALLOCATION][:, 0].copy(),
+        "dc_marker": plane[:, :, SP_DC][:, 0].copy(),
+        "metadata": metadata,
+    }
+
+
+def respaciate(plane):
+    """Re-layout a folded plane into the spatial plane, without re-deriving any field.
+
+    The datasets in hand store the folded plane, which is already normalized by the reference
+    amplitude and already carries the grid, the DM-RS mask, the pilot LS, the allocation, the DC
+    marker and the scalar channels. Re-packing them from a grid is therefore unnecessary: every
+    field the spatial layout needs is in the folded one, and the re-layout is a permutation.
+
+    This exists so that the arm can be trained on the captures already recorded. It is checked
+    against `pack_input_spatial` in `--selfcheck` (same capture, both paths, bit-for-bit), so the
+    permutation cannot drift into being a second convention.
+
+    The DM-RS symbols are read off the mask channels rather than passed in, and an allocation with
+    no resource elements would leave the pilot LS channels at zero; the callers never build one.
+    """
+    dmrs_mask = plane[:, SLICE_DMRS_MASK]
+    dmrs_symbols = [symbol for symbol in range(NOF_SYMBOLS) if dmrs_mask[:, symbol].any()]
+    out = np.zeros((NOF_SUBCARRIERS, NOF_SYMBOLS, NOF_CHANNELS_SPATIAL), dtype=np.float32)
+    out[:, :, SP_GRID_RE] = plane[:, 0:28:2]
+    out[:, :, SP_GRID_IM] = plane[:, 1:28:2]
+    out[:, :, SP_DMRS_MASK] = dmrs_mask
+    out[:, :, SP_ALLOCATION] = plane[:, CH_ALLOCATION][:, None]
+    out[:, :, SP_DC] = plane[:, CH_DC][:, None]
+    for slot, symbol in enumerate(dmrs_symbols[:NOF_LS_SLOTS]):
+        out[:, symbol, SP_LS_RE] = plane[:, SLICE_PILOT_LS.start + 2 * slot]
+        out[:, symbol, SP_LS_IM] = plane[:, SLICE_PILOT_LS.start + 2 * slot + 1]
+    # The five scalars, by the folded plane's own channel numbers: nof_tx_layers, nof_cdm_groups,
+    # dmrs_type, nof_dmrs_symbols and scaling. They are read here and written there, so the two
+    # packings can only disagree if one of them stops copying a field.
+    out[:, :, SP_SCALARS] = plane[0, [52, 55, 56, 57, 62]]
+    return out
 
 
 def llr_channels(modulation):
@@ -421,6 +545,58 @@ def selfcheck():
     ls = pilot_ls(grid, alloc_prb, dmrs_symbols, 7, 1, 0, dmrs_type, scaling)
     mask = pilot_ls_mask(alloc_prb, dmrs_symbols, dmrs_type)
     assert np.allclose(ls[mask], channel[mask], atol=1e-6), "de-boosted LS is not the channel"
+
+    # ---- the spatial packing: the layout the contract now freezes -----------------------------
+    spatial, r_spatial = pack_input_spatial(grid, alloc_prb, dmrs_symbols, meta)
+    assert spatial.shape == (NOF_SUBCARRIERS, NOF_SYMBOLS, NOF_CHANNELS_SPATIAL), spatial.shape
+    assert r_spatial == r, "the two packings must divide by the same reference amplitude"
+    spatial_back = unpack_input_spatial(spatial, alloc_prb, dmrs_symbols)
+    assert np.allclose(spatial_back["grid"], grid / r, atol=1e-6), "spatial grid does not round trip"
+    assert np.array_equal(spatial_back["dmrs_mask"], mask), "spatial DM-RS mask"
+    assert np.allclose(spatial_back["pilot_ls"], ls / r, atol=1e-6), "spatial LS"
+    assert np.array_equal(spatial_back["allocation_mask"], allocated_subcarriers(alloc_prb))
+    assert spatial_back["dc_marker"][306] == 1.0 and spatial_back["dc_marker"].sum() == 1.0
+    for name, value in (("nof_tx_layers", 1.0), ("nof_cdm_groups_without_data", 2.0),
+                        ("dmrs_type", 1.0), ("nof_dmrs_symbols", 2.0), ("scaling", scaling)):
+        assert spatial_back["metadata"][name] == np.float32(value), name
+
+    # The broadcast fields must be constant ALONG the symbol axis (they vary along frequency, which
+    # is what they describe). Reading them back from one symbol would pass even if a producer wrote
+    # per-symbol values there, so the assertion is on the whole axis.
+    for channel in (SP_ALLOCATION, SP_DC, *range(SP_SCALARS.start, SP_SCALARS.stop)):
+        row = spatial[:, 0, channel][:, None]
+        assert np.all(spatial[:, :, channel] == row), f"channel {channel} drifts along symbols"
+
+    # The pilot LS sits at the symbol it was measured on, and nowhere else. In the folded plane the
+    # same values live in numbered slots, so the two must agree slot by slot: this is what stops
+    # the spatial plane from becoming a second, quietly different, convention.
+    assert np.all(spatial[:, :, SP_LS_RE][:, [s for s in range(NOF_SYMBOLS)
+                                              if s not in dmrs_symbols]] == 0.0), "LS off DM-RS"
+    for slot, symbol in enumerate(dmrs_symbols):
+        assert np.array_equal(spatial[:, symbol, SP_LS_RE], plane[:, SLICE_PILOT_LS.start + 2 * slot])
+        assert np.array_equal(spatial[:, symbol, SP_LS_IM],
+                              plane[:, SLICE_PILOT_LS.start + 2 * slot + 1])
+        pilots = DV.pilot_subcarriers(alloc_prb, dmrs_type=dmrs_type)
+        assert np.all(spatial[pilots, symbol, SP_DMRS_MASK] == 1.0), f"mask at symbol {symbol}"
+        assert np.all(spatial[:, symbol, SP_DMRS_MASK].sum() == pilots.size), "mask width"
+    for symbol in range(NOF_SYMBOLS):
+        if symbol not in dmrs_symbols:
+            assert np.all(spatial[:, symbol, SP_DMRS_MASK] == 0.0), f"mask off DM-RS at {symbol}"
+
+    # And every field the two packings share is bit-for-bit the same value, not merely close.
+    assert np.array_equal(spatial[:, :, SP_GRID_RE], plane[:, 0:28:2]), "grid real part differs"
+    assert np.array_equal(spatial[:, :, SP_GRID_IM], plane[:, 1:28:2]), "grid imaginary part differs"
+    assert np.array_equal(spatial[:, :, SP_DMRS_MASK], plane[:, SLICE_DMRS_MASK]), "DM-RS mask"
+    assert np.array_equal(spatial[:, :, SP_ALLOCATION],
+                          np.repeat(plane[:, CH_ALLOCATION][:, None], NOF_SYMBOLS, axis=1))
+    assert np.array_equal(spatial[:, :, SP_DC], np.repeat(plane[:, CH_DC][:, None], NOF_SYMBOLS, 1))
+    assert np.array_equal(spatial[0, 0, SP_SCALARS],
+                          plane[0, [52, 55, 56, 57, 62]]), "the scalar channels disagree"
+
+    # The re-layout path used by the trainer on the recorded captures must land on exactly the same
+    # tensor as the packing path used by the seam on a live grid. This is the assertion that keeps
+    # "train on what is stored" and "receive with what is deployed" the same contract.
+    assert np.array_equal(respaciate(plane), spatial), "respaciate disagrees with pack_input_spatial"
 
     # Scatter and gather are inverses in the chain's bit order, on the data REs only.
     qm = BITS_PER_SYMBOL[modulation]

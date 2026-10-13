@@ -5,8 +5,8 @@
 /// \brief Checks the depth-3 Core ML entry point against the contract's shapes.
 ///
 /// Three questions, in the order that matters:
-///   1. does the bundle carry the contract at all: one fp16 [1, nsc, 1, 64] input named `x` and the
-///      four named heads (`init_depth3` refuses anything else);
+///   1. does the bundle carry the contract at all: one fp16 [1, nsc, 14, 12] input named `x` (the
+///      symbol axis is SPATIAL) and the four named heads (`init_depth3` refuses anything else);
 ///   2. did the forward pass actually WRITE the caller's buffers, checked by filling them with a
 ///      sentinel first. A pass that silently wrote nothing would leave a receiver reading stale
 ///      values that look like a result, which is the failure this workstream keeps meeting;
@@ -84,8 +84,10 @@ int main(int argc, char** argv)
   // The main head is a function of the modulation, so the check binds the 256QAM shape.
   constexpr unsigned BITS_PER_SYMBOL = 8;
   constexpr unsigned NOF_SYMBOLS     = 14;
+  // The contract's spatial plane: one block of 12 channels per symbol.
+  constexpr unsigned IN_CHANNELS     = 12;
 
-  std::vector<__fp16> plane(nsc * 64);
+  std::vector<__fp16> plane(nsc * NOF_SYMBOLS * IN_CHANNELS);
   std::vector<__fp16> llr(nsc * NOF_SYMBOLS * BITS_PER_SYMBOL);
   std::vector<__fp16> noise(nsc * NOF_SYMBOLS);
   std::vector<__fp16> ch_est(nsc * 2 * NOF_SYMBOLS);

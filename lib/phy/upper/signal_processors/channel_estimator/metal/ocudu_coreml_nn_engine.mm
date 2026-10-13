@@ -24,6 +24,9 @@ namespace {
 
 /// OFDM symbols per slot, which the contract folds into the channel axis.
 constexpr unsigned NOF_SYMBOLS_PER_SLOT = 14;
+// Input channels per symbol in the contract's SPATIAL plane (`model_network_design` 0.2(b)). The
+// symbol axis is spatial, so this is a per-symbol channel count and not a folded total.
+constexpr unsigned DEPTH3_IN_CHANNELS = 12;
 
 struct coreml_nn_engine_impl {
   MLModel* model     = nil;
@@ -42,6 +45,10 @@ struct coreml_nn_engine_impl {
   // rejected by Core ML at best and silently truncated at worst, and a truncated main head would
   // hand the decoder a plausible subset of the bits.
   unsigned  model3_channels[4] = {0, 0, 0, 0};
+  // The shape of each head AS THE MODEL DECLARES IT, kept whole rather than reduced to a channel
+  // count: the output backings must match it exactly, and the spatial contract's heads are
+  // [1, nsc, C] while its scalar head stays [1, 1, 1, 1].
+  NSArray<NSNumber*>* model3_shape[4] = {nil, nil, nil, nil};
 
   // Every prediction runs on ONE dedicated worker thread: the first Core ML
   // prediction on a NEW thread pays a per-thread runtime initialization
@@ -148,53 +155,62 @@ bool run_prediction_depth3(coreml_nn_engine_impl* e,
                            const ocudu::metal::coreml_nn_engine::depth3_output& out)
 {
   const unsigned nsc = in.nof_subcarriers;
-  const unsigned llr_channels   = e->model3_channels[0];
-  const unsigned noise_channels = e->model3_channels[1];
-  const unsigned ch_channels    = e->model3_channels[2];
 
-  NSArray<NSNumber*>* in_shape = @[ @1, @(nsc), @1, @64 ];
+  // Row-major strides of a declared shape, so the backings follow the model instead of a guess.
+  auto strides_of = [](NSArray<NSNumber*>* shape) {
+    NSMutableArray<NSNumber*>* strides = [NSMutableArray arrayWithCapacity:shape.count];
+    long                       running = 1;
+    for (NSInteger i = static_cast<NSInteger>(shape.count) - 1; i >= 0; --i) {
+      [strides insertObject:@(running) atIndex:0];
+      running *= shape[i].longValue;
+    }
+    return strides;
+  };
+
+  // The contract's input plane: [1, subcarriers, 14 symbols, 12 channels]. The symbol axis is a
+  // SPATIAL axis here, which is the whole point of the layout: a 3x3 kernel mixes frequency AND
+  // time. The buffer is the caller's, bound with a nil deallocator so nothing is copied.
+  NSArray<NSNumber*>* in_shape = @[ @1, @(nsc), @(NOF_SYMBOLS_PER_SLOT), @(DEPTH3_IN_CHANNELS) ];
   MLMultiArray*       in_arr   = [[MLMultiArray alloc]
       initWithDataPointer:const_cast<uint16_t*>(in.plane)
                     shape:in_shape
                  dataType:MLMultiArrayDataTypeFloat16
-                  strides:@[ @(nsc * 64), @64, @64, @1 ]
+                  strides:strides_of(in_shape)
               deallocator:nil
                     error:nil];
   if (in_arr == nil) {
     return false;
   }
 
-  NSArray<NSNumber*>* llr_shape    = @[ @1, @(nsc), @1, @(llr_channels) ];
-  NSArray<NSNumber*>* noise_shape  = @[ @1, @(nsc), @1, @(noise_channels) ];
-  NSArray<NSNumber*>* ch_shape     = @[ @1, @(nsc), @1, @(ch_channels) ];
-  NSArray<NSNumber*>* scalar_shape = @[ @1, @1, @1, @1 ];
-
+  // Each backing takes the shape the model declared for that head. A 3D head and a 4D backing (or
+  // the reverse) is rejected by Core ML, and building them from the declaration is what keeps this
+  // code from having to be edited every time the contract's rank changes.
   MLMultiArray* llr_arr = [[MLMultiArray alloc]
       initWithDataPointer:out.llr
-                    shape:llr_shape
+                    shape:e->model3_shape[0]
                  dataType:MLMultiArrayDataTypeFloat16
-                  strides:@[ @(nsc * llr_channels), @(llr_channels), @(llr_channels), @1 ]
+                  strides:strides_of(e->model3_shape[0])
               deallocator:nil
                     error:nil];
   MLMultiArray* noise_arr = [[MLMultiArray alloc]
       initWithDataPointer:out.post_eq_noise
-                    shape:noise_shape
+                    shape:e->model3_shape[1]
                  dataType:MLMultiArrayDataTypeFloat16
-                  strides:@[ @(nsc * noise_channels), @(noise_channels), @(noise_channels), @1 ]
+                  strides:strides_of(e->model3_shape[1])
               deallocator:nil
                     error:nil];
   MLMultiArray* ch_arr = [[MLMultiArray alloc]
       initWithDataPointer:out.ch_est
-                    shape:ch_shape
+                    shape:e->model3_shape[2]
                  dataType:MLMultiArrayDataTypeFloat16
-                  strides:@[ @(nsc * ch_channels), @(ch_channels), @(ch_channels), @1 ]
+                  strides:strides_of(e->model3_shape[2])
               deallocator:nil
                     error:nil];
   MLMultiArray* dmrs_arr = [[MLMultiArray alloc]
       initWithDataPointer:out.dmrs_noise
-                    shape:scalar_shape
+                    shape:e->model3_shape[3]
                  dataType:MLMultiArrayDataTypeFloat16
-                  strides:@[ @1, @1, @1, @1 ]
+                  strides:strides_of(e->model3_shape[3])
               deallocator:nil
                     error:nil];
   if (llr_arr == nil || noise_arr == nil || ch_arr == nil || dmrs_arr == nil) {
@@ -384,11 +400,15 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
     return false;
   }
   NSArray<NSNumber*>* in_shape = in_desc.multiArrayConstraint.shape;
-  // The contract's plane: [1, subcarriers, 1, 64], fp16. A model trained in another layout would
-  // be fed nonsense and would produce plausible logits for it, so the shape is checked here.
-  if (in_shape.count != 4 || in_shape[0].unsignedIntValue != 1 || in_shape[2].unsignedIntValue != 1 ||
-      in_shape[3].unsignedIntValue != 64) {
-    ocudulog::fetch_basic_logger("PHY").error("AI depth-3: input x is not [1, nsc, 1, 64]");
+  // The contract's plane: [1, subcarriers, 14, 12], fp16 -- the symbol axis is SPATIAL, which is
+  // what lets a 3x3 kernel mix time as well as frequency. A model trained in the superseded folded
+  // layout would be fed nonsense and would produce plausible logits for it, so the shape is checked
+  // here rather than at the first prediction.
+  if (in_shape.count != 4 || in_shape[0].unsignedIntValue != 1 ||
+      in_shape[2].unsignedIntValue != NOF_SYMBOLS_PER_SLOT ||
+      in_shape[3].unsignedIntValue != DEPTH3_IN_CHANNELS) {
+    ocudulog::fetch_basic_logger("PHY").error(
+        "AI depth-3: input x is not [1, nsc, {}, {}]", NOF_SYMBOLS_PER_SLOT, DEPTH3_IN_CHANNELS);
     return false;
   }
   e->model3_nof_subc = in_shape[1].unsignedIntValue;
@@ -403,8 +423,12 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
     }
     e->out3_names[head] = name;
     MLFeatureDescription* out_desc = desc.outputDescriptionsByName[name];
-    if (out_desc.multiArrayConstraint != nil && out_desc.multiArrayConstraint.shape.count == 4) {
-      e->model3_channels[head] = out_desc.multiArrayConstraint.shape[3].unsignedIntValue;
+    if (out_desc.multiArrayConstraint != nil && out_desc.multiArrayConstraint.shape.count >= 2) {
+      e->model3_shape[head]    = out_desc.multiArrayConstraint.shape;
+      // The channel count is the LAST axis whatever the rank is: the spatial contract's heads are
+      // [1, nsc, C] and its scalar head is [1, 1, 1, 1]. Reading axis 3 unconditionally is how a 3D
+      // head would be read as zero channels and rejected for the wrong reason.
+      e->model3_channels[head] = e->model3_shape[head].lastObject.unsignedIntValue;
     }
   }
   // The contract fixes what each head carries: 14 * Qm coded bits, 14 post-equalization noise
@@ -419,10 +443,20 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
     return false;
   }
 
-  e->keepalive_in3.resize(static_cast<size_t>(e->model3_nof_subc) * 64, 0);
-  e->keepalive_llr3.resize(static_cast<size_t>(e->model3_nof_subc) * NOF_SYMBOLS_PER_SLOT * 8, 0);
-  e->keepalive_noise3.resize(static_cast<size_t>(e->model3_nof_subc) * NOF_SYMBOLS_PER_SLOT, 0);
-  e->keepalive_ch3.resize(static_cast<size_t>(e->model3_nof_subc) * 2 * NOF_SYMBOLS_PER_SLOT, 0);
+  e->keepalive_in3.resize(
+      static_cast<size_t>(e->model3_nof_subc) * NOF_SYMBOLS_PER_SLOT * DEPTH3_IN_CHANNELS, 0);
+  // Product of the DECLARED shape, so a head whose spatial axes differ from the expected ones makes
+  // the keep-alive write out of bounds rather than silently predicting into a short buffer.
+  auto elements_of = [](NSArray<NSNumber*>* shape) {
+    size_t count = 1;
+    for (NSNumber* dim in shape) {
+      count *= dim.unsignedIntValue;
+    }
+    return count;
+  };
+  e->keepalive_llr3.resize(elements_of(e->model3_shape[0]), 0);
+  e->keepalive_noise3.resize(elements_of(e->model3_shape[1]), 0);
+  e->keepalive_ch3.resize(elements_of(e->model3_shape[2]), 0);
 
   ocudulog::fetch_basic_logger("PHY").debug(
       "AI depth-3: Core ML model loaded from {} ({} subcarriers, four heads)",

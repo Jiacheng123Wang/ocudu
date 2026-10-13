@@ -93,7 +93,7 @@ class FoldedScaleConv(tf.keras.layers.Layer):
 
 def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, residual=True,
           dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False,
-          layout="folded"):
+          layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -109,11 +109,12 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
       chooses that, so the graph dtype here is a training decision only.
     """
     keras_dtype = tf.float32 if dtype == "float32" else tf.float16
-    if layout == "unfolded":
-        # Time is a spatial axis here, so the 3x3 kernel mixes frequency AND symbols. Only the LLR
-        # head is built: this arm tests the locality, and the auxiliary heads would only add cost.
-        inp = tf.keras.Input(shape=(width, NOF_SYMBOLS, 8), batch_size=None, dtype=keras_dtype,
-                             name="x")
+    if layout != "folded":
+        # Time is a spatial axis here, so the 3x3 kernel mixes frequency AND symbols. `in_channels`
+        # is the packing the data carries: 12 for the contract's spatial plane, 8 for the R4.4
+        # diagnostic arm that isolated the locality.
+        inp = tf.keras.Input(shape=(width, NOF_SYMBOLS, in_channels), batch_size=None,
+                             dtype=keras_dtype, name="x")
         y = tf.keras.layers.Conv2D(c_hid, 1, dtype=keras_dtype, name="entry_1x1")(inp)
         y = tf.keras.layers.ReLU(dtype=keras_dtype, name="entry_relu")(y)
         for i in range(blocks):
@@ -126,13 +127,33 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
                                     name=f"pw{i}_1x1")(block)
             block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}b")(block)
             y = tf.keras.layers.Add(name=f"add{i}", dtype=keras_dtype)([y, block])
+        # The heads keep the CONTRACT's channel counts (14*Qm, 14, 28, 1) whatever the trunk's
+        # internal layout is. The seam binds them by name and the engine checks them by channel
+        # count, so a layout that renamed them would be a contract change rather than a choice
+        # inside the network. Only the spatial axes differ, and every one of them is flattened back
+        # to the contract's `[width, channels]` before the head leaves the model.
         llr = tf.keras.layers.Conv2D(qm, 1, dtype=keras_dtype, name="llr_1x1")(y)
         llr = tf.keras.layers.Activation("linear" if llr_linear else "tanh", dtype=keras_dtype,
                                          name="llr")(llr)
         # [batch, width, symbols, qm] -> [batch, width, symbols * qm]: the contract's channel order,
         # symbol major and bit fastest, which is what the label plane already holds.
-        llr = tf.keras.layers.Reshape((width, NOF_SYMBOLS * qm), name="llr_flat")(llr)
-        return tf.keras.Model(inp, {"llr": llr})
+        outputs = {"llr": tf.keras.layers.Reshape((width, NOF_SYMBOLS * qm), name="llr_flat")(llr)}
+        if aux_heads:
+            noise = tf.keras.layers.Activation("tanh", dtype=keras_dtype, name="post_eq_noise")(
+                tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="noise_1x1")(y))
+            outputs["post_eq_noise"] = tf.keras.layers.Reshape((width, NOF_SYMBOLS),
+                                                               name="noise_flat")(noise)
+            # Linear for the channel: it must reach deep fades as well as peaks.
+            ch_est = tf.keras.layers.Activation("linear", dtype=keras_dtype, name="ch_est")(
+                tf.keras.layers.Conv2D(2, 1, dtype=keras_dtype, name="ch_est_1x1")(y))
+            outputs["ch_est"] = tf.keras.layers.Reshape((width, 2 * NOF_SYMBOLS),
+                                                        name="ch_est_flat")(ch_est)
+            pooled = tf.keras.layers.GlobalAveragePooling2D(keepdims=True, dtype=keras_dtype,
+                                                            name="dmrs_pool")(y)
+            outputs["dmrs_noise"] = tf.keras.layers.Activation(
+                "tanh", dtype=keras_dtype, name="dmrs_noise")(
+                    tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="dmrs_noise_1x1")(pooled))
+        return tf.keras.Model(inp, outputs)
 
     inp = tf.keras.Input(shape=(width, 1, D3.NOF_CHANNELS), batch_size=None, dtype=keras_dtype,
                          name="x")
@@ -279,7 +300,10 @@ class Batches:
             noise_target = L.noise_shape_target(sigma2_norm / (np.abs(channel) ** 2 + 1e-30))
         noise_weights = (ch_weights > 0) & noise_target[1]
 
-        if self.layout == "unfolded":
+        if self.layout == "spatial":
+            # The contract's current input: the symbol axis is spatial, so the 3x3 mixes time.
+            plane_in = D3.respaciate(plane)
+        elif self.layout == "probe8":
             plane_in = unfold_plane(plane, alloc, dmrs_symbols)
         else:
             plane_in = plane[:, None, :]
@@ -506,16 +530,19 @@ def export_deployment(model, qm, path):
     still pass every shape check.
     """
     import coremltools as ct
+    # The input shape is taken from the model rather than from the folded contract: the spatialised
+    # trunk has a different one, and a hardcoded shape produces a bundle that converts cleanly and
+    # then fails at the binding point, which is the one place the check has to hold.
+    shape = [int(d) for d in model.inputs[0].shape[1:]]
     converted = ct.convert(
         model,
-        inputs=[ct.TensorType(name="x", shape=(1, D3.NOF_SUBCARRIERS, 1, D3.NOF_CHANNELS),
-                              dtype=np.float16)],
+        inputs=[ct.TensorType(name="x", shape=(1, *shape), dtype=np.float16)],
         compute_precision=ct.precision.FLOAT16,
         minimum_deployment_target=ct.target.iOS17,
         convert_to="mlprogram")
     converted = rename_outputs(converted, qm)
     converted.save(path)
-    print(f"wrote the fp16 deployment graph to {path}")
+    print(f"wrote the fp16 deployment graph to {path} (input {[1, *shape]})")
 
 
 def main():
@@ -526,14 +553,21 @@ def main():
     parser.add_argument("--out", default="", help="run directory; not needed with --export-only")
     parser.add_argument("--modulation", default="256QAM")
     parser.add_argument("--blocks", type=int, default=18)
-    parser.add_argument("--layout", choices=("folded", "unfolded"), default="folded",
-                        help="'folded' is the contract's plane. 'unfolded' gives each symbol its own "
-                             "spatial slice so the 3x3 kernel mixes time as well as frequency, "
-                             "which is the remaining structural self-variable")
+    parser.add_argument("--layout", choices=("folded", "spatial", "probe8", "unfolded"),
+                        default="spatial",
+                        help="'folded' is the superseded 64-channel contract, kept so the recorded "
+                             "comparisons stay reproducible. 'spatial' is the contract now: the "
+                             "symbol axis is a spatial axis, 12 channels per symbol. 'probe8' is "
+                             "the R4.4 diagnostic arm that isolated the locality (8 channels); "
+                             "'unfolded' is its old name and still works")
     parser.add_argument("--dense-blocks", action="store_true",
                         help="dense 3x3 instead of depthwise. Section 25.3 measured the same "
                              "latency for 5.7x the FLOPs, and depthwise is what caps the "
                              "per-position capacity the diagnosis points at")
+    parser.add_argument("--in-channels", type=int, default=0,
+                        help="input channels of the unfolded trunk. 0 takes it from the batches, "
+                             "which is the only value that cannot disagree with the data; the "
+                             "export-only path has no batches and passes it explicitly")
     parser.add_argument("--c-hid", type=int, default=64,
                         help="trunk width. The contract freezes the tensor shapes, not the width "
                              "inside the network, and a per-position decision over a 256QAM "
@@ -567,11 +601,20 @@ def main():
     parser.add_argument("--no-fold-scale", action="store_true",
                         help="keep the LayerScale as a separate multiply. Costs about 200 us on "
                              "the ANE (section 45.8); the default folds it into the convolution")
+    parser.add_argument("--init", default="",
+                        help="start from these weights instead of a fresh initialisation. A run "
+                             "whose curve has not flattened can then be EXTENDED rather than "
+                             "guessed at, which is what makes the epoch count a measurement")
     parser.add_argument("--export-only", default="",
                         help="export this trained .keras to the fp16 deployment graph and exit")
     parser.add_argument("--export-probe", default="",
                         help="also write the graph as a CoreML mlpackage, so the ANE probe "
                              "measures the artifact this script trains rather than a copy of it")
+    parser.add_argument("--probe-graph", default="",
+                        help="build the graph from the architecture flags, export it and EXIT "
+                             "without training, so ANE placement and latency can be measured "
+                             "before a training run is paid for. The weights are random: the "
+                             "artifact is for measurement and must never receive")
     parser.add_argument("--no-residual", action="store_true",
                         help="plain block stack. It collapses (section 12.9); kept so the "
                              "failure can be reproduced rather than remembered")
@@ -592,6 +635,10 @@ def main():
 
     tf.get_logger().setLevel("ERROR")
     tf.random.set_seed(args.seed)
+    if args.layout == "unfolded":
+        # The name the R4.4 runs were recorded under. Kept so their command lines still run.
+        print("--layout unfolded is the old name of probe8")
+        args.layout = "probe8"
 
     if args.export_only:
         exported = tf.keras.models.load_model(
@@ -602,8 +649,31 @@ def main():
         export_deployment(exported, D3.BITS_PER_SYMBOL[args.modulation], args.export_probe)
         return 0
 
+    qm = D3.BITS_PER_SYMBOL[args.modulation]
+    # The channel count follows the packing the layout names, so the trunk cannot be built for a
+    # layout the batches do not produce. The batches are then checked against it rather than
+    # believed: a `--layout` that disagrees with the data is the kind of error that trains happily
+    # and deploys into a shape the seam cannot fill.
+    in_channels = args.in_channels or {"folded": D3.NOF_CHANNELS, "probe8": 8}.get(
+        args.layout, D3.NOF_CHANNELS_SPATIAL)
+
+    if args.probe_graph:
+        # Architecture -> ANE latency, before paying for a training run. The weights are random and
+        # the artifact must never reach a receiver: it exists to be measured. `--in-channels` and
+        # the architecture flags are the whole input, so no dataset is needed.
+        print(f"probe graph: layout {args.layout}, {in_channels} input channels, "
+              f"c_hid {args.c_hid}, {args.blocks} blocks -- RANDOM WEIGHTS, measure only")
+        probe_model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux,
+                            residual=not args.no_residual, dtype=args.dtype,
+                            fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
+                            llr_linear=args.llr_linear, dense=args.dense_blocks,
+                            layout=args.layout, in_channels=in_channels)
+        export_deployment(probe_model, qm, args.probe_graph)
+        return 0
+
     if not args.train or not args.val or not args.out:
-        parser.error("--train, --val and --out are required unless --export-only is given")
+        parser.error("--train, --val and --out are required unless --export-only or --probe-graph "
+                     "is given")
     train = Batches(args.train, args.modulation, args.max_train, seed=args.seed,
                     snr_min=args.snr_min, snr_max=args.snr_max, target=args.target,
                     layout=args.layout)
@@ -613,14 +683,21 @@ def main():
     qm = train.qm
     print(f"train {train.n} samples, val {val.n} samples, {args.modulation} (Qm={qm})")
 
-    if args.layout == "unfolded" and not args.no_aux:
-        parser.error("--layout unfolded builds only the LLR head; add --no-aux")
+    from_data = int(train.sample(0)["x"].shape[-1])
+    if from_data != in_channels:
+        parser.error(f"--layout {args.layout} builds {in_channels} input channels but the data "
+                     f"carries {from_data}")
+    print(f"layout {args.layout}, {in_channels} input channels")
     model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux,
                   residual=not args.no_residual, dtype=args.dtype,
                   fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
-                  llr_linear=args.llr_linear, dense=args.dense_blocks, layout=args.layout)
+                  llr_linear=args.llr_linear, dense=args.dense_blocks, layout=args.layout,
+                  in_channels=in_channels)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}")
+    if args.init:
+        model.load_weights(args.init)
+        print(f"started from {args.init}")
 
     # The scale is model-external per the contract, so the loss sees the LLR the quantizer sees.
     scale = D3.RANGE_LIMIT_FLOAT[args.modulation]
@@ -632,25 +709,28 @@ def main():
     def step(x, targets, training):
         with tf.GradientTape() as tape:
             outputs = model(x, training=training)
-            raw = tf.cast(outputs["llr"], tf.float32)
-            # The unfolded graph returns [batch, width, symbols * qm] already, because its head works
-            # on the (frequency, symbol) plane; the folded one returns [batch, width, 1, channels].
-            llr = (raw if args.layout == "unfolded" else raw[:, :, 0, :]) * scale
+            # Every head leaves the model with the contract's `[width, channels]` tail, so one
+            # reshape reads each of them and the loss cannot drift with the trunk's layout: the
+            # spatial axes are an implementation detail that stops at the head.
+            llr = tf.reshape(tf.cast(outputs["llr"], tf.float32),
+                             (-1, D3.NOF_SUBCARRIERS, NOF_SYMBOLS * qm)) * scale
             if args.llr_linear:
                 # The bound the contract asks for, applied where it is differentiable.
                 llr = tf.clip_by_value(llr, -scale, scale)
             terms = {"llr": L.tf_bce_loss(llr, targets["llr_shape"], targets["llr_weights"])}
             if not args.no_aux:
-                ch = tf.cast(outputs["ch_est"], tf.float32)[:, :, 0, :]
+                ch = tf.reshape(tf.cast(outputs["ch_est"], tf.float32),
+                                (-1, D3.NOF_SUBCARRIERS, 2 * NOF_SYMBOLS))
                 terms["ch_est"] = L.tf_nmse(
                     tf.complex(ch[:, :, 0::2], ch[:, :, 1::2]),
                     tf.complex(targets["ch"][:, :, :, 0], targets["ch"][:, :, :, 1]),
                     targets["ch_weights"])
-                noise = tf.cast(outputs["post_eq_noise"], tf.float32)[:, :, 0, :]
+                noise = tf.reshape(tf.cast(outputs["post_eq_noise"], tf.float32),
+                                   (-1, D3.NOF_SUBCARRIERS, NOF_SYMBOLS))
                 error = (noise - targets["noise"]) ** 2
                 terms["post_eq_noise"] = (tf.reduce_sum(error * targets["noise_weights"])
                                           / tf.maximum(tf.reduce_sum(targets["noise_weights"]), 1.0))
-                dmrs = tf.cast(outputs["dmrs_noise"], tf.float32)[:, 0, 0, 0]
+                dmrs = tf.reshape(tf.cast(outputs["dmrs_noise"], tf.float32), (-1,))
                 terms["dmrs_noise"] = tf.reduce_mean((dmrs - targets["dmrs_noise"]) ** 2)
             total = sum(weights[name] * terms[name] for name in terms)
         if training:
