@@ -2600,3 +2600,17 @@ void demodulate(pusch_codeword_buffer& codeword_buffer, pusch_demodulator_notifi
 | ★★ | ★★ **C++ 与 Python 的输入面不一致**（★ 最危险：会喂错数据但"看起来在跑"）| ★★ R5.2b 的**逐位单测**（★ 金标准 = 数据集里的 `X`）|
 | ★★ | ★★ **解扰做两次或不做** | ★★ 单测：★ 用固定 `rnti/n_id` 生成序列，★ 与 `pusch_demodulator_impl` 的序列**逐位比** |
 | ★ | ★ 设备路径的零拷贝被破坏 | ★ 用户已接受（★ 深度 3 是中间态）；★ **但必须给数字**（★ R5.5）|
+
+#### ★★★ 16.5bis 契约校验的**负向**测试（★ F18：校验必须能失败）
+
+★★ 只验"合格模型能通过"是不够的（★ 那样一个**恒返回 true** 的校验也能过 ✗）。★ 用一个**只有 LLR 头**的模型试：
+
+```
+$ depth3_engine_check d3_llronly.mlmodelc 2 612      # 只有 1 个头
+INIT_FAIL d3_llronly.mlmodelc
+退出码 1                                              # ★ 被拒绝 ✓
+$ depth3_engine_check d3_contract4.mlmodelc 2 612    # 契约的四个头
+PASS                                                  # ★ 通过 ✓
+```
+
+★★★ **⇒ 校验在两个方向上都成立** ⇒ ★★ **"绑错模型"会失败，而不会静默跑出看似合理的结果** ✓。
