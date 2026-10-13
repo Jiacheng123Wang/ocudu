@@ -2537,3 +2537,66 @@ $PY $P/train_depth3.py --train ... --val $W/data/datasets/d3_cap002_rv0.npz \
 2. ★★★ **网络几乎不随 SNR 变化**（★ 0.329 → 0.311）⇒ ★★ **它还没有利用 SNR 信息**，
    ★ 即 **欠训练**（★ 1000 样本 / 40 epoch 远不够）⇒ ★★ **这正是 R4.4 全量训练要改的东西**，
    ★★ 也是"逐 SNR 分档"这条判据的价值：★ **中位数 0.314 会把这件事完全藏住**。
+
+---
+
+## 17. ★★★ R5 执行计划（★ 2026-10-13 冻结接口与判据；★ 下一轮照着做）
+
+> ★★ **R5 = 改接缝**，★ 也就是把 `design` §12.2 的偏差真正改回来：★★ **`ai` 臂的 `demodulate()` 不再转发经典解调器**，
+> ★★ **一次前向出 LLR，均衡与解映射【不再运行】**。
+> ★★★ **本节的目的**：★ 把"要改哪些文件、每个接口拿什么、判据是什么"写死，
+> ★★ **避免下一轮又出现"接了线但做的是另一件事"**（★ F14 的教训）。
+
+### 17.1 ★★★ 好消息：**所需输入在 `demodulate()` 侧【全都有】**（★ 已逐条核对）
+
+★★ `pusch_depth3_receiver::demodulate()` 的签名（`pusch_depth3_receiver.h:98-102`）：
+
+```cpp
+void demodulate(pusch_codeword_buffer& codeword_buffer, pusch_demodulator_notifier& notifier,
+                const resource_grid_reader& grid, const dmrs_pusch_estimator_results& est_results,
+                const pusch_demodulator::configuration& config);
+```
+
+| ★ 契约输入（★ §0.2(b)）| ★★ 在 `demodulate()` 的哪里拿 |
+|---|---|
+| ★ 网格 I/Q（★ 28 通道）| ★ `grid.get(port, symbol, subcarrier)` ✓ |
+| ★ DM-RS RE 掩码（★ 14）| ★ `config.dmrs_symb_pos` + `get_pxsch_dmrs_params(config.dmrs_type, port).re_pattern` ✓ |
+| ★★ **导频 LS（★ 8）** | ★★ **`grid` 的导频 RE ÷（★ DM-RS 参考序列 × `scaling`）** —— ★ 参考序列用 **`dmrs_sequence_generate()`**（`dmrs_helper.h:30`）✓，★ **它正是 `ai_train/dmrs.py` 的 C++ 对应物** |
+| ★ 分配掩码（★ 1）| ★ `config.rb_mask` ✓ |
+| ★ DC 标记（★ 1）| ★ `config.dc_position`（★ `optional`）✓ |
+| ★ 元数据（★ 12）| ★ `config.nof_tx_layers` / `rx_ports.size()` / `nof_cdm_groups_without_data` / `dmrs_type` / `dmrs_symb_pos.count()` / `nof_symbols` / `start_symbol_index` / `rb_mask.count()` / `config.rnti` / `config.n_id` ✓ |
+| ★★ **参考幅度 `r`** | ★★ **导频 LS 的 RMS**（★ 主机现算 ✓，★ 与 `depth3.pack_input` 同一约定 ✓）|
+| ★ `scaling` | ★ 由 `nof_cdm_groups_without_data` 推出 ✓（★ `dmrs.amplitude_scaling` ✓）|
+
+★★★ **⇒ `estimate()` 侧不需要额外传任何东西** ⇒ ★★ **接线集中在 `demodulate()` 一个函数里** ✓。
+
+### 17.2 ★★ 要改的文件与顺序
+
+| ★ 步 | ★★ 文件 | ★★★ 内容 |
+|---|---|---|
+| ★★ **R5.2a** | ★ **新增** `lib/phy/upper/channel_processors/pusch/pusch_depth3_input_plane.{h,cpp}` | ★★ **输入面组装器**（★ 契约 §0.2(b) 的 64 通道）★ + fp16 打包 ★ + 返回 `r` |
+| ★★ **R5.2b** | ★ **新增** 单测 `.../test/pusch_depth3_input_plane_test.cpp` | ★★★ **与 Python 版逐位对照**：★ 从数据集 dump 一个样本的（★ 网格、DM-RS 掩码、LS、掩码、元数据）★ → C++ 组装 → ★ 与 `.npz` 里的 `X` 比（★ 容差按 fp16 ✓）|
+| ★★★ **R5.1/R5.3** | ★ `pusch_depth3_receiver_impl.{h,cpp}` | ★★ `pusch_depth3_receiver_ai_identity::demodulate()`：★ 组装 → `predict_depth3` → **gather LLR**（★ §0.2(g) 的规则）→ **解扰** → `codeword_buffer.on_new_block(...)` ✓；★★ **不再调用 `demodulator.demodulate`** |
+| ★★ **R5.1b** | ★ 同上 | ★★ **解扰**：★ 用 `pseudo_random_generator` 按 `c_init = (rnti << 15) + n_id` 生成序列，★ **与经典解调器同一算式**（`pusch_demodulator_impl.cpp:400/727-730`）★ ⇒ ★ **必须与 `codeword_buffer` 拿到的序列【是同一个】** ✓ |
+| ★★ **R5.4** | ★ `pusch_depth3_receiver_impl.h` | ★★ `computes_itself()` 的语义从"估计器是否绑定细化"改成"**网络是否真的产出了 LLR**"（★ 即 `engine_ready && last_forward_ok`）|
+| ★ R5.5 | ★ 同 R5.1 | ★ 记录 **device→host 拷贝**（★ 网格在设备侧 ⇒ 输入面在主机组装）★ 并**实测**其代价 |
+| ★★ R6 | ★ 同上 + `pusch_demodulator_notifier` | ★★ 头 1 → **SINR**（★ `memo_07` C2）；★ 头 3/4 → 信道估计与噪声（★ 供测量核）|
+
+### 17.3 ★★★ 判据（★ 照 §1.5.7 与 I1/I7；★ 缺一不可）
+
+| ★ # | ★★ 判据 | ★★ 怎么测 |
+|---|---|---|
+| ★★★ **I1** | ★★★ **经典路径 bit-exact 回退** | ★ `--expert_phy.pusch_receiver_backend classic` 的 LLR/CRC **与改动前逐位相同** |
+| ★★★ **I7** | ★★ **降级可查询、可计数** | ★ 模型缺失/形状不符/`r` 非法 ⇒ ★ **不跑网络、走经典、计数**（★ 不得静默）|
+| ★★ **判据 1** | ★★ **CRC 不劣化** | ★ 同一批单元上 `crc=OK` 的数量 **≥** 经典基线 |
+| ★★ **判据 2** | ★★ **每跳 dispatch 数不增加** | ★ `ul_chain_replay` 的计数（★ 见 §1.5.7）|
+| ★★★ **新判据** | ★★★ **网络真的产出了 LLR** | ★★ 日志/统计里 `computes_itself()==true` **且** LLR **不等于**经典路径的 LLR（★ 否则就是"开关没生效≡没有效果" ✗ I10）|
+
+### 17.4 ★★ 风险与前置（★ 不掩盖）
+
+| ★ | ★★ 风险 | ★★ 处置 |
+|---|---|---|
+| ★★★ | ★★ **没有训练好的模型，接线无法验收** | ★★ **前置：R4.4 全量训练 + `eval_depth3.py` 三方对照**（★ 网络至少要赢过"未训练"并接近 genie）|
+| ★★ | ★★ **C++ 与 Python 的输入面不一致**（★ 最危险：会喂错数据但"看起来在跑"）| ★★ R5.2b 的**逐位单测**（★ 金标准 = 数据集里的 `X`）|
+| ★★ | ★★ **解扰做两次或不做** | ★★ 单测：★ 用固定 `rnti/n_id` 生成序列，★ 与 `pusch_demodulator_impl` 的序列**逐位比** |
+| ★ | ★ 设备路径的零拷贝被破坏 | ★ 用户已接受（★ 深度 3 是中间态）；★ **但必须给数字**（★ R5.5）|
