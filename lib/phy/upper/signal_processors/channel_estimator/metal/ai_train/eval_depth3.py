@@ -114,6 +114,9 @@ def evaluate(args):
     receivers = {name: T.CodedBler(data) for name in ("network", "genie", "perfect")}
     bit_errors = defaultdict(int)
     bit_total = defaultdict(int)
+    # Per-SNR buckets as well: a single median hides that a network can win at low SNR and lose at
+    # high SNR, which is exactly the pattern the depth-1 refiner showed.
+    per_snr = defaultdict(lambda: defaultdict(lambda: [0, 0]))
 
     for index in range(data.n):
         sample = data.sample(index)
@@ -133,9 +136,15 @@ def evaluate(args):
         valid = D3.llr_gather((sample["llr_weights"] > 0).astype(np.float32), alloc, dmrs_symbols,
                               modulation) > 0
         bit_total["all"] += int(valid.sum())
+        snr = float(data.data["snr_nominal"][index])
         for name, llr in (("network", network), ("genie", genie), ("perfect", perfect)):
             receivers[name].add(index, llr)
-            bit_errors[name] += int(((llr[valid] > 0) != (labels[valid] > 0.5)).sum())
+            mismatched = int(((llr[valid] > 0) != (labels[valid] > 0.5)).sum())
+            bit_errors[name] += mismatched
+            if name != "perfect":
+                entry = per_snr[snr][name]
+                entry[0] += mismatched
+                entry[1] += int(valid.sum())
 
     print(f"{args.model}\n  on {data.n} samples of {os.path.basename(args.data)}")
     print(f"  {'receiver':10s} {'uncoded BER':>12s} {'coded BLER':>11s} {'blocks':>8s} "
@@ -145,6 +154,15 @@ def evaluate(args):
         ber = bit_errors[name] / max(bit_total["all"], 1)
         bler = counter.rate()
         print(f"  {name:10s} {ber:12.4f} {bler:11.4f} {counter.blocks:8d} {counter.skipped:8d}")
+
+    levels = sorted(per_snr)
+    if levels:
+        print(f"  {'SNR dB':>7s} {'network uBER':>13s} {'genie uBER':>11s}")
+        for level in levels:
+            entry = per_snr[level]
+            network_ber = entry["network"][0] / max(entry["network"][1], 1)
+            genie_ber = entry["genie"][0] / max(entry["genie"][1], 1)
+            print(f"  {level:7.1f} {network_ber:13.4f} {genie_ber:11.4f}")
 
     assert receivers["perfect"].errors == 0, (
         "perfect LLRs did not decode cleanly, so the comparison below them is not trustworthy")
