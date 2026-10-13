@@ -92,7 +92,8 @@ class FoldedScaleConv(tf.keras.layers.Layer):
 
 
 def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, residual=True,
-          dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False):
+          dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False,
+          layout="folded"):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -108,6 +109,31 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
       chooses that, so the graph dtype here is a training decision only.
     """
     keras_dtype = tf.float32 if dtype == "float32" else tf.float16
+    if layout == "unfolded":
+        # Time is a spatial axis here, so the 3x3 kernel mixes frequency AND symbols. Only the LLR
+        # head is built: this arm tests the locality, and the auxiliary heads would only add cost.
+        inp = tf.keras.Input(shape=(width, NOF_SYMBOLS, 8), batch_size=None, dtype=keras_dtype,
+                             name="x")
+        y = tf.keras.layers.Conv2D(c_hid, 1, dtype=keras_dtype, name="entry_1x1")(inp)
+        y = tf.keras.layers.ReLU(dtype=keras_dtype, name="entry_relu")(y)
+        for i in range(blocks):
+            dilation = DILATIONS[i % len(DILATIONS)]
+            block = tf.keras.layers.DepthwiseConv2D(
+                3, padding="same", dilation_rate=(dilation, 1), dtype=keras_dtype,
+                name=f"dw{i}_3x3_d{dilation}")(y)
+            block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}")(block)
+            block = FoldedScaleConv(c_hid, initial_gain=scale_init, dtype=keras_dtype,
+                                    name=f"pw{i}_1x1")(block)
+            block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}b")(block)
+            y = tf.keras.layers.Add(name=f"add{i}", dtype=keras_dtype)([y, block])
+        llr = tf.keras.layers.Conv2D(qm, 1, dtype=keras_dtype, name="llr_1x1")(y)
+        llr = tf.keras.layers.Activation("linear" if llr_linear else "tanh", dtype=keras_dtype,
+                                         name="llr")(llr)
+        # [batch, width, symbols, qm] -> [batch, width, symbols * qm]: the contract's channel order,
+        # symbol major and bit fastest, which is what the label plane already holds.
+        llr = tf.keras.layers.Reshape((width, NOF_SYMBOLS * qm), name="llr_flat")(llr)
+        return tf.keras.Model(inp, {"llr": llr})
+
     inp = tf.keras.Input(shape=(width, 1, D3.NOF_CHANNELS), batch_size=None, dtype=keras_dtype,
                          name="x")
     y = inp
@@ -186,7 +212,7 @@ class Batches:
               "rv")
 
     def __init__(self, path, modulation, max_samples=0, seed=0, snr_min=None, snr_max=None,
-                 target="coded"):
+                 target="coded", layout="folded"):
         # Read every array once, eagerly. The file is a compressed archive, and accessing
         # `data["X"]` per sample would decompress the whole 200 MB array every time.
         archive = np.load(path, allow_pickle=True)
@@ -198,6 +224,7 @@ class Batches:
         # per-resource-element division and a constellation decision and no interpolation across
         # frequency. The difference between the two isolates where the network stalls.
         self.target = target
+        self.layout = layout
         self.n = len(self.data["X"])
         # Keep only the requested SNR range. The label of a low-SNR resource element is decided by
         # the noise, not by the input, so a model cannot fit it however long it trains; restricting
@@ -252,9 +279,13 @@ class Batches:
             noise_target = L.noise_shape_target(sigma2_norm / (np.abs(channel) ** 2 + 1e-30))
         noise_weights = (ch_weights > 0) & noise_target[1]
 
+        if self.layout == "unfolded":
+            plane_in = unfold_plane(plane, alloc, dmrs_symbols)
+        else:
+            plane_in = plane[:, None, :]
         return {
             "index": index,
-            "x": plane[:, None, :],
+            "x": plane_in,
             "llr_shape": label,
             "llr_weights": llr_weights,
             "ch": np.stack([channel.real, channel.imag], axis=-1),
@@ -383,6 +414,32 @@ def decode_metrics(llr, labels, weights):
     return float(errors), float(np.mean(np.abs(llr[labelled]))) if labelled.any() else np.nan
 
 
+def unfold_plane(plane, alloc, dmrs_symbols):
+    """Rearrange the contract's plane into a layout whose TIME axis is a spatial axis.
+
+    The contract folds the fourteen symbols into the channel axis, so a 3x3 kernel can only mix
+    frequency; every per-symbol relation has to be learned by 1x1 channel mixing. This layout gives
+    each symbol its own spatial slice instead, with eight channels each:
+
+        [Re(y), Im(y), DM-RS mask, allocation, DC, Re(LS), Im(LS), reserved]
+
+    The allocation and DC channels are properties of the subcarrier and are broadcast over symbols,
+    and the metadata scalars are dropped: they are derivable from the masks, and this arm exists to
+    test the locality, not to be a deployment candidate.
+    """
+    unfolded = np.zeros((plane.shape[0], NOF_SYMBOLS, 8), dtype=np.float32)
+    for symbol in range(NOF_SYMBOLS):
+        unfolded[:, symbol, 0] = plane[:, 2 * symbol]
+        unfolded[:, symbol, 1] = plane[:, 2 * symbol + 1]
+        unfolded[:, symbol, 2] = plane[:, 28 + symbol]
+        unfolded[:, symbol, 3] = plane[:, 50]
+        unfolded[:, symbol, 4] = plane[:, 51]
+    for slot, symbol in enumerate(sorted(dmrs_symbols)[:D3.NOF_LS_SLOTS]):
+        unfolded[:, symbol, 5] = plane[:, 42 + 2 * slot]
+        unfolded[:, symbol, 6] = plane[:, 43 + 2 * slot]
+    return unfolded
+
+
 def genie_labels(plane, channel, alloc, dmrs_symbols, modulation):
     """The bits a receiver with the TRUE channel would decide, in the contract's label layout.
 
@@ -469,6 +526,10 @@ def main():
     parser.add_argument("--out", default="", help="run directory; not needed with --export-only")
     parser.add_argument("--modulation", default="256QAM")
     parser.add_argument("--blocks", type=int, default=18)
+    parser.add_argument("--layout", choices=("folded", "unfolded"), default="folded",
+                        help="'folded' is the contract's plane. 'unfolded' gives each symbol its own "
+                             "spatial slice so the 3x3 kernel mixes time as well as frequency, "
+                             "which is the remaining structural self-variable")
     parser.add_argument("--dense-blocks", action="store_true",
                         help="dense 3x3 instead of depthwise. Section 25.3 measured the same "
                              "latency for 5.7x the FLOPs, and depthwise is what caps the "
@@ -544,16 +605,20 @@ def main():
     if not args.train or not args.val or not args.out:
         parser.error("--train, --val and --out are required unless --export-only is given")
     train = Batches(args.train, args.modulation, args.max_train, seed=args.seed,
-                    snr_min=args.snr_min, snr_max=args.snr_max, target=args.target)
+                    snr_min=args.snr_min, snr_max=args.snr_max, target=args.target,
+                    layout=args.layout)
     val = Batches(args.val, args.modulation, args.max_val, seed=args.seed + 1,
-                  snr_min=args.snr_min, snr_max=args.snr_max, target=args.target)
+                  snr_min=args.snr_min, snr_max=args.snr_max, target=args.target,
+                  layout=args.layout)
     qm = train.qm
     print(f"train {train.n} samples, val {val.n} samples, {args.modulation} (Qm={qm})")
 
+    if args.layout == "unfolded" and not args.no_aux:
+        parser.error("--layout unfolded builds only the LLR head; add --no-aux")
     model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux,
                   residual=not args.no_residual, dtype=args.dtype,
                   fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
-                  llr_linear=args.llr_linear, dense=args.dense_blocks)
+                  llr_linear=args.llr_linear, dense=args.dense_blocks, layout=args.layout)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}")
 
@@ -567,7 +632,10 @@ def main():
     def step(x, targets, training):
         with tf.GradientTape() as tape:
             outputs = model(x, training=training)
-            llr = tf.cast(outputs["llr"], tf.float32)[:, :, 0, :] * scale
+            raw = tf.cast(outputs["llr"], tf.float32)
+            # The unfolded graph returns [batch, width, symbols * qm] already, because its head works
+            # on the (frequency, symbol) plane; the folded one returns [batch, width, 1, channels].
+            llr = (raw if args.layout == "unfolded" else raw[:, :, 0, :]) * scale
             if args.llr_linear:
                 # The bound the contract asks for, applied where it is differentiable.
                 llr = tf.clip_by_value(llr, -scale, scale)
