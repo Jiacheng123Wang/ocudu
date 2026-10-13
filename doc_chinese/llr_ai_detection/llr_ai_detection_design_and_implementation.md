@@ -3111,3 +3111,49 @@ train_depth3.py --layout spatial --c-hid 64 --w-ch 0 --w-noise 0 \
 `for index in range(data.n)`，★★ **绕过了 `Batches.order`** ⇒ ★★ **`--snr-min/--snr-max` 与样本上限【静默失效】** ✗
 （★ 第一次跑 `--snr-min 42` 却打印出 12–48 dB 的行，★ 就是它 ✗）。★★ **改为 `for index in data.order`** ✓
 ⇒ ★★ **过滤开关真的动了**（★ 复跑只出 42/48 dB 两行 ✓）。
+
+### 19.9 ★★★ R5 的更正后执行计划（★ 取代 §17.2 的形状条款；★ 接口调研已完成，★ 照着写即可）
+
+> ★★ **相对 §17 的两处更正已在 §19.6 落地一半**（★ 引擎侧 ✅）；★★ **本节把"要写的代码"逐条钉死**，
+> ★★ **接口已经全部查过一遍**（★ 2026-10-13），★ 下一轮**不需要再调研**。
+
+★★ **已完成（★ 本会话）**：
+| ★ | ★★ 内容 |
+|---|---|
+| ★★★ | ★★ **引擎按空间契约绑定**（★ 输入 `[1,nsc,14,12]`、★ 头的通道数按**声明形状末轴**读、★ backing/keepalive 按声明形状构造）★ + **双向验证**（★ 空间 PASS、★ 折叠 `INIT_FAIL`）✓ §19.6 |
+| ★★ | ★★ **契约的可执行打包**（★ `depth3.pack_input_spatial` / `respaciate` / 自检 ✓）§19.2 |
+| ★★ | ★★ **训练图与损失与布局解耦**（★ 四个头按契约尾部形状读 ✓）§19.3 |
+
+★★ **R5.2a 输入面组装器（★ 新增 `lib/phy/upper/channel_processors/pusch/pusch_depth3_input_plane.{h,cpp}`）**：
+★★ **输入**：★ `const resource_grid_reader& grid`、★ `const pusch_demodulator::configuration& config`；
+★★ **输出**：★ `[612, 14, 12]` 的 fp16 缓冲 + ★ `r`；★★ **不依赖 `estimate()` 的任何结果**（★ §17.1 已核对 ✓）。
+
+| ★ 通道 | ★★ 怎么算（★ 逐字）|
+|---|---|
+| ★★ 0, 1 | ★ `grid.get(port, l, k)` ÷ `r` ⇒ ★ 实部/虚部；★ **`port` = `config.rx_ports.front()`** |
+| ★★ 2 | ★ DM-RS RE 掩码：★ `get_pxsch_dmrs_params(config.dmrs_type, port).re_pattern`（★ 12 个布尔，★ 按 PRB 内偏移）+ `config.rb_mask` + `config.dmrs_symb_pos` |
+| ★★ 3, 4 | ★ `config.rb_mask` 折成子载波；★ `config.dc_position`（★ `optional`，★ 空则全 0）|
+| ★★ 5, 6 | ★★ **导频 LS，去加重**：★ `ĥ_LS[l,k] = grid.get(port,l,k) / (x_DMRS[k] · scaling)`；★★ **`x_DMRS` 的生成必须逐字照抄 `dmrs_pusch_estimator_impl.cpp:91-124`**：★ 幅度 **`M_SQRT1_2`**、★ `c_init = ((14·n_slot + l + 1)·(2·n_id + 1)·2^17 + (2·n_id + n_scid)) mod 2^31`、★ `dmrs_sequence_generate(seq, prg, amplitude, DMRS_REF_POINT_K_TO_POINT_A, nof_re_per_prb(dmrs_type), config.rb_mask)` |
+| ★★ 7–11 | ★ 标量：★ `nof_tx_layers`（★ 必须 =1，★ 否则降级）、★ `nof_cdm_groups_without_data`、★ `dmrs_type`、★ DM-RS 符号计数、★ **`scaling = 1/convert_dB_to_amplitude(get_sch_to_dmrs_ratio_dB(nof_cdm_groups_without_data))`**（★ 与 `dmrs.py::amplitude_scaling` 同一个值 ✓）|
+| ★★ `r` | ★★ **导频 LS 的 RMS**（★ 与 `depth3.reference_amplitude` 同一约定 ✓）★ —— ★ **就地算、不落盘** |
+
+★★ **R5.2b 单测（★ 新增 `tests/unittests/.../pusch_depth3_input_plane_test.cpp`）**：
+★★ **金标准 = Python 产出的 fixture**（★ 网格 + 配置 + 期望的 `[612,14,12]`）——
+★★ **`tests/unittests/phy/support/resource_grid_test_doubles.h` 里有现成的 `resource_grid_reader_spy`** ✓
+（★ 构造 `(ports, symbols, prbs)`、★ `put()` 写入期望网格）⇒ ★★ **不必写真网格**；
+★★ **容差**：★ 判据是 **fp16 往返**（★ 打包时转 fp16 ⇒ ★ 与 fixture 比要在 fp16 量化后比 ✓）。
+
+★★ **R5.1/R5.3 接收机改写（★ `pusch_depth3_receiver_ai_identity::demodulate()`）**：
+1. ★★ **组装**输入面（★ R5.2a）；
+2. ★★ `engine.predict_depth3(...)` ⇒ ★ **四个头**；
+3. ★★ **gather LLR**（★ 契约 §0.2(g) 的规则，★ 子载波升序、★ 符号主序、★ bit 最快；★ DM-RS 符号跳过）；
+4. ★★ **解扰**：★ `descrambler->init(to_underlying(config.rnti) * 2^15 + config.n_id)`（★ `n_rapid` 存在时用 `c_init = rnti·2^16 + rapid·2^10 + n_id` ✓ 经典解调器 `pusch_demodulator_impl.cpp:394-398` 逐字）；
+   ★ `generate(seq)`；★ `revert_scrambling(codeword, codeword, seq)`（★ 同一个 `revert_scrambling`，★ `pusch_demodulator_impl.cpp:48`）；
+5. ★★ `codeword_buffer.on_new_block(codeword, seq)`（★ **序列必须与经典路径【同一个】** ✓ 签名见 `pusch_codeword_buffer.h:37`）；
+6. ★★ **不调用** `demodulator.demodulate(...)` ✓ —— ★★ **这就是 §12.2 的偏差被真正改回来的那一步** ✓。
+
+★★ **R5.4** `computes_itself()` 语义：★ 从"估计器是否绑定细化"改成 **`engine_ready && last_forward_ok`** ✓（★ I10：★ 必须能被证伪 —— ★ 判据是"LLR **不等于**经典路径的 LLR"✓）。
+★★ **R5.5**：★ 记录 **device→host 拷贝**次数与字节数，★ 并**实测**其代价（★ 用户已接受深度 3 是中间态，★ **但数字必须给** ✓）。
+★★ **R6**：★ 头 1（★ `post_eq_noise`）→ `pusch_demodulator_notifier` 的 **SINR**；★ 头 3/4 → 测量核；★ **与 R5 同批** ✓。
+
+★★ **开工前的前置**：★★ **训练好的模型**（★ 本会话已启动，★ 见 §19.7）★ + ★★ **R4.5 标度校准**（★ 否则 `S_llr=20` 只是初值 ✗）。
