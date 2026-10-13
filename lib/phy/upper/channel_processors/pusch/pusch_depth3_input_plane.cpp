@@ -70,6 +70,8 @@ const char* pusch_depth3_input_plane::to_string(status value)
       return "the grid is narrower than the 51 PRB window";
     case status::allocation_outside_window:
       return "the allocation reaches outside the 51 PRB window";
+    case status::allocation_too_narrow:
+      return "the allocation is narrower than the trained envelope (43 PRB)";
     case status::no_rx_port:
       return "no receive port";
     case status::unsupported_layers:
@@ -125,6 +127,11 @@ pusch_depth3_input_plane::assemble(span<__fp16>                           plane,
   // 612 belongs to a bandwidth part that does not start where the window does.
   if (config.rb_mask.find_highest() >= NOF_SUBCARRIERS / NOF_SUBCARRIERS_PER_RB) {
     return status::allocation_outside_window;
+  }
+  // And it must be wide enough for the model to have seen anything like it: MIN_PRB is the
+  // precision envelope of section 0.2(h), and the measurement behind it is in the design document.
+  if (config.rb_mask.count() < MIN_PRB) {
+    return status::allocation_too_narrow;
   }
 
   // The DM-RS symbols, ascending, which is the order the pilot LS channels are filled in.

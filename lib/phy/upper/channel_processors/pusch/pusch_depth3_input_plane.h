@@ -70,6 +70,17 @@ public:
   /// The pilot LS channels carry one complex value per DM-RS symbol, so the contract describes at
   /// most this many.
   static constexpr unsigned NOF_DMRS_SYMBOLS_MAX = 4;
+  /// \brief Narrowest allocation the trained model describes, in resource blocks.
+  ///
+  /// `model_network_design.md` section 0.2(h) records the precision envelope as ">= 43 PRB, allocation
+  /// not starting at PRB 0, slot > 40", and the training and validation sets honour it to the block:
+  /// every sample is 43, 46, 50 or 51 PRB wide. A narrower allocation is inside the CONTRACT and
+  /// outside what the network has ever seen, and the difference is measurable rather than theoretical:
+  /// on the 44 decodable narrow captures of the corpus the classical chain decoded 40 and the network
+  /// 8, while on the wide ones there was nothing to compare. Handing those receptions to the network
+  /// costs the link decodes it would otherwise have, so they are refused and counted like any other
+  /// reception outside the envelope (I7).
+  static constexpr unsigned MIN_PRB = 43;
 
   /// Channel indices, `model_network_design.md` section 0.2(b). Named because a plane written with
   /// the wrong one is a plane that trains and receives nothing.
@@ -103,6 +114,8 @@ public:
     /// An allocation that reaches outside the contract's window, which means the bandwidth part does not
     /// start where the window does.
     allocation_outside_window,
+    /// An allocation narrower than the trained model describes (\ref MIN_PRB).
+    allocation_too_narrow,
     /// No receive port to read.
     no_rx_port,
     /// The contract describes one layer.
