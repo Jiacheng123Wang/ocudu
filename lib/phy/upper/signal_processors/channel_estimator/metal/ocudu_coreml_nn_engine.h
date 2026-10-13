@@ -93,6 +93,15 @@ public:
   /// \return True on success.
   bool predict_depth3(const depth3_input& in, const depth3_output& out);
 
+  /// \brief Bits per resource element the bound depth-3 model's main head was built for, or 0 if none.
+  ///
+  /// The contract trains ONE MODEL PER MODULATION (section 0.2(h)), so the arm has to know which one it bound
+  /// before it runs: a 256QAM model fed a 64QAM reception produces 112 channels where the caller reads 84, and
+  /// the only honest outcome is a refusal that NAMES the reason. Without this the engine still refuses -- it
+  /// checks the caller's `bits_per_symbol` against the model -- but the receiver can only report "the forward
+  /// pass failed", which is the kind of message that costs an afternoon.
+  unsigned depth3_bits_per_symbol() const;
+
   /// Wall-clock duration of the last predict() in microseconds.
   double last_predict_us() const { return last_predict_us_; }
 

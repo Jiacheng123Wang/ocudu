@@ -84,6 +84,9 @@ public:
   /// beyond the classical chain run.
   bool computes_itself() const override { return refinement_bound; }
 
+  /// For this arm the binding IS the answer to both questions: it computes nothing of its own either way.
+  bool is_bound() const override { return refinement_bound; }
+
   /// \brief Whether this arm will actually compute a refined estimate (the same answer, named for this arm).
   bool is_refinement_bound() const { return refinement_bound; }
 

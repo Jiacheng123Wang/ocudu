@@ -468,6 +468,15 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
   return true;
 }
 
+unsigned coreml_nn_engine::depth3_bits_per_symbol() const
+{
+  auto* e = static_cast<coreml_nn_engine_impl*>(impl);
+  if (e == nullptr || e->model3 == nil || e->model3_channels[0] == 0) {
+    return 0;
+  }
+  return e->model3_channels[0] / NOF_SYMBOLS_PER_SLOT;
+}
+
 bool coreml_nn_engine::predict_depth3(const depth3_input& in, const depth3_output& out)
 {
   auto* e = static_cast<coreml_nn_engine_impl*>(impl);

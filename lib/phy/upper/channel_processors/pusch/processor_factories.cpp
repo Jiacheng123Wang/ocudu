@@ -151,8 +151,13 @@ public:
     ch_estimate_dimensions(config.ch_estimate_dimensions),
     dec_nof_iterations(config.dec_nof_iterations),
     dec_enable_early_stop(config.dec_enable_early_stop),
-    depth3_kind(config.pusch_receiver_backend == "ai" ? pusch_depth3_kind::ai_identity
-                                                       : pusch_depth3_kind::classic),
+    // A model path selects the arm that COMPUTES; without one the arm is the stage-S-1 identity, which
+    // forwards and says so. The choice is made here because only the configuration knows whether a model was
+    // asked for, and the arm reports the OUTCOME (a bundle that fails to load leaves it inactive).
+    depth3_kind(config.pusch_receiver_backend == "ai"
+                    ? (config.pusch_receiver_model_path.empty() ? pusch_depth3_kind::ai_identity
+                                                                : pusch_depth3_kind::ai_network)
+                    : pusch_depth3_kind::classic),
     depth3_model_path(config.pusch_receiver_model_path),
     csi_sinr_calc_method(config.csi_sinr_calc_method)
   {
@@ -193,15 +198,20 @@ public:
     // The binding's OUTCOME, reported once for the whole pool. The arm decides, the estimator refines, and this
     // line is what tells an operator which of the two actually happened: "ai" on the command line is a request,
     // not a fact, and a run must never be read as an AI result on the strength of the request alone.
-    if (depth3_kind == pusch_depth3_kind::ai_identity) {
+    if (depth3_kind != pusch_depth3_kind::classic) {
       const bool bound = dependencies.front()->depth3_refinement_bound();
-      if (bound) {
+      if (bound && depth3_kind == pusch_depth3_kind::ai_network) {
         fmt::print(stderr,
-                   "[pusch_receiver] backend=ai: AI ARM ACTIVE. The depth-3 forward pass is bound to model '{}' "
-                   "and the estimator will refine its estimate; the equaliser and demapper are the arm's own "
-                   "call path. A reception whose equaliser reads the DEVICE estimate does not consume the "
-                   "refinement - the host-grid route does.\n",
+                   "[pusch_receiver] backend=ai: AI ARM ACTIVE. The depth-3 network bound model '{}' and "
+                   "COMPUTES channel estimation, equalisation and demapping itself: the classical demodulator "
+                   "does not run, and the classical estimator still runs only for the chain's measurements. "
+                   "Every degraded reception is logged and counted.\n",
                    depth3_model_path);
+      } else if (bound) {
+        fmt::print(stderr,
+                   "[pusch_receiver] backend=ai: AI ARM IS THE IDENTITY (no model path was given). The "
+                   "estimator refines its estimate and the demodulator is the classical one. This run's "
+                   "depth-3 output must NOT be reported as an AI result.\n");
       } else {
         fmt::print(stderr,
                    "[pusch_receiver] backend=ai: AI ARM INACTIVE (the estimator could not bind model '{}'). "

@@ -98,8 +98,11 @@ public:
     /// type or CDM group count outside the table, more DM-RS symbols than the LS channels hold, or a
     /// sequence context that disagrees with the demodulator.
     unsupported_configuration,
-    /// A bandwidth part that is not the contract's 51 PRB.
+    /// A grid narrower than the contract's 51 PRB window.
     unsupported_bandwidth,
+    /// An allocation that reaches outside the contract's window, which means the bandwidth part does not
+    /// start where the window does.
+    allocation_outside_window,
     /// No receive port to read.
     no_rx_port,
     /// The contract describes one layer.

@@ -30,7 +30,10 @@ constexpr float DMRS_SEQUENCE_AMPLITUDE = 0.70710678118654752440F;
 
 } // namespace
 
-pusch_depth3_dmrs_context make_pusch_depth3_dmrs_context(const dmrs_pusch_estimator::configuration& config)
+// Qualified, not left to the using-directive: a free function DEFINED unqualified at global scope
+// declares a new function there instead of defining the one `namespace ocudu` declared, and the linker
+// is the only thing that notices.
+pusch_depth3_dmrs_context ocudu::make_pusch_depth3_dmrs_context(const dmrs_pusch_estimator::configuration& config)
 {
   pusch_depth3_dmrs_context context;
   context.slot            = config.slot;
@@ -64,7 +67,9 @@ const char* pusch_depth3_input_plane::to_string(status value)
     case status::unsupported_configuration:
       return "the configuration is outside the contract";
     case status::unsupported_bandwidth:
-      return "the bandwidth part is not 51 PRB";
+      return "the grid is narrower than the 51 PRB window";
+    case status::allocation_outside_window:
+      return "the allocation reaches outside the 51 PRB window";
     case status::no_rx_port:
       return "no receive port";
     case status::unsupported_layers:
@@ -89,7 +94,13 @@ pusch_depth3_input_plane::assemble(span<__fp16>                           plane,
   }
   // The envelope the contract describes. Every case here is a property of the RECEPTION rather than
   // of the implementation, so each one is a degradation to count and not a programming error.
-  if (grid.get_nof_subc() != NOF_SUBCARRIERS) {
+  // The contract's window is the first 612 subcarriers of the grid, which is the bandwidth part when the cell
+  // IS the bandwidth part (612 of 612) and stays the same window when the chain's grid is the whole carrier
+  // (the replay harness builds a 275 PRB grid for a 51 PRB capture, `ul_chain_replay.cpp:1254`). A window that
+  // is not the bandwidth part -- a cell whose BWP does not start at subcarrier zero -- must NOT be assembled:
+  // it would feed the network a different 51 PRBs than it was trained on, and the only sign of it would be a
+  // slightly worse constellation. That case is caught below, where an allocation outside the window refuses.
+  if (grid.get_nof_subc() < NOF_SUBCARRIERS) {
     return status::unsupported_bandwidth;
   }
   if (config.enable_transform_precoding || config.start_symbol_index != 0 ||
@@ -108,6 +119,13 @@ pusch_depth3_input_plane::assemble(span<__fp16>                           plane,
   }
 
   const unsigned port = config.rx_ports.front();
+
+  // Every allocated resource block must lie inside the contract's window. This is the check that makes "the
+  // window is the bandwidth part" a fact rather than an assumption: an allocation that reaches past subcarrier
+  // 612 belongs to a bandwidth part that does not start where the window does.
+  if (config.rb_mask.find_highest() >= NOF_SUBCARRIERS / NOF_SUBCARRIERS_PER_RB) {
+    return status::allocation_outside_window;
+  }
 
   // The DM-RS symbols, ascending, which is the order the pilot LS channels are filled in.
   std::array<unsigned, NOF_DMRS_SYMBOLS_MAX> dmrs_symbols{};
