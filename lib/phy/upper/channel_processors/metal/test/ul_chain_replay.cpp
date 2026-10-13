@@ -390,6 +390,16 @@ int main(int argc, char** argv)
   /// stayed invisible until it reached the air. Rotating captures of different shapes in one process
   /// is what makes the per-hop state visible.
   std::vector<std::string> rotate;
+  /// \brief Replay every capture through ONE processor, so a retransmission meets the soft buffer its
+  /// earlier transmission filled (--harq-chain).
+  ///
+  /// A retransmission cannot be decoded on its own and must not be asked to be: the capture says
+  /// `new_data=0`, the decoder therefore COMBINES with its soft buffer, and in a one-processor-per-capture
+  /// replay that buffer is empty. What comes out is the null word -- and the null word passes both the LDPC
+  /// syndrome and CRC-24A, so the chain reports `crc=OK` over 5763 zero bytes and every comparison built on
+  /// that verdict compares nothing. Chaining the transmissions of one HARQ process is what makes the
+  /// retransmission's decode mean what it says.
+  bool harq_chain = false;
   // Default to the strategy the gNB app configures (pusch_channel_estimator_td_strategy), so that a
   // replay compares like with like: the classical estimator divides the least-squares pilots by the
   // number of DM-RS symbols only under "average", while the Metal one always runs its own MMSE.
@@ -415,6 +425,8 @@ int main(int argc, char** argv)
       repeat = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
     } else if ((arg == "--also") && (i + 1 < argc)) {
       rotate.emplace_back(argv[++i]);
+    } else if (arg == "--harq-chain") {
+      harq_chain = true;
     } else if (arg == "--dft") {
       dft_mode   = true;
       // --dft names its back end as much as --cpu/--metal do (the generic CPU DFT, line below), so it
@@ -456,6 +468,8 @@ int main(int argc, char** argv)
     } else if (arg == "-h" || arg == "--help") {
       std::printf("usage: %s <capture-base> --out <prefix> [--cpu|--metal|--metal-cpu-ldpc|--metal-cpu-demod]\n"
                   "  <capture-base> is one reception of a capture, e.g. /tmp/C_4352_17921\n"
+                  "  --also <base> --harq-chain replays several transmissions of ONE HARQ process\n"
+                  "    through ONE processor, so a retransmission combines with the earlier soft bits\n"
                   "  --dft [--dft-metal] [--device-grid] [--synth N] [--synth-first-slot S] [--reuse-grid]\n"
                   "    replays TIME-DOMAIN input through the OFDM demodulator; with --synth N the input is\n"
                   "    generated (N slots) instead of read, so no capture is needed.\n",
@@ -1121,6 +1135,13 @@ int main(int argc, char** argv)
     std::printf("depth-3 receiver model: %s (OCUDU_REPLAY_MODEL)\n", model_env);
   }
   std::shared_ptr<pusch_processor_factory> proc_factory = create_pusch_processor_factory_sw(proc_cfg);
+  // The chained receiver, alive across every capture of the run: its decoder is the soft buffer a
+  // retransmission combines with (see --harq-chain).
+  std::unique_ptr<pusch_processor> harq_receiver;
+  if (harq_chain) {
+    harq_receiver = proc_factory->create();
+    check(harq_receiver, "pusch processor (harq chain)");
+  }
   check(proc_factory, "proc_factory");
   report("created proc_factory");
 
@@ -1400,16 +1421,35 @@ int main(int argc, char** argv)
       hop_pdu.back().rnti = to_rnti(static_cast<uint16_t>(base_rnti + k));
       auto spy            = std::make_unique<result_spy>();
       unique_rx_buffer buffer = buffer_pool->get_pool().reserve(
-          hop_pdu.back().slot, trx_buffer_identifier(hop_pdu.back().rnti, 0), nof_codeblocks, true);
+          hop_pdu.back().slot,
+          // Keyed by the capture's OWN HARQ identifier, not by zero. The receive buffer IS the HARQ soft
+          // buffer, so a hardcoded zero makes every process share one and -- worse for --harq-chain -- a
+          // retransmission of one process indistinguishable from a first transmission of another.
+          trx_buffer_identifier(hop_pdu.back().rnti, static_cast<uint8_t>(to_underlying(hop_pdu.back().harq_id))),
+          nof_codeblocks,
+          // The CAPTURE's own flag, not a hardcoded `true`: the last argument is `new_data`, and the pool
+          // WIPES the soft buffer when it is set. Hardcoding it made every retransmission start from an
+          // empty buffer, so a --harq-chain run reproduced exactly the failure it was written to fix --
+          // and reported the null word as a successful decode.
+          hop_pdu.back().codeword->new_data);
       if (!buffer) {
         std::fprintf(stderr, "cannot reserve a receive buffer\n");
         return 1;
       }
-      auto receiver = proc_factory->create();
-      check(receiver, "pusch processor");
+      std::unique_ptr<pusch_processor> owned_receiver;
+      pusch_processor*                  receiver = nullptr;
+      if (harq_chain) {
+        receiver = harq_receiver.get();
+      } else {
+        owned_receiver = proc_factory->create();
+        check(owned_receiver, "pusch processor");
+        receiver = owned_receiver.get();
+      }
       receiver->process(data, std::move(buffer), *spy, grid->get_reader(), hop_pdu.back());
       spies.push_back(std::move(spy));
-      receivers.push_back(std::move(receiver));
+      if (owned_receiver) {
+        receivers.push_back(std::move(owned_receiver));
+      }
     }
     for (std::unique_ptr<result_spy>& spy : spies) {
       for (unsigned wait = 0; (wait != 5000) && !spy->done; ++wait) {
