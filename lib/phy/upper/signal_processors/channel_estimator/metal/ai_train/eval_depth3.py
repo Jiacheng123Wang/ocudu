@@ -94,6 +94,19 @@ def genie_llr(plane, channel, sigma2_over_r2, alloc, dmrs_symbols, modulation):
     return max_log_llr(equalized, noise, D3.BITS_PER_SYMBOL[modulation])
 
 
+def to_bf16(values):
+    """Rounds a float32 array to bfloat16 the way `ocudu/adt/bf16.h` rounds it.
+
+    The chain's resource grid STORES complex bfloat16, so the receiver reads eight mantissa bits while
+    the datasets hold ten (fp16). Whether those two bits matter is a measurement, not an opinion, and
+    this is the switch that takes it.
+    """
+    as_uint = np.asarray(values, dtype=np.float32).copy().view(np.uint32)
+    as_uint += np.uint32(0x7FFF) + ((as_uint >> np.uint32(16)) & np.uint32(1))
+    as_uint &= np.uint32(0xFFFF0000)
+    return as_uint.view(np.float32)
+
+
 def perfect_llr(sample):
     """The LLRs a perfect model emits: the label is `1 - b` and positive means bit 0."""
     return (2.0 * sample["llr_shape"] - 1.0) * LD.KNOWN_LLR
@@ -125,7 +138,10 @@ def evaluate(args):
         dmrs_symbols = data.dmrs_symbols_of(index)
         modulation = data.modulation_of(index)
 
-        outputs = model(tf.constant(sample["x"][None, ...]), training=False)
+        plane = sample["x"]
+        if args.input_quant == "bf16":
+            plane = to_bf16(plane)
+        outputs = model(tf.constant(plane[None, ...]), training=False)
         # The heads leave the model with the contract's `[subcarriers, channels]` tail whatever the
         # trunk's internal layout is: the folded plane adds a degenerate spatial axis, so flattening
         # to two axes reads both layouts and the evaluation cannot drift with the trunk.
@@ -187,6 +203,9 @@ def main():
                         help="the packing the model was trained on; must match the data")
     parser.add_argument("--snr-min", type=float, default=None)
     parser.add_argument("--snr-max", type=float, default=None)
+    parser.add_argument("--input-quant", choices=("none", "bf16"), default="none",
+                        help="quantise the input plane before the forward pass. 'bf16' emulates what a "
+                             "receiver reads back from the resource grid, which stores bfloat16")
     parser.add_argument("--seed", type=int, default=20261013)
     args = parser.parse_args()
     return evaluate(args)
