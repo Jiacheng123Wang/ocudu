@@ -373,12 +373,35 @@ def rename_outputs(mlmodel, qm):
     return ct.models.MLModel(spec, weights_dir=mlmodel.weights_dir)
 
 
+def export_deployment(model, qm, path):
+    """Convert a TRAINED model to the fp16 deployment graph, with the contract's output names.
+
+    The conversion decides the deployment precision, which is why training runs in fp32: the
+    artifact is fp16 either way. The heads are renamed because the TensorFlow frontend emits
+    `Identity`, `Identity_1`, ... and drops the Keras layer names, while the contract binds them BY
+    NAME; `depth3_engine_check` refuses a bundle whose heads are not named `llr`, `post_eq_noise`,
+    `ch_est` and `dmrs_noise`, and a bundle exported before training would carry random weights and
+    still pass every shape check.
+    """
+    import coremltools as ct
+    converted = ct.convert(
+        model,
+        inputs=[ct.TensorType(name="x", shape=(1, D3.NOF_SUBCARRIERS, 1, D3.NOF_CHANNELS),
+                              dtype=np.float16)],
+        compute_precision=ct.precision.FLOAT16,
+        minimum_deployment_target=ct.target.iOS17,
+        convert_to="mlprogram")
+    converted = rename_outputs(converted, qm)
+    converted.save(path)
+    print(f"wrote the fp16 deployment graph to {path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--train", required=True)
-    parser.add_argument("--val", required=True)
-    parser.add_argument("--out", required=True)
+    parser.add_argument("--train", default="", help="training dataset; not needed with --export-only")
+    parser.add_argument("--val", default="", help="validation dataset; not needed with --export-only")
+    parser.add_argument("--out", default="", help="run directory; not needed with --export-only")
     parser.add_argument("--modulation", default="256QAM")
     parser.add_argument("--blocks", type=int, default=18)
     parser.add_argument("--epochs", type=int, default=150)
@@ -393,6 +416,8 @@ def main():
     parser.add_argument("--no-fold-scale", action="store_true",
                         help="keep the LayerScale as a separate multiply. Costs about 200 us on "
                              "the ANE (section 45.8); the default folds it into the convolution")
+    parser.add_argument("--export-only", default="",
+                        help="export this trained .keras to the fp16 deployment graph and exit")
     parser.add_argument("--export-probe", default="",
                         help="also write the graph as a CoreML mlpackage, so the ANE probe "
                              "measures the artifact this script trains rather than a copy of it")
@@ -417,6 +442,17 @@ def main():
     tf.get_logger().setLevel("ERROR")
     tf.random.set_seed(args.seed)
 
+    if args.export_only:
+        exported = tf.keras.models.load_model(
+            args.export_only, compile=False,
+            custom_objects={"FoldedScaleConv": FoldedScaleConv})
+        if not args.export_probe:
+            parser.error("--export-only needs --export-probe")
+        export_deployment(exported, D3.BITS_PER_SYMBOL[args.modulation], args.export_probe)
+        return 0
+
+    if not args.train or not args.val or not args.out:
+        parser.error("--train, --val and --out are required unless --export-only is given")
     train = Batches(args.train, args.modulation, args.max_train, seed=args.seed)
     val = Batches(args.val, args.modulation, args.max_val, seed=args.seed + 1)
     qm = train.qm
@@ -427,26 +463,6 @@ def main():
                   fold_scale=not args.no_fold_scale)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}")
-
-    if args.export_probe:
-        import coremltools as ct
-        probe = build(blocks=args.blocks, qm=qm, aux_heads=not args.no_aux,
-                      residual=not args.no_residual, dtype="float16",
-                      fold_scale=not args.no_fold_scale)
-        converted = ct.convert(
-            probe,
-            inputs=[ct.TensorType(name="x", shape=(1, D3.NOF_SUBCARRIERS, 1, D3.NOF_CHANNELS),
-                                  dtype=np.float16)],
-            compute_precision=ct.precision.FLOAT16,
-            minimum_deployment_target=ct.target.iOS17,
-            convert_to="mlprogram")
-        # The TensorFlow frontend names the outputs `Identity`, `Identity_1`, ... and loses the
-        # Keras layer names, while the contract binds them BY NAME. Renaming the spec is what makes
-        # the artifact self-describing, and it is checked: `depth3_engine_check` refuses a bundle
-        # whose heads are not named `llr`, `post_eq_noise`, `ch_est` and `dmrs_noise`.
-        converted = rename_outputs(converted, qm)
-        converted.save(args.export_probe)
-        print(f"wrote the fp16 deployment graph to {args.export_probe}")
 
     # The scale is model-external per the contract, so the loss sees the LLR the quantizer sees.
     scale = D3.RANGE_LIMIT_FLOAT[args.modulation]
@@ -585,6 +601,13 @@ def main():
     np.save(os.path.join(args.out, "val_llr_stats.npy"),
             np.array([[h["val_ber"], h["val_llr_mean"], h["val_bler"]] for h in history]))
     print(f"best val loss {best:.5f}; wrote {args.out}/depth3_best.keras and history.json")
+
+    # Export AFTER training, from the trained weights. Exporting first would produce a deployment
+    # graph with random weights that passes every shape check, which is the kind of artifact that
+    # reaches a receiver and produces plausible nonsense.
+    if args.export_probe:
+        model.load_weights(os.path.join(args.out, "depth3_best.keras"))
+        export_deployment(model, qm, args.export_probe)
     return 0
 
 
