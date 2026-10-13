@@ -92,7 +92,7 @@ class FoldedScaleConv(tf.keras.layers.Layer):
 
 
 def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, residual=True,
-          dtype="float32", fold_scale=True):
+          dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -117,21 +117,27 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
                                                 dtype=keras_dtype, name=f"dw{i}_3x3_d{dilation}")(y)
         block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}")(block)
         if residual and fold_scale:
-            block = FoldedScaleConv(c_hid, dtype=keras_dtype, name=f"pw{i}_1x1")(block)
+            block = FoldedScaleConv(c_hid, initial_gain=scale_init, dtype=keras_dtype,
+                                    name=f"pw{i}_1x1")(block)
             block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}b")(block)
             y = tf.keras.layers.Add(name=f"add{i}", dtype=keras_dtype)([y, block])
         else:
             block = tf.keras.layers.Conv2D(c_hid, 1, dtype=keras_dtype, name=f"pw{i}_1x1")(block)
             block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}b")(block)
             if residual:
-                block = Scale(name=f"scale{i}", dtype=keras_dtype)(block)
+                block = Scale(initial=scale_init, name=f"scale{i}", dtype=keras_dtype)(block)
                 y = tf.keras.layers.Add(name=f"add{i}", dtype=keras_dtype)([y, block])
             else:
                 y = block
 
+    # The main head's bound. `tanh` keeps the output inside +-1 with no clipping branch, but its
+    # gradient vanishes exactly where a confident bit lives: at 42 dB the correct LLR is far beyond
+    # the scale, so every well-classified bit sits in the flat region and stops teaching the trunk.
+    # Section 4.2 lists a clamp as the second allowed form of the same bound, and a linear head with
+    # an explicit clamp keeps the gradient everywhere the output is not already clipped.
+    llr_head = tf.keras.layers.Conv2D(NOF_SYMBOLS * qm, 1, dtype=keras_dtype, name="llr_1x1")(y)
     outputs = {"llr": tf.keras.layers.Activation(
-        "tanh", dtype=keras_dtype, name="llr")(
-            tf.keras.layers.Conv2D(NOF_SYMBOLS * qm, 1, dtype=keras_dtype, name="llr_1x1")(y))}
+        "linear" if llr_linear else "tanh", dtype=keras_dtype, name="llr")(llr_head)}
     if aux_heads:
         outputs["post_eq_noise"] = tf.keras.layers.Activation(
             "tanh", dtype=keras_dtype, name="post_eq_noise")(
@@ -164,7 +170,7 @@ class Batches:
               "qm", "sigma2_over_r2", "snr_nominal", "tb_bits", "nof_tb_bits", "rnti", "n_id",
               "rv")
 
-    def __init__(self, path, modulation, max_samples=0, seed=0):
+    def __init__(self, path, modulation, max_samples=0, seed=0, snr_min=None, snr_max=None):
         # Read every array once, eagerly. The file is a compressed archive, and accessing
         # `data["X"]` per sample would decompress the whole 200 MB array every time.
         archive = np.load(path, allow_pickle=True)
@@ -172,9 +178,21 @@ class Batches:
         self.modulation = modulation
         self.qm = D3.BITS_PER_SYMBOL[modulation]
         self.n = len(self.data["X"])
+        # Keep only the requested SNR range. The label of a low-SNR resource element is decided by
+        # the noise, not by the input, so a model cannot fit it however long it trains; restricting
+        # the range is how the pipeline is checked against an answer that IS reachable.
+        self.order = np.arange(self.n)
+        nominal = self.data["snr_nominal"]
+        keep = np.ones(self.n, dtype=bool)
+        if snr_min is not None:
+            keep &= nominal >= snr_min
+        if snr_max is not None:
+            keep &= nominal <= snr_max
+        self.order = self.order[keep]
+        self.n = int(self.order.size)
         if max_samples:
             self.n = min(self.n, max_samples)
-        self.order = np.arange(self.n)
+        self.order = self.order[:self.n]
         self.rng = np.random.default_rng(seed)
 
     def allocation_of(self, index):
@@ -409,10 +427,23 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--max-train", type=int, default=0, help="cap the training samples")
     parser.add_argument("--max-val", type=int, default=64)
+    parser.add_argument("--snr-min", type=float, default=None,
+                        help="keep only samples at or above this nominal SNR. A low-SNR label is "
+                             "decided by the noise, so training on it cannot converge to a low "
+                             "error rate; the high-SNR slice is the one with a reachable answer")
+    parser.add_argument("--snr-max", type=float, default=None)
     parser.add_argument("--w-llr", type=float, default=L.DEFAULT_WEIGHTS["llr"])
     parser.add_argument("--w-ch", type=float, default=L.DEFAULT_WEIGHTS["ch_est"])
     parser.add_argument("--w-noise", type=float, default=L.DEFAULT_WEIGHTS["post_eq_noise"])
     parser.add_argument("--no-aux", action="store_true", help="LLR head only, for the R2.4 ablation")
+    parser.add_argument("--llr-linear", action="store_true",
+                        help="make the LLR head linear and bound it by clamping in the loss, "
+                             "instead of a tanh whose gradient vanishes where confident bits live")
+    parser.add_argument("--scale-init", type=float, default=1.0,
+                        help="initial gain of the residual LayerScale. The refiner uses 0.1 because "
+                             "it learns a correction on top of its input; this network learns the "
+                             "whole mapping from scratch, and at 0.1 the eighteen blocks each shrink "
+                             "their branch tenfold, so training stalls")
     parser.add_argument("--no-fold-scale", action="store_true",
                         help="keep the LayerScale as a separate multiply. Costs about 200 us on "
                              "the ANE (section 45.8); the default folds it into the convolution")
@@ -453,14 +484,17 @@ def main():
 
     if not args.train or not args.val or not args.out:
         parser.error("--train, --val and --out are required unless --export-only is given")
-    train = Batches(args.train, args.modulation, args.max_train, seed=args.seed)
-    val = Batches(args.val, args.modulation, args.max_val, seed=args.seed + 1)
+    train = Batches(args.train, args.modulation, args.max_train, seed=args.seed,
+                    snr_min=args.snr_min, snr_max=args.snr_max)
+    val = Batches(args.val, args.modulation, args.max_val, seed=args.seed + 1,
+                  snr_min=args.snr_min, snr_max=args.snr_max)
     qm = train.qm
     print(f"train {train.n} samples, val {val.n} samples, {args.modulation} (Qm={qm})")
 
     model = build(blocks=args.blocks, qm=qm, aux_heads=not args.no_aux,
                   residual=not args.no_residual, dtype=args.dtype,
-                  fold_scale=not args.no_fold_scale)
+                  fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
+                  llr_linear=args.llr_linear)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}")
 
@@ -475,6 +509,9 @@ def main():
         with tf.GradientTape() as tape:
             outputs = model(x, training=training)
             llr = tf.cast(outputs["llr"], tf.float32)[:, :, 0, :] * scale
+            if args.llr_linear:
+                # The bound the contract asks for, applied where it is differentiable.
+                llr = tf.clip_by_value(llr, -scale, scale)
             terms = {"llr": L.tf_bce_loss(llr, targets["llr_shape"], targets["llr_weights"])}
             if not args.no_aux:
                 ch = tf.cast(outputs["ch_est"], tf.float32)[:, :, 0, :]
