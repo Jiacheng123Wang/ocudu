@@ -92,7 +92,7 @@ class FoldedScaleConv(tf.keras.layers.Layer):
 
 
 def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, residual=True,
-          dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False):
+          dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -118,8 +118,18 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         y = tf.keras.layers.ReLU(dtype=keras_dtype, name="entry_relu")(y)
     for i in range(blocks):
         dilation = DILATIONS[i % len(DILATIONS)]
-        block = tf.keras.layers.DepthwiseConv2D(3, padding="same", dilation_rate=(dilation, 1),
-                                                dtype=keras_dtype, name=f"dw{i}_3x3_d{dilation}")(y)
+        # A DEPTHWISE 3x3 mixes frequency within each channel; a dense one mixes channels and
+        # frequency together, which is far more expressive per layer. `model_network_design` 25.3
+        # measured that a dense 3x3 computes 5.7 times the FLOPs for the SAME latency on this
+        # engine, so the depthwise choice was buying an arithmetic-intensity saving the ANE did not
+        # need, at the cost of exactly the per-position capacity the diagnosis points at.
+        if dense:
+            block = tf.keras.layers.Conv2D(c_hid, 3, padding="same", dilation_rate=(dilation, 1),
+                                           dtype=keras_dtype, name=f"cv{i}_3x3_d{dilation}")(y)
+        else:
+            block = tf.keras.layers.DepthwiseConv2D(
+                3, padding="same", dilation_rate=(dilation, 1), dtype=keras_dtype,
+                name=f"dw{i}_3x3_d{dilation}")(y)
         block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}")(block)
         if residual and fold_scale:
             block = FoldedScaleConv(c_hid, initial_gain=scale_init, dtype=keras_dtype,
@@ -459,6 +469,10 @@ def main():
     parser.add_argument("--out", default="", help="run directory; not needed with --export-only")
     parser.add_argument("--modulation", default="256QAM")
     parser.add_argument("--blocks", type=int, default=18)
+    parser.add_argument("--dense-blocks", action="store_true",
+                        help="dense 3x3 instead of depthwise. Section 25.3 measured the same "
+                             "latency for 5.7x the FLOPs, and depthwise is what caps the "
+                             "per-position capacity the diagnosis points at")
     parser.add_argument("--c-hid", type=int, default=64,
                         help="trunk width. The contract freezes the tensor shapes, not the width "
                              "inside the network, and a per-position decision over a 256QAM "
@@ -539,7 +553,7 @@ def main():
     model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux,
                   residual=not args.no_residual, dtype=args.dtype,
                   fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
-                  llr_linear=args.llr_linear)
+                  llr_linear=args.llr_linear, dense=args.dense_blocks)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}")
 
