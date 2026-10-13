@@ -366,6 +366,22 @@ def respaciate(plane):
     return out
 
 
+def grid_from_plane(plane, alloc_prb, dmrs_symbols, dmrs_type=1):
+    """The complex `[symbol, subcarrier]` grid a packed plane carries, in either layout.
+
+    The folded plane holds the grid in channels `2t` and `2t+1`; the spatial plane holds it in
+    channels 0 and 1 of each symbol's slice. Both are the same received grid divided by the same
+    reference amplitude, so a consumer that only needs the grid - a baseline, a test, a diagnostic -
+    should not have to know which packing produced it.
+    """
+    plane = np.asarray(plane)
+    if plane.ndim == 2:
+        plane = plane[:, None, :]
+    if plane.shape[1] == 1:
+        return unpack_input(plane[:, 0, :], alloc_prb, dmrs_symbols, dmrs_type)["grid"]
+    return unpack_input_spatial(plane, alloc_prb, dmrs_symbols)["grid"]
+
+
 def llr_channels(modulation):
     """Number of channels the LLR head carries for `modulation`: one symbol block per symbol."""
     return NOF_SYMBOLS * BITS_PER_SYMBOL[modulation]

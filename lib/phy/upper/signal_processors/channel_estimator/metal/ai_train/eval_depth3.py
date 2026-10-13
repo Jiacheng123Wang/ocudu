@@ -83,12 +83,9 @@ def genie_llr(plane, channel, sigma2_over_r2, alloc, dmrs_symbols, modulation):
     which is the same normalisation the contract's plane uses, so the two are consistent without
     restoring physical units.
     """
-    # The contract's plane is [subcarrier, 1, channel]; `unpack_input` reads [subcarrier, channel].
-    plane = np.asarray(plane)
-    if plane.ndim == 3:
-        plane = plane[:, 0, :]
-    back = D3.unpack_input(plane, alloc, dmrs_symbols, 1)
-    grid = back["grid"]                                   # [symbol, subcarrier]
+    # Either packing reads here: the folded plane is [subcarrier, 1, channel], the spatial one is
+    # [subcarrier, symbol, channel], and both carry the same normalised grid.
+    grid = D3.grid_from_plane(plane, alloc, dmrs_symbols)  # [symbol, subcarrier]
     subcarriers, symbols = D3.data_re_indices(alloc, dmrs_symbols)
     received = grid[symbols, subcarriers]
     estimate = channel[subcarriers, symbols]
@@ -106,7 +103,8 @@ def evaluate(args):
     import tensorflow as tf
     tf.get_logger().setLevel("ERROR")
 
-    data = T.Batches(args.data, args.modulation, max_samples=args.samples, seed=args.seed)
+    data = T.Batches(args.data, args.modulation, max_samples=args.samples, seed=args.seed,
+                     snr_min=args.snr_min, snr_max=args.snr_max, layout=args.layout)
     model = tf.keras.models.load_model(args.model, compile=False,
                                        custom_objects={"FoldedScaleConv": T.FoldedScaleConv})
     scale = D3.RANGE_LIMIT_FLOAT[args.modulation]
@@ -118,15 +116,21 @@ def evaluate(args):
     # high SNR, which is exactly the pattern the depth-1 refiner showed.
     per_snr = defaultdict(lambda: defaultdict(lambda: [0, 0]))
 
-    for index in range(data.n):
+    # `data.order`, not `range(data.n)`: the SNR filter and the sample cap both live in the order
+    # array, and iterating the raw indices silently ignores them -- a switch that does not switch.
+    for index in data.order:
+        index = int(index)
         sample = data.sample(index)
         alloc = data.allocation_of(index)
         dmrs_symbols = data.dmrs_symbols_of(index)
         modulation = data.modulation_of(index)
 
         outputs = model(tf.constant(sample["x"][None, ...]), training=False)
-        network = D3.llr_gather(np.asarray(outputs["llr"])[0, :, 0, :] * scale, alloc, dmrs_symbols,
-                                modulation)
+        # The heads leave the model with the contract's `[subcarriers, channels]` tail whatever the
+        # trunk's internal layout is: the folded plane adds a degenerate spatial axis, so flattening
+        # to two axes reads both layouts and the evaluation cannot drift with the trunk.
+        llr_plane = np.asarray(outputs["llr"]).reshape(D3.NOF_SUBCARRIERS, -1)
+        network = D3.llr_gather(llr_plane * scale, alloc, dmrs_symbols, modulation)
         channel = sample["ch"][:, :, 0] + 1j * sample["ch"][:, :, 1]
         genie = genie_llr(sample["x"], channel, sample["sigma2_over_r2"], alloc, dmrs_symbols,
                           modulation)
@@ -179,6 +183,10 @@ def main():
     parser.add_argument("--data", required=True)
     parser.add_argument("--modulation", default="256QAM")
     parser.add_argument("--samples", type=int, default=96)
+    parser.add_argument("--layout", choices=("folded", "spatial", "probe8"), default="spatial",
+                        help="the packing the model was trained on; must match the data")
+    parser.add_argument("--snr-min", type=float, default=None)
+    parser.add_argument("--snr-max", type=float, default=None)
     parser.add_argument("--seed", type=int, default=20261013)
     args = parser.parse_args()
     return evaluate(args)
