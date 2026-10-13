@@ -111,6 +111,11 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
     inp = tf.keras.Input(shape=(width, 1, D3.NOF_CHANNELS), batch_size=None, dtype=keras_dtype,
                          name="x")
     y = inp
+    if int(inp.shape[-1]) != c_hid:
+        # The residual adds need matching widths, and the contract's plane has 64 channels whatever
+        # the trunk uses. One projection at the entry is cheaper than a skip projection per block.
+        y = tf.keras.layers.Conv2D(c_hid, 1, dtype=keras_dtype, name="entry_1x1")(y)
+        y = tf.keras.layers.ReLU(dtype=keras_dtype, name="entry_relu")(y)
     for i in range(blocks):
         dilation = DILATIONS[i % len(DILATIONS)]
         block = tf.keras.layers.DepthwiseConv2D(3, padding="same", dilation_rate=(dilation, 1),
@@ -170,13 +175,19 @@ class Batches:
               "qm", "sigma2_over_r2", "snr_nominal", "tb_bits", "nof_tb_bits", "rnti", "n_id",
               "rv")
 
-    def __init__(self, path, modulation, max_samples=0, seed=0, snr_min=None, snr_max=None):
+    def __init__(self, path, modulation, max_samples=0, seed=0, snr_min=None, snr_max=None,
+                 target="coded"):
         # Read every array once, eagerly. The file is a compressed archive, and accessing
         # `data["X"]` per sample would decompress the whole 200 MB array every time.
         archive = np.load(path, allow_pickle=True)
         self.data = {name: archive[name] for name in self.ARRAYS}
         self.modulation = modulation
         self.qm = D3.BITS_PER_SYMBOL[modulation]
+        # "coded" trains against the transmitted bits, which is the contract's task. "genie" trains
+        # against the hard decisions a receiver with the TRUE channel would make, which needs only a
+        # per-resource-element division and a constellation decision and no interpolation across
+        # frequency. The difference between the two isolates where the network stalls.
+        self.target = target
         self.n = len(self.data["X"])
         # Keep only the requested SNR range. The label of a low-SNR resource element is decided by
         # the noise, not by the input, so a model cannot fit it however long it trains; restricting
@@ -214,11 +225,12 @@ class Batches:
         bits = np.unpackbits(data["bits"][index])[:int(data["nof_bits"][index])]
 
         plane = data["X"][index].astype(np.float32)
-        label = D3.label_plane(bits, alloc, dmrs_symbols, modulation)
-        llr_weights = D3.loss_weights(alloc, dmrs_symbols, modulation)
-
         channel = (data["H"][index][:, :, 0].astype(np.float32)
                    + 1j * data["H"][index][:, :, 1].astype(np.float32))
+        label = D3.label_plane(bits, alloc, dmrs_symbols, modulation)
+        if self.target == "genie":
+            label = genie_labels(plane, channel, alloc, dmrs_symbols, modulation)
+        llr_weights = D3.loss_weights(alloc, dmrs_symbols, modulation)
         # The channel head is only constrained where the allocation is, and the target is already
         # divided by the reference amplitude, which is what the head produces.
         subcarriers = np.flatnonzero(D3.allocated_subcarriers(alloc))
@@ -361,6 +373,31 @@ def decode_metrics(llr, labels, weights):
     return float(errors), float(np.mean(np.abs(llr[labelled]))) if labelled.any() else np.nan
 
 
+def genie_labels(plane, channel, alloc, dmrs_symbols, modulation):
+    """The bits a receiver with the TRUE channel would decide, in the contract's label layout.
+
+    Equalize each data resource element by the true channel, take the nearest constellation point
+    and read its bits off. Nothing here needs information from another resource element, so a model
+    that cannot fit THIS is blocked by its per-position capacity rather than by interpolation across
+    frequency; a model that fits it but not the coded bits is blocked by the estimation step.
+    """
+    import eval_depth3 as E
+    qm = D3.BITS_PER_SYMBOL[modulation]
+    # The constellation is the same for every sample; rebuilding it per call dominated the cost.
+    if not hasattr(genie_labels, "points"):
+        genie_labels.points, genie_labels.labels = E.constellation(qm)
+    grid = D3.unpack_input(plane, alloc, dmrs_symbols, 1)["grid"]
+    subcarriers, symbols = D3.data_re_indices(alloc, dmrs_symbols)
+    equalized = grid[symbols, subcarriers] / channel[subcarriers, symbols]
+    nearest = np.argmin(np.abs(equalized[:, None] - genie_labels.points[None, :]), axis=1)
+    bits = genie_labels.labels[nearest].reshape(-1)
+    plane_out = np.zeros((D3.NOF_SUBCARRIERS, D3.NOF_SYMBOLS * qm), dtype=np.float32)
+    resource_element = np.arange(bits.size) // qm
+    bit_index = np.arange(bits.size) % qm
+    plane_out[subcarriers[resource_element], symbols[resource_element] * qm + bit_index] = 1.0 - bits
+    return plane_out
+
+
 def rename_outputs(mlmodel, qm):
     """Rename a converted model's outputs to the contract's names.
 
@@ -422,11 +459,19 @@ def main():
     parser.add_argument("--out", default="", help="run directory; not needed with --export-only")
     parser.add_argument("--modulation", default="256QAM")
     parser.add_argument("--blocks", type=int, default=18)
+    parser.add_argument("--c-hid", type=int, default=64,
+                        help="trunk width. The contract freezes the tensor shapes, not the width "
+                             "inside the network, and a per-position decision over a 256QAM "
+                             "constellation needs more capacity than 64 channels gave it")
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--max-train", type=int, default=0, help="cap the training samples")
     parser.add_argument("--max-val", type=int, default=64)
+    parser.add_argument("--target", choices=("coded", "genie"), default="coded",
+                        help="'coded' is the contract's task. 'genie' replaces the label with the "
+                             "hard decisions a receiver with the true channel would make, which "
+                             "isolates per-position capacity from the estimation step")
     parser.add_argument("--snr-min", type=float, default=None,
                         help="keep only samples at or above this nominal SNR. A low-SNR label is "
                              "decided by the noise, so training on it cannot converge to a low "
@@ -485,13 +530,13 @@ def main():
     if not args.train or not args.val or not args.out:
         parser.error("--train, --val and --out are required unless --export-only is given")
     train = Batches(args.train, args.modulation, args.max_train, seed=args.seed,
-                    snr_min=args.snr_min, snr_max=args.snr_max)
+                    snr_min=args.snr_min, snr_max=args.snr_max, target=args.target)
     val = Batches(args.val, args.modulation, args.max_val, seed=args.seed + 1,
-                  snr_min=args.snr_min, snr_max=args.snr_max)
+                  snr_min=args.snr_min, snr_max=args.snr_max, target=args.target)
     qm = train.qm
     print(f"train {train.n} samples, val {val.n} samples, {args.modulation} (Qm={qm})")
 
-    model = build(blocks=args.blocks, qm=qm, aux_heads=not args.no_aux,
+    model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux,
                   residual=not args.no_residual, dtype=args.dtype,
                   fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
                   llr_linear=args.llr_linear)
