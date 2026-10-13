@@ -212,6 +212,7 @@ class Batches:
             "ch_weights": ch_weights,
             "noise": noise_target[0],
             "noise_weights": noise_weights.astype(np.float32),
+            "sigma2_over_r2": np.float32(sigma2_norm),
             "snr": float(data["snr_nominal"][index]),
         }
 
