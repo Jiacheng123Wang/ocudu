@@ -90,17 +90,13 @@ RANGE_LIMIT_FLOAT = {"QPSK": 24.0, "16QAM": 20.0, "64QAM": 20.0, "256QAM": 20.0}
 LLR_MAX = 120
 LLR_INFTY = 127
 
-# `get_sch_to_dmrs_ratio_dB` in `include/ocudu/ran/sch/sch_dmrs_power.h`, indexed by the number of
-# CDM groups without data. The DM-RS EPRE rises as data REs are given up to pilots.
-SCH_TO_DMRS_RATIO_DB = {1: 0.0, 2: -3.0, 3: -4.77}
-
-
 def dmrs_amplitude_scaling(nof_cdm_groups_without_data):
     """Amplitude ratio between the DM-RS and the shared channel, as the estimator is configured.
 
-    Matches `pusch_processor_impl.cpp:374`, which passes `convert_dB_to_amplitude(-ratio)`.
+    Lives in `dmrs` because it is a property of the DM-RS, and both the contract's pilot-LS
+    definition and the grid builder need the same value.
     """
-    return 10.0 ** (-SCH_TO_DMRS_RATIO_DB[int(nof_cdm_groups_without_data)] / 20.0)
+    return DV.amplitude_scaling(nof_cdm_groups_without_data)
 
 
 def allocated_subcarriers(alloc_prb):

@@ -35,7 +35,8 @@ NOF_SUBCARRIERS_PER_RB = 12
 SLOTS_PER_FRAME_30KHZ = 20
 
 
-def encode_symbols(tb_bits, n_prb, n_syms, mod, dmrs_mask, n_id, rnti, rv, n_layers=1):
+def encode_symbols(tb_bits, n_prb, n_syms, mod, dmrs_mask, n_id, rnti, rv, n_layers=1,
+                   return_bits=False):
     """Re-encode a transport block into the transmitted data symbols.
 
     Follows the same primitive chain as `build_labels.build_label` (segment -> LDPC encode ->
@@ -47,7 +48,13 @@ def encode_symbols(tb_bits, n_prb, n_syms, mod, dmrs_mask, n_id, rnti, rv, n_lay
     coordinates, starting at 0. Passing the BWP width instead over-counts the data REs, which
     changes the rate-matching length; the code-block assertion below catches that.
 
-    Returns (symbols, data_pos), where data_pos is a list of (symbol, subcarrier) pairs.
+    `return_bits` additionally returns the SCRAMBLED coded bits in the order `modulate` consumes
+    them. That sequence is the depth-3 network's training target: it is known exactly, it is in
+    the scrambling domain the contract's LLRs live in, and it has to be taken before modulation
+    because modulation is not invertible from the symbols back to the bits. Callers that only
+    want the symbols keep the two-value return.
+
+    Returns (symbols, data_pos) or (symbols, data_pos, scrambled).
     """
     import build_labels as BL
 
@@ -93,6 +100,8 @@ def encode_symbols(tb_bits, n_prb, n_syms, mod, dmrs_mask, n_id, rnti, rv, n_lay
     scrambled = BL.scramble(coded, (rnti << 15) + n_id)
     symbols = np.array(BL.modulate(scrambled, mod), dtype=np.complex64)
     assert len(symbols) == len(data_pos)
+    if return_bits:
+        return symbols, data_pos, np.asarray(scrambled, dtype=np.uint8)
     return symbols, data_pos
 
 
@@ -100,6 +109,12 @@ def build_clean(cfg, H, X_true, data_pos, alloc_rb, dmrs_syms, dmrs_ref="prg_ski
     """Assemble the noiseless received grid from `H` and the re-encoded symbols.
 
     `H` is [symbol, subcarrier] over the whole BWP; `alloc_rb` is the allocation's PRB indices.
+
+    The pilots are written at the amplitude the DM-RS is TRANSMITTED with, which at two CDM groups
+    without data is 3 dB above the shared channel (`dmrs.amplitude_scaling`). Leaving that factor
+    out makes every pilot observation 3 dB low, and because a receiver divides the pilot estimate
+    by the same factor, the error survives into the channel estimate as a scale that looks like a
+    training problem rather than a construction bug.
     """
     grid = np.zeros_like(H)
 
@@ -119,6 +134,7 @@ def build_clean(cfg, H, X_true, data_pos, alloc_rb, dmrs_syms, dmrs_ref="prg_ski
     nid = int(cfg["dmrs_scrambling_id"])
     nscid = int(cfg["dmrs_n_scid"])
     slot_index = int(cfg["slot"]) % SLOTS_PER_FRAME_30KHZ
+    amplitude = DV.amplitude_scaling(int(cfg["dmrs_nof_cdm_groups_without_data"]))
 
     #   "prg_skip" - correct: the PRG advances 6 RE per PRB from reference point k=0 up to the
     #                first allocated PRB, so the sequence depends on absolute PRB position.
@@ -130,7 +146,7 @@ def build_clean(cfg, H, X_true, data_pos, alloc_rb, dmrs_syms, dmrs_ref="prg_ski
         alloc = alloc_rb if dmrs_ref == "prg_skip" else list(range(len(alloc_rb)))
         sequence = DV.sequence(slot_index, symbol, nid, nscid, alloc)
         assert len(sequence) == len(pilots), f"dmrs length {len(sequence)} vs {len(pilots)} pilots"
-        grid[symbol, pilots] = H[symbol, pilots] * sequence
+        grid[symbol, pilots] = H[symbol, pilots] * sequence * amplitude
     return grid
 
 

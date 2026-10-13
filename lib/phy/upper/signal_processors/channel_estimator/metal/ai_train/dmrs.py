@@ -139,3 +139,30 @@ def pilot_subcarriers(alloc_prb, dmrs_type: int = 1) -> np.ndarray:
     """
     offsets = (0, 2, 4, 6, 8, 10) if dmrs_type == 1 else (0, 1, 6, 7)
     return np.concatenate([np.arange(r * 12, r * 12 + 12)[list(offsets)] for r in sorted(alloc_prb)])
+
+
+def sch_to_dmrs_ratio_db(nof_cdm_groups_without_data: int) -> float:
+    """Power ratio between the shared channel and the DM-RS, as TS38.214 Table 6.2.2-1 defines it.
+
+    Reproduces `get_sch_to_dmrs_ratio_dB` in `include/ocudu/ran/sch/sch_dmrs_power.h`, whose table
+    is `{NAN, 0, -3, -4.77}` for one to three CDM groups without data. Handing data resource
+    elements to pilots raises the DM-RS power, so at two groups the DM-RS sits 3 dB above the
+    shared channel.
+    """
+    table = {1: 0.0, 2: -3.0, 3: -4.77}
+    if int(nof_cdm_groups_without_data) not in table:
+        raise ValueError(f"invalid number of CDM groups without data: {nof_cdm_groups_without_data}")
+    return table[int(nof_cdm_groups_without_data)]
+
+
+def amplitude_scaling(nof_cdm_groups_without_data: int) -> float:
+    """Amplitude the DM-RS is transmitted with, relative to the shared channel.
+
+    This is the `scaling` the estimator is configured with
+    (`pusch_processor_impl.cpp:374` computes `convert_dB_to_amplitude(-ratio)`), and a receiver
+    divides the least-squares pilot estimate by it to obtain a channel estimate at the shared
+    channel's EPRE. A grid built for training must multiply its pilots by it, or every pilot
+    observation is 3 dB low at two CDM groups and the estimator's own convention turns that into a
+    scale error that looks like a training problem.
+    """
+    return 10.0 ** (-sch_to_dmrs_ratio_db(nof_cdm_groups_without_data) / 20.0)
