@@ -106,3 +106,8 @@ target_link_libraries(helena_head2head_bench PRIVATE ocudu_channel_estimator_met
 add_executable(k1_check test/k1_check.cpp)
 target_include_directories(k1_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(k1_check PRIVATE ocudu_channel_estimator_metal ocudu_support)
+
+# ---- Depth-3 engine check: binds a compiled model, proves each head was written, times the pass --
+add_executable(depth3_engine_check test/depth3_engine_check.cpp)
+target_include_directories(depth3_engine_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(depth3_engine_check PRIVATE ocudu_channel_estimator_metal ocudu_support)

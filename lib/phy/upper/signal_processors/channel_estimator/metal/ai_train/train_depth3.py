@@ -140,6 +140,15 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         outputs["ch_est"] = tf.keras.layers.Activation(
             "linear", dtype=keras_dtype, name="ch_est")(
                 tf.keras.layers.Conv2D(2 * NOF_SYMBOLS, 1, dtype=keras_dtype, name="ch_est_1x1")(y))
+        # The fourth head is one scalar for the whole slot, so the trunk is averaged over frequency
+        # first. The contract lists it as its own output because `memo_07` R4 needs the DM-RS domain
+        # noise variance, which the classical kernel can no longer measure once the estimate is the
+        # network's own: the residual it would measure has no noise left in it.
+        pooled = tf.keras.layers.GlobalAveragePooling2D(keepdims=True, dtype=keras_dtype,
+                                                        name="dmrs_pool")(y)
+        outputs["dmrs_noise"] = tf.keras.layers.Activation(
+            "tanh", dtype=keras_dtype, name="dmrs_noise")(
+                tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="dmrs_noise_1x1")(pooled))
     return tf.keras.Model(inp, outputs)
 
 
@@ -213,6 +222,10 @@ class Batches:
             "noise": noise_target[0],
             "noise_weights": noise_weights.astype(np.float32),
             "sigma2_over_r2": np.float32(sigma2_norm),
+            # The DM-RS domain noise variance is the same scalar the post-equalization head is
+            # derived from, so its target is the same `log10` shape of it, computed on the scalar
+            # rather than per resource element.
+            "dmrs_noise": np.float32(L.noise_shape_target(np.asarray([sigma2_norm]))[0][0]),
             "snr": float(data["snr_nominal"][index]),
         }
 
@@ -330,6 +343,36 @@ def decode_metrics(llr, labels, weights):
     return float(errors), float(np.mean(np.abs(llr[labelled]))) if labelled.any() else np.nan
 
 
+def rename_outputs(mlmodel, qm):
+    """Rename a converted model's outputs to the contract's names.
+
+    The TensorFlow frontend names the outputs `Identity`, `Identity_1`, ... and loses the Keras
+    layer names, while the contract binds them BY NAME. Renaming the spec is what makes the
+    artifact self-describing, and it is checked downstream: `depth3_engine_check` refuses a bundle
+    whose heads are not named `llr`, `post_eq_noise`, `ch_est` and `dmrs_noise`.
+
+    The heads are matched by their CHANNEL COUNT and not by their order, because the order the
+    converter emits them in is an implementation detail of the frontend. The counts are unique
+    (`14 * Qm`, 14, 28 and 1), so a mismatch is detectable rather than silently bound to the wrong
+    head: binding the channel estimate to the LLR head would produce a receiver that decodes
+    garbage from an artifact that looks correct.
+    """
+    import coremltools as ct
+    spec     = mlmodel.get_spec()
+    expected = {NOF_SYMBOLS * qm: "llr", NOF_SYMBOLS: "post_eq_noise",
+                2 * NOF_SYMBOLS: "ch_est", 1: "dmrs_noise"}
+    actual   = list(spec.description.output)
+    if len(actual) != len(expected):
+        raise ValueError(f"the model has {len(actual)} outputs, the contract has {len(expected)}")
+    for output in actual:
+        channels = output.type.multiArrayType.shape[-1]
+        name     = expected.pop(channels, None)
+        if name is None:
+            raise ValueError(f"no contract head has {channels} channels")
+        ct.utils.rename_feature(spec, output.name, name)
+    return ct.models.MLModel(spec, weights_dir=mlmodel.weights_dir)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -390,18 +433,26 @@ def main():
         probe = build(blocks=args.blocks, qm=qm, aux_heads=not args.no_aux,
                       residual=not args.no_residual, dtype="float16",
                       fold_scale=not args.no_fold_scale)
-        ct.convert(probe,
-                   inputs=[ct.TensorType(name="x", shape=(1, D3.NOF_SUBCARRIERS, 1, D3.NOF_CHANNELS),
-                                         dtype=np.float16)],
-                   compute_precision=ct.precision.FLOAT16,
-                   minimum_deployment_target=ct.target.iOS17,
-                   convert_to="mlprogram").save(args.export_probe)
+        converted = ct.convert(
+            probe,
+            inputs=[ct.TensorType(name="x", shape=(1, D3.NOF_SUBCARRIERS, 1, D3.NOF_CHANNELS),
+                                  dtype=np.float16)],
+            compute_precision=ct.precision.FLOAT16,
+            minimum_deployment_target=ct.target.iOS17,
+            convert_to="mlprogram")
+        # The TensorFlow frontend names the outputs `Identity`, `Identity_1`, ... and loses the
+        # Keras layer names, while the contract binds them BY NAME. Renaming the spec is what makes
+        # the artifact self-describing, and it is checked: `depth3_engine_check` refuses a bundle
+        # whose heads are not named `llr`, `post_eq_noise`, `ch_est` and `dmrs_noise`.
+        converted = rename_outputs(converted, qm)
+        converted.save(args.export_probe)
         print(f"wrote the fp16 deployment graph to {args.export_probe}")
 
     # The scale is model-external per the contract, so the loss sees the LLR the quantizer sees.
     scale = D3.RANGE_LIMIT_FLOAT[args.modulation]
     optimizer = tf.keras.optimizers.Adam(args.lr)
-    weights = {"llr": args.w_llr, "ch_est": args.w_ch, "post_eq_noise": args.w_noise}
+    weights = {"llr": args.w_llr, "ch_est": args.w_ch, "post_eq_noise": args.w_noise,
+               "dmrs_noise": args.w_noise}
 
     @tf.function
     def step(x, targets, training):
@@ -419,6 +470,8 @@ def main():
                 error = (noise - targets["noise"]) ** 2
                 terms["post_eq_noise"] = (tf.reduce_sum(error * targets["noise_weights"])
                                           / tf.maximum(tf.reduce_sum(targets["noise_weights"]), 1.0))
+                dmrs = tf.cast(outputs["dmrs_noise"], tf.float32)[:, 0, 0, 0]
+                terms["dmrs_noise"] = tf.reduce_mean((dmrs - targets["dmrs_noise"]) ** 2)
             total = sum(weights[name] * terms[name] for name in terms)
         if training:
             gradients = tape.gradient(total, model.trainable_variables)
@@ -435,6 +488,7 @@ def main():
                 "ch_weights": tf.constant(stack(samples, "ch_weights")),
                 "noise": tf.constant(stack(samples, "noise")),
                 "noise_weights": tf.constant(stack(samples, "noise_weights")),
+                "dmrs_noise": tf.constant(stack(samples, "dmrs_noise")),
             },
         )
 

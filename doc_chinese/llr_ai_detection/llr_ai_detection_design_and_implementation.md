@@ -2386,3 +2386,133 @@ ldpc_decode selfcheck: perfect decode in 1 iteration, inverse chain exact,
 ★ **在同种子同调度的噪声内** ✓ ⇒ ★★ **§2.3 的判据成立，★ 辅助头可以留着**（★ 它们是 `memo_07` C2/R1–R5 的唯一来源）。
 ★★ **同时如实记账**：★ 两者 **cBLER 都是 `1.0000`** ⇒ ★ **这个判据在【当前训练量】下还分辨不出好坏**
 （★ 未编码 BER 0.31 离 genie 基线的 0.055 还差得远）⇒ ★★ **要等 R4.4 的全量训练**。
+
+---
+
+## 16. ★★★ 本会话工作快照（★ 2026-10-13，★ 追加式；★ 只在【新会话】开始时才另写 `session_handoff_*`）
+
+> ★★ **本节取代**本会话中途写过的那份 `session_handoff_2026-10-13-2.md`（★ 已删除）。
+> ★★ **约定（用户 2026-10-13 明确）**：★ `session_handoff_*` **只用于新会话的现状快照**；
+> ★★ **工作过程中的一切记录都追加进本文件**（活文档）✓。
+
+### 16.1 ★★★ 一句话状态
+
+★★★ **R1（契约）、R2（损失）、R3（数据集）、R4.0（coded BLER 可测）已完成并各自留下自检；
+R4.1–R4.3（图、训练结构、小样验证）已完成；R4.4（全量训练）在四头修复后重跑；
+R5 的第一步（CoreML 引擎的 depth-3 通路）已实现并【运行验证】通过。**
+
+### 16.2 ★★ 已就绪的可复用件
+
+| ★ | ★★ 件 | ★★ 位置 |
+|---|---|---|
+| ★★★ **契约 + 打包入口** | ★ `ai_train/depth3.py`（★ `pack_input`/`label_plane`/`llr_gather`/`llr_from_logits`，★ 全向量化，★ `--selfcheck`）|
+| ★★★ **损失** | ★ `ai_train/depth3_loss.py`（★ `--selfcheck`）|
+| ★★★ **数据集** | ★ `work_tmp/data/datasets/d3_{cap001,cap002}_rv0.npz`（3752 / 3437，★ rv=0，★ 12–48 dB）|
+| ★★★ **训练** | ★ `ai_train/train_depth3.py`（★ 四头、★ 折叠 LayerScale、★ `--export-probe`、★ `CodedBler`）|
+| ★★★ **译码器** | ★ `ai_train/ldpc_decode.py`（★ min-sum + 接收侧逆链，★ `--selfcheck`）|
+| ★★★ **评测** | ★ `ai_train/eval_depth3.py`（★ 网络 / genie / 完美 三方对照）|
+| ★★★ **引擎** | ★ `ocudu_coreml_nn_engine::init_depth3/predict_depth3` + ★ `depth3_engine_check`（★ 独立可执行）|
+
+### 16.3 ★★★ 判据与实测数字（★ 引用时照此）
+
+| ★ 判据 | ★★ 结果 | ★ 出处 |
+|---|---|---|
+| ★★★ **契约的形状能落 ANE** | ★★ 四头图 `ane=85…158`，★ 离 ANE 的只有 `const`；★ **折叠 LayerScale 后 p50 365 µs**（★ 与无残差 372 µs 打平）| §45.7/§45.9 |
+| ★★★ **契约的图在真实调用路径上跑通** | ★★ `depth3_engine_check`：★ **四个头全部被写入**（哨兵全被覆盖），★ **p50 345.8 µs / p99 369.3** | §16.5 |
+| ★★★ **数据集自检** | ★★ `residual/sigma2` 0.971–1.029，★ 导频比 1.005（★ 60 抽样）| §12.8 |
+| ★★★ **coded BLER 指标可信** | ★★ 完美 LLR → **0.0000**；★ 噪声 → **1.00**；★ genie → uBER 0.0546 / BLER 0.3333；★ 未训练网络 → 0.4999 / 1.0 | §12.10/§12.12 |
+| ★★★ **R2.4（辅助头不拖累主头）** | ★★★ **成立**（★ val 0.49909 vs 0.49813；★ 差异在同种子噪声内）| §12.13 |
+| ★★ **R4.3（能训起来）** | ★★ 残差 + LayerScale + fp32 ⇒ val **0.537 < ln2**、★ BER 0.335 且降 | §12.9 |
+
+### 16.4 ★★★ 纪律（★ 本会话新增，★ 与 F7–F14 同级）
+
+| # | ★★ 纪律 | ★★ 出处 |
+|---|---|---|
+| ★★★ **F15** | ★★★ **时延数字必须在【机器空闲】时测，★ 且至少两遍** | ★ 第一次测残差头得 `+315 µs`，★ 真值 `+42 µs`（★ 后台在跑数据集构建）|
+| ★★★ **F16** | ★★★ **数据集的自检必须能【证伪标签】**，★ 不能只查形状/范围 | ★★ 两个缺陷（全零 TB、DM-RS 幅度）都是"把比特重新调制、穿过信道、与网格相减"抓到的 |
+| ★★★ **F17（本轮新增）** | ★★★ **自检的【工况】必须贴近部署工况**（★ 码率、块数、rv） | ★ min-sum 的求和错误只在**真实码率**下暴露；★ 逐块重加扰的错误只在**多码块**时暴露 |
+| ★★★ **F18（本轮新增）** | ★★★ **"指标能到 0"与"指标会失败"是【两条都要验】的判据** | ★ `ldpc_decode --selfcheck` 的第 4 项（★ 噪声下 BLER=1.00）与 `--bler-check`（★ 完美 LLR=0）|
+| ★★ **F19（本轮新增）** | ★★ **契约的校验要在【装订处】做**（★ 形状/名字/头数对不上就拒绝） | ★★ 引擎的 `init_depth3` 当场抓出训练图**缺第四个头**、★ 输出名是 `Identity*` |
+
+### 16.5 ★★★ R5 第一步已完成：**CoreML 引擎的 depth-3 通路**（★ 2026-10-13）
+
+| ★ | ★★ 内容 |
+|---|---|
+| ★★ **接口** | ★ `init_depth3(path)`（★ 校验：fp16 `x` `[1,nsc,1,64]` + **四个命名头** + 头的通道数符合契约）+ ★ `predict_depth3(in, out)` |
+| ★★ **零拷贝** | ★ 输入面与**四个输出**都用 `MLMultiArray` 包住调用方缓冲（★ fp16，★ 步长显式）|
+| ★★ **线程** | ★ 两套入口共用**同一个专用 worker**（★ per-thread CoreML 初始化只付一次，★ 不在接收线程上）★ + 2 s ANE keep-alive |
+| ★★ **形状权威** | ★★ **以模型【声明的】形状为准**（★ 不信调用方给的 `bits_per_symbol`）★ ⇒ ★ 绑错模型会**失败**而不是静默截断 |
+| ★★★ **验证** | ★★★ `depth3_engine_check <model.mlmodelc>`（★ 用**哨兵值**证明四个头**真的被写入**）|
+
+```
+init ok: d3_contract4.mlmodelc (612 subcarriers)
+llr        68544/68544 written, 68543 nonzero, range [-0.9702, 0.9648]
+noise      8568/8568 written, 8568 nonzero, range [-0.9951, 0.9897]
+ch_est     17136/17136 written, 17136 nonzero, range [-2.6465, 2.6543]
+dmrs_noise 1/1 written, 1 nonzero, range [0.0000, 0.0001]
+p50 345.8 us, p99 369.3 us over 12 predictions
+PASS
+```
+
+★★ **顺带修正**：★ 训练脚本的图原本**只有三个头**（★ 缺 `dmrs_noise`）★ 且导出后输出名是 `Identity*`（★ TF 前端丢层名）
+⇒ ★★ 已补第四头 + `rename_outputs()`（★ **按通道数匹配**，★ 不按顺序——顺序是前端实现细节）。
+
+### 16.6 ★★ 未决问题与重开条件
+
+| ★ | ★★ 问题 | ★★ 重开条件 / 下一步 |
+|---|---|---|
+| ★★★ | ★★ **TB dump 全零**（★ §12.8）| ★★ 阻塞 `real` 数据源；★ 先查 metal LDPC 路径为何在收敛前返回零 |
+| ★★ | ★★ **`crc=OK` 这个判据本身** | ★★ 需要一条**不会在零字上通过**的判据 |
+| ★★ | ★★ **coded BLER 的离线译码器 vs 链的真实译码器** | ★ 最终验收仍以**链的真实 LDPC + CRC** 为准（★ §2.3）|
+| ★★ | ★★ **残差结构的成本** | ★★ 已解决（★ 折叠后 ~0，★ §45.9）|
+| ★ | ★ **真实损伤（CFO/时偏/干扰）不在合成数据里** | ★★ 这是 `real` 源的独占价值 ⇒ 缺陷一值得优先修 |
+
+### 16.7 ★★ 常用命令
+
+```bash
+W=doc_chinese/llr_ai_detection/work_tmp
+P=lib/phy/upper/signal_processors/channel_estimator/metal/ai_train
+PY=~/ai_ce_work/venv/bin/python
+
+# ★★ 四个自检（★ 改契约/损失/数据/译码器后必须全过）
+$PY $P/depth3.py --selfcheck
+$PY $P/depth3_loss.py --selfcheck
+$PY $P/ldpc_decode.py --selfcheck
+$PY $P/build_depth3_dataset.py --selfcheck --out $W/data/datasets/d3_cap001_rv0.npz
+
+# ★★★ 训练（★ 四头 + 折叠 LayerScale + coded BLER；★ 机器要空闲）
+$PY $P/train_depth3.py --train $W/data/datasets/d3_cap001_rv0.npz \
+  --val $W/data/datasets/d3_cap002_rv0.npz --out $W/data/runs/d3_full \
+  --epochs 150 --batch 8 --bler-samples 24 --bler-every 15 \
+  --export-probe $W/probe/d3_full.mlpackage
+
+# ★★★ 三方对照（★ 网络 / genie / 完美）
+$PY $P/eval_depth3.py --model $W/data/runs/d3_full/depth3_best.keras \
+  --data $W/data/datasets/d3_cap002_rv0.npz --samples 96
+
+# ★★★ 引擎的 depth-3 通路（★ 先编译成 .mlmodelc）
+xcrun coremlcompiler compile $W/probe/d3_full.mlpackage $W/probe/
+./build/lib/phy/upper/signal_processors/channel_estimator/metal/depth3_engine_check \
+  $W/probe/d3_full.mlmodelc 20 612
+
+# ★★ 契约的指标检查（★ 完美 LLR 必须解出 0 错误）
+$PY $P/train_depth3.py --train ... --val $W/data/datasets/d3_cap002_rv0.npz \
+  --out /tmp/x --epochs 1 --max-val 8 --bler-samples 4 --bler-check
+```
+
+★ **提交纪律**：★ `git commit -F <文件>`，★ 消息文件放 `work_tmp/tmp/`（★ `.gitignore` 已忽略 `work_tmp/`，★ 不要放 `/tmp`）。
+
+### 16.8 ★★ 本会话的提交（★ 关键节点）
+
+| ★ commit | ★★ 内容 |
+|---|---|
+| `8be50bf1b3` | ★★★ **R1：契约冻结 + `depth3.py`** |
+| `3ddc3bdb86` | ★★ R2：`depth3_loss.py` |
+| `b8b49407a6` | ★★★ R3：数据集 + 两个真缺陷（★ 全零 TB、★ DM-RS 幅度）|
+| `bf6da6d8c6` | ★★ 契约的 ANE 复验 + R3 全量（3752/3437）|
+| `c0b043154a` | ★★ R4 开工：训练脚本 + 塌缩的复现与修复 + 残差结构成本 |
+| `90a00f7179` | ★★★ **R4.0：译码器 + coded BLER 指标** + 折叠 LayerScale |
+| `c28677b8a2` | ★★ 参照系（genie 基线）+ 抓到基线自己的错 |
+| `e7f68f8550` | ★★ R2.4 判据成立（辅助头不拖累主头）|
+| `77bea3b4df` | ★ 参照系记录 |
+| `8e3c2160c1` | ★ 本会话（第 2 轮）工作快照的记录 |
