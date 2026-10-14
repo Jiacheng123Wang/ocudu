@@ -284,12 +284,65 @@ $PY $W/probe/live_decode_rate.py --log $L --mod 16QAM --rv 0 --min-prb 43 --per-
 
 ★★★ **重采 16QAM / 64QAM 的命令（★ 第二轮，★ p0 交回 −76 ✓）**：
 
+> ★★★ **但先做 §5.2 的第 ① 步**（★ 看频段 ✓）✗ —— ★★ 若底噪本来就在**成串地跳** ✓，
+> ★ 那么"噪声列变好"**可能只是干扰走了** ✗，★ **不能读成"p0 修好了"** ✗。
+
 ```bash
 C=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus
 COUNT=2000 collect aillr-cap005b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam_p0default.yml $C/aillr_cap005b
 COUNT=2000 collect aillr-cap006b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_64qam_p0default.yml $C/aillr_cap006b
-# ★★ 判据（★ §5.1 的判读）：★ 噪声列回到 −15…−22 dB 且可译率上台阶 ⇒ ★ 是压缩 ✓；
-#    ★ 噪声列仍在 −1 dB ⇒ ★ 是外部干扰 ⇒ 换地点/换时间/查频谱 ✓，★ 与配置无关 ✓。
+# ★★ 判据：★ 噪声列回到 −15…−22 dB 且可译率上台阶 ⇒ ★ 与压缩一致 ✓；
+#    ★ 但只有在 §5.2 ① 显示底噪【平】时，才能把它归因给 p0 ✓。
+```
+
+---
+
+## 5.2 ★★★ 低噪声底最可能的第三个原因：★ **外部商业基站的同频干扰**（★ 2026-10-14 用户提出 ✓）
+
+★★ **为什么值得先查它** ✓：★★ 六条腿用的是**同一个 `p0 = −70`** ✓，★ 而推算噪声底在十二分钟内
+**−22.7 → −0.9 → −17.5 dB** 来回跳 ✗ ⇒ ★★ **"我们的功放被推狠了"应该每条腿都发生** ✗，
+★ **时变的外部源更符合** ✓（★ 商业基站的调度器开关自己的上行 ✓）。
+
+### ★★★ 第 ① 步（★ 先做这个，★ 它最直接 ✓）：**停掉 gNB、手机静默，直接看上行频段**
+
+```bash
+# ★★ 手机静默（★ 飞行模式或断开 ✓）、★ gNB 停掉 ✓ —— 我们自己的发射必须是关的 ✗
+# ★★ 5 秒原始 IQ，★ 中心频率与采样率与 gNB 一致 ✓（★ 3408.96 MHz / 23.04 Msps / rx_gain 70 ✓）
+uhd_rx_cfile -f 3408960000 -r 23040000 -g 70 -N 115200000 /tmp/band.bin
+
+W=doc_chinese/llr_ai_detection/work_tmp
+~/ai_ce_work/venv/bin/python $W/probe/spectrum_floor.py --file /tmp/band.bin --slice-ms 100
+```
+
+★★★ **判据（★ 先于测量登记 ✓）**：
+
+| ★★ 底噪形态 | ★★★ 结论 | ★★ 下一步 |
+|---|---|---|
+| ★★ **成串地抬 15–20 dB**（★ 一秒以上的突发 ✓）| ★★★ **同频邻居** ✓ | ★★ 换 ARFCN（★ 20M 内换一个 ✓）或换地点/时间 ✓；★ 并把这条写进采集前置 ✓ |
+| ★★ **平**（★ 跨度只有几 dB ✓）| ★★ **不是邻居** ✗ | ★★ 做 §5.2 的第 ② 步：**交错 A/B** ✓ |
+
+### ★★ 第 ② 步（★ 仅当 ① 为平）：**交错 A/B**
+
+★★★ **必须交错**（★ A/B/A/B… ✓）✗ —— ★★ 干扰是**时间的函数** ✓，
+★ 单次 A→B 会把"干扰走了"读成"p0 修好了" ✗（★ 这正是用户提醒的那个陷阱 ✓）。
+
+```bash
+# ★★ 同一次坐下交替飞，★ 其余逐字不变 ✓
+COUNT=1500 collect aillr-ab-70a configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam.yml          $C/aillr_ab70a
+COUNT=1500 collect aillr-ab-76a configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam_p0default.yml $C/aillr_ab76a
+COUNT=1500 collect aillr-ab-70b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam.yml          $C/aillr_ab70b
+COUNT=1500 collect aillr-ab-76b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam_p0default.yml $C/aillr_ab76b
+# ★★ 判据：★ 两个 −70 腿与两个 −76 腿【各自一致】且两组【互相不同】⇒ 是 p0/压缩 ✓；
+#    ★ 四腿都差不多 ⇒ 是时间/环境 ✓，★ 与 p0 无关 ✓。
+```
+
+### ★★ cap003 也一并重采 ✓
+
+★★ cap003 的推算噪声底 **−12.7 dB** ✓（★ cap004 是 −22.7 ✓）、★ 实时译码率 **10.3%** ✓（★ cap004 67.5% ✓）
+⇒ ★★ **同一现象、幅度较小** ✓ ⇒ ★★ 与 16QAM/64QAM 一起重采 ✓：
+
+```bash
+COUNT=3000 collect aillr-cap003b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml $C/aillr_cap003b
 ```
 
 ---
