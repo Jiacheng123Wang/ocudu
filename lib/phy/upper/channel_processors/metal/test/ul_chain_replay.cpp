@@ -91,6 +91,26 @@ namespace {
 /// Upper bound used to size the soft buffer pool (the largest transport block of the widest BWP).
 static constexpr unsigned MAX_NOF_CODEBLOCKS = 64;
 
+/// \brief The LDPC decoder's iteration cap this harness runs with.
+///
+/// The cap decides verdicts, not only latency: a reception the decoder would crack on its seventh iteration
+/// is `crc=KO` at a cap of six and `crc=OK` at ten, and a corpus's decode rate is a rate at whatever cap the
+/// air leg ran. That is the application's `pusch_dec_max_iterations`, which every leg configuration of this
+/// workflow sets to 6 (`du_low_config.h` defaults to the same 6).
+///
+/// This harness ran a hardcoded 10, so every comparison it made between the replay and the live chain put a
+/// decoder with ten iterations against one with six: every reception in the band between the two caps came
+/// out as "the replay decodes what the live chain could not", and the rate that was being compared against
+/// the air was not the air's. The default is therefore the air value, the knob is kept for the A/B, and the
+/// value is PRINTED at the start of a run so a comparison can see which decoder produced its verdict.
+unsigned replay_dec_nof_iterations()
+{
+  unsigned iterations = 6;
+  if (const char* env = std::getenv("OCUDU_REPLAY_DEC_ITERATIONS")) {
+    iterations = static_cast<unsigned>(std::strtoul(env, nullptr, 10));
+  }
+  return iterations;
+}
 
 /// Parsed capture of one reception.
 struct capture_t {
@@ -1126,7 +1146,7 @@ int main(int argc, char** argv)
                                      .nof_symbols   = MAX_NSYMB_PER_SLOT,
                                      .nof_rx_ports  = pusch_constants::MAX_NOF_RX_PORTS,
                                      .nof_tx_layers = pusch_constants::MAX_NOF_LAYERS};
-  proc_cfg.dec_nof_iterations    = 10;
+  proc_cfg.dec_nof_iterations    = replay_dec_nof_iterations();
   proc_cfg.dec_enable_early_stop = true;
   proc_cfg.max_nof_concurrent_threads = 2;
   proc_cfg.csi_sinr_calc_method = channel_state_information::sinr_type::post_equalization;
@@ -1177,12 +1197,13 @@ int main(int argc, char** argv)
     return 1;
   }
 
-  std::printf("replay %s -> %s  (%s CE, %s equalizer/demapper, %s LDPC)\n",
+  std::printf("replay %s -> %s  (%s CE, %s equalizer/demapper, %s LDPC, %u decoder iteration(s))\n",
               prefix.c_str(),
               out_prefix.c_str(),
               use_metal_ce ? "metal" : "cpu",
               use_metal_demod ? "metal" : "cpu",
-              use_metal_decoder ? "metal" : "cpu");
+              use_metal_decoder ? "metal" : "cpu",
+              replay_dec_nof_iterations());
 
   unsigned                 replayed = 0;
   std::vector<std::string> prefixes;
@@ -1409,9 +1430,29 @@ int main(int argc, char** argv)
     const ldpc_base_graph_type base_graph =
         capture.fields.count("ldpc_base_graph") != 0
             ? static_cast<ldpc_base_graph_type>(capture.get_unsigned("ldpc_base_graph"))
-            : get_ldpc_base_graph(pdu.mcs_descr.get_normalised_target_code_rate(), units::bits(tbs));
+            : get_ldpc_base_graph(pdu.mcs_descr.get_normalised_target_code_rate(), units::bytes(tbs).to_bits());
     pdu.codeword->ldpc_base_graph = base_graph;
-    const unsigned       nof_codeblocks = compute_nof_codeblocks(units::bits(tbs), base_graph);
+    // The transport block size is a number of BYTES -- `tbs_calculator_calculate` returns `units::bytes`, the
+    // buffer handed to the processor is that many bytes, and the reception is logged as `tbs=2370` for a block of
+    // 18960 bits -- while the number of codeblocks is derived from the size in BITS.
+    //
+    // This line read `units::bits(tbs)`: the byte count taken as a bit count, eight times too small. On a
+    // multi-codeblock reception the pool was then reserved for FEWER codeblocks than the decoder derives from the
+    // buffer it is handed -- measured on `aillr_256qam_narrow/C_10059_17921`, tbs 2370 B = 18960 bits, BG1:
+    // reserved 1, decoder 3. `pusch_decoder_impl::new_data` asserts that the two agree, and `ocudu_assert` is
+    // compiled out of a Release build, which is the build this harness is: nothing reported it, the decoder
+    // indexed the pool's codeblock array past its size, every codeblock still passed its own CRC-24B, and the
+    // transport block failed its CRC-24A. So the harness reported `crc=KO` on receptions the air interface
+    // decoded -- measured before this fix, 1 of 20 narrow receptions and 0 of 20 wide ones replayed as the live
+    // chain had decoded them. A reception with ONE codeblock is unaffected (1 either way), which is why the
+    // narrow corpus agreed on its small allocations and every wide reception failed. It also cannot be caught by
+    // comparing soft bits, because the soft bits were never what was wrong.
+    const unsigned nof_codeblocks = compute_nof_codeblocks(units::bytes(tbs).to_bits(), base_graph);
+    std::printf("  geometry: tbs=%u B (%u bits), bg=%u, %u codeblock(s) reserved\n",
+                tbs,
+                tbs * 8,
+                static_cast<unsigned>(base_graph),
+                nof_codeblocks);
     std::vector<uint8_t> data(tbs);
 
     // Run the receiver(s) and report. The processor is asynchronous, so each one stays alive until its
