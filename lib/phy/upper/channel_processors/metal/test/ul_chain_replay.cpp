@@ -1034,6 +1034,24 @@ int main(int argc, char** argv)
                    : create_port_channel_estimator_factory_sw(ta_factory);
   check(port_estimator_factory, "port_estimator_factory");
   report("created port_estimator_factory");
+  // THE ESTIMATOR'S LANE ORDER MUST BE THE RECEIVING CHAIN'S, or this harness publishes a WRONG ESTIMATE.
+  //
+  // Measured 2026-10-14 on a 256QAM capture the live chain decoded. The estimator's default order here is
+  // `merged`, and the hops this harness drives are not deferred, so the route the air interface takes is
+  // not the one a replay gets: on that capture the published rsrp came out 53x too large and the noise
+  // variance 17000x, bit-identically on eight consecutive runs. Bisecting with the engine's own knobs
+  // isolates the ORDER and nothing else -- burst reproduces the live chain's own numbers (rsrp 0.517
+  // against its 0.534) while merged, host_wait and event all give the garbage -- and the engine's LS probe
+  // (OCUDU_CE_LS_CHECK=1) shows the device least-squares VALUES are identical to the host's to 2.6e-07 on
+  // that same hop. The arithmetic is right; the visibility of its result is not, and on the merged route
+  // the stage that consumes the pilots reads them before they exist.
+  //
+  // `burst` is the air interface's order -- a live leg reports `burst commits=250518 ...
+  // channel_estimator=250518`, two dispatches per hop -- and the air legs are the thing these numbers are
+  // compared against, so the harness runs it. Set without overwriting: a caller who wants the A/B can
+  // still ask for another order.
+  setenv("OCUDU_CE_LANE_ORDER", "burst", /*overwrite=*/0);
+
   std::shared_ptr<dmrs_pusch_estimator_factory> estimator_factory = create_dmrs_pusch_estimator_factory_sw(
       prg_factory,
       papr_factory,
