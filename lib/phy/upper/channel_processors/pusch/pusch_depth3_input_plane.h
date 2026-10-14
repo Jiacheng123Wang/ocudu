@@ -72,15 +72,17 @@ public:
   static constexpr unsigned NOF_DMRS_SYMBOLS_MAX = 4;
   /// \brief Narrowest allocation the trained model describes, in resource blocks.
   ///
-  /// `model_network_design.md` section 0.2(h) records the precision envelope as ">= 43 PRB, allocation
-  /// not starting at PRB 0, slot > 40", and the training and validation sets honour it to the block:
-  /// every sample is 43, 46, 50 or 51 PRB wide. A narrower allocation is inside the CONTRACT and
-  /// outside what the network has ever seen, and the difference is measurable rather than theoretical:
-  /// on the 44 decodable narrow captures of the corpus the classical chain decoded 40 and the network
-  /// 8, while on the wide ones there was nothing to compare. Handing those receptions to the network
-  /// costs the link decodes it would otherwise have, so they are refused and counted like any other
-  /// reception outside the envelope (I7).
-  static constexpr unsigned MIN_PRB = 43;
+  /// The first model was trained on 43 PRB and wider only, and the difference was measured rather
+  /// than assumed: on 44 decodable narrow captures the classical chain decoded 40 and that network 8,
+  /// so narrow receptions were refused and counted (I7) instead of being handed to a network that
+  /// would lose them.
+  ///
+  /// The model has since been fine-tuned on allocations down to four PRB, and the offline validation
+  /// says the repair worked: the narrow set went from 0.5245 to 0.4200 coded BLER against genie's
+  /// 0.4051, a relative gap of 30 percent down to 3.7, while the wide set did not regress. So the
+  /// constant moves to the new model's own lower bound, and the CHAIN-level measurement on the narrow
+  /// captures -- the one that could not run while this refused them -- is what confirms or corrects it.
+  static constexpr unsigned MIN_PRB = 4;
 
   /// Channel indices, `model_network_design.md` section 0.2(b). Named because a plane written with
   /// the wrong one is a plane that trains and receives nothing.
