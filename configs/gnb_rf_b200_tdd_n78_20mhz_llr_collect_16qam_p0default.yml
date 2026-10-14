@@ -1,0 +1,157 @@
+# SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+# SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+
+
+# =====================================================================================================
+# COLLECTION CONFIG for the depth-3 LLR corpus (llr_ai_detection design document section 19.22 / 19.34).
+#
+# ROUND 2 (2026-10-14): the first 16QAM/64QAM legs failed for a reason worth an A/B, not a repeat.
+# Their received power was 5 dB ABOVE the 256QAM leg and their noise floor 20 dB above it, so the
+# uplink power target goes back to the delivery default here. Same phone, same position, and this
+# one line is the only difference from the round-1 config.
+#
+# THIS VARIANT COLLECTS QAM16: min_ue_mcs = max_ue_mcs = 9, i.e. rate 0.602.
+#   (MCS 5-10 in the 256QAM table are 16QAM; 9 is the entry at rate 0.602.)
+#   The contract keeps ONE MODEL PER MODULATION, so each modulation needs its own corpus before it
+#   can have its own model. Same recipe otherwise: wide allocations, first transmissions only.
+#
+# It is `gnb_rf_b200_tdd_n78_20mhz.yml` -- the delivery config -- with THREE lines changed, and only
+# those three. Everything else (radio, cell, TDD pattern, concurrency) is the delivery shape on purpose:
+# a corpus collected on a configuration nobody delivers measures a receiver nobody will run.
+#
+#   cell_cfg.pusch.min_ue_mcs: 9        pin the MCS at the QAM16 entry whose rate is 0.602
+#   cell_cfg.pusch.max_ue_mcs: 9        (the delivery default is 28 = 256QAM rate 0.948, which is what
+#                                        the previous corpus captured, and almost none of it decodes)
+#   cell_cfg.pusch.p0_nominal_with_grant: -70   raise the uplink power target 6 dB above the -76 default
+#
+# WHY THE MCS PIN, in one line: criterion 1 compares the network against the classical chain on
+# receptions that DECODE, and a retransmission cannot supply one -- the offline replay does not reproduce
+# the live chain's HARQ soft combining. So the corpus has to be built from FIRST transmissions that
+# succeed, and the MCS is the only lever that makes them. Measured on the previous corpus: 731 in-envelope
+# first transmissions, ZERO of them decoding a non-zero transport block.
+#
+# WHY THIS MODULATION AND THIS INDEX: the contract keeps one model per modulation, so each one needs its
+# own corpus before it can have its own model. MCS 9 is the QAM16 entry of the 256QAM table
+# (pdsch_mcs.cpp MCS_INDEX_TABLE_2) closest to rate 0.6, which is the same conservatism the 256QAM
+# variant gets from MCS 20 -- the lowest entry its own modulation has.
+#
+# WHY p0 = -70: the recipe asks for high SNR, and this is the knob that buys it -- the uplink power target
+# is raised 6 dB into the phone's own margin. Measured on the ul_ab legs: +3 to +6 dB of SINR.
+# =====================================================================================================
+
+
+# This example configuration outlines how to configure the OCUDU gNB to create a single TDD cell
+# transmitting in band 78, with 20 MHz bandwidth and 30 kHz sub-carrier-spacing. A USRP B200 is configured
+# as the RF frontend using split 8. Note in this example an external clock source is not used, so the sync
+# is not defined and the default is used.
+
+cu_cp:
+  amf:
+    addrs: 192.168.0.106
+    port: 38412
+    bind_addrs: 192.168.0.231
+    supported_tracking_areas:
+      - tac: 7
+        plmn_list:
+          - plmn: "00101"
+            tai_slice_support_list:
+              - sst: 1
+
+ru_sdr:
+  device_driver: uhd
+  # num_recv_frames is the radio's RECEIVE RING DEPTH, i.e. how long a stall the transport may take before the
+  # B200 drops samples. Measured A/B (dev doc 6.53), same binary, this line the only difference:
+  #   64 frames  -> 5 discontinuities (max 35.3 ms of lost uplink samples), pool holds 11/16, starved_events 0
+  #   256 frames -> 0 discontinuities (a 19.5 ms backlog absorbed),        pool holds 16/16, starved_events 2
+  # So the ring converts a LOST SAMPLE into a DELIVERED BACKLOG; the backlog arrives as a burst, which is why
+  # the pool it feeds was re-sized with it (lower_phy_factory: peak 16 + rx path 2 + margin 3 -> 32, dev doc
+  # 6.53). What it does NOT do is remove the stall: the stalls are inside receive() itself (dev doc 6.53 (2),
+  # the `[ul_rx_timing] overflow_ctx` of every overflow), i.e. the host/USB path - the root cause still open.
+  #
+  # 512 frames (dev doc 6.56, ruling B): the margin was sitting ON the worst stall ever measured. At 8200
+  # bytes/frame and sc12 (3 bytes/sample) one frame is 2733 samples, so the ring absorbs
+  #   64 frames = 7.6 ms   256 = 30.4 ms   512 = 60.7 ms
+  # while the measured worst drifts are 33.9 ms (p34, which lost 35.3 ms of samples at 64 frames) and
+  # 28.1 ms (bench, CPU pinned). 256 therefore covers the observed range with ~0 headroom - one 34 ms stall
+  # eats the whole ring - and 512 doubles it. Measured healthy on the bench with RX and TX streaming at once
+  # (wip/uhd_rx_health: 100% duty, 0 radio errors); 1024 is healthy too, for whoever wants 121 ms.
+  # num_send_frames stays 64 ON PURPOSE: the transmit ring is NOT the lever for the RF underflows. They occur
+  # with the hand-over ~1.5 ms EARLY and the host's send ring FULL (p35: transmit() blocked >1 ms 447 times,
+  # `AT/BELOW 0` only 23, against 649 underflows) - i.e. the samples are queued and not moving over the wire,
+  # which no ring depth can fix, and the bench cannot reproduce it either (0 underflows at 64 or 512 frames,
+  # even with 20 ms feeder stalls). See dev doc 6.56 (2) for why arm C was retired rather than flown.
+  #device_args: type=b200,num_recv_frames=512,num_send_frames=64
+  device_args: type=b200,num_recv_frames=512,num_send_frames=64,clock_source=gpsdo,time_source=gpsdo,gpsdo=1
+  srate: 23.04
+  otw_format: sc12
+  tx_gain: 80
+  rx_gain: 70
+  clock: gpsdo
+  sync: internal
+
+cell_cfg:
+#  dl_arfcn: 632628         # 20M BW, onePlus8T only
+#  dl_arfcn: 625920         # 10M BW, iPhone17 only
+#  dl_arfcn: 624000         # 20M BW
+#  dl_arfcn: 621600         # 20M BW 
+  dl_arfcn: 627264         # 20M BW
+
+  band: 78
+  channel_bandwidth_MHz: 20
+  common_scs: 30
+  plmn: "00101"
+  tac: 7
+  pci: 1
+
+  # ★ 2026-09-28 用户裁决（一页清单：doc_chinese/phy_latency/delivery_config_decision_2026-09-28.md）：
+  # 默认的 `[0]` 让 36% 的重传全是 rv0（无增量冗余，重传基本白费）。实测只改这一个变量：
+  # TCP 收到 7.39 → 9.93 Mbit/s（+34.4%）、重传 25.8% → 8.3%、CRC BLER 33.2% → 7.9%、
+  # 有效 bit/RE 1.90 → 2.54、MAC 新数据→TCP 存活率 78% → 92%（§6.143⑦）。
+  # `[0, 2, 3, 1]` 是标准 RV 循环，也是本仓 DL 侧的默认。
+  pusch:
+    rv_sequence: [0, 2, 3, 1]
+    # ---- 本文件相对交付配置的【三行改动】（★ 采集专用，★ 见文件头的说明）----------------------
+    # ★ MCS 钉在 256QAM 表的第一档（MCS 20，rate 0.6825）。交付默认是 28（rate 0.948），
+    #   而上一批语料正是采在 28 上 —— 731 个包络内首传里【一个都译不出】✗。
+    # ★ `min = max = 20` 而不是"上限 19"：256QAM 表里 MCS 0–19 是 QPSK/16QAM/64QAM，
+    #   20–27 才是 256QAM（lib/ran/pdsch/pdsch_mcs.cpp MCS_INDEX_TABLE_2）——
+    #   卡在 19 会让语料里【一个 256QAM 都没有】，而那是当前唯一有模型的调制。
+    min_ue_mcs: 9
+    max_ue_mcs: 9
+    # ★ 上行功控目标抬 6 dB（默认 -76）。配方要"高 SNR"，这是买得到它的那个旋钮；
+    #   ul_ab 腿实测 +3…+6 dB SINR。必须是 2 的倍数。
+    # 2026-10-14 第二轮：★ 这一行**故意注释掉** —— 交回交付默认的 -76 ✓。
+    # 第一轮 16QAM/64QAM 的【接收功率比 256QAM 那一场还高 5 dB，★ 而噪声底高了 20 dB】
+    # （rsrp 中位 +3.7/+4.0 dB ↔ sinr 中位 6.3/4.9 dB）：★ 这种「信号更强、噪声更差」的形态
+    # 指向【压缩】（★ 手机功放被 -70 推狠了，★ 或 B200 前端过载）✗，★ 而不是路损 ✗。
+    # 本文件用来做那个 A/B：★ 同一台手机、同一个位置，★ 只把 p0 交回默认 ✓。
+    # p0_nominal_with_grant: -70
+
+# The USRP clock may introduce some CFO: configure the channel estimator to compensate for it.
+# With good clocks (e.g., external ones), the default setup may provide better performance.
+expert_phy:
+#  pusch_channel_estimator_td_strategy: average
+#  pusch_channel_estimator_cfo_compensation: true
+  pusch_ldpc_decoder_type:  auto
+  pusch_dec_max_iterations: 6 
+
+# ★ 2026-09-28：把验收腿一直在**命令行**带的并发度写进配置 —— 在那之前，全部近期证据（p85–p96）都是在
+# conc 2 上飞的，而本配置解析出 1（AUTO 对本小区推导为 1）⇒ **证据描述的不是出厂配置**（§6.150、一页清单）。
+# 实测（p76 conc1 vs p72/p75 conc2）：V1 1606.2 → 1399.5 µs（−13%），只改等待类量
+# （wait 206.5→54.4、residency 623.4→495.7、gap 125.7→0.0）。
+# ⚠ 历史：conc 2 曾在 s88/s88b 关联过两次 ~5 s 停顿（gaps=2），其后修复 A/B 落地；最近 12 条腿
+# （p85–p96，全部 conc 2）gaps=0、池绿、契约 9/9 ⇒ 风险当前未复现，本配置的第一次飞行即为重新取证。
+expert_execution:
+  threads:
+    upper_phy:
+      max_pusch_and_srs_concurrency: 2
+
+log:
+  filename: /tmp/gnb.log
+  all_level: info
+
+pcap:
+  mac_enable: false
+  mac_filename: /tmp/gnb_mac.pcap
+  ngap_enable: false
+  ngap_filename: /tmp/gnb_ngap.pcap

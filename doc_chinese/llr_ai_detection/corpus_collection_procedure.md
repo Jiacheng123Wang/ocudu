@@ -241,7 +241,6 @@ aillr_cap003: <N> captures
 ```
 
 ### ★★ 不合格时怎么办（★ 按现象查）
-
 | ★★ 现象 | ★★ 含义 | ★★ 处置 |
 |---|---|---|
 | ★ `code rate` 主要是 **948** ✗ | ★ 配置没生效（★ 用了旧 config ✓）| ★ 确认 `LEG_CONFIG` 指向 `..._llr_collect.yml` ✓；★ 看腿日志开头打印的 `CONFIG=` ✓ |
@@ -252,6 +251,46 @@ aillr_cap003: <N> captures
 
 ★★ **目录里多出来的东西是正常的** ✓：★ 每个采集 5 个文件（★ `.txt` / `.bin` / `_h.bin` / `_llr.bin` / `_ce.txt` ✓）；
 ★★ **`_h.bin` / `_llr.bin` 的来源至今未解释** ✗（★ §19.21 ✓）★ ⇒ ★★ **不要拿它们当保真度参照** ✓。
+
+---
+
+## 5.1 ★★★ 可译率低时：★ 先用【实时日志】分清"射频差"与"代码问题"（★ 2026-10-14 新增 ✓）
+
+★★★ **上一轮 16QAM 只译出 0.1%、★ 64QAM 只译出 0.6%** ✗ —— ★★ 而**同一条命令**下 QPSK 是 **99.9%** ✓、
+★ 256QAM 是 **67.5%** ✓ ⇒ ★★ 值得先分清原因 ✓。★★ 工具已经有了 ✓：
+
+```bash
+cd ~/dev/ocudu
+W=doc_chinese/llr_ai_detection/work_tmp
+PY=~/ai_ce_work/venv/bin/python
+L=doc_chinese/phy_pipeline_gpu/wip/logs/gnb_gpu_aillr-cap0NN_1014_HHMM.log
+
+# ① 实时译码率（**独立于离线重放**的另一个口径 ✓）
+$PY $W/probe/live_decode_rate.py --log $L --mod 16QAM --rv 0 --min-prb 43
+# ② 三个量：★ 接收功率 rsrp、★ SINR、★ 两者之差 = 推算噪声
+$PY $W/probe/live_decode_rate.py --log $L --mod 16QAM --rv 0 --min-prb 43 --per-mod   # （★ 另见 §19.36 的三列表）
+```
+
+★★★ **判读（★ 三类，★ 互斥 ✓）**：
+
+| ★★ 形态 | ★★ 含义 | ★★ 处置 |
+|---|---|---|
+| ★★ sinr 低 ✗ **且 rsrp 也低** ✓ | ★★ **路损 / UE 功率不足** | ★ 手机靠近 ✓；★ 或抬 `p0_nominal_with_grant` ✓ |
+| ★★★ sinr 低 ✗ **但 rsrp 反而【更高】** ✗ | ★★★ **噪声/压缩**（★ 功放或前端过载 ✓）| ★★ **把 p0 交回默认**：用 `..._collect_{16qam,64qam}_p0default.yml` ✓ |
+| ★★ sinr 够 ✓ **而仍不译** ✗ | ★★ **才轮到怀疑代码** ✗ | ★ 抓一个这样的采集，★ 用 `ul_chain_replay` 单条复现 ✓ |
+
+★★ **每条腿里【宽分配比窄分配低 2–4 dB】** ✓ 是**功率受限 UE 的正常签名** ✓（★ 同样的总功率摊到更多 PRB ✓）
+⇒ ★★ **判断配方够不够，要看【宽分配】的 SINR** ✓，★ 不要看窄的 ✓。
+
+★★★ **重采 16QAM / 64QAM 的命令（★ 第二轮，★ p0 交回 −76 ✓）**：
+
+```bash
+C=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus
+COUNT=2000 collect aillr-cap005b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam_p0default.yml $C/aillr_cap005b
+COUNT=2000 collect aillr-cap006b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_64qam_p0default.yml $C/aillr_cap006b
+# ★★ 判据（★ §5.1 的判读）：★ 噪声列回到 −15…−22 dB 且可译率上台阶 ⇒ ★ 是压缩 ✓；
+#    ★ 噪声列仍在 −1 dB ⇒ ★ 是外部干扰 ⇒ 换地点/换时间/查频谱 ✓，★ 与配置无关 ✓。
+```
 
 ---
 
