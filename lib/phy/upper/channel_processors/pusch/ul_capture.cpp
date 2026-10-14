@@ -6,13 +6,16 @@
 #include "ocudu/phy/support/resource_grid_writer.h"
 
 #include <atomic>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <set>
 #include <optional>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 using namespace ocudu;
@@ -90,6 +93,60 @@ std::string make_key(slot_point slot, rnti_t rnti)
   return capture_prefix() + "_" + std::to_string(slot.count()) + "_" + std::to_string(to_underlying(rnti));
 }
 
+/// \brief Reports, ONCE, that a capture cannot be written -- on stderr, and not through a logger.
+///
+/// A capture that silently writes nothing is the worst outcome a leg can have: every counter is green, the
+/// rate is normal, the run looks healthy, and the corpus is empty when someone finally looks at it. It has
+/// happened: on 2026-10-14 a leg ran for eight minutes and 99672 receptions with
+/// `OCUDU_UL_DUMP=/Users/.../aillr_cap003/C` whose directory did not exist -- `fopen` does not create
+/// directories -- and the gNB printed nothing at all, so the loss was only discovered when the audit was
+/// run. stderr rather than the logger, for the reason F20 gives: whether a corpus exists must not depend on
+/// whether a log level happened to be enabled.
+void report_capture_failure(const char* path, const char* why)
+{
+  static std::atomic<bool> reported{false};
+  if (reported.exchange(true)) {
+    return;
+  }
+  std::fprintf(stderr,
+               "[ul_capture] NOT CAPTURING: cannot write '%s': %s. Every capture of this leg is being "
+               "DROPPED. Create the directory the prefix names and re-run.\n",
+               path,
+               why);
+}
+
+/// \brief True when the directory the prefix names exists, checked ONCE before the first capture.
+///
+/// `fopen` does not create directories, so a prefix whose directory is missing turns every capture into a
+/// silent no-op -- and it costs nothing to find out before the budget is spent.
+bool capture_directory_exists()
+{
+  const std::string prefix = capture_prefix();
+  const std::size_t slash  = prefix.find_last_of('/');
+  if (slash == std::string::npos) {
+    // A bare prefix writes into the working directory, which exists by construction.
+    return true;
+  }
+  struct stat info{};
+  return (::stat(prefix.substr(0, slash).c_str(), &info) == 0) && S_ISDIR(info.st_mode);
+}
+
+/// \brief Says, ONCE, where the captures are going and how many are budgeted.
+///
+/// The positive half of report_capture_failure(): an operator watching an eight-minute leg has to be able
+/// to see that files are landing, and "no news" is indistinguishable from "the directory is missing".
+void report_first_capture(const std::string& name)
+{
+  static std::atomic<bool> reported{false};
+  if (reported.exchange(true)) {
+    return;
+  }
+  std::fprintf(stderr,
+               "[ul_capture] capturing: writing %s.* (budget %u reception(s) that pass the filters)\n",
+               name.c_str(),
+               capture_budget());
+}
+
 /// Receptions selected for capture. The decision is taken once, by the grid capture, and the
 /// later stages (which may run on other threads) only check membership, so all three stage files
 /// of a reception exist together and the budget bounds the whole set.
@@ -107,6 +164,18 @@ std::set<std::string>& selected()
 
 bool select(const pusch_processor::pdu_t& pdu)
 {
+  // The destination is checked ONCE, and before the budget is touched: a missing directory would otherwise
+  // turn every selected reception into a file that is not written, silently and for the whole leg.
+  static const bool directory_ok = []() {
+    if (capture_directory_exists()) {
+      return true;
+    }
+    report_capture_failure(capture_prefix().c_str(), "its directory does not exist");
+    return false;
+  }();
+  if (!directory_ok) {
+    return false;
+  }
   // The width filters run FIRST and do not spend the budget: a reception they reject is not a candidate,
   // so a leg whose traffic is mostly wide still records the narrow hops it is looking for, and a leg
   // looking for wide hops still records them when the scheduler interleaves small grants.
@@ -182,6 +251,7 @@ void ocudu::ul_capture::capture_grid(const resource_grid_reader& grid, const pus
     return;
   }
   const std::string name = make_key(pdu.slot, pdu.rnti);
+  report_first_capture(name);
 
   if (FILE* f = std::fopen((name + ".txt").c_str(), "w")) {
     std::fprintf(f, "slot=%u\n", pdu.slot.count());
@@ -230,6 +300,12 @@ void ocudu::ul_capture::capture_grid(const resource_grid_reader& grid, const pus
     });
     std::fprintf(f, "\n");
     std::fclose(f);
+  }
+  else {
+    // The directory exists (checked in select()) but the file still could not be opened: a permission, a
+    // full disk, a filename the filesystem refuses. Reported rather than swallowed, because the reception
+    // has already spent the budget and the operator has no other way to find out.
+    report_capture_failure((name + ".txt").c_str(), std::strerror(errno));
   }
 
   const unsigned    nof_subc  = pdu.bwp_size_rb * NOF_SUBCARRIERS_PER_RB;

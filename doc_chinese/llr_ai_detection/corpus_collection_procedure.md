@@ -55,12 +55,24 @@ grep -A2 "^  amf:" configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml
 # ★★ 必须与【你交付配置里正在用的那两个地址】一致 ✓（★ 本文件是它的副本 ✓，★
 #    但交付配置的地址是【本地未提交】的改动 ⇒ 你若再改交付配置，★ 这里也要跟着改 ✓）
 
-# ③ ★★ 磁盘
+# ③ ★★★ 磁盘【和目录】—— `fopen` 【不会】自动建目录 ✗✗
 df -h ~/ocudu_capture            # ★ 需要 ≥3 GB 余量
 mkdir -p ~/ocudu_capture/aillr_cap003
+# ★★★ 这一步漏了会【静默丢掉整条腿】✗：★ 2026-10-14 的第一条 cap003 腿就是这么丢的 ——
+#     ★ 跑了 8 分钟、99672 次接收、★ 目录不存在 ⇒ 3000 个 fopen 全部返回 null ⇒ ★ **一个文件都没写** ✗，
+#     而 gNB 当时**什么都没打印** ✗（★ 现已修：见下面 ④ ✓）。
 
-# ④ ★★ 采集代码是编进去的
+# ④ ★★ 采集代码是编进去的，★ 并且现在会【自己报告】能不能写
 grep -m1 ENABLE_UL_CAPTURE build/CMakeCache.txt      # ★ 必须是 ON
+strings build/apps/gnb/gnb | grep -c "NOT CAPTURING" # ★ 必须是 1（本次构建新增的保护）
+```
+
+★★★ **新增的两条自报（★ 2026-10-14，★ 就是为了上面那次静默丢失 ✓）**：
+
+| ★ 输出 | ★★ 含义 |
+|---|---|
+| ★★ `[ul_capture] capturing: writing <前缀>_<slot>_<rnti>.* (budget N reception(s) that pass the filters)` | ★★ **第一个采集落地了** ✓ —— ★ 一条腿开头看到这一行，★ 说明目录、权限、前缀都对 ✓ |
+| ★★★ `[ul_capture] NOT CAPTURING: cannot write '<前缀>': <原因>` | ★★★ **整条腿正在丢采集** ✗ —— ★★ 立即停腿、★ 建目录、★ 重跑 ✓ |
 ```
 
 ★★ **另外要准备好**：★ B200 ＋ **GPSDO 锁星**（★ 配置里 `clock_source=gpsdo,time_source=gpsdo` ✓）、
@@ -102,14 +114,73 @@ sudo -E env \
 
 ---
 
+## 3.1 ★★★ 一次坐下把【该抓的全部抓完】：★ 6 条腿
+
+★★ **为什么一次抓完** ✓：★★ 每条腿都要现场（★ 电台 ＋ 手机 ＋ 人 ✓），★ 而**契约是"一个调制一个模型"** ✓
+⇒ ★★ **另外三个调制现在【一个样本都没有】** ✗（★ §④D ✓），★ 补齐它们只需要**换配置再飞一条腿** ✓。
+
+| ★ 腿 | ★★ 语料目录 | ★★ 配置文件 | ★★ 调制 / MCS | ★★ 用途 | ★★ 采集量 |
+|---|---|---|---|---|---|
+| ★★ 1 | `aillr_cap003` | `..._llr_collect.yml` | 256QAM / 20 | ★★★ **判据 1 的主池** ✓ | 3000 |
+| ★★ 2 | `aillr_cap004` | `..._llr_collect.yml` | 256QAM / 20 | ★★ **第二场** ⇒ 会话级 train/val（★ 本工作流**从不随机划分** ✓）| 3000 |
+| ★ 3 | `aillr_cap005` | `..._collect_64qam.yml` | 64QAM / 14 | ★ 第二个调制：★ 语料 → 模型 → 链级读数 | 2000 |
+| ★ 4 | `aillr_cap006` | `..._collect_16qam.yml` | 16QAM / 9 | ★ 第三个 | 2000 |
+| ★ 5 | `aillr_cap007` | `..._collect_qpsk.yml` | QPSK / 4 | ★ 第四个 | 2000 |
+| ★ 6 | `aillr_cap008` | `..._llr_collect.yml` ＋ `MAX_RB=25` | 交付默认 MCS | ⬜ **可选**：★ **窄分配池** ⇒ 重新裁决 `MIN_PRB` ✓ | 2000 |
+
+★★ **容量先算**（★ **约 1 MB/采集** ✓）：★ 6 条腿合计约 **11 GB** ✗ ⇒ ★★ **先 `df -h` 看一眼** ✓；
+★ 空间紧就**先把 cap003/cap004 抓完** ✓（★ 判据 1 只依赖这两条 ✓），★ 其余调制**下次再补** ✓。
+
+### ★★ 一次性执行（★ 把 6 条腿挨着飞）
+
+```bash
+cd ~/dev/ocudu
+
+collect() {                       # 用法: collect <标签> <配置> <目录> [额外的 OCUDU_* 覆盖...]
+  local label=$1 cfg=$2 dir=$3; shift 3
+  mkdir -p "$dir"                 # ★★ 必须 —— fopen 不会建目录 ✗
+  sudo -E env "LEG_CONFIG=$HOME/dev/ocudu/$cfg" \
+       "OCUDU_UL_DUMP=$dir/C" OCUDU_UL_DUMP_COUNT=${COUNT:-3000} \
+       OCUDU_UL_DUMP_MIN_RB=43 OCUDU_UL_DUMP_RV=0 \
+       OCUDU_UL_DUMP_LLR=1 OCUDU_RECEIVER_PROBE=1 "$@" \
+       bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu "$label"
+}
+
+C=$HOME/ocudu_capture
+collect aillr-cap003 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml       $C/aillr_cap003
+collect aillr-cap004 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml       $C/aillr_cap004
+COUNT=2000 collect aillr-cap005 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_64qam.yml $C/aillr_cap005
+COUNT=2000 collect aillr-cap006 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam.yml $C/aillr_cap006
+COUNT=2000 collect aillr-cap007 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_qpsk.yml  $C/aillr_cap007
+# 可选 —— 窄分配：把下限撤掉、改用上限（后写的赋值覆盖前面的 ✓）
+COUNT=2000 collect aillr-cap008 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml $C/aillr_cap008 \
+        OCUDU_UL_DUMP_MIN_RB=0 OCUDU_UL_DUMP_MAX_RB=25
+```
+
+★★ **每条腿的操作节奏** ✓：★ ① 起腿 ⇒ ★ ② 开 iperf3（★ §4 ✓）⇒ ★ ③ 盯到 **`[ul_capture] capturing:`** 出现 ✓
+（★ 没出现就说明目录/权限不对 ⇒ ★ **立刻停腿** ✓，★ 大概念见到 `NOT CAPTURING` ✓）⇒
+★ ④ **预算填得很快**（★ 实测 ~310 次接收/秒 ✓，★ 3000 个合格接收通常 **1–3 分钟** 就满 ✓）⇒
+★ ⑤ **Ctrl-C 停腿**（★ 按协议：★ 只按一次 Ctrl-C，★ 不要 SIGTERM ✓）⇒ ★ ⑥ 把 iperf3 停掉 ⇒ ★ ⑦ 跑验收（★ §5 ✓）。
+
+★★ **腿与腿之间**：★ 手机重新附着通常几秒 ✓；★★ **每条腿必须换目录** ✓（★ 否则会追加进同一批 ✓）。
+
+★★ **不要混用的两件事** ✗：★ **调制腿之间必须换配置文件** ✓（★ MCS 在 YAML 里、★ 不在环境变量里 ✓），
+★ 而**采集过滤器在环境里** ✓（★ 所以窄分配那条腿只改 `OCUDU_UL_DUMP_*`、★ 不换配置 ✓）。
+
+---
+
 ## 4. ★★ 采集期间：★ 把上行流量打满（★ 决定分配宽度）
 
 ★★ **调度器只在【上行缓冲堆积】时给宽分配** ✓ ⇒ ★★ **流量不够，就会退化成窄分配，★ 然后被 `MIN_RB=43` 全滤掉** ✗。
 
 ```
-# 手机侧（gNB 的 IP 按你的部署；-R = 手机发、gNB 收）
-iperf3 -c <gNB_IP> -R -t 300 -P 4
+# ★★ 在【跑 gNB 的这台机器】上执行；★ `<手机IP>` 是【手机的地址】，★★ 不是 gNB 的 ✗ ——
+# ★★ gNB 只是 CN 与手机之间的管道，★ 它【不是】iperf3 的端点 ✓；★ iperf3 server 跑在手机上 ✓。
+# ★★ `-R` = reverse ⇒ 【手机发、gNB 收】= 上行 ✓。
+iperf3 -c <手机IP> -R -t 300 -P 4
 ```
+
+★★★ **2026-10-14 更正**：★ 上一版这里写的是 `<gNB_IP>` ✗ —— ★★ 那是错的 ✓（★ 用户指出 ✓）。
 
 ★★ **判读（★ 采集中随时看）**：★ 采到的文件应当**持续增长** ✓；★ 若几分钟不涨，★ 说明**当前流量产生不了 ≥43 PRB 的 rv=0 接收** ✗
 ⇒ ★★ 加大负载（★ `-P 8`、★ UDP `-u -b 0`）★ 或**把手机靠近** ✓。
@@ -190,3 +261,25 @@ aillr_cap003: <N> captures
 
 ★★★ **换配置（MCS 20 ＋ p0 −70）＋ 加两个过滤器（MIN_RB=43 / RV=0）＋ 流量打满** ✓，
 ★★★ **采完先跑 `audit_corpus.py --replay`，可译 ≥100 再往下走** ✓ —— ★★ **不要先建数据集** ✗。
+
+---
+
+## 8. ★★★ 事故记录：★ 第一条 cap003 腿**一个文件都没写**（★ 2026-10-14）
+
+★★ **事实**（★ 从腿日志读出来的 ✓）：★ 腿 `gnb_gpu_aillr-cap003_1014_2146` 跑了 **8 分钟、99672 次接收** ✓，
+★ 九个环境变量**全部正确送达** ✓（★ 腿日志开头逐条打印 ✓），★★ **而 `$HOME/ocudu_capture/aillr_cap003/` 不存在** ✗ ——
+★★★ **`fopen` 不会创建目录** ✓ ⇒ ★★ **3000 个采集的每一次 fopen 都返回 null，★ 而 gNB 什么都没打印** ✗。
+
+★★ **为什么没被发现**：★ 腿本身**是健康的** ✓（★ 契约 8/9 通过 ✓、★ 计数器全绿 ✓、★ 速率正常 ✓）——
+★★ 唯一的症状是"**没有文件**" ✓，★ 而当时没有任何东西会报告它 ✗。
+
+★★★ **⇒ 处置（★ 已落地 ✓）**：
+1. ★★ **`ul_capture` 现在自报** ✓：★ 第一个采集落地时打印 `[ul_capture] capturing: writing …` ✓；
+★★ 目录不存在或 `fopen` 失败时打印 **`[ul_capture] NOT CAPTURING: … Every capture of this leg is being DROPPED`** ✓
+（★ **stderr、★ 不受日志级别影响** ✓ —— ★ 与 F20 同一条理由：★ "语料在不在"不能取决于日志级别 ✓）；
+2. ★★ **目录检查在花预算【之前】** ✓（★ 一个被拒的接收不占预算 ✓，★ 与两个宽度过滤器同一处置 ✓）；
+3. ★★ 手册把 `mkdir -p` 提到前置检查里 ✓，★ 并写明"**看不到 `capturing:` 就立刻停腿**" ✓。
+
+★★★ **⇒ 纪律 F34**：★★★ **采集器必须【自报它在写】** ✓ —— ★★ 一个"什么都没做"的仪器，
+★ 与一个"做了但结果为空"的仪器，★ **在输出上无法区分** ✗ ⇒ ★★ **必须由仪器自己说出前者** ✓。
+★★ 本条与 **F20**（降级必须走不受日志级别影响的通道 ✓）是同一族：★ **沉默的失败比失败的失败更贵** ✓。
