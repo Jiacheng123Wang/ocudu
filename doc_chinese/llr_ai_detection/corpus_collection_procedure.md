@@ -1,4 +1,4 @@
-# 深度-3 LLR 语料采集操作手册（★ `aillr_cap003`，2026-10-14）
+# 深度-3 LLR 语料采集操作手册（★ 2026-10-14 第一轮已完成，§3.1 是它的记录）
 
 > **这份文档是干什么的**：★ 把 §19.22 的采集配方变成**照着敲就能跑、跑完能自己判合格与否**的一份操作步骤 ✓。
 > **上位文档**：★ `llr_ai_detection_design_and_implementation.md` ★ **§19.22**（配方来源 ✓）、
@@ -59,7 +59,7 @@ grep -A2 "^  amf:" configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml
 # ★★ 语料放在【工作流目录里】（★ 与 cap001/cap002 同一处 ✓，★ 已被 .gitignore 忽略 ✓）：
 CORPUS=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus
 df -h "$CORPUS"                 # ★ 每条腿约 2–3 GB；★ 6 条腿约 11 GB
-mkdir -p "$CORPUS/aillr_cap003"
+mkdir -p "$CORPUS/<语料目录>"
 ls -d "$CORPUS"/*/              # ★ 应当看到 aillr_cap001 aillr_cap002（旧语料）
 # ★★ gNB 以 root 跑 ⇒ 采到的文件是 root 的 ✓ ⇒ 顺手确认 root 能写、并记下要 chown ✓：
 sudo touch "$CORPUS/.write_test" && sudo rm "$CORPUS/.write_test" && echo "root can write here OK"
@@ -91,13 +91,13 @@ cd ~/dev/ocudu
 
 sudo -E env \
   LEG_CONFIG=$HOME/dev/ocudu/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml \
-  OCUDU_UL_DUMP=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/aillr_cap003/C \
+  OCUDU_UL_DUMP=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/<语料目录>/C \
   OCUDU_UL_DUMP_COUNT=3000 \
   OCUDU_UL_DUMP_MIN_RB=43 \
   OCUDU_UL_DUMP_RV=0 \
   OCUDU_UL_DUMP_LLR=1 \
   OCUDU_RECEIVER_PROBE=1 \
-  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-cap003
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu <腿标签>
 ```
 
 ### ★★ 与你原来那条命令的逐项对照
@@ -105,7 +105,7 @@ sudo -E env \
 | ★ 环境变量 | ★★ 原来 | ★★★ 现在 | ★★ 为什么 |
 |---|---|---|---|
 | `LEG_CONFIG` | `gnb_rf_b200_tdd_n78_20mhz.yml` | ★★ **`..._llr_collect.yml`** | ★★ MCS 钉 20 ＋ 功控 −70 ✓ |
-| `OCUDU_UL_DUMP` | `.../aillr_cap002/C` | ★ `.../aillr_cap003/C` | ★ 新目录，★ 不覆盖旧语料 ✓ |
+| `OCUDU_UL_DUMP` | `.../aillr_cap002/C` | ★ `.../<语料目录>/C` | ★ 新目录，★ 不覆盖旧语料 ✓ |
 | `OCUDU_UL_DUMP_COUNT` | 2000 | ★ **3000** | ★ 过滤器会让预算只花在合格接收上 ✓，★ 多留余量 ✓ |
 | ★★ **`OCUDU_UL_DUMP_MIN_RB`** | — | ★★ **新增 `43`** | ★★ **窄于 43 PRB 的接收不占预算** ✓（★ 旧语料 357 个白占 ✗）|
 | ★★ **`OCUDU_UL_DUMP_RV`** | — | ★★ **新增 `0`** | ★★ **重传不占预算** ✓（★ 重放复现不出合并 ✗，★ 见 §0）|
@@ -123,17 +123,18 @@ sudo -E env \
 ★★ **为什么一次抓完** ✓：★★ 每条腿都要现场（★ 电台 ＋ 手机 ＋ 人 ✓），★ 而**契约是"一个调制一个模型"** ✓
 ⇒ ★★ **另外三个调制现在【一个样本都没有】** ✗（★ §④D ✓），★ 补齐它们只需要**换配置再飞一条腿** ✓。
 
-| ★ 腿 | ★★ 语料目录 | ★★ 配置文件 | ★★ 调制 / MCS | ★★ 用途 | ★★ 采集量 |
+| ★ 腿 | ★★ 语料目录（★ 最终名 ✓）| ★★ 配置文件 | ★★ 调制 / MCS | ★★ 用途 | ★★★ 实测 |
 |---|---|---|---|---|---|
-| ★★ 1 | `aillr_cap003` | `..._llr_collect.yml` | 256QAM / 20 | ★★★ **判据 1 的主池** ✓ | 3000 |
-| ★★ 2 | `aillr_cap004` | `..._llr_collect.yml` | 256QAM / 20 | ★★ **第二场** ⇒ 会话级 train/val（★ 本工作流**从不随机划分** ✓）| 3000 |
-| ★ 3 | `aillr_cap005` | `..._collect_64qam.yml` | 64QAM / 14 | ★ 第二个调制：★ 语料 → 模型 → 链级读数 | 2000 |
-| ★ 4 | `aillr_cap006` | `..._collect_16qam.yml` | 16QAM / 9 | ★ 第三个 | 2000 |
-| ★ 5 | `aillr_cap007` | `..._collect_qpsk.yml` | QPSK / 4 | ★ 第四个 | 2000 |
-| ★ 6 | `aillr_cap008` | `..._llr_collect.yml` ＋ `MAX_RB=25` | 交付默认 MCS | ⬜ **可选**：★ **窄分配池** ⇒ 重新裁决 `MIN_PRB` ✓ | 2000 |
+| ★★ 1 | `aillr_256qam_wide_s1` | `..._llr_collect.yml` | 256QAM / 20 | ★★ **判据 1 的主池（会话 1）** ✓ | 2770 个，**67.5%** ✓ |
+| ★★ 2 | `aillr_256qam_wide_s2` | 同上 | 256QAM / 20 | ★★ **第二场** ⇒ 会话级 train/val（★ 从不随机划分 ✓）| 2640 个，**60.5%** ✓ |
+| ★ 3 | `aillr_64qam_wide` | `..._collect_64qam.yml` | 64QAM / 14 | ★ 第二个调制 | 2000 个，**92.3%** ✓ |
+| ★ 4 | `aillr_16qam_wide` | `..._collect_16qam.yml` | 16QAM / 9 | ★ 第三个 | 2000 个，**76.9%** ✓ |
+| ★ 5 | `aillr_qpsk_wide` | `..._collect_qpsk.yml` | QPSK / 4 | ★ 第四个 | 1997 个，**99.9%** ✓ |
+| ★ 6 | `aillr_256qam_narrow` | `..._llr_collect.yml` ＋ `MAX_RB=25` | 256QAM | ★★ 窄分配池 ⇒ 重新裁决 `MIN_PRB` ✓ | 1217 个，**33.8%** ✓ |
 
-★★ **容量先算**（★ **约 1 MB/采集** ✓）：★ 6 条腿合计约 **11 GB** ✗ ⇒ ★★ **先 `df -h` 看一眼** ✓；
-★ 空间紧就**先把 cap003/cap004 抓完** ✓（★ 判据 1 只依赖这两条 ✓），★ 其余调制**下次再补** ✓。
+★★★ **⇒ 本轮已完成** ✓（★ 2026-10-14 ✓）：★★ **六个组合各一批、★ 全部 KEEP** ✓，
+★ 共 **12 624** 个采集、★ **14 GB** ✓。★★ 被重飞取代的三批已删 ✓（★ 设计文档 §19.38 有改名映射 ✓）。
+★★ **下一次采集（如果还要）**：★ 直接用下面的 `collect()` 函数 ✓，★ 目录名按 `调制_宽度[_场次]` 起 ✓。
 
 ### ★★ 一次性执行（★ 把 6 条腿挨着飞）
 
@@ -151,13 +152,13 @@ collect() {                       # 用法: collect <标签> <配置> <目录> [
 }
 
 C=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus
-collect aillr-cap003 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml       $C/aillr_cap003
-collect aillr-cap004 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml       $C/aillr_cap004
-COUNT=2000 collect aillr-cap005 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_64qam.yml $C/aillr_cap005
-COUNT=2000 collect aillr-cap006 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam.yml $C/aillr_cap006
-COUNT=2000 collect aillr-cap007 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_qpsk.yml  $C/aillr_cap007
-# 可选 —— 窄分配：把下限撤掉、改用上限（后写的赋值覆盖前面的 ✓）
-COUNT=2000 collect aillr-cap008 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml $C/aillr_cap008 \
+collect aillr-256qam-s1 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml       $C/aillr_256qam_wide_s1
+collect aillr-256qam-s2 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml       $C/aillr_256qam_wide_s2
+COUNT=2000 collect aillr-64qam configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_64qam.yml $C/aillr_64qam_wide
+COUNT=2000 collect aillr-16qam configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam.yml $C/aillr_16qam_wide
+COUNT=2000 collect aillr-qpsk   configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_qpsk.yml  $C/aillr_qpsk_wide
+# 窄分配：把下限撤掉、改用上限（★ 后写的赋值覆盖前面的 ✓）
+COUNT=2000 collect aillr-narrow configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml $C/aillr_256qam_narrow \
         OCUDU_UL_DUMP_MIN_RB=0 OCUDU_UL_DUMP_MAX_RB=25
 ```
 
@@ -199,7 +200,7 @@ iperf3 -c <手机IP> -R -t 300 -P 4
 
 ```bash
 # 最近 20 个采集的 SNR（dB）：_ce.txt 的 snr 列是【线性】值，dB = 10*log10
-for f in $(ls -t $HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/aillr_cap003/C_*_ce.txt | head -20); do
+for f in $(ls -t $HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/<语料目录>/C_*_ce.txt | head -20); do
   awk '{for(i=1;i<=NF;i++) if($i ~ /^snr=/){split($i,a,"="); printf "%.1f dB\n", 10*log10(a[2])}}' "$f"
 done
 # ★★ 配方要"高 SNR"：★ 目标【中位 ≥25 dB】✓（★ 旧语料只有 19.8 dB ✗）
@@ -215,7 +216,7 @@ done
 cd ~/dev/ocudu
 W=doc_chinese/llr_ai_detection/work_tmp
 PY=~/ai_ce_work/venv/bin/python
-D=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/aillr_cap003
+D=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/<语料目录>
 
 # ① ★ 秒级：配方维度对不对
 $PY $W/probe/audit_corpus.py --corpus $D
@@ -228,7 +229,7 @@ $PY $W/probe/audit_corpus.py --corpus $D --replay \
 ### ★★★ 期望输出长什么样
 
 ```
-aillr_cap003: <N> captures
+<语料目录>: <N> captures
   modulation   : {'256QAM': ...}                       ← ★ 以 256QAM 为主
   rv           : {'0': ...}                            ← ★ 只有 0（过滤器生效）
   code rate    : 256QAM@683(...)                       ← ★★★ 683 = MCS 20；若是 948 ⇒ 配置没生效 ✗
@@ -288,9 +289,9 @@ $PY $W/probe/live_decode_rate.py --log $L --mod 16QAM --rv 0 --min-prb 43 --powe
 
 ```bash
 C=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus
-COUNT=2000 collect aillr-cap005b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam.yml $C/aillr_cap005b
-COUNT=2000 collect aillr-cap006b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_64qam.yml $C/aillr_cap006b
-COUNT=3000 collect aillr-cap003b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml       $C/aillr_cap003b
+COUNT=2000 collect aillr-cap005b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam.yml $C/aillr_16qam_wide
+COUNT=2000 collect aillr-cap006b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_64qam.yml $C/aillr_64qam_wide
+COUNT=3000 collect aillr-cap003b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml       $C/<语料目录>b
 ```
 
 ★ 附：`..._collect_{16qam,64qam}_p0default.yml` 两个配置仍在 ✓（★ p0 交回 −76 ✓），
@@ -317,8 +318,8 @@ PY=~/ai_ce_work/venv/bin/python
 L=doc_chinese/phy_pipeline_gpu/wip/logs
 
 # ★★ 每条腿跑完立刻跑这一条（★ 几秒钟 ✓）
-$PY $W/probe/leg_verdict.py --corpus $W/corpus/aillr_capXXX \
-    --log "$L/gnb_gpu_aillr-capXXX_*.log" --mod 256QAM --rv 0 --min-prb 43
+$PY $W/probe/leg_verdict.py --corpus $W/corpus/<语料目录> \
+    --log "$L/gnb_gpu_aillr-<腿标签>_*.log" --mod 256QAM --rv 0 --min-prb 43
 # ★★ 输出：★ 实时译码率（判据 ✓）、★ 后均衡噪声底（解释 ✓）、
 #    ★ `_ce.txt` 残差（仅上下文，★ 工具会标注它**不跟踪链路** ✗）
 # ★★ ⇒ **KEEP** ✓ 或 **RE-FLY** ✗（★ 退出码 0 / 2 ✓）；
@@ -329,13 +330,13 @@ $PY $W/probe/leg_verdict.py --corpus $W/corpus/aillr_capXXX \
 
 | ★ 语料 | ★★ 译码率 | ★★ 后均衡噪声底 | ★★ 判决 |
 |---|---|---|---|
-| aillr_cap003 | 10.3% | −12.7 | ★ **RE-FLY** ✗ |
-| aillr_cap004 | 67.5% | −22.0 | ★★ **KEEP** ✓ |
-| aillr_cap005 | 0.6% | −2.9 | ★ **RE-FLY** ✗ |
-| ★★ **aillr_cap005b** | ★★★ **76.9%** ✓✓ | −15.5 | ★★ **KEEP** ✓ |
-| aillr_cap006 | 0.1% | −0.9 | ★ **RE-FLY** ✗ |
-| aillr_cap007 | 99.9% | −17.4 | ★★ **KEEP** ✓ |
-| aillr_cap008 | 33.8% | −5.1 | ★★ **KEEP** ✓ |
+| <语料目录> | 10.3% | −12.7 | ★ **RE-FLY** ✗ |
+| aillr_256qam_wide_s1 | 67.5% | −22.0 | ★★ **KEEP** ✓ |
+| <语料目录>| 0.6% | −2.9 | ★ **RE-FLY** ✗ |
+| ★★ **aillr_16qam_wide** | ★★★ **76.9%** ✓✓ | −15.5 | ★★ **KEEP** ✓ |
+| <语料目录>| 0.1% | −0.9 | ★ **RE-FLY** ✗ |
+| aillr_qpsk_wide | 99.9% | −17.4 | ★★ **KEEP** ✓ |
+| aillr_256qam_narrow | 33.8% | −5.1 | ★★ **KEEP** ✓ |
 
 ★★★ **RE-FLY 时怎么做** ✓：★ **换一个新目录重飞同一条配置** ✓
 —— ★★ **不要删旧的** ✗：★ 它仍可作**训练数据源** ✓，★ 只是**不能当判据池** ✗。
