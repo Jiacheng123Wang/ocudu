@@ -33,6 +33,7 @@ sys.path.insert(0, HERE)
 import tensorflow as tf          # noqa: E402
 
 import depth3 as D3              # noqa: E402
+import depth3_loss as L          # noqa: E402
 import train_depth3 as T         # noqa: E402
 
 
@@ -112,12 +113,21 @@ def main():
     # opinion. The plateau is therefore the set of scales whose quantised decode equals the best
     # quantised decode, and the rule is to KEEP the value the model was trained with when it lies on
     # the plateau -- moving inside a flat region changes a trained convention and buys nothing.
-    best_bler = min(row[5] for row in results)
-    plateau = [row[0] for row in results if abs(row[5] - best_bler) < 1.0e-9]
+    #
+    # "Equals" has to mean "equals to the resolution of this measurement", and the resolution is ONE
+    # BLOCK: a BLER is a count of failed blocks over `blocks`, so two scales whose counts differ by one
+    # are the same measurement. An exact-equality plateau turns that one block into a refit, and it did
+    # -- on 616 blocks it moved the deployed scale from the trained 20 to 10 on a single block (0.3929
+    # against 0.3945), which is a change to a trained convention bought with noise.
+    best_bler  = min(row[5] for row in results)
+    blocks     = max(row[6] for row in results)
+    resolution = 1.0 / max(blocks, 1)
+    plateau = [row[0] for row in results if row[5] - best_bler <= resolution + 1.0e-12]
     on_plateau = any(abs(scale - args.current) < 1.0e-9 for scale in plateau)
     chosen = args.current if on_plateau else min((row for row in results if row[5] == best_bler),
                                                  key=lambda row: row[0])[0]
-    print(f"\nplateau (quantised BLER {best_bler:.4f}): S_llr in [{min(plateau):g}, {max(plateau):g}]")
+    print(f"\nplateau (quantised BLER {best_bler:.4f}, resolution {resolution:.4f} = one of {blocks} "
+          f"blocks): S_llr in [{min(plateau):g}, {max(plateau):g}]")
     print(f"the model was trained with S_llr = {args.current:g}, "
           f"{'which is on the plateau -- KEPT' if on_plateau else 'which is NOT on it -- refitted'}")
     print(f"chosen S_llr = {chosen:g}")
@@ -131,7 +141,17 @@ def main():
             handle.write(f"# R4.5 fit from {os.path.basename(args.model)} on "
                          f"{os.path.basename(args.data)}, {len(heads)} samples\n")
             handle.write(f"s_llr={best[0]:g}\n")
-        print(f"wrote {path}")
+            # The noise pair travels with the LLR scale, and it is not a fit: heads 2 and 4 were
+            # TRAINED against `depth3_loss.noise_shape_target`, so the map the receiver has to invert
+            # is fixed by the training, and the trainer's constants are the only correct source for it.
+            # Written here because the receiver otherwise falls back to its own defaults, which happen
+            # to be the same numbers today and are two independent literals in two languages -- a
+            # change to either side would move the published noise by decades with no symptom until
+            # the scheduler read a wrong SINR.
+            handle.write(f"a_noise={L.NOISE_SCALE_DECADES:g}\n")
+            handle.write(f"b_noise={L.NOISE_SCALE_CENTER:g}\n")
+        print(f"wrote {path} (s_llr={best[0]:g}, a_noise={L.NOISE_SCALE_DECADES:g}, "
+              f"b_noise={L.NOISE_SCALE_CENTER:g})")
     return 0
 
 

@@ -3,6 +3,7 @@
 
 #include "pusch_depth3_receiver_impl.h"
 #include "pusch_depth3_input_plane.h"
+#include "pusch_depth3_measurements.h"
 #include "ul_capture.h"
 #include "ocudu/phy/phy_pipeline_crossings.h"
 #include "ocudu/ocudulog/ocudulog.h"
@@ -42,6 +43,25 @@ struct depth3_scales {
   float b_noise = -1.0F;
 };
 
+/// \brief Reports a sidecar that does not carry the noise pair, through a channel no log level can silence.
+///
+/// The pair is what turns heads 2 and 4 into a variance, and getting it wrong moves the published SINR by
+/// decades: the receiver's defaults are the trainer's current constants, but they are two independent
+/// literals in two languages and nothing keeps them in step. A sidecar that omits them means the deployment
+/// is relying on that coincidence, so it is said out loud -- on stderr, for the reason F20 gives, because a
+/// wrong SINR is worse than a missing one and must not depend on whether a logger happened to be enabled.
+void report_missing_noise_pair(const std::string& path, const depth3_scales& scales, const char* why)
+{
+  fmt::print(stderr,
+             "[pusch_receiver] AI depth-3: {}: {}, so the noise map falls back to the receiver's defaults "
+             "(A_n={} B_n={}). Regenerate it with calibrate_depth3.py --write-scales so the map travels "
+             "with the model.\n",
+             path,
+             why,
+             scales.a_noise,
+             scales.b_noise);
+}
+
 /// Splits "key=value" lines, ignoring comments and blanks. Unparseable lines are REPORTED: a sidecar that
 /// silently half-applies is a calibration that never happened.
 depth3_scales read_scales(const std::string& model_path, float range_limit)
@@ -56,8 +76,11 @@ depth3_scales read_scales(const std::string& model_path, float range_limit)
 
   std::ifstream handle(path);
   if (!handle.is_open()) {
+    report_missing_noise_pair(path, scales, "there is no sidecar at all");
     return scales;
   }
+  bool have_a_noise = false;
+  bool have_b_noise = false;
   std::string line;
   while (std::getline(handle, line)) {
     const size_t equals = line.find('=');
@@ -70,11 +93,16 @@ depth3_scales read_scales(const std::string& model_path, float range_limit)
       scales.s_llr = value;
     } else if (key == "a_noise") {
       scales.a_noise = value;
+      have_a_noise   = true;
     } else if (key == "b_noise") {
       scales.b_noise = value;
+      have_b_noise   = true;
     } else {
       ocudulog::fetch_basic_logger("PHY").warning("AI depth-3: ignoring unknown scale '{}' in {}", key, path);
     }
+  }
+  if (!have_a_noise || !have_b_noise) {
+    report_missing_noise_pair(path, scales, "it does not carry the noise pair");
   }
   ocudulog::fetch_basic_logger("PHY").info(
       "AI depth-3: scales from {}: S_llr={} A_n={} B_n={}", path, scales.s_llr, scales.a_noise, scales.b_noise);
@@ -257,6 +285,14 @@ public:
       return;
     }
 
+    // ---- the reporting heads, next to the estimator's own numbers ---------------------------------
+    // R6's acceptance is that the network's measurements agree with the classical estimator's to the order
+    // of magnitude the design asks for, and the only way to know is to compute both on the same reception
+    // and print them side by side. They are NOT published yet: the arm still forwards `estimate()` to the
+    // classical estimator, so a measurement that is wrong would reach the scheduler with nothing to
+    // compare it against. Measure first, then switch -- the order the rest of this work has used.
+    report_measurements(reference_amplitude, est_results, config);
+
     // ---- gather, quantise, descramble, deliver ---------------------------------------------------
     if (!deliver(codeword_buffer, notifier, config, qm)) {
       degrade(depth3_degradation::no_data_resource_elements, codeword_buffer, notifier, grid, est_results, config);
@@ -269,6 +305,47 @@ private:
   /// The contract's range limit for the modulation in use. Read from the chain's own table so the arm cannot
   /// invent a saturation point the quantiser does not have.
   static constexpr float D3_RANGE_LIMIT_256QAM = 20.0F;
+
+  /// \brief Computes the network's measurements from heads 3 and 4 and prints them beside the estimator's.
+  ///
+  /// Sampled the way the degradations are -- the first reception in full, then one in a thousand -- so a
+  /// mis-scaled noise map or a channel head that was not multiplied back by `r` is unmissable in a single
+  /// run's output without turning a run into a log.
+  void report_measurements(float                                   reference_amplitude,
+                           const dmrs_pusch_estimator_results&     est_results,
+                           const pusch_demodulator::configuration& config)
+  {
+    ++forwarded_receptions;
+    if ((forwarded_receptions != 1) && ((forwarded_receptions % 1000) != 0)) {
+      return;
+    }
+    const depth3_measurements net = measure_depth3(span<const __fp16>(input_plane),
+                                                   span<const __fp16>(channel_head),
+                                                   reference_amplitude,
+                                                   static_cast<float>(dmrs_noise_head),
+                                                   scales.a_noise,
+                                                   scales.b_noise);
+    if (net.nof_pilot_re == 0) {
+      fmt::print(stderr, "[depth3-measure] the plane carries no pilot resource element; nothing measured\n");
+      return;
+    }
+    const unsigned port        = config.rx_ports.empty() ? 0 : config.rx_ports.front();
+    const float    classic_nv  = est_results.get_noise_variance(port);
+    fmt::print(stderr,
+               "[depth3-measure] reception {} over {} pilot RE(s): epre net={:.2f} classic={:.2f} dB | "
+               "rsrp net={:.2f} classic={:.2f} dB | snr net={:.2f} classic={:.2f} dB | "
+               "noise net={:.4e} classic={:.4e}\n",
+               forwarded_receptions,
+               net.nof_pilot_re,
+               convert_power_to_dB(net.epre_lin),
+               convert_power_to_dB(est_results.get_epre(port)),
+               convert_power_to_dB(net.rsrp_lin),
+               convert_power_to_dB(est_results.get_rsrp(port, 0)),
+               convert_power_to_dB(net.snr_lin),
+               convert_power_to_dB(est_results.get_snr(port)),
+               net.noise_variance_lin,
+               classic_nv);
+  }
 
   void degrade(depth3_degradation                  reason,
                pusch_codeword_buffer&              codeword_buffer,
@@ -416,6 +493,9 @@ private:
   bool                                            context_is_valid = false;
   bool                                            engine_ready      = false;
   bool                                            last_forward_ok   = false;
+  /// Receptions whose forward pass produced the soft bits, which is what the measurement reporting is
+  /// sampled on: a degradation has no head output to measure.
+  unsigned                                        forwarded_receptions = 0;
   depth3_scales                                   scales;
 
   std::vector<__fp16>          input_plane;

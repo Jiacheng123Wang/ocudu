@@ -29,6 +29,7 @@ add_library(ocudu_pusch_processor STATIC
         pusch_decoder_hw_impl.cpp
         pusch_decoder_impl.cpp
         pusch_depth3_input_plane.cpp
+        pusch_depth3_measurements.cpp
         pusch_depth3_receiver_impl.cpp
         pusch_processor_impl.cpp
         pusch_processor_validator_impl.cpp
