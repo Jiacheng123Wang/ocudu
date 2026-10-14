@@ -50,6 +50,10 @@ strings build/apps/gnb/gnb | grep -E "OCUDU_UL_DUMP_(MIN_RB|RV)$"
 ls -la configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml
 # ★★ 它是交付配置的副本，★ 只改了【三行】（★ 见文件头说明 ✓）：
 #    cell_cfg.pusch.min_ue_mcs: 20 / max_ue_mcs: 20 / p0_nominal_with_grant: -70
+# ★★ 同时核一眼 AMF 地址（★ `cu_cp.amf.addrs` / `bind_addrs` ✓）：
+grep -A2 "^  amf:" configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml
+# ★★ 必须与【你交付配置里正在用的那两个地址】一致 ✓（★ 本文件是它的副本 ✓，★
+#    但交付配置的地址是【本地未提交】的改动 ⇒ 你若再改交付配置，★ 这里也要跟着改 ✓）
 
 # ③ ★★ 磁盘
 df -h ~/ocudu_capture            # ★ 需要 ≥3 GB 余量
