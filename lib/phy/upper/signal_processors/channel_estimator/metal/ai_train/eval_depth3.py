@@ -121,6 +121,20 @@ def evaluate(args):
     model = tf.keras.models.load_model(args.model, compile=False,
                                        custom_objects={"FoldedScaleConv": T.FoldedScaleConv})
     scale = D3.RANGE_LIMIT_FLOAT[args.modulation]
+    if args.weight_quant == "int8":
+        # Per-tensor symmetric int8, the same shape `coremltools.optimize.coreml.quantize_weights`
+        # applies to the converted graph: scale = max|w|/127, round, and put the scale back so the
+        # arithmetic that follows is unchanged.
+        quantised = 0
+        for weight in model.weights:
+            values = weight.numpy()
+            peak = float(abs(values).max())
+            if peak == 0.0:
+                continue
+            step = peak / 127.0
+            weight.assign(np.clip(np.round(values / step), -127, 127) * step)
+            quantised += 1
+        print(f"quantised {quantised} weight tensors to int8")
 
     receivers = {name: T.CodedBler(data) for name in ("network", "genie", "perfect")}
     bit_errors = defaultdict(int)
@@ -203,6 +217,10 @@ def main():
                         help="the packing the model was trained on; must match the data")
     parser.add_argument("--snr-min", type=float, default=None)
     parser.add_argument("--snr-max", type=float, default=None)
+    parser.add_argument("--weight-quant", choices=("none", "int8"), default="none",
+                        help="simulate 8-bit weight quantisation in the model itself, so the coded "
+                             "BLER says whether the signs the LDPC reads survive it. The ANE probe "
+                             "measures the same thing's latency; this measures its cost")
     parser.add_argument("--input-quant", choices=("none", "bf16"), default="none",
                         help="quantise the input plane before the forward pass. 'bf16' emulates what a "
                              "receiver reads back from the resource grid, which stores bfloat16")
