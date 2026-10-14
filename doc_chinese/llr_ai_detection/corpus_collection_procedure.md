@@ -254,9 +254,11 @@ aillr_cap003: <N> captures
 
 ---
 
-## 5.1 ★★★ 可译率低时：★ 先用【实时日志】分清"射频差"与"代码问题"（★ 2026-10-14 新增 ✓）
+## 5.1 ★★★ 可译率低时：★ 先用【实时日志】分清“电源/环境”与“代码问题”（★ 2026-10-14 ✓）
 
-★★★ **上一轮 16QAM 只译出 0.1%、★ 64QAM 只译出 0.6%** ✗ —— ★★ 而**同一条命令**下 QPSK 是 **99.9%** ✓、
+> ★★★ **行动只有一个：★ 重飞** ✓（★ 见 §5.2 的裁定 ✓）。★ 本节只回答“**还值不值得再跑一遍**” ✓。
+
+★★★ **上一轮 16QAM 只译出 0.1%、★ 64QAM 只译出 0.6%** ✗ —— 而**同一条命令**下 QPSK 是 **99.9%** ✓、
 ★ 256QAM 是 **67.5%** ✓ ⇒ ★★ 值得先分清原因 ✓。★★ 工具已经有了 ✓：
 
 ```bash
@@ -268,7 +270,7 @@ L=doc_chinese/phy_pipeline_gpu/wip/logs/gnb_gpu_aillr-cap0NN_1014_HHMM.log
 # ① 实时译码率（**独立于离线重放**的另一个口径 ✓）
 $PY $W/probe/live_decode_rate.py --log $L --mod 16QAM --rv 0 --min-prb 43
 # ② 三个量：★ 接收功率 rsrp、★ SINR、★ 两者之差 = 推算噪声
-$PY $W/probe/live_decode_rate.py --log $L --mod 16QAM --rv 0 --min-prb 43 --per-mod   # （★ 另见 §19.36 的三列表）
+$PY $W/probe/live_decode_rate.py --log $L --mod 16QAM --rv 0 --min-prb 43 --power
 ```
 
 ★★★ **判读（★ 三类，★ 互斥 ✓）**：
@@ -276,82 +278,60 @@ $PY $W/probe/live_decode_rate.py --log $L --mod 16QAM --rv 0 --min-prb 43 --per-
 | ★★ 形态 | ★★ 含义 | ★★ 处置 |
 |---|---|---|
 | ★★ sinr 低 ✗ **且 rsrp 也低** ✓ | ★★ **路损 / UE 功率不足** | ★ 手机靠近 ✓；★ 或抬 `p0_nominal_with_grant` ✓ |
-| ★★★ sinr 低 ✗ **但 rsrp 反而【更高】** ✗ | ★★★ **噪声/压缩**（★ 功放或前端过载 ✓）| ★★ **把 p0 交回默认**：用 `..._collect_{16qam,64qam}_p0default.yml` ✓ |
+| ★★★ sinr 低 ✗ **但 rsrp 反而【更高】** ✗ | ★★★ **噪声/压缩**（★ 功放或前端过载 ✓，★ 或外部干扰 ✓）| ★★ **重飞** ✓（★ 不测量 ✓） |
 | ★★ sinr 够 ✓ **而仍不译** ✗ | ★★ **才轮到怀疑代码** ✗ | ★ 抓一个这样的采集，★ 用 `ul_chain_replay` 单条复现 ✓ |
 
 ★★ **每条腿里【宽分配比窄分配低 2–4 dB】** ✓ 是**功率受限 UE 的正常签名** ✓（★ 同样的总功率摊到更多 PRB ✓）
 ⇒ ★★ **判断配方够不够，要看【宽分配】的 SINR** ✓，★ 不要看窄的 ✓。
 
-★★★ **重采 16QAM / 64QAM 的命令（★ 第二轮，★ p0 交回 −76 ✓）**：
-
-> ★★★ **但先做 §5.2 的第 ① 步**（★ 看频段 ✓）✗ —— ★★ 若底噪本来就在**成串地跳** ✓，
-> ★ 那么"噪声列变好"**可能只是干扰走了** ✗，★ **不能读成"p0 修好了"** ✗。
+★★ **重飞命令（★ 同一配置、★ 换新目录 ✓）**：
 
 ```bash
 C=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus
-COUNT=2000 collect aillr-cap005b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam_p0default.yml $C/aillr_cap005b
-COUNT=2000 collect aillr-cap006b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_64qam_p0default.yml $C/aillr_cap006b
-# ★★ 判据：★ 噪声列回到 −15…−22 dB 且可译率上台阶 ⇒ ★ 与压缩一致 ✓；
-#    ★ 但只有在 §5.2 ① 显示底噪【平】时，才能把它归因给 p0 ✓。
+COUNT=2000 collect aillr-cap005b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam.yml $C/aillr_cap005b
+COUNT=2000 collect aillr-cap006b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_64qam.yml $C/aillr_cap006b
+COUNT=3000 collect aillr-cap003b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml       $C/aillr_cap003b
 ```
 
----
+★ 附：`..._collect_{16qam,64qam}_p0default.yml` 两个配置仍在 ✓（★ p0 交回 −76 ✓），
+★ 但★★ **按裁定它不再是重飞的默认动作** ✗ —— ★ 只在以后真想验证“压缩”假设时才用 ✓。
 
-## 5.2 ★★★ 低噪声底最可能的第三个原因：★ **外部商业基站的同频干扰**（★ 2026-10-14 用户提出 ✓）
+## 5.2 ★★★ 采集后的判定：★ **一条命令，★ 不合格就重飞**（★ 2026-10-14 用户裁定 ✓）
 
-★★ **为什么值得先查它** ✓：★★ 六条腿用的是**同一个 `p0 = −70`** ✓，★ 而推算噪声底在十二分钟内
-**−22.7 → −0.9 → −17.5 dB** 来回跳 ✗ ⇒ ★★ **"我们的功放被推狠了"应该每条腿都发生** ✗，
-★ **时变的外部源更符合** ✓（★ 商业基站的调度器开关自己的上行 ✓）。
+★★★ **裁定**：★★ 外面的同频干扰**不是我们能控制的** ✓ ⇒
+★★ **一旦接收异常，直接重飞手机、重新采集，★ 不做测量** ✓。
+★★ ⇒ 这条规则要能**几秒钟内回答“这条腿要不要重飞”** ✓，
+★ 而答案必须**只用腿自己已经写下的东西** ✓。
 
-### ★★★ 第 ① 步（★ 先做这个，★ 它最直接 ✓）：**停掉 gNB、手机静默，直接看上行频段**
-
-★★★ **2026-10-14 第一次尝试的结论与一个必须补上的限定** ✗：★ 用户用 5 s 抓包跑了一次 ✓，
-★★ 结果 **底噪极平（跨度 1.4 dB）** ✓ ⇒ ★★ **那一刻没有突发干扰** ✓ ——
-★★★ **但 5 秒的抓包【不能】给"那两条坏腿"脱罪** ✗：★★ 坏腿在 **30–60 分钟之前** ✓，
-★ 而已测到底噪**在约 6 分钟的量级上来回变** ✓（★ 好→坏→好→坏 ✓）⇒ ★★ **必须抓【长】一点** ✓。
+★★★ **判据 = 估计器自己发布的噪声方差** ✓（★ 每个采集的 `_ce.txt` 里 ✓）—— ★★ 选它的理由：
+★★ **它是绝对量、★ 而且与调制无关** ✓ ⇒ ★★ 它说的是“**接收机看到多少噪声**” ✓，
+★ 不是“某个调制扶得怎么样” ✓。
+★★ 六条腿实测：★ 干净 **−26.3 / −27.2 dB** ✓、★ 被污染 **−4.3 / −5.1 / −6.7 dB** ✗、
+★ 中间 **−13.1 dB** ✓ ⇒ ★★ **门限取 −15 dB** ✓（★ 两侧都有余量 ✓）。
 
 ```bash
-# ★★★ 长监视：10 分钟、1 Msps、int16（★ 约 1.2 GB ✓），★ 手机静默 / gNB 停 ✓
-uhd_rx_cfile -f 3408960000 -r 1000000 -g 70 -s -N 600000000 /tmp/monitor.bin
-
 W=doc_chinese/llr_ai_detection/work_tmp
-~/ai_ce_work/venv/bin/python $W/probe/spectrum_floor.py --file /tmp/monitor.bin \
-    --rate 1000000 --slice-ms 1000 --shorts --series
-# ★★ --series 打出每秒一个字符的时间序列 ✓ —— ★★ 干扰"开关"在摘要里看不见，★ 在这里一眼可见 ✓
-#    （★ 例：`..........+++++++++++++++...............++++++++++++........` ✓）
+PY=~/ai_ce_work/venv/bin/python
+L=doc_chinese/phy_pipeline_gpu/wip/logs
+
+# ★★ 每条腿跑完立刻跑这一条（★ 几秒钟 ✓）
+$PY $W/probe/leg_verdict.py --corpus $W/corpus/aillr_capXXX \
+    --log "$L/gnb_gpu_aillr-capXXX_*.log" --mod 256QAM --rv 0 --min-prb 43
+# ★★ 输出：★ 噪声方差中位、★ rsrp/snr、★ 实时译码率 ★ ⇒ ★★ **KEEP** ✓ 或 **RE-FLY** ✗（★ 退出码 0 / 2 ✓）
 ```
 
-★★★ **判据（★ 先于测量登记 ✓）**：
+★★★ **RE-FLY 时怎么做** ✓：★ **换一个新目录重飞同一条配置** ✓
+—— ★★ **不要删旧的** ✗：★ 它仍可作**训练数据源** ✓（★ 低 SINR 失败本身就是有用的样本 ✓），
+★ 只是**不能当判据池** ✗。
 
-| ★★ 底噪形态 | ★★★ 结论 | ★★ 下一步 |
-|---|---|---|
-| ★★ **成串地抬 15–20 dB**（★ 一秒以上 ✓）| ★★★ **同频邻居** ✓ | ★ 换 ARFCN / 地点 / 时间 ✓，★ 并把"先监视再看腿"写进采集前置 ✓ |
-| ★★ **10 分钟内全程平**（★ 跨度几 dB ✓）| ★★ **不是外部源** ✗ | ★★ 立刻飞一条腿 ✓ —— ★★ **腿坏而监视平 ⇒ 与我们的发射相关 ⇒ 指向压缩** ✓ |
+★★ **采集循环（固定 ✓）**：★ **起腿 ⇒ 采集 ⇒ `leg_verdict.py` ⇒ KEEP 进下一腿 / RE-FLY 换目录重飞** ✓。
 
-★★★ **顺序很重要** ✗：★★ **先监视 10 分钟、★ 紧接着飞一条腿** ✓ —— ★ 这样监视覆盖的正是腿所在的那段时间 ✓。
+### ★ 附：若以后想知道干扰长什么样（★ 不在本工作流里 ✗）
 
-### ★★ 第 ② 步（★ 仅当 ① 为平）：**交错 A/B**
-★★★ **必须交错**（★ A/B/A/B… ✓）✗ —— ★★ 干扰是**时间的函数** ✓，
-★ 单次 A→B 会把"干扰走了"读成"p0 修好了" ✗（★ 这正是用户提醒的那个陷阱 ✓）。
-
-```bash
-# ★★ 同一次坐下交替飞，★ 其余逐字不变 ✓
-COUNT=1500 collect aillr-ab-70a configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam.yml          $C/aillr_ab70a
-COUNT=1500 collect aillr-ab-76a configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam_p0default.yml $C/aillr_ab76a
-COUNT=1500 collect aillr-ab-70b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam.yml          $C/aillr_ab70b
-COUNT=1500 collect aillr-ab-76b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam_p0default.yml $C/aillr_ab76b
-# ★★ 判据：★ 两个 −70 腿与两个 −76 腿【各自一致】且两组【互相不同】⇒ 是 p0/压缩 ✓；
-#    ★ 四腿都差不多 ⇒ 是时间/环境 ✓，★ 与 p0 无关 ✓。
-```
-
-### ★★ cap003 也一并重采 ✓
-
-★★ cap003 的推算噪声底 **−12.7 dB** ✓（★ cap004 是 −22.7 ✓）、★ 实时译码率 **10.3%** ✓（★ cap004 67.5% ✓）
-⇒ ★★ **同一现象、幅度较小** ✓ ⇒ ★★ 与 16QAM/64QAM 一起重采 ✓：
-
-```bash
-COUNT=3000 collect aillr-cap003b configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml $C/aillr_cap003b
-```
+★★ 工具仍在：`probe/spectrum_floor.py` ✓（★ 读 `uhd_rx_cfile` 的原始 IQ ✓，
+★ `--series` 每秒一个字符打时间序列 ✓）。★★ 一次 5 s 的抓包已经说明了它的局限 ✗：
+★ 底噪平（★ 跨度 1.4 dB ✓）而坏腿在 30–60 分钟之前 ✗ —— ★★ **要看就要看 10 分钟** ✓。
+★ ★ ★ **但按裁定不再做这件事** ✓。
 
 ---
 
