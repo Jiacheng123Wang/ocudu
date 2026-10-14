@@ -53,6 +53,38 @@ unsigned capture_max_rb()
   return (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 0U;
 }
 
+/// \brief Allocation-width floor (OCUDU_UL_DUMP_MIN_RB): only receptions at least this many PRBs wide
+/// are candidates. Unset (or 0) captures any width.
+///
+/// The mirror of capture_max_rb(), and it exists for the same reason the model's precision envelope does:
+/// the depth-3 network describes allocations of MIN_PRB (4) and wider, and the criterion-1 pool needs the
+/// WIDE ones -- the scheduler hands big grants to high-throughput traffic and small ones to the traffic
+/// that succeeds, so a budget that counts both fills up with receptions no measurement can use. In the
+/// corpus collected without this filter, 357 of 1956 captures were narrower than 43 PRB and every one of
+/// them was a slot the budget could have spent on a usable one. A rejected reception does not spend the
+/// budget, exactly as with the ceiling.
+unsigned capture_min_rb()
+{
+  const char* env = std::getenv("OCUDU_UL_DUMP_MIN_RB");
+  return (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 0U;
+}
+
+/// \brief Redundancy-version filter (OCUDU_UL_DUMP_RV): empty captures every version, otherwise only
+/// receptions whose codeword carries this one.
+///
+/// It is here because a criterion-1 sample has to decode from ONE reception: a retransmission is
+/// decodable only with the HARQ soft buffer the live chain holds and the offline replay does not
+/// reproduce, so an rv=2 capture that the chain decoded is not a sample the comparison can use. With the
+/// budget bounded, spending it on retransmissions is spending it on nothing.
+std::optional<unsigned> capture_rv()
+{
+  const char* env = std::getenv("OCUDU_UL_DUMP_RV");
+  if (env == nullptr) {
+    return std::nullopt;
+  }
+  return static_cast<unsigned>(std::strtoul(env, nullptr, 10));
+}
+
 std::string make_key(slot_point slot, rnti_t rnti)
 {
   return capture_prefix() + "_" + std::to_string(slot.count()) + "_" + std::to_string(to_underlying(rnti));
@@ -75,11 +107,24 @@ std::set<std::string>& selected()
 
 bool select(const pusch_processor::pdu_t& pdu)
 {
-  // The width filter runs FIRST and does not spend the budget: a reception it rejects is not a
-  // candidate, so a leg whose traffic is mostly wide still records the narrow hops it is looking for.
+  // The width filters run FIRST and do not spend the budget: a reception they reject is not a candidate,
+  // so a leg whose traffic is mostly wide still records the narrow hops it is looking for, and a leg
+  // looking for wide hops still records them when the scheduler interleaves small grants.
   const unsigned max_rb = capture_max_rb();
   if ((max_rb != 0) && (pdu.freq_alloc.get_nof_rb() > max_rb)) {
     return false;
+  }
+  const unsigned min_rb = capture_min_rb();
+  if ((min_rb != 0) && (pdu.freq_alloc.get_nof_rb() < min_rb)) {
+    return false;
+  }
+  // Same for the redundancy version, and it has to be read from the codeword rather than from the PDU's
+  // absence: `codeword` is checked by the caller, and an rv the caller did not ask for is a reception the
+  // offline comparison cannot use.
+  if (const std::optional<unsigned> rv = capture_rv(); rv.has_value()) {
+    if (!pdu.codeword.has_value() || (pdu.codeword->rv != *rv)) {
+      return false;
+    }
   }
   static std::atomic<unsigned> count{0};
   std::lock_guard              lock(selected_mutex());
