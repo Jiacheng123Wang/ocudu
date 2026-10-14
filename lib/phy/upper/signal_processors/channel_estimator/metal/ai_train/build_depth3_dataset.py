@@ -180,7 +180,7 @@ def synthetic_channel(prefix, cfg, alloc, sub, grid):
 
 
 def candidate_units(index_path, tb_dir, corpus_dir, modulation, min_prb, min_slot,
-                    require_off_prb0):
+                    require_off_prb0, max_prb=0):
     """Select units that can be re-encoded.
 
     `build_synth_dataset` also rejected allocations starting at PRB 0 and early slots, because
@@ -212,6 +212,8 @@ def candidate_units(index_path, tb_dir, corpus_dir, modulation, min_prb, min_slo
             if alloc != list(range(alloc[0], alloc[0] + len(alloc))):
                 continue
             if int(cfg["slot"]) < min_slot or len(alloc) < min_prb:
+                continue
+            if max_prb and len(alloc) > max_prb:
                 continue
             if require_off_prb0 and min(alloc) == 0:
                 continue
@@ -561,6 +563,11 @@ def main():
     parser.add_argument("--include-natural", action="store_true",
                         help="also keep each real capture at its own SNR")
     parser.add_argument("--min-prb", type=int, default=43)
+    parser.add_argument("--max-prb", type=int, default=0,
+                        help="widest allocation to keep, 0 for no limit. The trained envelope is "
+                             "a RANGE, and this is what isolates one end of it: a narrow-only set "
+                             "is how the model's behaviour on allocations it never saw gets a "
+                             "number instead of a suspicion")
     parser.add_argument("--min-slot", type=int, default=0,
                         help="reject slots below this. The old pipeline used 40 to keep the "
                              "slot-number convention from hiding; the per-sample pilot check "
@@ -580,7 +587,7 @@ def main():
         parser.error("missing required arguments: " + ", ".join("--" + m for m in missing))
 
     units = candidate_units(args.units, args.tb, args.corpus, args.modulation, args.min_prb,
-                            args.min_slot, args.require_off_prb0)
+                            args.min_slot, args.require_off_prb0, args.max_prb)
     if args.max_units:
         units = units[:args.max_units]
     print(f"{len(units)} candidate units (CRC OK, {args.modulation}, contiguous allocation, "
