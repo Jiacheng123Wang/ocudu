@@ -240,6 +240,29 @@ public:
   static uint64_t get_host_write_bytes() { return host_write_bytes().load(std::memory_order_relaxed); }
   static uint64_t get_device_hops() { return device_hops().load(std::memory_order_relaxed); }
 
+  /// Records that \p site could not be entered in the table, keeping the first such name.
+  ///
+  /// A full table is the one failure mode of the breakdown that is silent: the crossing is still in the
+  /// total (count_host_read() ran before this), but the table cannot show it, and the report's own
+  /// "N read(s) are NOT named by a site" line then attributes it to "a read nobody has named yet" -
+  /// which is a finding, while an overflowing table is a limitation of the instrument. The two need
+  /// different answers, so the table says which one it is. It became reachable when the depth-3
+  /// receiver's own grid read was added to a table that already held eleven names.
+  static void note_dropped_site(const char* site)
+  {
+    dropped_sites().fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(dropped_mutex());
+    if (dropped_name()[0] == nullptr) {
+      dropped_name()[0] = site;
+    }
+  }
+
+  static uint64_t get_dropped_sites() { return dropped_sites().load(std::memory_order_relaxed); }
+  static const char* get_first_dropped_site() { return dropped_name()[0]; }
+
+  /// The size of the table, so a report can say how many names it can hold.
+  static std::size_t get_max_sites() { return kMaxSites; }
+
 private:
   /// Thread-local depth of scoped_debug_touches: a capture is opened and closed on the thread that
   /// writes the file, and one thread's capture must not reclassify another thread's lane touches.
@@ -309,7 +332,7 @@ private:
     std::atomic<uint64_t> debug_reads{0};
     std::atomic<uint64_t> debug_writes{0};
   };
-  static constexpr std::size_t kMaxSites = 8;
+  static constexpr std::size_t kMaxSites = 16;
   static site_entry* sites()
   {
     static site_entry* v = new site_entry[kMaxSites];
@@ -330,6 +353,7 @@ private:
       }
     }
     if (i == kMaxSites) {
+      note_dropped_site(site);
       return nullptr;
     }
     sites()[i].name = site;
@@ -396,6 +420,25 @@ private:
   }
   static std::size_t nof_sites() { return nof_sites_stored(); }
   static std::mutex& sites_mutex()
+  {
+    static std::mutex* m = new std::mutex();
+    return *m;
+  }
+
+  // The dropped-name record: heap-allocated and behind its own mutex for the same reasons as the
+  // counters (the report runs from an atexit handler) and the sites table (modules declare from
+  // different threads, and site_for() holds sites_mutex() when it calls here).
+  static std::atomic<uint64_t>& dropped_sites()
+  {
+    static std::atomic<uint64_t>* n = new std::atomic<uint64_t>(0);
+    return *n;
+  }
+  static const char** dropped_name()
+  {
+    static const char** v = new const char*[1]();
+    return v;
+  }
+  static std::mutex& dropped_mutex()
   {
     static std::mutex* m = new std::mutex();
     return *m;
@@ -503,6 +546,18 @@ inline void register_phy_pipeline_crossing_check()
                           "lane makes has to be attributable)",
                           static_cast<unsigned long long>(total_reads - phy_pipeline_crossings::get_named_reads()),
                           static_cast<unsigned long long>(total_reads));
+           }
+           // ...and WHY one can be missing from the table: a site nobody named (a finding, which has an
+           // answer in the code) or a table that was full (a limit of the instrument, which does not).
+           // The line above cannot tell the two apart, so it must not be left to the reader to guess.
+           if (phy_pipeline_crossings::get_dropped_sites() != 0) {
+             std::fprintf(stderr,
+                          "\n    (%llu site(s) did not fit in the table of %llu, starting with '%s': their "
+                          "crossings are counted in the totals above but cannot appear in the breakdown "
+                          "below)",
+                          static_cast<unsigned long long>(phy_pipeline_crossings::get_dropped_sites()),
+                          static_cast<unsigned long long>(phy_pipeline_crossings::get_max_sites()),
+                          phy_pipeline_crossings::get_first_dropped_site());
            }
            std::fprintf(stderr, "\n");
            if (!phy_pipeline_mode_registry::is_published() || (hops == 0)) {

@@ -4,6 +4,7 @@
 #include "pusch_depth3_input_plane.h"
 #include "../../signal_processors/dmrs_helper.h"
 #include "ocudu/adt/bounded_bitset.h"
+#include "ocudu/phy/phy_pipeline_crossings.h"
 #include "ocudu/phy/support/mask_types.h"
 #include "ocudu/phy/upper/dmrs_mapping.h"
 #include "ocudu/phy/upper/sequence_generators/sequence_generator_factories.h"
@@ -204,6 +205,17 @@ pusch_depth3_input_plane::assemble(span<__fp16>                           plane,
     // result is not a length to check: with a mask covering the whole window the tail is empty and the
     // values sit at their own subcarrier indices, which is exactly the indexing used below.
     grid.get(row, port, symbol, 0, all_subcarriers);
+    // CROSSING (device -> host), counted AT the read. `assemble()` is a host consumer of data the
+    // device produced, which is exactly the leg the fused lane's crossing contract has to drive to
+    // zero (see phy_pipeline_crossings.h). It is counted once per symbol read rather than once per
+    // reception because that is how many times the host actually takes the window, and named because
+    // a total that does not say WHICH read it was is not actionable. The estimator's own grid read
+    // ("ce: host grid materialized from the device") is a different site: it happens whether or not
+    // this arm is selected, and until this arm existed the audit's module list did not cover it -- a
+    // "0 read(s)" that was read as a statement about the whole lane when it was a statement about
+    // four modules.
+    phy_pipeline_crossings::count_host_read_site("depth3: host grid read for the input plane",
+                                                 NOF_SUBCARRIERS * sizeof(cf_t));
 
     // The reference symbols of this symbol, generated the way the chain's own estimator generates
     // them: one PRG seeding per (slot, symbol, scrambling identity), and a walk over the allocation
@@ -256,6 +268,9 @@ pusch_depth3_input_plane::assemble(span<__fp16>                           plane,
 
   for (unsigned symbol = 0; symbol != NOF_SYMBOLS; ++symbol) {
     grid.get(row, port, symbol, 0, all_subcarriers);
+    // The same crossing as the first pass: one host read of the window per symbol.
+    phy_pipeline_crossings::count_host_read_site("depth3: host grid read for the input plane",
+                                                 NOF_SUBCARRIERS * sizeof(cf_t));
 
     // Which pilot LS slot this symbol owns, if any. The slots are the DM-RS symbols in ascending
     // order, which is the contract's rule and not a configuration field.

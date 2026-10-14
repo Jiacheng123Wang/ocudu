@@ -151,6 +151,14 @@ public:
     // The model is bound HERE, at construction, and the outcome is kept: an arm that was SELECTED but cannot
     // compute must never be reported as an AI result, and only this flag can tell the two apart.
     engine_ready = engine->init_depth3(model_path.c_str());
+    // The crossing audit's module list is what gives its "0 read(s)" a SCOPE, and this arm was not on
+    // it: the audit counted the estimator's, the demapper's and the DFT route's host touches, so a
+    // green zero there said nothing about the grid this arm reads through `assemble()`. Declaring it
+    // is the difference between "no crossing here" and "not looked at here", and the number this arm
+    // adds is the honest one -- registering the check is idempotent and also makes the report exist
+    // for a run whose estimator never ran.
+    register_phy_pipeline_crossing_check();
+    phy_pipeline_crossings::declare_reporter("depth3_receiver");
     if (!engine_ready) {
       ocudulog::fetch_basic_logger("PHY").error(
           "AI depth-3: the model at '{}' did not load; every reception will fall back to the classical chain "
@@ -372,19 +380,28 @@ private:
       }
       codeword_buffer.on_new_block(codeword, scrambling_seq);
     }
-    // The end of the codeword is a CALL, not an inference: without it the decoder never learns that the soft
-    // bits it accumulated are complete, decodes nothing, and reports a block error with zero iterations.
-    codeword_buffer.on_end_codeword();
 
     // The reporting obligation (`design` section 17.2, R6): the scheduler's post-equalisation SINR comes from
     // the noise head, because the classical estimator's residual no longer holds the noise once the estimate
     // is the network's own.
+    //
+    // It is reported BEFORE the codeword is ended, and that order is the whole of this block: ending the
+    // codeword runs the LDPC decode, the decode emits `pusch_processor_result_data`, and the adaptor fills
+    // that result's `csi` from the object this call writes into (`pusch_processor_notifier_adaptor.h:256`).
+    // Reported after it -- which is where this stood -- the SINR is computed correctly and then lands in a
+    // copy nobody reads again: the run reports `sinr=0.00 dB`, which is the value the harness prints when
+    // the field is EMPTY, and the scheduler sees a reception with no channel quality rather than a wrong
+    // one. The classical path has the same two calls in the same order (`pusch_demodulator_impl.cpp:783`).
     if (noise_count != 0 && noise_sum > 0.0) {
       const float mean_noise = static_cast<float>(noise_sum / static_cast<double>(noise_count));
       pusch_demodulator_notifier::demodulation_stats stats;
       stats.sinr_dB.emplace(-convert_power_to_dB(mean_noise));
       notifier.on_end_stats(stats);
     }
+
+    // The end of the codeword is a CALL, not an inference: without it the decoder never learns that the soft
+    // bits it accumulated are complete, decodes nothing, and reports a block error with zero iterations.
+    codeword_buffer.on_end_codeword();
     return true;
   }
 
