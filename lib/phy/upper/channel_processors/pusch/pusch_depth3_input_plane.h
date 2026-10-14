@@ -72,16 +72,18 @@ public:
   static constexpr unsigned NOF_DMRS_SYMBOLS_MAX = 4;
   /// \brief Narrowest allocation the trained model describes, in resource blocks.
   ///
-  /// The first model was trained on 43 PRB and wider only, and the difference was measured rather
-  /// than assumed: on 44 decodable narrow captures the classical chain decoded 40 and that network 8,
-  /// so narrow receptions were refused and counted (I7) instead of being handed to a network that
-  /// would lose them.
+  /// The first model was trained on 43 PRB and wider only, and the difference was measured rather than
+  /// assumed: on 35 decodable narrow captures the classical chain decoded 31 and that network 7, so
+  /// narrow receptions were refused and counted (I7) instead of being handed to a network that would
+  /// lose them.
   ///
   /// The model has since been fine-tuned on allocations down to four PRB, and the offline validation
   /// says the repair worked: the narrow set went from 0.5245 to 0.4200 coded BLER against genie's
-  /// 0.4051, a relative gap of 30 percent down to 3.7, while the wide set did not regress. So the
-  /// constant moves to the new model's own lower bound, and the CHAIN-level measurement on the narrow
-  /// captures -- the one that could not run while this refused them -- is what confirms or corrects it.
+  /// 0.4051, a relative gap of 30 percent down to 3.7, while the wide set did not regress. The chain
+  /// level agrees on the same 35 captures: the fine-tuned network decodes 32 and the classical chain
+  /// 31. So the constant moves to the new model's own lower bound, and the CHAIN-level measurement on
+  /// the narrow captures -- the one that could not run while this refused them -- is what confirms or
+  /// corrects it.
   static constexpr unsigned MIN_PRB = 4;
 
   /// Channel indices, `model_network_design.md` section 0.2(b). Named because a plane written with

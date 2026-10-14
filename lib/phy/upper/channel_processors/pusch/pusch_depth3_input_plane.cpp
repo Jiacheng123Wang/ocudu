@@ -13,6 +13,7 @@
 #include "ocudu/support/math/math_utils.h"
 #include <array>
 #include <cmath>
+#include <cstdio>
 
 using namespace ocudu;
 
@@ -70,8 +71,18 @@ const char* pusch_depth3_input_plane::to_string(status value)
       return "the grid is narrower than the 51 PRB window";
     case status::allocation_outside_window:
       return "the allocation reaches outside the 51 PRB window";
-    case status::allocation_too_narrow:
-      return "the allocation is narrower than the trained envelope (43 PRB)";
+    case status::allocation_too_narrow: {
+      // Built from MIN_PRB rather than written into the text. The literal here said "43 PRB" for as long
+      // as the constant has been 4, so every refusal named an envelope the caller could not act on --
+      // and the envelope is the one number in this message a caller is meant to do something about.
+      // thread_local because a gNB runs one receiver per PUSCH thread.
+      static thread_local std::array<char, 96> text = {};
+      std::snprintf(text.data(),
+                    text.size(),
+                    "the allocation is narrower than the trained envelope (%u PRB)",
+                    static_cast<unsigned>(MIN_PRB));
+      return text.data();
+    }
     case status::no_rx_port:
       return "no receive port";
     case status::unsupported_layers:
