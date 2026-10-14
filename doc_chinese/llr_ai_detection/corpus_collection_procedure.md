@@ -56,8 +56,13 @@ grep -A2 "^  amf:" configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml
 #    但交付配置的地址是【本地未提交】的改动 ⇒ 你若再改交付配置，★ 这里也要跟着改 ✓）
 
 # ③ ★★★ 磁盘【和目录】—— `fopen` 【不会】自动建目录 ✗✗
-df -h ~/ocudu_capture            # ★ 需要 ≥3 GB 余量
-mkdir -p ~/ocudu_capture/aillr_cap003
+# ★★ 语料放在【工作流目录里】（★ 与 cap001/cap002 同一处 ✓，★ 已被 .gitignore 忽略 ✓）：
+CORPUS=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus
+df -h "$CORPUS"                 # ★ 每条腿约 2–3 GB；★ 6 条腿约 11 GB
+mkdir -p "$CORPUS/aillr_cap003"
+ls -d "$CORPUS"/*/              # ★ 应当看到 aillr_cap001 aillr_cap002（旧语料）
+# ★★ gNB 以 root 跑 ⇒ 采到的文件是 root 的 ✓ ⇒ 顺手确认 root 能写、并记下要 chown ✓：
+sudo touch "$CORPUS/.write_test" && sudo rm "$CORPUS/.write_test" && echo "root can write here OK"
 # ★★★ 这一步漏了会【静默丢掉整条腿】✗：★ 2026-10-14 的第一条 cap003 腿就是这么丢的 ——
 #     ★ 跑了 8 分钟、99672 次接收、★ 目录不存在 ⇒ 3000 个 fopen 全部返回 null ⇒ ★ **一个文件都没写** ✗，
 #     而 gNB 当时**什么都没打印** ✗（★ 现已修：见下面 ④ ✓）。
@@ -73,7 +78,6 @@ strings build/apps/gnb/gnb | grep -c "NOT CAPTURING" # ★ 必须是 1（本次�
 |---|---|
 | ★★ `[ul_capture] capturing: writing <前缀>_<slot>_<rnti>.* (budget N reception(s) that pass the filters)` | ★★ **第一个采集落地了** ✓ —— ★ 一条腿开头看到这一行，★ 说明目录、权限、前缀都对 ✓ |
 | ★★★ `[ul_capture] NOT CAPTURING: cannot write '<前缀>': <原因>` | ★★★ **整条腿正在丢采集** ✗ —— ★★ 立即停腿、★ 建目录、★ 重跑 ✓ |
-```
 
 ★★ **另外要准备好**：★ B200 ＋ **GPSDO 锁星**（★ 配置里 `clock_source=gpsdo,time_source=gpsdo` ✓）、
 ★ 手机已能附着、★ iperf3 可用 ✓。
@@ -87,7 +91,7 @@ cd ~/dev/ocudu
 
 sudo -E env \
   LEG_CONFIG=$HOME/dev/ocudu/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml \
-  OCUDU_UL_DUMP=$HOME/ocudu_capture/aillr_cap003/C \
+  OCUDU_UL_DUMP=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/aillr_cap003/C \
   OCUDU_UL_DUMP_COUNT=3000 \
   OCUDU_UL_DUMP_MIN_RB=43 \
   OCUDU_UL_DUMP_RV=0 \
@@ -146,7 +150,7 @@ collect() {                       # 用法: collect <标签> <配置> <目录> [
        bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu "$label"
 }
 
-C=$HOME/ocudu_capture
+C=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus
 collect aillr-cap003 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml       $C/aillr_cap003
 collect aillr-cap004 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml       $C/aillr_cap004
 COUNT=2000 collect aillr-cap005 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_64qam.yml $C/aillr_cap005
@@ -162,7 +166,13 @@ COUNT=2000 collect aillr-cap008 configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.ym
 ★ ④ **预算填得很快**（★ 实测 ~310 次接收/秒 ✓，★ 3000 个合格接收通常 **1–3 分钟** 就满 ✓）⇒
 ★ ⑤ **Ctrl-C 停腿**（★ 按协议：★ 只按一次 Ctrl-C，★ 不要 SIGTERM ✓）⇒ ★ ⑥ 把 iperf3 停掉 ⇒ ★ ⑦ 跑验收（★ §5 ✓）。
 
-★★ **腿与腿之间**：★ 手机重新附着通常几秒 ✓；★★ **每条腿必须换目录** ✓（★ 否则会追加进同一批 ✓）。
+★★ **腿与腿之间**：★ 手机重新附着通常几秒 ✓；★★ **每条腿必须换目录** ✓（★ 否则会追加进同一批 ✓）；
+★★★ **gNB 以 root 跑 ⇒ 采集文件是 root 的** ✓ ⇒ ★★ 每条腿结束后把属主收回来 ✓（★ 否则以后 `rm -rf` 删语料要 sudo ✓）：
+
+```bash
+CORPUS=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus
+sudo chown -R "$(whoami)":staff "$CORPUS"
+```
 
 ★★ **不要混用的两件事** ✗：★ **调制腿之间必须换配置文件** ✓（★ MCS 在 YAML 里、★ 不在环境变量里 ✓），
 ★ 而**采集过滤器在环境里** ✓（★ 所以窄分配那条腿只改 `OCUDU_UL_DUMP_*`、★ 不换配置 ✓）。
@@ -189,7 +199,7 @@ iperf3 -c <手机IP> -R -t 300 -P 4
 
 ```bash
 # 最近 20 个采集的 SNR（dB）：_ce.txt 的 snr 列是【线性】值，dB = 10*log10
-for f in $(ls -t ~/ocudu_capture/aillr_cap003/C_*_ce.txt | head -20); do
+for f in $(ls -t $HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/aillr_cap003/C_*_ce.txt | head -20); do
   awk '{for(i=1;i<=NF;i++) if($i ~ /^snr=/){split($i,a,"="); printf "%.1f dB\n", 10*log10(a[2])}}' "$f"
 done
 # ★★ 配方要"高 SNR"：★ 目标【中位 ≥25 dB】✓（★ 旧语料只有 19.8 dB ✗）
@@ -205,7 +215,7 @@ done
 cd ~/dev/ocudu
 W=doc_chinese/llr_ai_detection/work_tmp
 PY=~/ai_ce_work/venv/bin/python
-D=$HOME/ocudu_capture/aillr_cap003
+D=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/aillr_cap003
 
 # ① ★ 秒级：配方维度对不对
 $PY $W/probe/audit_corpus.py --corpus $D
@@ -267,7 +277,7 @@ aillr_cap003: <N> captures
 ## 8. ★★★ 事故记录：★ 第一条 cap003 腿**一个文件都没写**（★ 2026-10-14）
 
 ★★ **事实**（★ 从腿日志读出来的 ✓）：★ 腿 `gnb_gpu_aillr-cap003_1014_2146` 跑了 **8 分钟、99672 次接收** ✓，
-★ 九个环境变量**全部正确送达** ✓（★ 腿日志开头逐条打印 ✓），★★ **而 `$HOME/ocudu_capture/aillr_cap003/` 不存在** ✗ ——
+★ 九个环境变量**全部正确送达** ✓（★ 腿日志开头逐条打印 ✓），★★ **而语料目录（★ 当时在 `$HOME/ocudu_capture/` ✗）不存在** ✗ ——
 ★★★ **`fopen` 不会创建目录** ✓ ⇒ ★★ **3000 个采集的每一次 fopen 都返回 null，★ 而 gNB 什么都没打印** ✗。
 
 ★★ **为什么没被发现**：★ 腿本身**是健康的** ✓（★ 契约 8/9 通过 ✓、★ 计数器全绿 ✓、★ 速率正常 ✓）——
