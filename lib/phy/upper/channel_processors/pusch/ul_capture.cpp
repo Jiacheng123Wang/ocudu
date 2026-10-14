@@ -272,6 +272,24 @@ void ocudu::ul_capture::capture_grid(const resource_grid_reader& grid, const pus
     std::fprintf(f, "new_data=%d\n", static_cast<int>(pdu.codeword->new_data));
     std::fprintf(f, "tbs_lbrm=%u\n", pdu.tbs_lbrm.value());
     std::fprintf(f, "nof_harq_ack=%u\n", pdu.uci.nof_harq_ack);
+    // The REST of the UCI description, and it is not optional for a replay: the UL-SCH demultiplexer is a
+    // BYPASS only while the reception carries no UCI. With CSI on the PUSCH it has to know how many resource
+    // elements the report takes, which is `nof_csi_part1` scaled by `alpha_scaling` and
+    // `beta_offset_csi_part1`; without them a replay lays the UL-SCH soft bits out differently from the air
+    // interface and decodes nothing. Measured on the 2026-10-14 corpora: writing only `nof_harq_ack` left
+    // every UCI-carrying reception unreplayable -- 43 to 49 percent of the wide legs, and EVERY remaining
+    // replay-versus-live disagreement (design document 19.45(f)).
+    //
+    // The CSI Part 2 size description is reduced to its entry count. It reaches neither the demultiplexer nor
+    // the decoder's soft-bit count (`pusch_processor_impl` takes the Part 2 payload as zero bits); the only
+    // thing it decides is whether `set_nof_softbits` is called before or after the first soft bits arrive, so
+    // the count is recorded to keep that decision and the table itself is not.
+    std::fprintf(f, "nof_csi_part1=%u\n", pdu.uci.nof_csi_part1);
+    std::fprintf(f, "nof_csi_part2_entries=%zu\n", pdu.uci.csi_part2_size.entries.size());
+    std::fprintf(f, "alpha_scaling=%.9g\n", static_cast<double>(pdu.uci.alpha_scaling));
+    std::fprintf(f, "beta_offset_harq_ack=%.9g\n", static_cast<double>(pdu.uci.beta_offset_harq_ack));
+    std::fprintf(f, "beta_offset_csi_part1=%.9g\n", static_cast<double>(pdu.uci.beta_offset_csi_part1));
+    std::fprintf(f, "beta_offset_csi_part2=%.9g\n", static_cast<double>(pdu.uci.beta_offset_csi_part2));
     std::fprintf(f, "dc_position=%d\n", pdu.dc_position.has_value() ? static_cast<int>(*pdu.dc_position) : -1);
     if (std::holds_alternative<pusch_processor::dmrs_configuration>(pdu.dmrs)) {
       const auto& dmrs = std::get<pusch_processor::dmrs_configuration>(pdu.dmrs);

@@ -125,6 +125,12 @@ struct capture_t {
     return (it != fields.end()) ? static_cast<unsigned>(std::strtoul(it->second.c_str(), nullptr, 10)) : fallback;
   }
 
+  float get_float(const std::string& key, float fallback = 0.0F) const
+  {
+    auto it = fields.find(key);
+    return (it != fields.end()) ? std::strtof(it->second.c_str(), nullptr) : fallback;
+  }
+
   std::string get_string(const std::string& key, const std::string& fallback = "") const
   {
     auto it = fields.find(key);
@@ -1360,7 +1366,30 @@ int main(int argc, char** argv)
         .rv              = capture.get_unsigned("rv"),
         .ldpc_base_graph = static_cast<ldpc_base_graph_type>(capture.get_unsigned("ldpc_base_graph", 2)),
         .new_data        = capture.get_unsigned("new_data", 1) != 0};
-    pdu.uci.nof_harq_ack       = capture.get_unsigned("nof_harq_ack");
+    // The UCI description, and the defaults are chosen to mean "a capture that does not carry the field". The
+    // demultiplexer BYPASSES only while the reception carries no UCI at all, so for a capture without UCI these
+    // values change nothing: every UCI resource-element count is zero because its payload size is zero. For a
+    // capture that DOES carry CSI, `nof_csi_part1` is what decides the layout, and a capture written before
+    // 2026-10-15 does not record it -- such a reception cannot be replayed (19.45(f)). `alpha_scaling` falls
+    // back to the scheduler's own minimum (`alpha_scaling_opt::f1`, see `mcs_tbs_calculator.cpp`).
+    pdu.uci.nof_harq_ack         = capture.get_unsigned("nof_harq_ack");
+    pdu.uci.nof_csi_part1        = capture.get_unsigned("nof_csi_part1", 0);
+    pdu.uci.alpha_scaling        = capture.get_float("alpha_scaling", 1.0F);
+    pdu.uci.beta_offset_harq_ack = capture.get_float("beta_offset_harq_ack", 0.0F);
+    pdu.uci.beta_offset_csi_part1 = capture.get_float("beta_offset_csi_part1", 0.0F);
+    pdu.uci.beta_offset_csi_part2 = capture.get_float("beta_offset_csi_part2", 0.0F);
+    if (capture.get_unsigned("nof_csi_part2_entries", 0) != 0) {
+      std::printf("  UCI: the capture describes a CSI Part 2 size TABLE, which this harness does not "
+                  "reconstruct (it reaches neither the demultiplexer nor the decoder - see the capture)\n");
+    }
+    if (pdu.uci.nof_csi_part1 != 0) {
+      std::printf("  UCI: nof_harq_ack=%u nof_csi_part1=%u alpha=%.3f beta_ack=%.3f beta_csi1=%.3f\n",
+                  pdu.uci.nof_harq_ack,
+                  pdu.uci.nof_csi_part1,
+                  static_cast<double>(pdu.uci.alpha_scaling),
+                  static_cast<double>(pdu.uci.beta_offset_harq_ack),
+                  static_cast<double>(pdu.uci.beta_offset_csi_part1));
+    }
     pdu.dc_position            = (capture.get_unsigned("dc_position", 0xFFFFFFFF) == 0xFFFFFFFF)
                                      ? std::nullopt
                                      : std::optional<unsigned>(capture.get_unsigned("dc_position"));
