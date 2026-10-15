@@ -320,12 +320,15 @@ grep "rv=0 " $L | tail -2000 | awk '{ok+=/crc=OK/; n++} END{printf "rv=0 last %d
 
 ```bash
 D=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/<语料目录>
-while :; do printf "%s  %s\n" "$(date +%H:%M:%S)" "$(ls $D/C_*_*.txt | grep -vc _ce)"; sleep 5; done
-# ★★ 带负载时【每秒涨 100–400】✓（★ 2026-10-15 实测 ✓）；★★ 而"每 5 秒只涨 1–6 个"（≈1/s ✓）就是【流量没起来】✗
-# ★★ 注意：★★ 它【只在一圈超帧内涨】✗ —— 涨到 ~3 200（★ 256QAM 宽 ✓）之后就不动了 ✓
+while :; do printf "%s  %s\n" "$(date +%H:%M:%S)" \
+  "$(find $D -maxdepth 1 -name 'C_*_*.txt' ! -name '*_ce.txt' | wc -l | tr -d ' ')"; sleep 5; done
+# ★★ 带负载时【每秒涨 100–400】✓（★ 2026-10-15 实测 ✓）；★★ 而"每 5 秒只涨 1–6 个"（≈1/s ✓）
+#    就是【流量没起来】✗ ⇒ 查手机 IP 与路由（★ §4 ✓）、★ 查 iperf3 是不是真的在跑 ⇒ ★★ 不用等，直接重飞 ✓。
+# ★★ 注意：★★ 它【只在一圈超帧内涨】✗ —— 256QAM 宽腿涨到 ~3 200–4 400 之后就不动了 ✓
 #    （★ 再选中只是覆盖同一个键 ✓）⇒ ★★ 【不要】拿它当"预算还没满"的证据 ✗，★ 那一项看 rv=0 译码率 ✓。
-#    ⇒ 查手机 IP 与路由（★ §4 ✓）、★ 查 iperf3 是不是真的在跑 ⇒ ★★ **不用等，直接重飞** ✓。
-# ★★ 注意：`ls C_*_*.txt` 也会匹配 `_ce.txt` ✗（★ 多一倍 ✓）⇒ 必须 `grep -vc _ce` ✓。
+# ★★★ 必须用 `find` ✗：★ 2026-10-15 实测 `ls $D/C_*_*.txt | grep -vc _ce` 在采集数上千时**返回 0** ✗✗
+#    （★ 参数表太长、`ls` 的报错写进 stderr 被管道吞掉 ✓）—— ★★ 我本人被它骗过一次（★ 以为"一个采集都没有" ✗，
+#    而 `find` 数是 4 418 ✓）⇒ ★★ 两个数不一致时以 `find` 为准 ✓。
 ```
 
 ★★★ **预算满了就停** ✓：★ `_llr.bin` 在预算花完之后**还会继续追加** ✗（★ 键仍被选中 ✓，★ §19.45(g) ✓），
@@ -365,7 +368,8 @@ $PY $W/probe/audit_corpus.py --corpus $D --replay \
     --tool ./build/lib/phy/upper/channel_processors/metal/ul_chain_replay --limit 200
 
 # ③bis ★ 秒级：本轮采集必须【自己带 UCI 描述】（★ 2026-10-15 起 ✓）
-grep -l "beta_offset_csi_part1" $D/C_*.txt | wc -l      # ★ 应当 == 采集数（不是 0）
+find $D -maxdepth 1 -name 'C_*_*.txt' ! -name '*_ce.txt' -exec grep -l "beta_offset_csi_part1" {} + | wc -l
+# ★ 应当 == 采集数（★ 不是 0 ✓）；★ 别用 `$D/C_*.txt` 做 shell 展开 ✗（★ 上千个名字会失败 ✓，★ 见 §4.1 的说明 ✓）
 # ★★ 0 ⇒ gNB 不是这一版构建 ✗（★ 见 §2 ②bis ✓）。
 # ★★★ 2026-10-15 实测：★ 那条 74 个采集的无流量腿 **74/74 全部带这些字段** ✓ ⇒ ★★ **写入端已验证** ✓
 #    （★ 字段值全为 0 是对的 ✓：★ 那次接收本身不带 UCI ✓）。
