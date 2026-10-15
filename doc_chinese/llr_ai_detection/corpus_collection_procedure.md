@@ -413,6 +413,20 @@ while :; do printf "%s  %s\n" "$(date +%H:%M:%S)" \
 ★★ 用 `leg_acceptance.py` 的 `THE CAPTURES' OWN receptions` 那一行 ✓（★ 精确 slot 身份 join ✓）：
 ★★ **它才是语料能不能用** ✓；★ 腿整体的 rv=0 率只是**上下文** ✗（★ s4 实测腿 45.5% ✓ 而语料 **13.2%** ✗✗）。
 
+★★★ **第 ⓪-bis 步（★ 2026-10-16 新增 ✓，★ 一票否决 ✓）：★ 腿日志里有没有 `Real-time failure`** ✓✓ ——
+★★ 塌掉那一段的采集是**我们流水线**的产物 ✗，★ 不是信道的 ✓（★ §19.59 ✓：★ RF underflow ＋ FAPI
+`UL processor is busy` ＋ PUSCH `t=24 000us`（★ 正常 3 500 ✓）＋ epre/rsrp 钉在 −15.0 ✓）。
+
+```bash
+L=<这条腿的 .log>
+grep -cE "Real-time failure in RF|UL processor is busy" "$L"          # 总数（每条腿都有一些 ✓）
+grep -E "Real-time failure" "$L" | awk '{print substr($0,12,5)}' | sort | uniq -c   # 按分钟看有没有【成片】的
+```
+
+★★ 成片（★ 一分钟几十条以上 ✓）⇒ ★★ 用 `trim_corpus.py` 把那段**裁掉** ✓：
+`--exclude HH:MM:SS-HH:MM:SS` ✓（★ 默认只报告 ✓，★ `--apply` 移到 `<corpus>_dropped` ✓，★ 不删 ✓）。
+★★ 参照：★ 一条 90 秒的塌陷把语料从 **82.3% 拉到 59.3%** ✓（★ 裁回来 82.3% ✓，★ 17 029 个采集 ✓）。
+
 ★★★ **第 ⓪ 步的快速版（★ 一票否决 ✓）：这条腿的 `rv=0` 译码率** ✓ ——
 ★★ 它是"这批语料能不能用"的量 ✓，★ 而在腿日志里就能算 ✓（★ 不用重放 ✓）：
 
