@@ -24,8 +24,19 @@
 # QPSK/16QAM/64QAM and MCS 20-27 are 256QAM. A cap of 19 keeps the link comfortable and gives the corpus
 # no 256QAM at all, which is the one modulation the deployed model describes.
 #
-# WHY p0 = -70: the recipe asks for high SNR, and this is the knob that buys it -- the uplink power target
-# is raised 6 dB into the phone's own margin. Measured on the ul_ab legs: +3 to +6 dB of SINR.
+# WHY p0 = -70: the recipe asks for high SNR, and this was the knob that was supposed to buy it, by raising
+# the uplink power target 6 dB into the phone's own margin.
+#
+# CORRECTED 2026-10-16 (design document 19.58). It does not buy SNR once the level is already high: it
+# pushes the link into compression, where the implied noise rises faster than the signal. Three legs that
+# day lined up exactly -- rv=0 decoded 88.7% at epre -1.8 dB, 15.1% at +0.7 dB, and 0.1% at +3.3 dB --
+# so 5.1 dB more level cost 12.9 dB of SINR, the signature of a third-order non-linearity rather than of a
+# neighbour (a sweep of all of band n78 the same morning found no interferer on any channel). The same
+# pattern had already cost the round-1 16QAM and 64QAM legs their corpora (19.34), and their round-2 legs,
+# with p0 back at the delivery default of -76, decoded 99.8 and 99.9 percent.
+#
+# USE `gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml` (identical but for that one line) when the
+# received level reads positive, and watch the epre median while flying: keep it near -2 dB.
 # =====================================================================================================
 
 
