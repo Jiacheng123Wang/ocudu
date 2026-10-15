@@ -43,8 +43,10 @@ cd ~/dev/ocudu
 
 # ① ★★★ gNB 必须是【本次构建】—— 新的两个采集过滤器要真的在二进制里
 strings build/apps/gnb/gnb | grep -E "OCUDU_UL_DUMP_(MIN_RB|RV)$"
-# ★★ 必须打印出这两行；★ 打印不出来说明二进制旧了 ⇒
-#    cmake --build build --target ocudu_versioning && cmake --build build --target gnb
+# ★★ 必须打印出这两行；★ 打印不出来说明二进制旧了 ⇒ ★★ 现在【不用手动重建】了 ✓：
+#    ★★★ `run_leg.sh` 起腿前会自己跑 `cmake --build build -j14` ✓（★ 2026-10-16 起 ✓），
+#    ★ 它同时也解决了"二进制戳对不上就拒绝执行"那个反复出现的问题 ✓（★ 见 §19.56 ✓）。
+# ★★ 手动才需要时：cmake --build build -j14（★ 想跳过自动构建：LEG_SKIP_BUILD=1 ✓；★ 改并行度：LEG_BUILD_JOBS=n ✓）。
 
 # ② ★★ 采集配置在
 ls -la configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml
