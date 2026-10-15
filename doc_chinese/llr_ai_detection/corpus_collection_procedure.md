@@ -280,6 +280,19 @@ COUNT=2000 collect aillr-narrow-s2  configs/gnb_rf_b200_tdd_n78_20mhz_llr_collec
 （★ 手机已附着 ✓、★ PDU Session 已建 ✓、★ CRC 91% ✓ ⇒ ★ 换网后**链路是好的** ✓）。
 
 ★★★ **⇒ 飞行中要盯的是【这条腿的 rv=0 译码率】** ✓✓（★ 2026-10-15 起的硬门槛 ✓）：
+★★★ **两个量一起看** ✓：★★ **rv=0 的 crc OK 率**（★ 下面那条命令 ✓）★★ **和 rv=0 的后均衡 SINR 中位** ✓。
+★ 实测标定（★ 256QAM / MCS 20 ✓）：★ **19.5 dB ⇒ 67.5%** ✓（s1 ✓）、★ **16.3 dB ⇒ ~50%** ✓（s2 ✓）、
+★★ **9.2 dB ⇒ 0.0–0.3%** ✗（2026-10-15 两条腿 ✓）⇒ ★★ **门槛取 16 dB** ✓。
+```bash
+L=$(ls -t $HOME/dev/ocudu/doc_chinese/phy_pipeline_gpu/wip/logs/gnb_gpu_*.log | head -1)
+grep "rv=0 " $L | tail -2000 | grep -o "sinr=[-0-9.]*dB" | sed 's/sinr=//;s/dB//' | sort -n \
+  | awk '{a[NR]=$1} END{printf "rv=0 post-eq SINR median %.1f dB (need >=16)\n", a[int(NR/2)]}'
+```
+★★★ **调功率之前先看 rsrp** ✓ —— ★★ 2026-10-15 实测：★ **rsrp 比 s1 高 4.5 dB 而 SINR 低 10 dB** ✗
+（★ 估计器残差高 13 dB ✓）⇒ ★★ 那是"**信号更强、干扰／多径更重**" ✓，
+★★ **不是功率不够** ✗ ⇒ ★★ **抬功率买不到这 10 dB** ✗ —— ★★ **先给手机换位置** ✓（★ 几厘米就能换掉多径 ✓）。
+★ 换位置无效、且确认是信号弱（★ rsrp 明显低 ✓）时，才动用功控 ✓：
+★★ `configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0_64.yml` ✓（★ 只差一行：★ `p0_nominal_with_grant: -64` ✓，★ +12 dB ✓，★ 已 dryrun 通过 ✓）。
 ★★ **采集过滤器是 `RV=0`** ✓ ⇒ ★★ 语料的价值 = **rv=0 的译码率** ✓，★ 而**它可能接近 0** ✗：
 ★ 2026-10-15 22:25 那条腿（★ 同配置 ✓）实测 **rv=0 只有 0.3%** ✗（★ 49 960 次 ✓），
 ★ 而 rv=2 是 48.9% ✓、rv=3 是 90.4% ✓ —— ★★ 也就是说**重传能译、首传全灭** ✗，
