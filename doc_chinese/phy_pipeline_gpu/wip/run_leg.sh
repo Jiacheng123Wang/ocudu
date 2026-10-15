@@ -117,6 +117,17 @@ fi
 
 mkdir -p "$LOGDIR"     # --log.filename never creates it, and a missing one fails silently
 
+# ---- THE CAPTURE DIRECTORY MUST EXIST BEFORE THE FIRST RECEPTION -------------------------------------
+# `fopen` does not create directories, and ul_capture checks the directory ONCE, before its first capture,
+# then latches the answer: a leg started with the directory missing drops every reception it makes and
+# never recovers, however long it runs or however good the link becomes. Measured 2026-10-16: a corpus
+# directory holding a bad window was deleted just before a re-fly, so the new leg spent its whole settling
+# period writing nothing -- the counters and the rate looked normal, and only the leg's .stderr file said
+# "NOT CAPTURING". Creating the directory here costs nothing and removes the failure mode.
+if [ -n "${OCUDU_UL_DUMP:-}" ]; then
+  mkdir -p "$(dirname "$OCUDU_UL_DUMP")"
+fi
+
 # ---- REFUSE TO START ON TOP OF A STRAY gNB ----------------------------------------------------------
 # Measured 2026-09-24: a short gNB started only to read a start-up line (the P0-6 verification) did not
 # die on its first kill, stayed as an orphan holding the GTP-U socket, and the next leg failed 15
