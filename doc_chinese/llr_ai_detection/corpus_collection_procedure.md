@@ -50,10 +50,21 @@ strings build/apps/gnb/gnb | grep -E "OCUDU_UL_DUMP_(MIN_RB|RV)$"
 ls -la configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml
 # ★★ 它是交付配置的副本，★ 只改了【三行】（★ 见文件头说明 ✓）：
 #    cell_cfg.pusch.min_ue_mcs: 20 / max_ue_mcs: 20 / p0_nominal_with_grant: -70
-# ★★ 同时核一眼 AMF 地址（★ `cu_cp.amf.addrs` / `bind_addrs` ✓）：
-grep -A2 "^  amf:" configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml
-# ★★ 必须与【你交付配置里正在用的那两个地址】一致 ✓（★ 本文件是它的副本 ✓，★
-#    但交付配置的地址是【本地未提交】的改动 ⇒ 你若再改交付配置，★ 这里也要跟着改 ✓）
+# ★★ 同时核一眼 AMF 地址（★ `cu_cp.amf.addrs` = AMF／CN 的地址 ✓，`bind_addrs` = 【本机】地址 ✓）：
+grep -A3 "^  amf:" configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml
+# ★★ 必须与【交付配置里正在用的那两个地址】一致 ✓。
+# ★★★ 2026-10-15 换网：★ 六个采集配置已同步成
+#       addrs: 192.168.100.153（★ CN ✓） / bind_addrs: 192.168.100.125（★ 本机 en1 ✓）
+# ★★ 本机自己的地址用 `ifconfig en1 | grep "inet "` 核 ✓（★ 本轮实测就是 192.168.100.125 ✓）；
+# ★★ CN 在同一段里应当能直接 ping 到 ✓：ping -c2 192.168.100.153
+# ★★ 语义在代码里：`apps/units/o_cu_cp/cu_cp/cu_cp_unit_config.h` 的 `ip_addrs`（对端）与
+#    `bind_addrs`（本机，★ 同时被当作 NGu／GTP-U 的绑定地址 ✓，★ 见 `apps/gnb/gnb.cpp:216` ✓）—— ★
+#    【不要】按"哪个像本机"去猜 ✗，★ 按这两个字段名对 ✓。
+
+# ②bis ★★★ 采集侧本轮【新增了 UCI 字段的写入】⇒ gNB 必须是【这一版】构建 ✓
+strings build/apps/gnb/gnb | grep -c "beta_offset_csi_part1"     # ★ 必须是 1（或更多）
+# ★★ 为什么必须有：★ 解复用器只有"没有 UCI"时才直通 ✓ ⇒ ★ 带 UCI 的接收（★ 宽腿的 43–49% ✓）
+#    缺这些字段就【译不出来】✓（★ 设计文档 §19.45(f) ✓）。
 
 # ③ ★★★ 磁盘【和目录】—— `fopen` 【不会】自动建目录 ✗✗
 # ★★ 语料放在【工作流目录里】（★ 与 cap001/cap002 同一处 ✓，★ 已被 .gitignore 忽略 ✓）：
@@ -194,6 +205,11 @@ sudo chown -R "$(whoami)":staff "$CORPUS"
 iperf3 -c <手机IP> -R -t 300 -P 4
 ```
 
+★★★ **换网后【先确认手机地址与路由】** ✓（★ 2026-10-15 新增 ✓）：★★ 手机地址是 **CN 分配的** ✓，
+★ 换网后与上一次不同 ✗ ⇒ ★★ 飞之前先：★ ① 从**手机自己**（★ 设置→关于→IP ✓）或 CN 上看它的地址 ✓；
+★ ② 在 Mac 上 `ping -c2 <手机IP>` 必须通 ✓（★ 不通就是本机到 UE 网段**没有路由** ✗，
+★ 上一次那条路由是照着**旧网段**配的 ✓ —— 这一条是换网后最容易漏的 ✓）。
+
 ★★★ **2026-10-14 更正**：★ 上一版这里写的是 `<gNB_IP>` ✗ —— ★★ 那是错的 ✓（★ 用户指出 ✓）。
 
 ★★ **判读（★ 采集中随时看）**：★ 采到的文件应当**持续增长** ✓；★ 若几分钟不涨，★ 说明**当前流量产生不了 ≥43 PRB 的 rv=0 接收** ✗
@@ -208,6 +224,50 @@ for f in $(ls -t $HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/<�
 done
 # ★★ 配方要"高 SNR"：★ 目标【中位 ≥25 dB】✓（★ 旧语料只有 19.8 dB ✗）
 ```
+
+---
+
+## 4.1 ★★★ 本轮（2026-10-15 起）要采什么（★ 由判据 1 的**样本量**决定 ✓）
+
+★★ 依据是 §19.47 的实测 ✓：★ 判据 1 声明的 **+1.0 pp 上界**在 n = 598 时给到 **+2.80 pp** ✗，
+★★ 区间宽度按 **1/√n** 缩 ⇒ ★★ **单场约 4 700–5 000 配对**才判得动 ✓（★ 整场 2 770 只到 ~+1.3 pp ✗；
+★ 两场合并够、但 `memo_08` §7.2 的 **C7 禁止跨场次合并** ✗）。★★ 另加一条硬要求：
+★★ **每个调制都要有第二个场次** ✓（★ 契约是"会话级 train/val、从不随机划分" ✓，★ 而 64/16/QPSK 现在各只有一场 ✗）。
+
+| ★ 腿 | ★★ 目录 | ★★ 配置 | ★★ `COUNT` | ★★ 为什么 |
+|---|---|---|---|---|
+| ★★ 1 | `aillr_256qam_wide_s3` | `..._llr_collect.yml` | ★★ **6000** | ★★ 让判据 1 的 **+1.0 pp** 单场可判 ✓（★ 约 5–6 GB ✓）|
+| ★ 2 | `aillr_64qam_wide_s2` | `..._collect_64qam.yml` | ★ 2000 | ★ 会话级 train/val ✓ |
+| ★ 3 | `aillr_16qam_wide_s2` | `..._collect_16qam.yml` | ★ 2000 | ★ 同上 ✓ |
+| ★ 4 | `aillr_qpsk_wide_s2` | `..._collect_qpsk.yml` | ★ 2000 | ★ 同上 ✓ |
+| ★ 5（★ 可选 ✓）| `aillr_256qam_narrow_s2` | `..._llr_collect.yml` ＋ `MAX_RB=25` | ★ 2000 | ★ `MIN_PRB` 的窄池也要有第二场 ✓ |
+
+★★ **合计约 14 000 个采集、15 GB** ✓（★ 实测每个采集约 1.1 MB ✓，★ 盘上余量按 §2③ 核 ✓）。
+
+```bash
+cd ~/dev/ocudu
+collect() {                       # 用法: collect <标签> <配置> <目录> [额外的 OCUDU_* 覆盖...]
+  local label=$1 cfg=$2 dir=$3; shift 3
+  mkdir -p "$dir"                 # ★★ 必须 —— fopen 不会建目录 ✗
+  sudo -E env "LEG_CONFIG=$HOME/dev/ocudu/$cfg" \
+       "OCUDU_UL_DUMP=$dir/C" OCUDU_UL_DUMP_COUNT=${COUNT:-3000} \
+       OCUDU_UL_DUMP_MIN_RB=43 OCUDU_UL_DUMP_RV=0 \
+       OCUDU_UL_DUMP_LLR=1 OCUDU_RECEIVER_PROBE=1 "$@" \
+       bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu "$label"
+}
+C=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus
+COUNT=6000 collect aillr-256qam-s3  configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml        $C/aillr_256qam_wide_s3
+COUNT=2000 collect aillr-64qam-s2   configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_64qam.yml  $C/aillr_64qam_wide_s2
+COUNT=2000 collect aillr-16qam-s2   configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam.yml  $C/aillr_16qam_wide_s2
+COUNT=2000 collect aillr-qpsk-s2    configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_qpsk.yml   $C/aillr_qpsk_wide_s2
+# 窄分配（★ 可选 ✓）：撤下限、改上限
+COUNT=2000 collect aillr-narrow-s2  configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect.yml        $C/aillr_256qam_narrow_s2 \
+        OCUDU_UL_DUMP_MIN_RB=0 OCUDU_UL_DUMP_MAX_RB=25
+```
+
+★★ **每条腿照 §3.1 的节奏走** ✓，★★ 并且**每条腿都跑 §5 的三步验收**（★ 本轮起第 ③ 步是必做 ✓）——
+★★ 第 ③ 步现在还要顺带确认一件事 ✓：★ **带 UCI 的采集【不用恢复】就与实时判决一致** ✓
+（★ 那正是"采集侧新写 UCI 字段"这一改动的验收 ✓，★ 设计文档 §19.45(f) ✓）。
 
 ---
 
@@ -228,12 +288,16 @@ $PY $W/probe/audit_corpus.py --corpus $D
 $PY $W/probe/audit_corpus.py --corpus $D --replay \
     --tool ./build/lib/phy/upper/channel_processors/metal/ul_chain_replay --limit 200
 
+# ③bis ★ 秒级：本轮采集必须【自己带 UCI 描述】（★ 2026-10-15 起 ✓）
+grep -l "beta_offset_csi_part1" $D/C_*.txt | wc -l      # ★ 应当 == 采集数（不是 0）
+# ★★ 0 ⇒ gNB 不是这一版构建 ✗（★ 见 §2 ②bis ✓）。
+
 # ③ ★★★ 同样分钟级：**离线重放与实时腿逐接收对得上吗**（★ 2026-10-15 新增 ✓）
 #    采完必须做这一条 —— 本轮的三个缺陷（★ 码块数 ✗、译码上限 ✗、UCI 没记 ✗）
 #    全都是它抓出来的，而"实时译码率"这一条【抓不到】它们 ✓。
 $PY $W/probe/replay_vs_live.py --corpus $D --log <腿日志> \
     --tool ./build/lib/phy/upper/channel_processors/metal/ul_chain_replay --count 200
-# ★ 期望：★ 对上 90%+ 且【不带 UCI 的接收 100% 一致】✓、
+# ★ 期望：★ 对上 90%+ 且【不带 UCI 的接收 100% 一致】✓、★ 带 UCI 的也一致（本轮起不需要恢复 ✓）、
 #   ★ 采集时间偏移中位 +1.1…+3.4 ms ✓（★ 这是"采集写在接收开头、日志行在结尾"应有的大小 ✓）。
 # ★★ 若带 UCI 的接收大面积不一致 ⇒ ★ 采集侧还没记 UCI（★ 2026-10-15 起会记 ✓）；
 #    旧语料用 $PY $W/probe/uci_from_log.py --prepare <新目录> 从腿日志补回来 ✓（★ 实测 187/189 ✓）。
