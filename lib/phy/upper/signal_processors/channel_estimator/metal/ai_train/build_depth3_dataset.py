@@ -144,6 +144,28 @@ def data_aided_channel(grid, data_symbols, data_subcarriers, symbols, alloc_subc
         channel[symbol] = channel_from_tdl(coefficients, alloc_subcarriers)
         residuals.append(observations - channel_from_tdl(coefficients, subcarriers))
     sigma2 = float(np.mean(np.abs(np.concatenate(residuals)) ** 2))
+
+    # The DM-RS symbols carry no data, so the fit above leaves them at zero -- and the DM-RS symbols are
+    # exactly where `pilot_ls_consistency` looks, because that is where the pilot LS is defined. Comparing
+    # the pilot LS against a zero channel does not test the DM-RS convention; it tests whether the pilot
+    # power happens to equal the noise, so it rejected every capture with a decent pilot SNR and accepted
+    # the ones near 0 dB. Measured 2026-10-16 on the s4_d corpus: 11 of 60 captures passed, all of them the
+    # low-SNR ones. The channel drifts slowly inside a slot, so interpolating it between the neighbouring
+    # DATA symbols gives the comparison something real to compare against.
+    filled = [s for s in range(NOF_SYMBOLS) if np.any(channel[s] != 0.0)]
+    for symbol in range(NOF_SYMBOLS):
+        if np.any(channel[symbol] != 0.0) or not filled:
+            continue
+        below = [s for s in filled if s < symbol]
+        above = [s for s in filled if s > symbol]
+        if below and above:
+            low, high = below[-1], above[0]
+            weight = (symbol - low) / float(high - low)
+            channel[symbol] = (1.0 - weight) * channel[low] + weight * channel[high]
+        elif below:
+            channel[symbol] = channel[below[-1]]
+        else:
+            channel[symbol] = channel[above[0]]
     return channel, sigma2
 
 
@@ -223,17 +245,27 @@ def candidate_units(index_path, tb_dir, corpus_dir, modulation, min_prb, min_slo
 
 def pilot_ls_consistency(ls, channel, alloc_prb, dmrs_symbols, dmrs_type, sigma2, scaling,
                          window_subcarriers=None):
-    """Ratio between the pilot LS residual and the noise it should contain, for one capture.
+    """How well the pilot LS agrees with the data-aided channel, as a scale-free correlation.
 
     The pilot LS is built from the DM-RS sequence this module generates, while the channel comes
-    from the DATA REs, so the two are independent. Their residual is therefore a test of the
+    from the DATA REs, so the two are independent. Their agreement is therefore a test of the
     DM-RS conventions against the capture itself: a wrong PRG start, a wrong slot reduction or a
-    wrong sign would move this ratio far from one, and none of those is visible in the shapes.
+    wrong sign would make the correlation collapse, and none of those is visible in the shapes.
 
-    The expected value is `sigma2 / scaling^2`, because the de-boosted LS divides the pilot noise
-    by the amplitude the DM-RS was boosted with. `window_subcarriers` slices the LS and the mask
-    down to the allocation, which is where the caller's channel is defined; the channel is already
-    restricted, so it is not sliced again.
+    This was a residual-power ratio until 2026-10-16, and for real captures it was measuring
+    nothing of the kind. `data_aided_channel` fits the channel on the DATA symbols only, so it
+    holds zero on the DM-RS symbols -- which is exactly where the pilot mask looks. The "residual"
+    was therefore the pilot power itself and the ratio was the pilot SNR in units of the noise, so
+    the check rejected every capture with a decent pilot SNR and accepted the ones near 0 dB:
+    measured on the s4_d corpus, 11 of 60 passed and every one of them was a low-SNR capture. The
+    fit now interpolates across the DM-RS symbols (see `data_aided_channel`), which makes the
+    comparison defined, and the correlation is its scale-free form -- it does not depend on the
+    noise model that the old ratio assumed, which was itself approximate because the data fit's
+    residual carries model error as well as noise. The caller's window, 0.5 to 2.0, applies to the
+    correlation unchanged: below 0.5 the two estimates are not describing the same channel.
+
+    `window_subcarriers` slices the LS and the mask down to the allocation, which is where the
+    caller's channel is defined; the channel is already restricted, so it is not sliced again.
     """
     mask = D3.pilot_ls_mask(alloc_prb, dmrs_symbols, dmrs_type)
     ls = np.asarray(ls)
@@ -242,10 +274,14 @@ def pilot_ls_consistency(ls, channel, alloc_prb, dmrs_symbols, dmrs_type, sigma2
         ls = ls[:, window_subcarriers]
         mask = mask[:, window_subcarriers]
     assert ls.shape == channel.shape, (ls.shape, channel.shape)
-    if mask.sum() == 0 or sigma2 <= 0.0:
+    if mask.sum() == 0:
         return float("nan")
-    residual = np.abs(ls[mask] - channel[mask]) ** 2
-    return float(residual.mean() / (sigma2 / (scaling * scaling)))
+    pilot = ls[mask]
+    data = channel[mask]
+    denominator = float(np.sqrt(np.mean(np.abs(pilot) ** 2) * np.mean(np.abs(data) ** 2)))
+    if denominator == 0.0:
+        return float("nan")
+    return float(abs(np.mean(pilot * np.conj(data))) / denominator)
 
 
 def load_transport_block(tb_path, source):
