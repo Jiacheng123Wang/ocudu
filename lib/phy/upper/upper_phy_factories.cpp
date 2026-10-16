@@ -975,6 +975,8 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
   // anything but "classic" until an AI backend exists), so this is a pass-through with no second policy.
   pusch_config.pusch_receiver_backend    = config.pusch_receiver_backend;
   pusch_config.pusch_receiver_model_path = config.pusch_receiver_model_path;
+  pusch_config.pusch_receiver_model_slots = config.pusch_receiver_model_slots;
+  pusch_config.pusch_receiver_model_is_build_default = config.pusch_receiver_model_is_build_default;
 
   // :TODO: check these values in the future. Extract them to more public config.
   pusch_config.ch_estimate_dimensions.nof_symbols        = MAX_NSYMB_PER_SLOT;
