@@ -178,6 +178,14 @@ static constexpr unsigned D3_COND_QM_ORDER_SIZE = 4;
 /// The LLR head's stride under the conditioned contract: the widest modulation, always.
 static constexpr unsigned COND_STRIDE = 8;
 
+/// \brief How far the network's RSRP and EPRE may sit from the classical estimator's before the reception counts
+/// as disagreeing (R6's runtime evidence, design section 19.126).
+///
+/// Half a dB is the tolerance the adoption checklist uses, and it is a tolerance and not a target: the
+/// conditioned bundle measures 0.02-0.10 dB from the estimator, while a bundle whose head 3 is shrunk sits
+/// decibels away -- the difference this count exists to make visible on a live run.
+static constexpr float R6_AGREEMENT_DB = 0.5F;
+
 class pusch_depth3_receiver_ai_network_impl : public pusch_depth3_receiver
 {
 public:
@@ -645,6 +653,24 @@ private:
     }
     const unsigned port        = config.rx_ports.empty() ? 0 : config.rx_ports.front();
     const float    classic_nv  = est_results.get_noise_variance(port);
+    // R6's runtime evidence, and the reason it is counted HERE rather than declared by the artifact: the rule that
+    // a bundle may only be used with `net` after passing a known-truth check has to be checkable on a LIVE run,
+    // and the classical estimator computes the same two quantities independently on every reception anyway
+    // (measured 2026-10-17: the conditioned bundle agrees to 0.10 dB and one superseded per-modulation bundle is
+    // 2.5 dB out, which is exactly the state a declaration would have hidden). A reception counts as agreeing
+    // when both RSRP and EPRE are within R6_AGREEMENT_DB of the estimator's values.
+    const float classic_rsrp = est_results.get_rsrp(port, 0);
+    const float classic_epre = est_results.get_epre(port);
+    if ((classic_rsrp > 0.0F) && (classic_epre > 0.0F)) {
+      const float rsrp_delta = std::abs(convert_power_to_dB(net.rsrp_lin) - convert_power_to_dB(classic_rsrp));
+      const float epre_delta = std::abs(convert_power_to_dB(net.epre_lin) - convert_power_to_dB(classic_epre));
+      if ((rsrp_delta <= R6_AGREEMENT_DB) && (epre_delta <= R6_AGREEMENT_DB)) {
+        ++measurements_agreeing;
+      }
+      else {
+        ++measurements_disagreeing;
+      }
+    }
     fmt::print(stderr,
                "[depth3-measure] reception {} (Qm={} {}) over {} pilot RE(s): epre net={:.2f} classic={:.2f} dB "
                "| rsrp net={:.2f} classic={:.2f} dB | snr net={:.2f} classic={:.2f} dB | "
@@ -661,6 +687,13 @@ private:
                convert_power_to_dB(est_results.get_snr(port)),
                net.noise_variance_lin,
                classic_nv);
+    // The two counts travel with every sampled line, so a run's own log says whether its network measurements are
+    // inside the tolerance the adoption checklist asks for -- and a run that never agrees cannot be read as one
+    // that did.
+    fmt::print(stderr,
+               "[depth3-measure]   RSRP/EPRE against the independent estimator: {} within {} dB, {} outside "
+               "(since the run started)\n",
+               measurements_agreeing, R6_AGREEMENT_DB, measurements_disagreeing);
   }
 
   void degrade(depth3_degradation                  reason,
@@ -881,6 +914,10 @@ private:
   bool                                              warned_unverified_domain = false;
   /// Receptions whose RSRP and EPRE were published from the network's heads (R6's switch, `net` only).
   unsigned                                          published_measurements = 0;
+  /// Sampled receptions whose network RSRP and EPRE agreed with the independent estimator's within
+  /// \ref R6_AGREEMENT_DB, and those that did not. R6's live evidence; see `report_measurements`.
+  unsigned                                          measurements_agreeing    = 0;
+  unsigned                                          measurements_disagreeing = 0;
   bool                                              conditioned   = false;
   /// The main head's stride, per modulation, as the bundle that computes that modulation DECLARES it: its head
   /// width divided by the slot's symbols. Qm for a per-modulation bundle, the widest Qm for a conditioned one.
