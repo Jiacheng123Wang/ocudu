@@ -7362,3 +7362,22 @@ DIRTY_FP=$(git diff -- $DIRTY_PATHS | git hash-object --stdin | cut -c1-12)
 ★ `UL processor is busy` ✓／★ `radio underflow` ✓／★ `late message` ✓／★ other ✓，
 ★★ 因为**它们指向不同的处置** ✓（★ 前者是臂的成本 ✓、★ 后者是射频侧 ✓），★ 合成一个数会丢掉这个区别 ✗。
 ★ 合成样例（★ 三种各一条 ✓）已跑过 ✓：★ 输出 `real-time failures: 3 (1 UL processor is busy, 1 radio underflow, 1 late message)` ✓。
+
+
+★★★ **判腿工具再加一节：★ 关机**体检** ✓（★ `ai_leg_verdict.py` ✓）** ✓：★ 它现在同时回答
+★"**这条腿跑没跑网络**" ✓ 与 ★"**这条腿停没停下来**" ✓ —— ★ 读的是三层命名 ✓
+（★ `shutdown:` ✓／★ `o_du stop:` ✓／★ `upper PHY stop:` ✓），★ 按"开了有没有回"配对 ✓：
+
+```
+shutdown      : 6 步中 4 步返回、共 32 ms，2 步【从未返回】
+    !! app: 'DU stop' 开了没回 —— 卡在这里
+    !! o_du: 'lower_phy' 开了没回 —— 卡在这里
+    30 ms  app: ul_pipeline_probe report
+```
+
+★★ **实测（★ 用两个合成夹具 ＋ 一条真腿日志的关机片段 ✓）** ✓：★ 干净夹具 ⇒ 逐步列出耗时 ✓；
+★ 卡死夹具 ⇒ **点名到子步骤**（★ `upper_phy: 'rx buffer pool'` ✓）；★ 用 **16:42 那条真腿**的日志片段回放 ✓
+⇒ 输出**正是**当时人工 grep 才查出来的结论 ✓（★ `DU stop` ＋ `lower_phy` 从未返回 ✓）。
+★★ 两个正则的坑也在这里暴露并被修掉 ✓：★ PHY 日志在消息前有**两组方括号** ✓（★ `[PHY] [I] [ slot]` ✓），
+★ 只吃一组会**静默漏掉**所有 `upper PHY stop:` 行 ✗ —— ★ 而"漏掉"看起来**和"没卡"一模一样** ✗
+（★ 又是"守卫必须在它守的那类数据上跑过"这一族 ✓）。
