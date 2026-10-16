@@ -95,12 +95,23 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
   }
 
   measurements.epre_lin = static_cast<float>(epre_sum / static_cast<double>(nof_pilot_re));
-  measurements.rsrp_lin = static_cast<float>(rsrp_sum / static_cast<double>(nof_pilot_re));
+  // THE DM-RS-TO-DATA RATIO BELONGS IN THE PUBLISHED RSRP, and it was missing: head 3 estimates the channel GAIN
+  // (`H/r` times `r`), while RSRP is defined on the DM-RS RESOURCE ELEMENTS, whose transmit power is `scaling^2`
+  // above the data REs'. Measured 2026-10-17 against the classical estimator on two independent receptions, the
+  // published value was 3.11 and 2.96 dB low -- a factor of two, i.e. exactly this -- while EPRE, which already
+  // multiplied by `scaling`, agreed to 0.01 dB. RSRP is one of the three quantities R6 hands the scheduler, so it
+  // is published in the estimator's convention.
+  const float rsrp_gain_lin = static_cast<float>(rsrp_sum / static_cast<double>(nof_pilot_re));
+  measurements.rsrp_lin     = rsrp_gain_lin * scaling * scaling;
 
   // The estimator's own formula (`port_channel_estimator_average_impl.cpp:289`): the data RE power is the
   // RSRP scaled by the number of layers and by the INVERSE of the DM-RS-to-data amplitude ratio squared,
   // and the SNR is that over the noise variance.
-  const float data_rsrp = measurements.rsrp_lin * nof_layers / (scaling * scaling);
+  //
+  // It is fed the GAIN, not the published value above, and that is not a detail: `rsrp_gain_lin` is already in
+  // the units this formula expects (it divides by `scaling^2` itself), so using the published RSRP here would
+  // apply the ratio twice -- +3 dB of SNR, measured as a stable +1.1 to +1.3 dB offset before this change.
+  const float data_rsrp = rsrp_gain_lin * nof_layers / (scaling * scaling);
   measurements.snr_lin  = (measurements.noise_variance_lin > 0.0F)
                               ? (data_rsrp / measurements.noise_variance_lin)
                               : 0.0F;
