@@ -164,6 +164,19 @@ private:
       if (stats.sinr_dB.has_value()) {
         csi.set_sinr_dB(channel_state_information::sinr_type::post_equalization, *stats.sinr_dB);
       }
+      // R6: the measurements a demodulator took ITSELF, which today means the AI arm's reporting heads. Absent on
+      // the classical path, where the estimator's values -- already written into this same csi -- stand.
+      //
+      // NOT YET EQUIVALENT TO THE CLASSICAL REPORT, and the difference is recorded rather than hidden: the heads
+      // measure ONE value per reception (the serving port), so RSRP goes into the scalar field while a classical
+      // run may also fill the per-port vector. A net-mode review has to decide whether the scheduler reads the
+      // scalar or the vector before this is switched on (design sections 19.123, 19.124).
+      if (stats.rsrp_dB.has_value()) {
+        csi.set_rsrp_dB(*stats.rsrp_dB);
+      }
+      if (stats.epre_dB.has_value()) {
+        csi.set_epre(*stats.epre_dB);
+      }
       if (stats.evm.has_value()) {
         csi.set_total_evm(*stats.evm);
         csi.set_sinr_dB(channel_state_information::sinr_type::evm, -20.0F * log10f(*stats.evm) - 3.7F);

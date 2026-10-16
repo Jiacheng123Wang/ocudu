@@ -18,6 +18,19 @@ public:
     std::optional<float> sinr_dB;
     /// Measured EVM.
     std::optional<float> evm;
+    /// \brief Reference signal received power, in dB, when the DEMODULATOR measured it itself.
+    ///
+    /// R6: the AI arm's reporting heads measure RSRP and EPRE on the same reception, in the window before
+    /// `on_end_codeword()` that the arm already uses to publish its SINR -- which is the only window in which
+    /// anything can reach the scheduler's channel state, because `estimate()` completes before `demodulate()` and
+    /// the heads do not exist until the forward pass has run (design section 19.123).
+    ///
+    /// EMPTY ON THE CLASSICAL PATH, and that is the contract: a demodulator that did not measure these leaves
+    /// them unset, and the estimator's own values stay in force. A value here means the number came from the
+    /// demodulator, in the estimator's units (section 19.122 brought the two to within 0.04 dB).
+    std::optional<float> rsrp_dB;
+    /// \brief Energy per resource element, in dB, when the DEMODULATOR measured it itself. See \ref rsrp_dB.
+    std::optional<float> epre_dB;
   };
 
   /// Default destructor.

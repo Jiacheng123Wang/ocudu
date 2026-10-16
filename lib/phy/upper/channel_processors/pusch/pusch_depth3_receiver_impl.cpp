@@ -542,7 +542,7 @@ public:
     report_measurements(reference_amplitude, est_results, config, model_scales);
 
     // ---- gather, quantise, descramble, deliver ---------------------------------------------------
-    if (!deliver(codeword_buffer, notifier, grid, est_results, config, qm, model_scales)) {
+    if (!deliver(codeword_buffer, notifier, grid, est_results, config, qm, model_scales, reference_amplitude)) {
       degrade(depth3_degradation::no_data_resource_elements, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
@@ -698,7 +698,8 @@ private:
                const dmrs_pusch_estimator_results&    est_results,
                const pusch_demodulator::configuration& config,
                unsigned                               qm,
-               const depth3_scales&                   scales)
+               const depth3_scales&                   scales,
+               float                                  reference_amplitude)
   {
     const unsigned range_limit = (config.modulation == modulation_scheme::QPSK) ? 24 : 20;
 
@@ -806,6 +807,31 @@ private:
       const float mean_noise = static_cast<float>(noise_sum / static_cast<double>(noise_count));
       pusch_demodulator_notifier::demodulation_stats stats;
       stats.sinr_dB.emplace(-convert_power_to_dB(mean_noise));
+
+      // R6: RSRP and EPRE from the reporting heads, in the same window and through the same call as the SINR.
+      // ONLY UNDER `net`: under `classic` the chain's measurements are the classical chain's, and these two would
+      // otherwise replace the estimator's numbers with the network's without the operator asking (design section
+      // 19.123; the SINR is a separate case, because an arm that does not run the classical equalizer has no
+      // other post-equalisation noise to publish -- section 19.116).
+      if (reporting_source == "net") {
+        const depth3_measurements net = measure_depth3(span<const __fp16>(input_plane), plane_channels,
+                                                      span<const __fp16>(channel_head), reference_amplitude,
+                                                      static_cast<float>(dmrs_noise_head), scales.a_noise,
+                                                      scales.b_noise);
+        if (net.nof_pilot_re != 0) {
+          stats.rsrp_dB.emplace(convert_power_to_dB(net.rsrp_lin));
+          stats.epre_dB.emplace(convert_power_to_dB(net.epre_lin));
+          ++published_measurements;
+          // Said out loud, and not only because the two sources now agree to 0.04 dB: a number that arrives at the
+          // scheduler from the network has to be identifiable as such from the log alone.
+          if ((published_measurements == 1) || ((published_measurements % 1000) == 0)) {
+            fmt::print(stderr,
+                       "[pusch_receiver] reporting source net: published measurement {} from the network's heads "
+                       "(rsrp {:.2f} dB, epre {:.2f} dB)\n",
+                       published_measurements, *stats.rsrp_dB, *stats.epre_dB);
+          }
+        }
+      }
       notifier.on_end_stats(stats);
     }
     if (!domain_by_qm[qm].has) {
@@ -853,6 +879,8 @@ private:
   std::string                                       reporting_source = "classic";
   /// Whether the one-time note about an undeclared measurement domain has been printed for this arm.
   bool                                              warned_unverified_domain = false;
+  /// Receptions whose RSRP and EPRE were published from the network's heads (R6's switch, `net` only).
+  unsigned                                          published_measurements = 0;
   bool                                              conditioned   = false;
   /// The main head's stride, per modulation, as the bundle that computes that modulation DECLARES it: its head
   /// width divided by the slot's symbols. Qm for a per-modulation bundle, the widest Qm for a conditioned one.
