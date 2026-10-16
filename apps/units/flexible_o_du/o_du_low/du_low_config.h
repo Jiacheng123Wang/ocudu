@@ -73,6 +73,21 @@ struct du_low_unit_expert_upper_phy_config {
   /// Per-modulation model slots, in the order QPSK, 16QAM, 64QAM, 256QAM. A slot wins over the fallback for its
   /// own modulation; a slot whose bundle declares a different modulation is refused when the arm binds it.
   std::array<std::string, 4> pusch_receiver_model_slots;
+  /// \brief Which measurements the chain reports: `classic` (the classical estimator's, the default) or `net`
+  /// (the AI arm's reporting heads).
+  ///
+  /// R6 of the AI receiver workstream. The chain reports post-equalisation SINR, RSRP and EPRE to the scheduler,
+  /// and the AI arm computes heads for all three: switching is what makes the estimator removable rather than
+  /// merely bypassed for the soft bits. It is a SEPARATE knob from the receiver backend on purpose, because the
+  /// two carry different risk: `net` publishes numbers the scheduler acts on, and a measurement source is only
+  /// worth switching once it has been measured against known truth (`design` sections 17.2, 19.114, 19.115).
+  ///
+  /// \note \c net needs the `ai` receiver: with no arm computing, there are no heads to report, and the value
+  ///       would be carried without being honoured. The validator refuses that combination.
+  /// \note A model whose reporting heads were trained over a narrower SNR range than the cell operates in must
+  ///       not have its measurements published there; the arm declines those receptions, counts them, and says so
+  ///       (the domain guard, `design` section 19.115).
+  std::string pusch_reporting_source = "classic";
   /// \brief Sets the maximum allowed downlink processing delay in slots.
   ///
   /// Higher values increase the downlink processing pipeline length, which improves performance and stability for

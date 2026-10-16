@@ -199,6 +199,21 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
   // Whether the fallback is the BUILD's default is a fact only this layer knows (the resolver filled it), and the
   // coverage line says it: a model the operator never asked for is exactly what has to be visible.
   upper_phy_factory_config.pusch_receiver_model_is_build_default = du_low.expert_phy_cfg.pusch_receiver_model.empty();
+  // R6: which measurements the chain reports. The factory passes it to the depth-3 arm, which publishes the
+  // network's heads when it says `net` -- and declines, counted and named, the receptions whose SNR lies outside
+  // what the bound model's reporting heads were trained on (the domain guard; design section 19.115).
+  upper_phy_factory_config.pusch_reporting_source = du_low.expert_phy_cfg.pusch_reporting_source;
+  if (du_low.expert_phy_cfg.pusch_reporting_source == "net") {
+    // A startup line, because this is the knob that decides whether the scheduler acts on the network's numbers:
+    // a leg log has to say which source produced them without the reader inferring it from a flag.
+    // NOT claimed here: that out-of-range receptions fall back. The bundle does not declare its trained SNR range
+    // yet (`depth3_snr_range`), so the gate cannot be enforced and the arm WARNS once instead. A startup line
+    // that promised the fallback would be the kind of value-carried-but-not-honoured this workstream refuses.
+    fmt::print("PUSCH reporting source: net (the AI arm's reporting heads). The domain gate is NOT in force until "
+               "the bound bundle declares the SNR range its reporting heads were trained on "
+               "(`depth3_snr_range`); until then the arm publishes the network's measurements and warns once per "
+               "arm that it cannot tell a measurement inside the model's domain from one outside it.\n");
+  }
   upper_phy_factory_config.pusch_channel_estimator_mmse_tau_rms_us =
       du_low.expert_phy_cfg.pusch_channel_estimator_mmse_tau_rms_us;
   upper_phy_factory_config.pusch_channel_estimator_mmse_fd_hz =

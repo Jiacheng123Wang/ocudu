@@ -977,6 +977,9 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
   pusch_config.pusch_receiver_model_path = config.pusch_receiver_model_path;
   pusch_config.pusch_receiver_model_slots = config.pusch_receiver_model_slots;
   pusch_config.pusch_receiver_model_is_build_default = config.pusch_receiver_model_is_build_default;
+  // R6's reporting source, carried to the arm through the PUSCH factory. It is a pass-through like the four above:
+  // the flexible O-DU has already refused `net` where no arm computes.
+  pusch_config.pusch_reporting_source = config.pusch_reporting_source;
 
   // :TODO: check these values in the future. Extract them to more public config.
   pusch_config.ch_estimate_dimensions.nof_symbols        = MAX_NSYMB_PER_SLOT;

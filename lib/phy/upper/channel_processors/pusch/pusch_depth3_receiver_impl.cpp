@@ -177,11 +177,13 @@ public:
                                         pusch_demodulator&                     demodulator_,
                                         const std::string&                     fallback_path_,
                                         const std::array<std::string, 4>&      slot_paths_,
-                                        bool                                   fallback_is_build_default_) :
+                                        bool                                   fallback_is_build_default_,
+                                        const std::string&                     reporting_source_) :
     estimator(estimator_),
     demodulator(demodulator_),
     fallback_path(fallback_path_),
     fallback_is_build_default(fallback_is_build_default_),
+    reporting_source(reporting_source_),
     descrambler(create_pseudo_random_generator_sw_factory()->create()),
     input_plane(pusch_depth3_input_plane::NOF_SUBCARRIERS * pusch_depth3_input_plane::NOF_SYMBOLS *
                 pusch_depth3_input_plane::NOF_CHANNELS),
@@ -493,7 +495,7 @@ public:
     report_measurements(reference_amplitude, est_results, config, model_scales);
 
     // ---- gather, quantise, descramble, deliver ---------------------------------------------------
-    if (!deliver(codeword_buffer, notifier, config, qm, model_scales)) {
+    if (!deliver(codeword_buffer, notifier, grid, est_results, config, qm, model_scales)) {
       degrade(depth3_degradation::no_data_resource_elements, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
@@ -645,6 +647,8 @@ private:
   ///         describe rather than an empty one to deliver.
   bool deliver(pusch_codeword_buffer&                 codeword_buffer,
                pusch_demodulator_notifier&            notifier,
+               const resource_grid_reader&            grid,
+               const dmrs_pusch_estimator_results&    est_results,
                const pusch_demodulator::configuration& config,
                unsigned                               qm,
                const depth3_scales&                   scales)
@@ -738,12 +742,39 @@ private:
     // copy nobody reads again: the run reports `sinr=0.00 dB`, which is the value the harness prints when
     // the field is EMPTY, and the scheduler sees a reception with no channel quality rather than a wrong
     // one. The classical path has the same two calls in the same order (`pusch_demodulator_impl.cpp:783`).
+    // WHICH MEASUREMENT IS PUBLISHED, and the default is the classical one: R6's switch exists to be measured
+    // before it is trusted, and the measurement it replaces is one the scheduler acts on. `net` takes the value
+    // from the noise head (the arm's own), `classic` from the estimator's residual -- the same quantity the
+    // classical demodulator publishes, from the same place, so a `classic` run is comparable with a classical one
+    // bit for bit.
+    // THE POST-EQUALISATION NOISE IS THE ARM'S OWN IN EITHER MODE, and that is not a choice: the classical value
+    // is the classical EQUALIZER's per-resource-element residual, which this arm does not compute because it does
+    // not run that equalizer. Substituting the estimator's noise variance instead -- which is what this branch
+    // first did -- publishes a DIFFERENT QUANTITY under the same name, measured at +5.6 dB on one capture
+    // (31.61 against 25.98 dB), because it leaves out the equalizer's gain. A knob may not silently change what
+    // the scheduler acts on, so the arm publishes its own post-eq noise in both modes; what `net` adds is the
+    // DOMAIN GATE below, and what R6 will add is the rest of the set (RSRP, EPRE) once the estimator's results
+    // can be synthesised from head 3 (design section 19.98's largest performance item).
     if (noise_count != 0 && noise_sum > 0.0) {
       const float mean_noise = static_cast<float>(noise_sum / static_cast<double>(noise_count));
       pusch_demodulator_notifier::demodulation_stats stats;
       stats.sinr_dB.emplace(-convert_power_to_dB(mean_noise));
       notifier.on_end_stats(stats);
     }
+    if (reporting_source == "net") {
+      if (!warned_unverified_domain) {
+        // Until the bundle declares the SNR range its reporting heads were trained on, nothing here can tell a
+        // measurement the model is entitled to make from one it extrapolated. Said ONCE per arm, on stderr, so a
+        // `net` run is never read as a validated switch: the number reaches the scheduler either way.
+        warned_unverified_domain = true;
+        fmt::print(stderr,
+                   "[pusch_receiver] reporting source net: the chain's measurements come from the network's "
+                   "reporting heads. The bound bundle declares no trained SNR range (depth3_snr_range), so this "
+                   "arm cannot tell a measurement inside the model's domain from one outside it -- measure it "
+                   "against known truth before trusting it (design sections 19.114, 19.115).\n");
+      }
+    }
+
 
     // The end of the codeword is a CALL, not an inference: without it the decoder never learns that the soft
     // bits it accumulated are complete, decodes nothing, and reports a block error with zero iterations.
@@ -768,6 +799,12 @@ private:
   /// The MODULATION-CONDITIONED contract is bound: one engine serves every modulation it declares and the plane
   /// carries the four conditioning channels. The LLR head's stride is NOT arm-wide but per modulation
   /// (`llr_stride_by_qm`), because a per-modulation slot can share the arm with a conditioned fallback.
+  /// R6's knob, as resolved by the configuration: `classic` (the estimator's measurements, the default) or
+  /// `net` (this arm's reporting heads). It is a string here for the same reason it is one at the command line:
+  /// the value is meant to be read back in a log.
+  std::string                                       reporting_source = "classic";
+  /// Whether the one-time note about an undeclared measurement domain has been printed for this arm.
+  bool                                              warned_unverified_domain = false;
   bool                                              conditioned   = false;
   /// The main head's stride, per modulation, as the bundle that computes that modulation DECLARES it: its head
   /// width divided by the slot's symbols. Qm for a per-modulation bundle, the widest Qm for a conditioned one.
@@ -804,7 +841,8 @@ std::unique_ptr<pusch_depth3_receiver> ocudu::create_pusch_depth3_receiver(
     pusch_depth3_kind               kind,
     dmrs_pusch_estimator&           estimator,
     pusch_demodulator&              demodulator,
-    const pusch_depth3_model_paths& models)
+    const pusch_depth3_model_paths& models,
+    const std::string&              reporting_source)
 {
   switch (kind) {
     case pusch_depth3_kind::classic:
@@ -816,7 +854,8 @@ std::unique_ptr<pusch_depth3_receiver> ocudu::create_pusch_depth3_receiver(
     case pusch_depth3_kind::ai_network:
 #if defined(OCUDU_HAVE_DEPTH3_ENGINE)
       return std::make_unique<pusch_depth3_receiver_ai_network_impl>(
-          estimator, demodulator, models.fallback, models.slots, models.fallback_is_build_default);
+          estimator, demodulator, models.fallback, models.slots, models.fallback_is_build_default,
+          reporting_source);
 #else
       // Built without the Core ML engine: the arm is selected and cannot run, which is exactly what the
       // identity arm exists to represent -- and it says so rather than pretending.

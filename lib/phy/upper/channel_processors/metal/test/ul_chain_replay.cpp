@@ -1178,6 +1178,14 @@ int main(int argc, char** argv)
     proc_cfg.pusch_receiver_model_path = model_env;
     std::printf("depth-3 receiver model: %s (OCUDU_REPLAY_MODEL)\n", model_env);
   }
+  // R6's knob, mirrored for the same reason as the two above: which measurements the chain reports has to be
+  // selectable in a measurement, or the two sources cannot be compared on the same reception. The DEFAULT is the
+  // application's default (classic), because a measurement run that forgot the variable must not silently become
+  // a run that publishes the network's numbers.
+  if (const char* reporting_env = std::getenv("OCUDU_REPLAY_REPORTING")) {
+    proc_cfg.pusch_reporting_source = reporting_env;
+    std::printf("chain reporting source: %s (OCUDU_REPLAY_REPORTING)\n", reporting_env);
+  }
   std::shared_ptr<pusch_processor_factory> proc_factory = create_pusch_processor_factory_sw(proc_cfg);
   // The chained receiver, alive across every capture of the run: its decoder is the soft buffer a
   // retransmission combines with (see --harq-chain).

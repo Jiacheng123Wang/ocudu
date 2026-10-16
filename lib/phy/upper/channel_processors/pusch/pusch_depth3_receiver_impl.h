@@ -149,10 +149,14 @@ struct pusch_depth3_model_paths {
 /// \param[in] demodulator The classical demodulator, already built by the per-module backends.
 /// \param[in] models      The model paths: the fallback first, then the per-modulation slots in the order
 ///                        QPSK, 16QAM, 64QAM, 256QAM (empty entries are modulations with no slot).
+/// \param[in] reporting_source Which measurements the arm publishes: `classic` (the estimator's, the default)
+///                        or `net` (the arm's reporting heads). R6; only the AI arm consults it, and only the
+///                        `net` value changes what reaches the scheduler.
 std::unique_ptr<pusch_depth3_receiver> create_pusch_depth3_receiver(
     pusch_depth3_kind                  kind,
     dmrs_pusch_estimator&              estimator,
     pusch_demodulator&                 demodulator,
-    const pusch_depth3_model_paths&    models = {});
+    const pusch_depth3_model_paths&    models = {},
+    const std::string&                 reporting_source = "classic");
 
 } // namespace ocudu

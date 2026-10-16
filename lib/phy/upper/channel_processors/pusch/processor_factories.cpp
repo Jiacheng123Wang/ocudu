@@ -171,6 +171,7 @@ public:
     depth3_models{.fallback                   = config.pusch_receiver_model_path,
                   .fallback_is_build_default  = config.pusch_receiver_model_is_build_default,
                   .slots                      = config.pusch_receiver_model_slots},
+    reporting_source(config.pusch_reporting_source),
     csi_sinr_calc_method(config.csi_sinr_calc_method)
   {
     if (depth3_kind == pusch_depth3_kind::ai_identity && depth3_models.fallback.empty()) {
@@ -202,8 +203,9 @@ public:
           estimator_factory->create(), demodulator_factory->create(), demux_factory->create(),
           uci_dec_factory->create(), ch_estimate_dimensions);
 
-      dependencies->set_depth3(create_pusch_depth3_receiver(
-          depth3_kind, dependencies->get_estimator(), dependencies->get_demodulator(), depth3_models));
+      dependencies->set_depth3(create_pusch_depth3_receiver(depth3_kind, dependencies->get_estimator(),
+                                                            dependencies->get_demodulator(), depth3_models,
+                                                            reporting_source));
       return dependencies;
     });
 
@@ -228,10 +230,14 @@ public:
         fmt::print(stderr,
                    "[pusch_receiver] backend=ai: AI ARM ACTIVE over {} model(s). Each bound model COMPUTES "
                    "channel estimation, equalisation and demapping for the modulation it declares; the classical "
-                   "demodulator does not run for those receptions, and the classical estimator still runs for the "
-                   "chain's measurements. A reception of any other modulation degrades to the classical chain, is "
-                   "counted, and says so.\n",
-                   arm.bound_models().size());
+                   "demodulator does not run for those receptions. The chain's measurements come from {}; a "
+                   "reception of any other modulation degrades to the classical chain, is counted, and says so.\n",
+                   arm.bound_models().size(),
+                   reporting_source == "net"
+                       ? "the network's reporting heads (--pusch_reporting_source net); their domain is gated by "
+                         "the bundle's own declaration"
+                       : "the classical estimator, except the post-equalisation noise, which the arm measures "
+                         "itself in either mode (--pusch_reporting_source classic, the default)");
         // THE CONTRACT, printed from the bundle's own declaration rather than from the command line. It is the
         // only way to see the declaration in the artifact that actually loaded: a conditioned bundle and a
         // per-modulation 256QAM bundle have the same 112-channel main head and the same file name shape, and
@@ -316,6 +322,8 @@ private:
   /// Compiled model the ai arm binds; empty means it cannot compute, which the constructor reports.
   /// The model paths the arm is built from: the fallback and the per-modulation slots.
   pusch_depth3_model_paths                                                 depth3_models;
+  /// R6's knob, carried to the arm unchanged: `classic` (the default) or `net`.
+  std::string                                                             reporting_source = "classic";
   channel_state_information::sinr_type                                     csi_sinr_calc_method;
 };
 

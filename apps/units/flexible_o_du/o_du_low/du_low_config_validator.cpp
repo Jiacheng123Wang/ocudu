@@ -158,6 +158,19 @@ static bool validate_phy_pipeline_config(const du_low_unit_expert_upper_phy_conf
     }
   }
 
+  // R6's knob is refused where it would be carried but not honoured. `net` means "the chain reports what the AI
+  // arm's reporting heads measured", and with no arm computing there are no heads: the run would print
+  // reporting=net while the classical estimator's numbers reached the scheduler, which is the exact shape of
+  // failure this workstream keeps refusing (a value that looks like a result). `auto` resolves to the classical
+  // receiver, so it is a conflict too.
+  if ((config.pusch_reporting_source == "net") && (effective->receiver != "ai")) {
+    fmt::print("Invalid configuration: --expert_phy.pusch_reporting_source net needs --expert_phy."
+               "pusch_receiver_backend ai (it resolved to '{}'). The reporting heads exist only while the AI arm "
+               "computes, so with any other backend the value would be reported without being honoured.\n",
+               effective->receiver);
+    return false;
+  }
+
   return true;
 }
 

@@ -126,6 +126,13 @@ struct pusch_processor_factory_sw_configuration {
   std::array<std::string, 4> pusch_receiver_model_slots;
   /// True when \c pusch_receiver_model_path came from the build's default rather than from the command line.
   bool pusch_receiver_model_is_build_default = false;
+  /// Which measurements the chain reports: \c classic (the classical estimator's, the default) or \c net (the AI
+  /// arm's reporting heads). R6 of the AI receiver workstream; see the expert-phy knob of the same name.
+  ///
+  /// It reaches the depth-3 arm and nothing else: the arm is the only place where both sources exist on the same
+  /// reception, which is also what makes the two comparable. A value other than \c net leaves every published
+  /// measurement exactly as it was.
+  std::string pusch_reporting_source = "classic";
 };
 
 std::shared_ptr<pusch_processor_factory>

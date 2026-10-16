@@ -319,6 +319,18 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              "`xcrun coremlcompiler compile` first.")
       ->capture_default_str();
   add_option(app,
+             "--pusch_reporting_source",
+             expert_phy_params.pusch_reporting_source,
+             "Which measurements the chain reports to the scheduler: 'classic' (the classical estimator's, the "
+             "default) or 'net' (the AI arm's reporting heads: post-equalisation SINR, RSRP and EPRE).\n"
+             "'net' needs --pusch_receiver_backend ai: with no arm computing there are no heads to report, and the "
+             "value would be carried without being honoured, so that combination is refused at startup.\n"
+             "A model whose reporting heads were trained over a narrower SNR range than the reception's must not "
+             "have its measurements published there: the arm declines those receptions (counted, named in the "
+             "log) and the classical estimator's values stay in force for them.")
+      ->capture_default_str()
+      ->check(CLI::IsMember({"classic", "net"}));
+  add_option(app,
              "--max_proc_delay",
              expert_phy_params.max_processing_delay_slots,
              "Maximum allowed DL processing delay in slots.")

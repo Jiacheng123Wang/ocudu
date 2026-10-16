@@ -385,6 +385,12 @@ struct upper_phy_factory_configuration {
   std::array<std::string, 4> pusch_receiver_model_slots;
   /// True when \c pusch_receiver_model_path is the build's default rather than a value from the command line.
   bool pusch_receiver_model_is_build_default = false;
+  /// \brief Which measurements the chain reports: `classic` (the classical estimator's, the default) or `net`
+  /// (the AI arm's reporting heads).
+  ///
+  /// R6. It is carried to the depth-3 arm unchanged; see the expert-phy knob of the same name for what `net`
+  /// refuses to do (publish a measurement outside the SNR range the bound model declares).
+  std::string pusch_reporting_source = "classic";
   /// \brief MMSE estimator: fixed RMS delay spread (in microseconds) - v1 constant.
   /// \remark The estimation-backed provider arrives with the v2 statistics module.
   float pusch_channel_estimator_mmse_tau_rms_us = 0.37F;
