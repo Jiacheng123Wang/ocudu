@@ -6719,3 +6719,25 @@ ping ＋ `iperf3 -R` 与同条件经典腿同量级 ✓）、★ 译码（★ rv
 
 ★★ **代价与注意** ✓：★ 检查本身会把 app 起 ~8 秒 ✓（★ **会短暂打开电台** ✓、★ 不会有 UE ✓、★ 结束用两次 SIGINT ✓）
 ★ ⇒ ★★ 请在**没有腿在飞**的时候跑配方 ✓（★ 配方自己也会先查"有没有残留 gNB" ✓）。
+
+
+### 19.74 ★★ ③的"实时语义"静态核实：★ 接缝确实是臂对象，★ 而且降级是**有名有数**的 ✓（★ 2026-10-16 ✓）
+
+★★ 起飞前把**实时链路到底会做什么**从源码上核实了一遍 ✓（★ 静态 ✓，★ 不需要电台 ✓）：
+
+| ★ 检查 | ★★ 证据 |
+|---|---|
+| ★★ 接缝在哪 | ★★ `pusch_processor_impl.cpp` 调 **`deps->get_depth3().estimate(...)`**（★ `:402` ✓）与 **`…get_depth3().demodulate(...)`**（★ `:834` ✓）⇒ ★★ **估计与解调两跳都走深度-3 接收机** ✓✓ |
+| ★★ `ai_network` 臂做什么 | ★ `pusch_depth3_receiver_impl.cpp` ✓：★ **`estimate()` 仍调经典估计器**（★ `:219` ✓）—— ★★ 正是横幅所说的"经典估计器只跑测量" ✓；★★ **`demodulate()` 做【一次前向、四个头】**（★ `:271` ✓）|
+| ★★ 前向失败怎么办 | ★★ `degrade(...)` ✓，★ 而**原因是有名字的枚举** ✓（★ `:114-134` ✓）：★ `demodulate() ran without estimate(), so the DM-RS sequence context is missing` ✓、★ `the Core ML forward pass failed` ✓ ⇒ ★★ 每一次降级都被计数并打日志 ✓ |
+| ★★ "到底算了没有" | ★★ `computes_itself()` ✓（★ `:201` ✓）**只在模型绑定【且】上一次前向成功时为真** ✓ ⇒ ★★ 这就是"did anything compute"那个诚实的标志 ✓ |
+
+★★★ **⇒ 用户那条腿应当看什么** ✓：★★ `DEGRADED to the classical chain: … (N so far)` 行 ✓
+（★ 每条都带原因与累计数 ✓）、★ `[depth3-measure]` 行 ✓（★ 只作诊断 ✓）、
+★★ 而**门槛仍然是 rv=0 译码率** ✓。
+
+★★ **另外两项本轮实测** ✓：★ ① **`gpu + ai + --pusch_dft_type metal` 的"独立臂"警告确实会打** ✓
+（`[W] AI arm with a DEVICE grid writer (--pusch_dft_type metal): this is the SEPARATE arm …` ✓，
+并伴随 `receiver=ai` ✓、★ `lane_fused` 重述 ✓、★ `AI ARM ACTIVE` ✓）★ ⇒ ★★ §1.5.3 末行的"日志必须能区分"落地 ✓；
+★ ② 四个调制在**重放侧**仍然 `AI ARM ACTIVE` ✓（★ 重放二进制未被本次改动触及 ✓，
+★ 其 `crc=OK` 证据见 §19.69 ✓）。
