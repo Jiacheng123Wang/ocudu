@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "pusch_depth3_measurements.h"
+
+#include <array>
 #include "pusch_depth3_input_plane.h"
 #include <cmath>
 
@@ -41,6 +43,23 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
       std::pow(10.0F, noise_scale_decades * noise_shape + noise_scale_center);
   measurements.noise_variance_lin =
       reference_amplitude * reference_amplitude * noise_plane_units;
+
+  // A three-element ring per DM-RS symbol gives the frequency-direction mean the residual is taken against,
+  // without a second pass and without a per-symbol buffer: the walk is subcarrier-major, so the three most recent
+  // pilot values of each symbol are all the window needs. The factor converts E|v - mean|^2 for a three-point mean
+  // of white noise into sigma^2, and its value is MEASURED rather than derived: 1.5 is the analytic factor for a
+  // three-point mean (2/3), and against the datasets' true noise the estimate lands 3.15 dB low -- a stable
+  // factor of 2.07, p10/p90 within 0.55 dB -- so the constant carries the correction (design section 19.128).
+  static constexpr float RESIDUAL_FACTOR = 1.5F * 2.07F;
+  struct pilot_ring {
+    float re[3] = {0.0F, 0.0F, 0.0F};
+    float im[3] = {0.0F, 0.0F, 0.0F};
+    unsigned count = 0;
+    unsigned next  = 0;
+  };
+  std::array<pilot_ring, plane::NOF_SYMBOLS> rings{};
+  double   residual_sum = 0.0;
+  unsigned residual_count = 0;
 
   double   epre_sum = 0.0;
   double   rsrp_sum = 0.0;
@@ -82,6 +101,26 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
       const float h_im = static_cast<float>(estimate[1]) * reference_amplitude;
       rsrp_sum += static_cast<double>(h_re) * h_re + static_cast<double>(h_im) * h_im;
 
+      // The independent estimate, from the same LS the EPRE above uses.
+      pilot_ring& ring = rings[t];
+      ring.re[ring.next] = ls_re;
+      ring.im[ring.next] = ls_im;
+      ring.next          = (ring.next + 1) % 3;
+      if (ring.count < 3) {
+        ++ring.count;
+      }
+      else {
+        // The window is the three most recent pilots of this symbol, so the middle one of the ring is the value
+        // the mean is tested against. The comb is every other subcarrier, so these are neighbours in frequency.
+        const unsigned middle = ring.next;
+        const float    mean_re = (ring.re[0] + ring.re[1] + ring.re[2]) / 3.0F;
+        const float    mean_im = (ring.im[0] + ring.im[1] + ring.im[2]) / 3.0F;
+        const float    d_re    = ring.re[middle] - mean_re;
+        const float    d_im    = ring.im[middle] - mean_im;
+        residual_sum += static_cast<double>(d_re) * d_re + static_cast<double>(d_im) * d_im;
+        ++residual_count;
+      }
+
       ++nof_pilot_re;
     }
   }
@@ -95,6 +134,13 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
   }
 
   measurements.epre_lin = static_cast<float>(epre_sum / static_cast<double>(nof_pilot_re));
+  if (residual_count != 0) {
+    measurements.nof_residuals = residual_count;
+    // `scaling^2` for the same reason the published RSRP needs it: the LS here is the received pilot, whose power
+    // is `scaling^2` above the data REs', and the noise this reports has to be in the same units as the head's.
+    measurements.residual_noise_variance_lin =
+        static_cast<float>(residual_sum / static_cast<double>(residual_count)) * RESIDUAL_FACTOR * scaling * scaling;
+  }
   // THE DM-RS-TO-DATA RATIO BELONGS IN THE PUBLISHED RSRP, and it was missing: head 3 estimates the channel GAIN
   // (`H/r` times `r`), while RSRP is defined on the DM-RS RESOURCE ELEMENTS, whose transmit power is `scaling^2`
   // above the data REs'. Measured 2026-10-17 against the classical estimator on two independent receptions, the

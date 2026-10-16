@@ -25,6 +25,19 @@ struct depth3_measurements {
   /// DM-RS resource elements the averages were taken over. Zero means the reception was not measurable,
   /// and then every value above is zero rather than a fabricated one.
   unsigned nof_pilot_re = 0;
+
+  /// \brief Noise variance from the plane's own DM-RS least-squares values, in the SAME units as
+  /// \ref noise_variance_lin, and estimated WITHOUT the network and WITHOUT the classical estimator.
+  ///
+  /// Why it exists (design sections 19.127, 19.128): R6 has to know when its own measurements may be trusted, and
+  /// a ruler taken from the network's head 4 would be the network judging itself. This one subtracts a three-point
+  /// mean from the pilot LS along frequency and scales the residual: measured offline against the datasets' true
+  /// noise, it correlates at +0.999 in the log domain with a p10/p90 spread of 0.23 dB, against +0.593 and +-7 dB
+  /// for head 4.
+  float residual_noise_variance_lin = 0.0F;
+
+  /// How many pilot residuals the estimate above averages over; zero means it was not computed.
+  unsigned nof_residuals = 0;
 };
 
 /// \brief Turns heads 3 and 4 into the quantities `dmrs_pusch_estimator_results` publishes.
