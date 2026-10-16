@@ -36,6 +36,11 @@ struct depth3_measurements {
   /// for head 4.
   float residual_noise_variance_lin = 0.0F;
 
+  /// The same estimate BEFORE the `r` and `scaling` conversions, i.e. in the PLANE's own units -- which is what
+  /// the training datasets store as `sigma2_over_r2`, and therefore the only form in which the implementation can
+  /// be checked against the truth it was designed on (design section 19.129's first follow-up).
+  float residual_plane_units_lin = 0.0F;
+
   /// How many pilot residuals the estimate above averages over; zero means it was not computed.
   unsigned nof_residuals = 0;
 };

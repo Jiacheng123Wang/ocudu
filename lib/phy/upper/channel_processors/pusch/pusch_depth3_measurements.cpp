@@ -138,8 +138,10 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
     measurements.nof_residuals = residual_count;
     // `scaling^2` for the same reason the published RSRP needs it: the LS here is the received pilot, whose power
     // is `scaling^2` above the data REs', and the noise this reports has to be in the same units as the head's.
-    measurements.residual_noise_variance_lin =
-        static_cast<float>(residual_sum / static_cast<double>(residual_count)) * RESIDUAL_FACTOR * scaling * scaling;
+    const float residual_plane_units =
+        static_cast<float>(residual_sum / static_cast<double>(residual_count)) * RESIDUAL_FACTOR;
+    measurements.residual_plane_units_lin  = residual_plane_units;
+    measurements.residual_noise_variance_lin = residual_plane_units * scaling * scaling;
   }
   // THE DM-RS-TO-DATA RATIO BELONGS IN THE PUBLISHED RSRP, and it was missing: head 3 estimates the channel GAIN
   // (`H/r` times `r`), while RSRP is defined on the DM-RS RESOURCE ELEMENTS, whose transmit power is `scaling^2`
