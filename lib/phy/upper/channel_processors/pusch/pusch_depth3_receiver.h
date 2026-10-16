@@ -70,6 +70,11 @@ struct pusch_depth3_bound_model {
   std::string path;
   /// True when it came from the fallback knob rather than from a per-modulation slot.
   bool        fallback = false;
+  /// Whether the bundle declares the SNR range its reporting heads were trained on (`depth3_snr_range`).
+  bool        has_snr_range = false;
+  /// That range, in dB; meaningless when \c has_snr_range is false.
+  float       snr_min_db = 0.0F;
+  float       snr_max_db = 0.0F;
 };
 
 /// \brief The depth-3 unit: channel estimation + equalization + demapping, as one replaceable thing.

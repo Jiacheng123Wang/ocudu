@@ -59,6 +59,13 @@ struct coreml_nn_engine_impl {
   /// channels. It cannot be inferred: a conditioned bundle and a per-modulation 256QAM bundle have the same main
   /// head width (14 * 8 = 112 channels), and they are not interchangeable.
   bool      model3_conditioned = false;
+  /// The SNR range (dB) the bundle's REPORTING heads were trained on, as the bundle declares it
+  /// (`depth3_snr_range`). False in `model3_has_snr_range` means the bundle declares none, which is not the same
+  /// as "any range": a measurement the model extrapolated cannot be told from one it was entitled to make, and the
+  /// arm says so rather than pretending (design sections 19.115, 19.117).
+  bool      model3_has_snr_range = false;
+  float     model3_snr_min_db    = 0.0F;
+  float     model3_snr_max_db    = 0.0F;
   /// The modulations a conditioned bundle declares it serves, as bits per symbol, ascending; empty for a
   /// per-modulation bundle (whose single modulation is the head width divided by the slot's symbols).
   unsigned  model3_qm_set[4]   = {0, 0, 0, 0};
@@ -465,6 +472,25 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
       return false;
     }
   }
+  // THE MEASUREMENT DOMAIN, declared by the bundle for the same reason the layout is: nothing about the graph
+  // says what it was trained on, and a reporting head asked about a reception it never saw answers anyway.
+  // Measured 2026-10-16: a model trained on 20-32 dB reported 26.4 dB at 0 dB, 6 dB and 24 dB alike.
+  NSString* snr_range = creator_meta[@"depth3_snr_range"];
+  if (snr_range != nil) {
+    NSArray<NSString*>* bounds = [snr_range componentsSeparatedByString:@","];
+    if (bounds.count == 2) {
+      e->model3_snr_min_db    = bounds[0].floatValue;
+      e->model3_snr_max_db    = bounds[1].floatValue;
+      e->model3_has_snr_range = (e->model3_snr_max_db > e->model3_snr_min_db);
+    }
+    if (!e->model3_has_snr_range) {
+      ocudulog::fetch_basic_logger("PHY").error(
+          "AI depth-3: the bundle declares depth3_snr_range='{}' which is not a pair of increasing bounds; the "
+          "measurement domain stays undeclared",
+          snr_range.UTF8String);
+    }
+  }
+
   e->model3_in_channels = DEPTH3_IN_CHANNELS + (e->model3_conditioned ? DEPTH3_COND_CHANNELS : 0);
   // The contract's plane: [1, subcarriers, 14, 12], fp16 -- the symbol axis is SPATIAL, which is
   // what lets a 3x3 kernel mix time as well as frequency. A model trained in the superseded folded
@@ -535,6 +561,24 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
   // The worker thread may not have been started yet when only a depth-3 model is configured.
   start_worker(e);
   return true;
+}
+
+bool coreml_nn_engine::depth3_has_snr_range() const
+{
+  auto* e = static_cast<coreml_nn_engine_impl*>(impl);
+  return (e != nullptr) && e->model3_has_snr_range;
+}
+
+float coreml_nn_engine::depth3_snr_min_db() const
+{
+  auto* e = static_cast<coreml_nn_engine_impl*>(impl);
+  return (e == nullptr) ? 0.0F : e->model3_snr_min_db;
+}
+
+float coreml_nn_engine::depth3_snr_max_db() const
+{
+  auto* e = static_cast<coreml_nn_engine_impl*>(impl);
+  return (e == nullptr) ? 0.0F : e->model3_snr_max_db;
 }
 
 bool coreml_nn_engine::depth3_is_modulation_conditioned() const

@@ -571,7 +571,7 @@ def rename_outputs(mlmodel, qm, keras_names):
     return ct.models.MLModel(spec, weights_dir=mlmodel.weights_dir)
 
 
-def export_deployment(model, qm, path, cond=False):
+def export_deployment(model, qm, path, cond=False, snr_range=None):
     """Convert a TRAINED model to the fp16 deployment graph, with the contract's output names.
 
     The conversion decides the deployment precision, which is why training runs in fp32: the
@@ -601,11 +601,26 @@ def export_deployment(model, qm, path, cond=False):
     # `cond` is a PARAMETER and not the model's attribute: the export-only path loads the `.keras` from disk, and
     # an attribute set at build time does not survive that -- measured 2026-10-16, when an export-only smoke run
     # wrote a conditioned bundle with no declaration at all, which the engine would then have refused.
+    # The SNR RANGE the reporting heads were trained on, declared by the bundle itself.
+    #
+    # WHY IT IS HARD-WIRED AND NOT MEASURED AT RUN TIME: a network does not extrapolate. Measured 2026-10-16 on a
+    # model trained on a 20-32 dB corpus, replayed over prescribed-SNR grids: its published SINR read 26.4 dB at
+    # 0 dB, 6 dB and 24 dB alike, because every one of those inputs is outside what it ever saw -- while the
+    # classical estimator tracked the prescribed SNR to within 0.4 dB. The chain must therefore be able to ask the
+    # bundle where its measurements MEAN something, and the only honest source for that answer is the training set.
+    if snr_range is not None:
+        spec = converted.get_spec()
+        spec.description.metadata.userDefined["depth3_snr_range"] = f"{snr_range[0]:.2f},{snr_range[1]:.2f}"
+        converted = ct.models.MLModel(spec, weights_dir=converted.weights_dir)
     if cond or getattr(model, "_depth3_cond", False):
         spec = converted.get_spec()
         spec.description.metadata.userDefined["depth3_layout"] = "modcond"
         spec.description.metadata.userDefined["depth3_qm_set"] = ",".join(str(qm_) for qm_ in D3.COND_QM_ORDER)
         spec.description.metadata.userDefined["depth3_head_stride"] = str(D3.COND_STRIDE)
+        # The ranges are written through a spec each time because `get_spec()` copies (see the note above): two
+        # writes to two different copies would keep only the last one.
+        if snr_range is not None:
+            spec.description.metadata.userDefined["depth3_snr_range"] = f"{snr_range[0]:.2f},{snr_range[1]:.2f}"
         converted = ct.models.MLModel(spec, weights_dir=converted.weights_dir)
     # A conditioned bundle and a per-modulation 256QAM bundle have the same main-head width (14 * 8 = 112
     # channels), so a shape-based check cannot tell them apart -- and they are not interchangeable: one serves
@@ -613,6 +628,16 @@ def export_deployment(model, qm, path, cond=False):
     # the spec), and the engine reads the declaration rather than inferring a layout from a shared width.
     converted.save(path)
     print(f"wrote the fp16 deployment graph to {path} (input {[1, *shape]})")
+
+
+def cli_snr_range(args):
+    """The `--snr-range` knob as a pair, or None. Shared by the two export paths so they cannot disagree."""
+    if not args.snr_range:
+        return None
+    low, high = (float(value) for value in args.snr_range.split(","))
+    if high <= low:
+        raise SystemExit(f"--snr-range {args.snr_range}: the upper bound is not above the lower one")
+    return (low, high)
 
 
 def main():
@@ -628,6 +653,13 @@ def main():
                              "whose stride is COND_STRIDE. The dataset must carry mixed modulations (its `qm` "
                              "column already does) and --modulation only picks the sample's DEFAULT where the "
                              "file has none.")
+    parser.add_argument("--snr-range", default="",
+                        help="the SNR range (dB, 'min,max') the reporting heads were trained on, DECLARED in the "
+                             "bundle as depth3_snr_range so the chain can tell a measurement the model is "
+                             "entitled to make from one it extrapolated. Empty means: derive it from the training "
+                             "set's own snr_nominal percentiles (1st to 99th) when training, and declare nothing "
+                             "with --export-only -- a bundle that declares no range cannot be gated, and the "
+                             "receiver says so once per arm.")
     parser.add_argument("--blocks", type=int, default=18)
     parser.add_argument("--layout", choices=("folded", "spatial", "probe8", "unfolded"),
                         default="spatial",
@@ -722,8 +754,10 @@ def main():
             custom_objects={"FoldedScaleConv": FoldedScaleConv})
         if not args.export_probe:
             parser.error("--export-only needs --export-probe")
+        # The range has to come from the knob on this path: --export-only loads a `.keras` and no dataset, so
+        # there are no `snr_nominal` percentiles to derive it from (see the note where training derives it).
         export_deployment(exported, D3.BITS_PER_SYMBOL[args.modulation], args.export_probe,
-                          cond=args.modcond)
+                          cond=args.modcond, snr_range=cli_snr_range(args))
         return 0
 
     qm = D3.BITS_PER_SYMBOL[args.modulation]
@@ -944,12 +978,23 @@ def main():
             np.array([[h["val_ber"], h["val_llr_mean"], h["val_bler"]] for h in history]))
     print(f"best val loss {best:.5f}; wrote {args.out}/depth3_best.keras and history.json")
 
+    # THE DECLARED RANGE. From the knob when given, otherwise from the training set itself: the 1st to 99th
+    # percentile of `snr_nominal`, which is the range the reporting heads actually saw. The extremes are left out
+    # on purpose -- a handful of samples at the very edge are not a domain, and declaring them would widen the
+    # gate to receptions the model has essentially never met.
+    snr_range = cli_snr_range(args)
+    if snr_range is None and args.train:
+        nominal = np.load(args.train, allow_pickle=True)["snr_nominal"]
+        snr_range = (float(np.percentile(nominal, 1)), float(np.percentile(nominal, 99)))
+        print(f"declared SNR range from the training set: {snr_range[0]:.2f} to {snr_range[1]:.2f} dB "
+              f"(1st to 99th percentile of {nominal.size} sample(s))")
+
     # Export AFTER training, from the trained weights. Exporting first would produce a deployment
     # graph with random weights that passes every shape check, which is the kind of artifact that
     # reaches a receiver and produces plausible nonsense.
     if args.export_probe:
         model.load_weights(os.path.join(args.out, "depth3_best.keras"))
-        export_deployment(model, qm, args.export_probe, cond=args.modcond)
+        export_deployment(model, qm, args.export_probe, cond=args.modcond, snr_range=snr_range)
     return 0
 
 

@@ -120,6 +120,12 @@ enum class depth3_degradation {
   no_sequence_context,
   modulation_mismatch,
   plane_refused,
+  /// The reporting heads cannot measure this reception: its SNR lies outside the range the bound bundle declares
+  /// it was trained on. The reception degrades WHOLE rather than only its measurement, because the arm has no
+  /// honest number to publish for it and the classical chain does -- running the classical chain is what makes the
+  /// fallback visible in the logs and in the throughput, instead of a silently extrapolated SINR reaching the
+  /// scheduler (design sections 19.115, 19.117).
+  measurement_outside_domain,
   forward_failed,
   no_data_resource_elements
 };
@@ -133,6 +139,8 @@ const char* to_string(depth3_degradation value)
       return "the bound model is trained for another modulation";
     case depth3_degradation::plane_refused:
       return "the input plane was refused";
+    case depth3_degradation::measurement_outside_domain:
+      return "the reception is outside the SNR range the bound model's reporting heads were trained on";
     case depth3_degradation::forward_failed:
       return "the Core ML forward pass failed";
     case depth3_degradation::no_data_resource_elements:
@@ -241,6 +249,8 @@ public:
           // The stride of the head THIS bundle computes, which is the widest modulation it declares whatever
           // the reception's own Qm is: the one-hot channels are what tell the network which bits are live.
           llr_stride_by_qm[qm] = COND_STRIDE;
+          domain_by_qm[qm]     = declared_domain{engine->depth3_has_snr_range(), engine->depth3_snr_min_db(),
+                                                 engine->depth3_snr_max_db()};
         }
         scales_by_qm[declared.front()] = read_scales(path, D3_RANGE_LIMIT_256QAM);
         shared_engine      = std::move(engine);
@@ -281,6 +291,10 @@ public:
       // single repeated element -- it produced chance-level agreement (sign 0.50, mean |LLR| 19 against 64) on the
       // per-modulation path while every CRC still looked plausible (measured 2026-10-16).
       llr_stride_by_qm[declared_qm] = declared_qm;
+      // The bundle's declared measurement domain, kept per modulation: a fallback bundle and a slot bundle are
+      // different artifacts and were not necessarily trained on the same SNR range.
+      domain_by_qm[declared_qm] = declared_domain{
+          engine->depth3_has_snr_range(), engine->depth3_snr_min_db(), engine->depth3_snr_max_db()};
       notes.push_back(fmt::format("{} model '{}' bound for Qm={} {}", what, path, declared_qm,
                                   depth3_model_map::name(declared_qm)));
       any_model_bound = true;
@@ -330,7 +344,8 @@ public:
   {
     std::vector<pusch_depth3_bound_model> out;
     for (const depth3_model_map::entry& e : models.entries()) {
-      out.push_back(pusch_depth3_bound_model{e.qm, e.path, e.fallback});
+      out.push_back(pusch_depth3_bound_model{e.qm, e.path, e.fallback, domain_by_qm[e.qm].has,
+                                              domain_by_qm[e.qm].min_db, domain_by_qm[e.qm].max_db});
     }
     return out;
   }
@@ -417,6 +432,33 @@ public:
     // which does not fail loudly: it reads one element of the head over and over (measured 2026-10-16).
     ocudu_assert(llr_stride_by_qm[qm] != 0, "Qm={} has a bound model but no main-head stride", qm);
     const depth3_scales&     model_scales     = scales_by_qm[qm];
+
+    // ---- the measurement domain, before a single forward pass -------------------------------------
+    // R6's gate (design sections 19.115, 19.117). The chain reports this reception's channel quality to the
+    // scheduler, and the reporting heads can only report it where they were trained: measured 2026-10-16, a model
+    // trained on 20-32 dB reported 26.4 dB for a prescribed 0 dB. The classical estimator ran for this reception
+    // already (`estimate()` forwards to it), so its SNR is available here as an INDEPENDENT domain check -- it
+    // decides only whether the network's measurement may be published, and the number published is never the
+    // estimator's.
+    // IT APPLIES IN EITHER MODE, because the published post-equalisation SINR is this arm's own in either mode
+    // (see the note where it is published): a knob position may not decide whether an extrapolated measurement
+    // reaches the scheduler, and the `classic` position is the DEFAULT.
+    if (domain_by_qm[qm].has) {
+      const unsigned port   = config.rx_ports.empty() ? 0 : config.rx_ports.front();
+      // The estimator reports a linear power (`report_measurements` prints it through `convert_power_to_dB`), so
+      // it is converted once and the comparison is in the same units the declaration uses.
+      const float snr_db = convert_power_to_dB(est_results.get_snr(port));
+      if ((snr_db < domain_by_qm[qm].min_db) || (snr_db > domain_by_qm[qm].max_db)) {
+        char detail[224];
+        std::snprintf(detail, sizeof(detail),
+                      "the estimator measures %.2f dB and the bundle was trained on %.2f to %.2f dB, so this "
+                      "reception's measurement would be an extrapolation",
+                      snr_db, domain_by_qm[qm].min_db, domain_by_qm[qm].max_db);
+        degrade(depth3_degradation::measurement_outside_domain, codeword_buffer, notifier, grid, est_results,
+                config, detail);
+        return;
+      }
+    }
 
     // ---- the contract's plane, from the grid the chain holds --------------------------------------
     const auto segment_start = std::chrono::steady_clock::now();
@@ -761,17 +803,18 @@ private:
       stats.sinr_dB.emplace(-convert_power_to_dB(mean_noise));
       notifier.on_end_stats(stats);
     }
-    if (reporting_source == "net") {
+    if (!domain_by_qm[qm].has) {
       if (!warned_unverified_domain) {
         // Until the bundle declares the SNR range its reporting heads were trained on, nothing here can tell a
         // measurement the model is entitled to make from one it extrapolated. Said ONCE per arm, on stderr, so a
         // `net` run is never read as a validated switch: the number reaches the scheduler either way.
         warned_unverified_domain = true;
         fmt::print(stderr,
-                   "[pusch_receiver] reporting source net: the chain's measurements come from the network's "
-                   "reporting heads. The bound bundle declares no trained SNR range (depth3_snr_range), so this "
-                   "arm cannot tell a measurement inside the model's domain from one outside it -- measure it "
-                   "against known truth before trusting it (design sections 19.114, 19.115).\n");
+                   "[pusch_receiver] the bound bundle declares no trained SNR range (depth3_snr_range): this arm "
+                   "cannot tell a measurement inside the model's domain from one outside it, so the "
+                   "post-equalisation SINR it publishes is gated by nothing. Measure it against known truth "
+                   "before trusting it, or export a bundle that declares the range (design sections 19.114, "
+                   "19.115, 19.117).\n");
       }
     }
 
@@ -810,6 +853,15 @@ private:
   /// width divided by the slot's symbols. Qm for a per-modulation bundle, the widest Qm for a conditioned one.
   /// Zero means nothing is bound for that modulation, and a zero stride must never be used to read a head.
   std::array<unsigned, 9>                           llr_stride_by_qm{};
+  /// The declared measurement domain of the model that serves each modulation, in dB: what the reporting heads
+  /// were trained on. `has` is false when that bundle declares none, and a reception is then never refused for
+  /// being outside a domain nobody stated -- it is warned about once instead.
+  struct declared_domain {
+    bool  has = false;
+    float min_db = 0.0F;
+    float max_db = 0.0F;
+  };
+  std::array<declared_domain, 9>                    domain_by_qm{};
   unsigned                                          plane_channels = pusch_depth3_input_plane::NOF_CHANNELS;
   std::unique_ptr<metal::coreml_nn_engine>          shared_engine;
   /// What happened to each model, for the factory to print once for the pool (see binding_notes()).
@@ -830,7 +882,7 @@ private:
   std::vector<__fp16>          channel_head;
   __fp16                       dmrs_noise_head = 0;
   std::vector<unsigned>        allocated;
-  std::array<unsigned, 8>      degradations{};
+  std::array<unsigned, 9>      degradations{};
 };
 
 #endif // OCUDU_HAVE_DEPTH3_ENGINE

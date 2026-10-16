@@ -116,6 +116,19 @@ public:
   /// The \p index -th declared modulation, as bits per symbol, ascending; 0 when out of range.
   unsigned depth3_declared_qm(unsigned index) const;
 
+  /// \brief Whether the bound bundle declares the SNR range its REPORTING heads were trained on.
+  ///
+  /// False means the bundle declares no domain, which is not the same as "every domain": the arm then cannot tell
+  /// a measurement the model is entitled to make from one it extrapolated, and it says so rather than publishing
+  /// the number as if it were measured (design sections 19.115 and 19.117).
+  bool depth3_has_snr_range() const;
+
+  /// The lower bound of the declared training range, in dB; 0 when none is declared.
+  float depth3_snr_min_db() const;
+
+  /// The upper bound of the declared training range, in dB; 0 when none is declared.
+  float depth3_snr_max_db() const;
+
   /// \brief Input plane channels the bound bundle expects.
   ///
   /// 12 for the per-modulation contract; 12 + the four conditioning channels for a conditioned one. The caller

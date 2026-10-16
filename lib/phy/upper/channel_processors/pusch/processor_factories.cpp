@@ -259,6 +259,21 @@ public:
                      model.fallback ? (arm.fallback_is_the_build_default() ? "fallback: the build's default"
                                                                            : "fallback: given")
                                     : "slot");
+          // R6: the MEASUREMENT DOMAIN, from the bundle's own declaration. A `net` run publishes numbers the
+          // scheduler acts on, and the range they mean something in is not visible anywhere else -- a bundle that
+          // declares none cannot be gated, and saying so here is what keeps that state from passing unread.
+          if (reporting_source == "net") {
+            if (model.has_snr_range) {
+              fmt::print(stderr, "[pusch_receiver]     reporting heads trained on {:.2f} to {:.2f} dB: a reception "
+                                 "outside that range degrades whole, counted and named\n",
+                         model.snr_min_db, model.snr_max_db);
+            }
+            else {
+              fmt::print(stderr, "[pusch_receiver]     the bundle declares NO trained SNR range "
+                                 "(depth3_snr_range): the domain cannot be gated, so its measurements are "
+                                 "published wherever they are computed -- measure them against known truth\n");
+            }
+          }
         }
         for (unsigned qm : arm.unserved_modulations()) {
           fmt::print(stderr, "[pusch_receiver]   degrades Qm={} {:<6s} -> the classical chain (no model bound)\n",
