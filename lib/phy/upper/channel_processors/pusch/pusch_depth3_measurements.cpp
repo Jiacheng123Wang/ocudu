@@ -163,6 +163,12 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
   measurements.snr_lin  = (measurements.noise_variance_lin > 0.0F)
                               ? (data_rsrp / measurements.noise_variance_lin)
                               : 0.0F;
+  // The same formula with the plane's own noise: `epre` is the pilot power, so the data RE power is it divided by
+  // the DM-RS-to-data ratio squared, and the noise is the residual measured on the same LS.
+  if (measurements.residual_noise_variance_lin > 0.0F) {
+    const float data_epre = measurements.epre_lin * nof_layers / (scaling * scaling);
+    measurements.residual_snr_lin = data_epre / measurements.residual_noise_variance_lin;
+  }
 
   if (!std::isfinite(measurements.epre_lin) || !std::isfinite(measurements.rsrp_lin) ||
       !std::isfinite(measurements.snr_lin) || !std::isfinite(measurements.noise_variance_lin)) {

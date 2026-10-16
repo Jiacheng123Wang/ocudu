@@ -674,7 +674,8 @@ private:
     fmt::print(stderr,
                "[depth3-measure] reception {} (Qm={} {}) over {} pilot RE(s): epre net={:.2f} classic={:.2f} dB "
                "| rsrp net={:.2f} classic={:.2f} dB | snr net={:.2f} classic={:.2f} dB | "
-               "noise net={:.4e} classic={:.4e} residual={:.4e} plane_units={:.4e} ({} residual(s))\n",
+               "noise net={:.4e} classic={:.4e} residual={:.4e} plane_units={:.4e} ({} residual(s)) | "
+               "snr plane-only={:.2f} dB\n",
                forwarded_receptions,
                get_bits_per_symbol(config.modulation),
                depth3_model_map::name(get_bits_per_symbol(config.modulation)),
@@ -689,7 +690,8 @@ private:
                classic_nv,
                net.residual_noise_variance_lin,
                net.residual_plane_units_lin,
-               net.nof_residuals);
+               net.nof_residuals,
+               convert_power_to_dB(net.residual_snr_lin));
     // The two counts travel with every sampled line, so a run's own log says whether its network measurements are
     // inside the tolerance the adoption checklist asks for -- and a run that never agrees cannot be read as one
     // that did.

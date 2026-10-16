@@ -41,6 +41,14 @@ struct depth3_measurements {
   /// be checked against the truth it was designed on (design section 19.129's first follow-up).
   float residual_plane_units_lin = 0.0F;
 
+  /// \brief SNR built ENTIRELY from the plane: the pilot LS for the signal and the residual for the noise.
+  ///
+  /// It borrows nothing from the classical estimator and nothing from the network's heads, which is what a gate
+  /// that has to judge both needs. Its convention is its own, so it can only replace the estimator's SNR once the
+  /// declared training range is expressed in the same one -- which is why it is MEASURED against the estimator's
+  /// SNR first (design sections 19.127, 19.132).
+  float residual_snr_lin = 0.0F;
+
   /// How many pilot residuals the estimate above averages over; zero means it was not computed.
   unsigned nof_residuals = 0;
 };
