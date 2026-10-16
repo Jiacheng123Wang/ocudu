@@ -7,6 +7,7 @@
 #include "apps/helpers/metrics/metrics_config.h"
 #include "ocudu/ocudulog/logger.h"
 #include <optional>
+#include <array>
 #include <string>
 
 namespace ocudu {
@@ -65,7 +66,13 @@ struct du_low_unit_expert_upper_phy_config {
   std::string pusch_receiver_backend = "auto";
   /// Compiled model (`.mlmodelc` directory) the `ai` receiver binds. Empty means the AI arm cannot run and the
   /// run says so; ignored for `classic`/`auto`.
+  ///
+  /// \note This is the FALLBACK: it serves the modulations no per-modulation slot claims and that its own bundle
+  /// declares. Empty means the build's default model is used, which the startup log names.
   std::string pusch_receiver_model;
+  /// Per-modulation model slots, in the order QPSK, 16QAM, 64QAM, 256QAM. A slot wins over the fallback for its
+  /// own modulation; a slot whose bundle declares a different modulation is refused when the arm binds it.
+  std::array<std::string, 4> pusch_receiver_model_slots;
   /// \brief Sets the maximum allowed downlink processing delay in slots.
   ///
   /// Higher values increase the downlink processing pipeline length, which improves performance and stability for

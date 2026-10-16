@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "pusch_depth3_receiver_impl.h"
+#include "pusch_depth3_model_map.h"
 #include "pusch_depth3_input_plane.h"
 #include "pusch_depth3_measurements.h"
 #include "ul_capture.h"
@@ -164,13 +165,15 @@ void revert_scrambling(span<log_likelihood_ratio>       out,
 class pusch_depth3_receiver_ai_network_impl : public pusch_depth3_receiver
 {
 public:
-  pusch_depth3_receiver_ai_network_impl(dmrs_pusch_estimator& estimator_,
-                                        pusch_demodulator&    demodulator_,
-                                        const std::string&    model_path_) :
+  pusch_depth3_receiver_ai_network_impl(dmrs_pusch_estimator&                  estimator_,
+                                        pusch_demodulator&                     demodulator_,
+                                        const std::string&                     fallback_path_,
+                                        const std::array<std::string, 4>&      slot_paths_,
+                                        bool                                   fallback_is_build_default_) :
     estimator(estimator_),
     demodulator(demodulator_),
-    model_path(model_path_),
-    engine(std::make_unique<metal::coreml_nn_engine>()),
+    fallback_path(fallback_path_),
+    fallback_is_build_default(fallback_is_build_default_),
     descrambler(create_pseudo_random_generator_sw_factory()->create()),
     input_plane(pusch_depth3_input_plane::NOF_SUBCARRIERS * pusch_depth3_input_plane::NOF_SYMBOLS *
                 pusch_depth3_input_plane::NOF_CHANNELS),
@@ -178,9 +181,42 @@ public:
     noise_head(pusch_depth3_input_plane::NOF_SUBCARRIERS * pusch_depth3_input_plane::NOF_SYMBOLS),
     channel_head(pusch_depth3_input_plane::NOF_SUBCARRIERS * 2 * pusch_depth3_input_plane::NOF_SYMBOLS)
   {
-    // The model is bound HERE, at construction, and the outcome is kept: an arm that was SELECTED but cannot
-    // compute must never be reported as an AI result, and only this flag can tell the two apart.
-    engine_ready = engine->init_depth3(model_path.c_str());
+    // EVERY MODEL IS BOUND HERE, at construction, and every outcome is kept and printed: an arm that was
+    // SELECTED but cannot compute must never be reported as an AI result, and with more than one model the
+    // question becomes per-modulation -- "which modulations does this run actually compute" is answered below
+    // and by the coverage line the factory prints, not inferred from the command line.
+    auto bind = [this](const std::string& path, unsigned slot_qm, bool fallback) {
+      auto engine = std::make_unique<metal::coreml_nn_engine>();
+      const bool loaded = engine->init_depth3(path.c_str());
+      const unsigned declared_qm = loaded ? engine->depth3_bits_per_symbol() : 0;
+
+      const depth3_model_map::outcome outcome = fallback ? models.add_fallback(declared_qm, path)
+                                                        : models.add_slot(slot_qm, declared_qm, path);
+      const char* const what = fallback ? "fallback" : "slot";
+      // The line is COLLECTED, not printed: the pool builds one arm per concurrent PUSCH thread, and the factory
+      // prints these once for the pool.
+      if (outcome.result != depth3_model_map::status::kept) {
+        notes.push_back(fmt::format("{} model '{}' NOT bound: {}", what, path, outcome.reason));
+        return;
+      }
+      // The calibration travels with the model (a sidecar next to the bundle), so it is read once, here, and the
+      // reception picks the one of the model that computed it.
+      scales_by_qm[declared_qm] = read_scales(path, D3_RANGE_LIMIT_256QAM);
+      engine_by_qm[declared_qm] = std::move(engine);
+      notes.push_back(fmt::format("{} model '{}' bound for Qm={} {}", what, path, declared_qm,
+                                  depth3_model_map::name(declared_qm)));
+      any_model_bound = true;
+    };
+
+    for (unsigned i = 0; i != slot_paths_.size(); ++i) {
+      if (!slot_paths_[i].empty()) {
+        // The slot's modulation is fixed by the KNOB, not by the file: QPSK, 16QAM, 64QAM, 256QAM.
+        bind(slot_paths_[i], depth3_model_map::candidate_qm[i], false);
+      }
+    }
+    if (!fallback_path.empty()) {
+      bind(fallback_path, 0, true);
+    }
     // The crossing audit's module list is what gives its "0 read(s)" a SCOPE, and this arm was not on
     // it: the audit counted the estimator's, the demapper's and the DFT route's host touches, so a
     // green zero there said nothing about the grid this arm reads through `assemble()`. Declaring it
@@ -189,24 +225,45 @@ public:
     // for a run whose estimator never ran.
     register_phy_pipeline_crossing_check();
     phy_pipeline_crossings::declare_reporter("depth3_receiver");
-    if (!engine_ready) {
-      ocudulog::fetch_basic_logger("PHY").error(
-          "AI depth-3: the model at '{}' did not load; every reception will fall back to the classical chain "
-          "and the output of this arm is NOT an AI result",
-          model_path);
+    if (!any_model_bound) {
+      // Nothing bound: every reception forwards to the classical chain. The notes above say why each model failed,
+      // and the factory turns this state into an error for the whole pool -- a run in this state must not be read
+      // as an AI result.
+      notes.push_back("no model bound: every reception degrades to the classical chain");
     }
   }
 
   pusch_depth3_kind kind() const override { return pusch_depth3_kind::ai_network; }
 
-  /// True only when the model is bound AND the last forward pass produced the soft bits the caller received.
-  bool computes_itself() const override { return engine_ready && last_forward_ok; }
+  /// True only when a model is bound AND the last forward pass produced the soft bits the caller received.
+  bool computes_itself() const override { return any_model_bound && last_forward_ok; }
 
-  /// The startup question: the model loaded, so this arm will compute.
-  bool is_bound() const override { return engine_ready; }
+  /// The startup question: at least one model bound, so this arm will compute for what it covers.
+  bool is_bound() const override { return any_model_bound; }
 
-  /// The model's own declaration, read from its main head: the same number the envelope check compares against.
-  unsigned bound_qm() const override { return engine_ready ? engine->depth3_bits_per_symbol() : 0; }
+  /// The first (lowest) modulation a bound model serves; 0 when none is bound. See \ref bound_models for the
+  /// full list, which is what the coverage line reports.
+  unsigned bound_qm() const override { return models.entries().empty() ? 0 : models.entries().front().qm; }
+
+  /// Every model that serves at least one modulation, with its declaration and where it came from: this is what
+  /// the startup coverage line is printed from, so that "which modulations does this run compute" is read and not
+  /// inferred (the fallback is filled by the build's default, so the command line alone does not say).
+  std::vector<pusch_depth3_bound_model> bound_models() const override
+  {
+    std::vector<pusch_depth3_bound_model> out;
+    for (const depth3_model_map::entry& e : models.entries()) {
+      out.push_back(pusch_depth3_bound_model{e.qm, e.path, e.fallback});
+    }
+    return out;
+  }
+
+  /// The modulations no bound model serves; what the run degrades to the classical chain.
+  std::vector<unsigned> unserved_modulations() const override { return models.missing(); }
+
+  std::vector<std::string> binding_notes() const override { return notes; }
+
+  /// True when the fallback bound here came from the build rather than from the command line.
+  bool fallback_is_the_build_default() const override { return fallback_is_build_default; }
 
   void estimate(dmrs_pusch_estimator_notifier&            notifier,
                 const resource_grid_reader&                grid,
@@ -217,7 +274,6 @@ public:
     // the two entry points two methods of one object instead of two units.
     dmrs_context      = make_pusch_depth3_dmrs_context(config);
     context_is_valid  = true;
-    scales            = read_scales(model_path, D3_RANGE_LIMIT_256QAM);
 
     // The classical estimator still runs: the chain's measurements (RSRP, EPRE, SNR, timing advance) are read
     // from its results, and the network's own reporting heads replace them in R6.
@@ -231,7 +287,7 @@ public:
                   const pusch_demodulator::configuration& config) override
   {
     last_forward_ok = false;
-    if (!engine_ready) {
+    if (!any_model_bound) {
       degrade(depth3_degradation::forward_failed, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
@@ -245,17 +301,26 @@ public:
       degrade(depth3_degradation::plane_refused, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
-    // One model per modulation (contract section 0.2(h)), so the modulation is part of the arm's envelope and
-    // not a detail of the run: refused HERE it costs nothing and says why, refused by the engine it costs a
-    // forward pass and reports only that something failed.
-    const unsigned model_qm = engine->depth3_bits_per_symbol();
-    if (model_qm != 0 && model_qm != qm) {
-      char detail[96];
-      std::snprintf(detail, sizeof(detail), "the model carries Qm=%u, this reception is Qm=%u", model_qm, qm);
+    // One model per modulation (contract section 0.2(h)), so the modulation is the arm's envelope and not a
+    // detail of the run -- and with a slot per modulation plus a fallback, WHICH model serves this reception is a
+    // lookup, not a comparison. Refused HERE it costs nothing and says why (including which modulations ARE
+    // served); refused by the engine it would cost a forward pass and report only that something failed.
+    const depth3_model_map::entry* const model = models.find(qm);
+    if (model == nullptr) {
+      std::string served;
+      for (const depth3_model_map::entry& e : models.entries()) {
+        served += (served.empty() ? "" : ", ");
+        served += std::to_string(e.qm);
+      }
+      char detail[224];
+      std::snprintf(detail, sizeof(detail), "no model is bound for Qm=%u (%s); bound: %s", qm,
+                    depth3_model_map::name(qm), served.empty() ? "none" : served.c_str());
       degrade(depth3_degradation::modulation_mismatch, codeword_buffer, notifier, grid, est_results, config,
               detail);
       return;
     }
+    metal::coreml_nn_engine& computing_engine = *engine_by_qm[qm];
+    const depth3_scales&     model_scales     = scales_by_qm[qm];
 
     // ---- the contract's plane, from the grid the chain holds --------------------------------------
     const auto segment_start = std::chrono::steady_clock::now();
@@ -287,7 +352,7 @@ public:
     output.dmrs_noise      = reinterpret_cast<uint16_t*>(&dmrs_noise_head);
     output.bits_per_symbol = qm;
 
-    if (!engine->predict_depth3(input, output)) {
+    if (!computing_engine.predict_depth3(input, output)) {
       degrade(depth3_degradation::forward_failed, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
@@ -299,10 +364,10 @@ public:
     // and print them side by side. They are NOT published yet: the arm still forwards `estimate()` to the
     // classical estimator, so a measurement that is wrong would reach the scheduler with nothing to
     // compare it against. Measure first, then switch -- the order the rest of this work has used.
-    report_measurements(reference_amplitude, est_results, config);
+    report_measurements(reference_amplitude, est_results, config, model_scales);
 
     // ---- gather, quantise, descramble, deliver ---------------------------------------------------
-    if (!deliver(codeword_buffer, notifier, config, qm)) {
+    if (!deliver(codeword_buffer, notifier, config, qm, model_scales)) {
       degrade(depth3_degradation::no_data_resource_elements, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
@@ -382,7 +447,8 @@ private:
   /// run's output without turning a run into a log.
   void report_measurements(float                                   reference_amplitude,
                            const dmrs_pusch_estimator_results&     est_results,
-                           const pusch_demodulator::configuration& config)
+                           const pusch_demodulator::configuration& config,
+                           const depth3_scales&                    scales)
   {
     ++forwarded_receptions;
     if ((forwarded_receptions != 1) && ((forwarded_receptions % 1000) != 0)) {
@@ -401,10 +467,12 @@ private:
     const unsigned port        = config.rx_ports.empty() ? 0 : config.rx_ports.front();
     const float    classic_nv  = est_results.get_noise_variance(port);
     fmt::print(stderr,
-               "[depth3-measure] reception {} over {} pilot RE(s): epre net={:.2f} classic={:.2f} dB | "
-               "rsrp net={:.2f} classic={:.2f} dB | snr net={:.2f} classic={:.2f} dB | "
+               "[depth3-measure] reception {} (Qm={} {}) over {} pilot RE(s): epre net={:.2f} classic={:.2f} dB "
+               "| rsrp net={:.2f} classic={:.2f} dB | snr net={:.2f} classic={:.2f} dB | "
                "noise net={:.4e} classic={:.4e}\n",
                forwarded_receptions,
+               get_bits_per_symbol(config.modulation),
+               depth3_model_map::name(get_bits_per_symbol(config.modulation)),
                net.nof_pilot_re,
                convert_power_to_dB(net.epre_lin),
                convert_power_to_dB(est_results.get_epre(port)),
@@ -448,7 +516,8 @@ private:
   bool deliver(pusch_codeword_buffer&                 codeword_buffer,
                pusch_demodulator_notifier&            notifier,
                const pusch_demodulator::configuration& config,
-               unsigned                               qm)
+               unsigned                               qm,
+               const depth3_scales&                   scales)
   {
     const unsigned range_limit = (config.modulation == modulation_scheme::QPSK) ? 24 : 20;
 
@@ -553,19 +622,29 @@ private:
 
   dmrs_pusch_estimator& estimator;
   pusch_demodulator&    demodulator;
-  std::string           model_path;
+  /// The fallback path as given (for the startup lines), and whether it came from the build rather than the
+  /// command line -- the two look identical in a log otherwise, and the difference is what the coverage means.
+  std::string           fallback_path;
+  bool                  fallback_is_build_default = false;
 
-  std::unique_ptr<metal::coreml_nn_engine>        engine;
+  /// Which bound model serves which modulation, and the engine and calibration of each. Indexed by the
+  /// modulation's bits per symbol (2, 4, 6, 8), so a reception picks its model with one lookup.
+  depth3_model_map                                  models;
+  std::array<std::unique_ptr<metal::coreml_nn_engine>, 9> engine_by_qm;
+  std::array<depth3_scales, 9>                      scales_by_qm;
+  /// True when at least one model bound: the arm will compute for the modulations it covers.
+  bool                                              any_model_bound = false;
+  /// What happened to each model, for the factory to print once for the pool (see binding_notes()).
+  std::vector<std::string>                          notes;
+
   std::unique_ptr<pseudo_random_generator>        descrambler;
   pusch_depth3_input_plane                        assembler;
   pusch_depth3_dmrs_context                       dmrs_context;
   bool                                            context_is_valid = false;
-  bool                                            engine_ready      = false;
   bool                                            last_forward_ok   = false;
   /// Receptions whose forward pass produced the soft bits, which is what the measurement reporting is
   /// sampled on: a degradation has no head output to measure.
   unsigned                                        forwarded_receptions = 0;
-  depth3_scales                                   scales;
 
   std::vector<__fp16>          input_plane;
   std::vector<__fp16>          llr_head;
@@ -581,26 +660,29 @@ private:
 } // namespace
 
 std::unique_ptr<pusch_depth3_receiver> ocudu::create_pusch_depth3_receiver(
-    pusch_depth3_kind     kind,
-    dmrs_pusch_estimator& estimator,
-    pusch_demodulator&    demodulator,
-    const std::string&    model_path)
+    pusch_depth3_kind               kind,
+    dmrs_pusch_estimator&           estimator,
+    pusch_demodulator&              demodulator,
+    const pusch_depth3_model_paths& models)
 {
   switch (kind) {
     case pusch_depth3_kind::classic:
       return std::make_unique<pusch_depth3_receiver_classic>(estimator, demodulator);
     case pusch_depth3_kind::ai_identity:
-      return std::make_unique<pusch_depth3_receiver_ai_identity>(estimator, demodulator, model_path);
+      // The identity arm has nothing to compute with, so only the fallback path is meaningful to it: the slots
+      // describe models it will never run.
+      return std::make_unique<pusch_depth3_receiver_ai_identity>(estimator, demodulator, models.fallback);
     case pusch_depth3_kind::ai_network:
 #if defined(OCUDU_HAVE_DEPTH3_ENGINE)
-      return std::make_unique<pusch_depth3_receiver_ai_network_impl>(estimator, demodulator, model_path);
+      return std::make_unique<pusch_depth3_receiver_ai_network_impl>(
+          estimator, demodulator, models.fallback, models.slots, models.fallback_is_build_default);
 #else
       // Built without the Core ML engine: the arm is selected and cannot run, which is exactly what the
       // identity arm exists to represent -- and it says so rather than pretending.
       ocudulog::fetch_basic_logger("PHY").error(
           "AI depth-3: this build has no Core ML engine (ENABLE_METAL_CHEST is off); the arm forwards to the "
           "classical chain and its output is NOT an AI result");
-      return std::make_unique<pusch_depth3_receiver_ai_identity>(estimator, demodulator, model_path);
+      return std::make_unique<pusch_depth3_receiver_ai_identity>(estimator, demodulator, models.fallback);
 #endif
   }
   return nullptr;

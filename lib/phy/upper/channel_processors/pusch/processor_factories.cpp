@@ -7,6 +7,7 @@
 #include "pusch_decoder_empty_impl.h"
 #include "pusch_decoder_hw_impl.h"
 #include "pusch_decoder_impl.h"
+#include "pusch_depth3_model_map.h"
 #include "pusch_depth3_receiver_impl.h"
 #include "pusch_processor_impl.h"
 #include "pusch_processor_pool.h"
@@ -139,22 +140,11 @@ private:
   task_executor*                                          executor;
 };
 
-/// Name of the modulation a model's head width declares, for the startup lines. Empty when unrecognised (the
-/// arm's own envelope check is what refuses a mismatch; this is only how a human reads which one it carries).
-static const char* qm_name(unsigned qm)
+/// Whether any per-modulation slot carries a path. A run whose only model is a slot IS an AI run: the slots are
+/// how a modulation is covered, and the fallback is only what serves the modulations no slot claims.
+static bool has_any_slot(const std::array<std::string, 4>& slots)
 {
-  switch (qm) {
-    case 2:
-      return ", QPSK";
-    case 4:
-      return ", 16QAM";
-    case 6:
-      return ", 64QAM";
-    case 8:
-      return ", 256QAM";
-    default:
-      return "";
-  }
+  return std::any_of(slots.begin(), slots.end(), [](const std::string& slot) { return !slot.empty(); });
 }
 
 class pusch_processor_factory_generic : public pusch_processor_factory
@@ -173,13 +163,16 @@ public:
     // forwards and says so. The choice is made here because only the configuration knows whether a model was
     // asked for, and the arm reports the OUTCOME (a bundle that fails to load leaves it inactive).
     depth3_kind(config.pusch_receiver_backend == "ai"
-                    ? (config.pusch_receiver_model_path.empty() ? pusch_depth3_kind::ai_identity
-                                                                : pusch_depth3_kind::ai_network)
+                    ? ((config.pusch_receiver_model_path.empty() && !has_any_slot(config.pusch_receiver_model_slots))
+                           ? pusch_depth3_kind::ai_identity
+                           : pusch_depth3_kind::ai_network)
                     : pusch_depth3_kind::classic),
-    depth3_model_path(config.pusch_receiver_model_path),
+    depth3_models{.fallback                   = config.pusch_receiver_model_path,
+                  .fallback_is_build_default  = config.pusch_receiver_model_is_build_default,
+                  .slots                      = config.pusch_receiver_model_slots},
     csi_sinr_calc_method(config.csi_sinr_calc_method)
   {
-    if (depth3_kind == pusch_depth3_kind::ai_identity && depth3_model_path.empty()) {
+    if (depth3_kind == pusch_depth3_kind::ai_identity && depth3_models.fallback.empty()) {
       // The arm was SELECTED but has nothing to compute with. Said here rather than at startup because only the
       // arm knows whether the estimator accepted a binding; a run that reports "ai" while the classical chain
       // executes is the failure mode this workstream's discipline exists to catch.
@@ -209,7 +202,7 @@ public:
           uci_dec_factory->create(), ch_estimate_dimensions);
 
       dependencies->set_depth3(create_pusch_depth3_receiver(
-          depth3_kind, dependencies->get_estimator(), dependencies->get_demodulator(), depth3_model_path));
+          depth3_kind, dependencies->get_estimator(), dependencies->get_demodulator(), depth3_models));
       return dependencies;
     });
 
@@ -217,22 +210,38 @@ public:
     // line is what tells an operator which of the two actually happened: "ai" on the command line is a request,
     // not a fact, and a run must never be read as an AI result on the strength of the request alone.
     if (depth3_kind != pusch_depth3_kind::classic) {
-      const bool     bound = dependencies.front()->depth3_refinement_bound();
-      const unsigned qm    = dependencies.front()->get_depth3().bound_qm();
+      const bool           bound  = dependencies.front()->depth3_refinement_bound();
+      pusch_depth3_receiver& arm   = dependencies.front()->get_depth3();
+      // The binding notes come from the arm (one per model: kept, redundant, refused), and are printed ONCE for
+      // the pool: the pool builds one arm per concurrent PUSCH thread, so printing them per arm would repeat the
+      // same seven lines and hide the one that matters.
+      for (const std::string& note : arm.binding_notes()) {
+        fmt::print(stderr, "[pusch_receiver] AI depth-3: {}\n", note);
+      }
       if (bound && depth3_kind == pusch_depth3_kind::ai_network) {
-        // The declared modulation is printed WITH the model, because the model's name is not a declaration:
-        // the envelope the arm enforces is the main head's width, and a run whose model carries one modulation
-        // degrades every reception of the others (they are logged, and counted). Measured 2026-10-16: the
-        // default model was called `d3_mixed` while carrying 256QAM alone -- this line would have said so.
+        // THE COVERAGE, printed from what the arm BOUND -- not from the command line. Two reasons, both measured
+        // on 2026-10-16: a model's name is not a declaration (the default was called `d3_mixed` and carried
+        // 256QAM alone, so a minimal `gpu + ai` leg computed 80% of its receptions and degraded 20% silently),
+        // and the fallback is filled by the build's default when the knob is absent, so which modulations a run
+        // computes cannot be read off the command line at all.
         fmt::print(stderr,
-                   "[pusch_receiver] backend=ai: AI ARM ACTIVE. The depth-3 network bound model '{}' "
-                   "(Qm={}{}) and COMPUTES channel estimation, equalisation and demapping itself: the classical "
-                   "demodulator does not run, and the classical estimator still runs only for the chain's "
-                   "measurements. Every degraded reception is logged and counted (a reception of another "
-                   "modulation is one of them).\n",
-                   depth3_model_path,
-                   qm,
-                   qm_name(qm));
+                   "[pusch_receiver] backend=ai: AI ARM ACTIVE over {} model(s). Each bound model COMPUTES "
+                   "channel estimation, equalisation and demapping for the modulation it declares; the classical "
+                   "demodulator does not run for those receptions, and the classical estimator still runs for the "
+                   "chain's measurements. A reception of any other modulation degrades to the classical chain, is "
+                   "counted, and says so.\n",
+                   arm.bound_models().size());
+        for (const pusch_depth3_bound_model& model : arm.bound_models()) {
+          fmt::print(stderr, "[pusch_receiver]   computes Qm={} {:<6s} <- '{}' [{}]\n", model.qm,
+                     depth3_model_map::name(model.qm), model.path,
+                     model.fallback ? (arm.fallback_is_the_build_default() ? "fallback: the build's default"
+                                                                           : "fallback: given")
+                                    : "slot");
+        }
+        for (unsigned qm : arm.unserved_modulations()) {
+          fmt::print(stderr, "[pusch_receiver]   degrades Qm={} {:<6s} -> the classical chain (no model bound)\n",
+                     qm, depth3_model_map::name(qm));
+        }
       } else if (bound) {
         fmt::print(stderr,
                    "[pusch_receiver] backend=ai: AI ARM IS THE IDENTITY (no model path was given). The "
@@ -240,10 +249,17 @@ public:
                    "depth-3 output must NOT be reported as an AI result.\n");
       } else {
         fmt::print(stderr,
-                   "[pusch_receiver] backend=ai: AI ARM INACTIVE (the estimator could not bind model '{}'). "
-                   "This run's depth-3 output is the CLASSICAL result and must NOT be reported as an AI "
-                   "result.\n",
-                   depth3_model_path);
+                   "[pusch_receiver] backend=ai: AI ARM INACTIVE (the estimator could not bind the model(s): "
+                   "fallback '{}', {} slot(s)). This run's depth-3 output is the CLASSICAL result and must NOT "
+                   "be reported as an AI result.\n",
+                   depth3_models.fallback,
+                   [&]() {
+                     unsigned n = 0;
+                     for (const std::string& slot : depth3_models.slots) {
+                       n += slot.empty() ? 0U : 1U;
+                     }
+                     return n;
+                   }());
       }
     }
 
@@ -282,7 +298,8 @@ private:
   /// refuses any value it cannot honour.
   pusch_depth3_kind                                                        depth3_kind;
   /// Compiled model the ai arm binds; empty means it cannot compute, which the constructor reports.
-  std::string                                                              depth3_model_path;
+  /// The model paths the arm is built from: the fallback and the per-modulation slots.
+  pusch_depth3_model_paths                                                 depth3_models;
   channel_state_information::sinr_type                                     csi_sinr_calc_method;
 };
 

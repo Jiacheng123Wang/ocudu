@@ -7969,7 +7969,7 @@ aillr_256qam_ai_s1 (stride 8, first AI leg): 5132 paired capture(s)
 | ★★ **覆盖行（★ 新增冻结项 ✓）** | ★★★ 启动横幅必须**逐条写明**"★ 本运行计算：★ … ✓；★ 退化：★ …（★ 缺哪个 Qm 的模型 ✓）" ✓ —— ★★ 可由"★ 已绑槽位 ＋ 各自声明的 Qm"在**构造时**推出 ✓，★ 与"★ 按 Qm 选择"共用同一份数据 ✓ |
 | ★ 一致性 | ★★ 每个 bundle 的**声明 Qm**（★ 主头宽度 ✓）必须**等于槽位的 Qm** ✓；★ 不符 ⇒ ★ **启动即拒绝该槽位并说明** ✓（★ 这是运行时绑定才知道的事 ✓，★ validator 打不开 CoreML ✓）|
 | ★ 日志 | ★★ 启动横幅**逐个列出**"★ 路径 ＋ Qm ＋ 调制名 ✓"；★ 每接收的计时/测量行**带上本次用的 Qm** ✓ ⇒ ★★ "★ 混合运行"与"★ 部分退化运行"事后可分 ✓（★ §19.96 的教训 ✓）|
-| ★ 工厂/臂 | ★ 臂内**按槽位持有至多 4 个 engine** ✓，★ `demodulate()` 按 `qm` 选择 ✓；★ `bound_qm()` 扩成"**已绑槽位集合**" ✓（★ 位掩码 ✓）；★ 内存为四个 bundle 常驻 ✓（★ 每个几 MB ✓）|
+| ★ 工厂/臂 | ★ 臂内**每个配置的模型各持一个 engine** ✓（★ 槽位 ＋ 回退，★ 最多 5 份 ✓），★ `demodulate()` 按 `qm` 查表选择 ✓；★ `bound_qm()` 扩成"**第一个被服务的 Qm**" ✓ ＋ ★ 新增 `bound_models()` / `unserved_modulations()` ✓（★ 覆盖行的数据源 ✓）。★★ **注意：池里有 N 个臂（＝并发 PUSCH 线程数，本机 7 ✓）★ 每个都各自绑定** ✓ —— ★ 这是**刻意的** ✓：★ engine 内部有锁、一次只跑一个 job ✓ ⇒ 多份才有**推理并发** ✓（★ 共享一份会把并发降到 1 ✗）。★ 代价是内存与启动加载 ×N ✓（★ 每个 bundle 几 MB ✓）；★★ 横幅/绑定行**每个 factory 构造打印一次** ✓（★ 本 app 构造两次 ✓ —— ★ 这是**既有行为** ✓，★ 飞过的腿上也是两条横幅 ✓）|
 | ★ 矩阵检查 | ★ 新增一行：★ **两个槽位**（★ 256QAM ＋ QPSK ✓）⇒ ★ 横幅必须列出**两个** ✓ |
 | ★ 单测 | ★ 选择逻辑（★ 槽位命中／未命中／声明不符 ✓）＋ ★ resolver/validator 的新旋钮 ✓ |
 
@@ -8063,3 +8063,71 @@ AI ARM ACTIVE. bound model '…/d3_256qam.mlmodelc' (Qm=8, 256QAM) [fallback: th
 
 ★★ **⇒ "构建默认是一次真实绑定，不是'没给'"** ✓ 这句话就是本节要冻结的理解方式 ✓；
 ★★ 用户若不想要它 ✓，★ 一行 `--pusch_receiver_model=<想要的>` 即可**替换**它 ✓。
+
+
+### 19.100 ★★★ 第 1 步**已实现并验证** ✓：★ 按调制绑定模型 ⇒ **最简 `gpu + ai` 也能覆盖四种调制** ✓（★ 2026-10-16 ✓）
+
+★★ 按 §19.99.4–19.99.6 冻结的接口实现 ✓，★ 全部实测 ✓。
+
+#### ★★ 19.100.1 改了什么（★ 文件级 ✓）
+
+| ★ 层 | ★★ 改动 |
+|---|---|
+| ★★ **纯逻辑**（★ 新文件 ✓）| `lib/.../pusch/pusch_depth3_model_map.h` ✓ —— ★★ **槽位／回退谁服务哪个 Qm** 的查找 ✓（★ 声明不符 ⇒ 拒绝并说明 ✓、★ 重复 ⇒ 冗余并说明 ✓、★ 无人服务 ⇒ 列出 ✓）；★★ **不依赖 Core ML ⇒ 可单测** ✓ |
+| ★★ 臂 | `pusch_depth3_receiver_impl.*` ✓：★ 构造时**逐个绑定** ✓（★ 每个模型读它自己的 `depth3_scales` 边车 ✓）、★ 按 `qm` 查 engine ✓、★ 缺模型时**点名** ✓；★ 新增 `bound_models()`／`unserved_modulations()`／`fallback_is_the_build_default()`／`binding_notes()` ✓；★ `[depth3-measure]` 行现在带 `Qm=` ✓ |
+| ★★ 工厂 | `processor_factories.cpp` ✓：★ 启动打印**绑定行（每个模型一行，含 kept／冗余／拒绝＋原因 ✓）＋ 覆盖行（computes／degrades ✓）** ✓；★★ 这些行**每个 factory 构造只打印一次** ✓（★ 池里有 7 个臂 ✓，★ 逐臂打印会把关键那行淹掉 ✓）|
+| ★★ 配置/透传 | ★ 四个新旋钮 ＋ 回退 ✓：★ `du_low_config.h` ✓、★ CLI schema ✓（★ 帮助文本写明查找规则 ✓）、★ validator **逐路径存在性检查** ✓（★ 报错时点名来自哪个旋钮 ✓）、★ translator 透传槽位与"回退是否来自构建默认" ✓ |
+
+★★ **契约要点（★ 一句话 ✓）** ✓：★★ **一份被绑定的模型只服务它自己声明的那个 Qm** ✓；
+★ 槽位优先于回退 ✓；★ 没人声明 ⇒ 经典链 ＋ 计数退化 ＋ 点名 ✓。
+
+#### ★★★ 19.100.2 实测（★ 全部本机跑过 ✓）
+
+★★ **1) 两槽位（256QAM ＋ QPSK）** ✓：
+
+```
+AI depth-3: slot model '…/d3_qpsk.mlmodelc'   bound for Qm=2 QPSK
+AI depth-3: slot model '…/d3_256qam.mlmodelc' bound for Qm=8 256QAM
+AI depth-3: fallback model '…/d3_256qam.mlmodelc' NOT bound: a slot already serves Qm=8,
+            so the fallback model is not used
+AI ARM ACTIVE over 2 model(s). …
+  computes Qm=2 QPSK   <- '…/d3_qpsk.mlmodelc'   [slot]
+  computes Qm=8 256QAM <- '…/d3_256qam.mlmodelc' [slot]
+  degrades Qm=4 16QAM  -> the classical chain (no model bound)
+  degrades Qm=6 64QAM  -> the classical chain (no model bound)
+```
+
+★★ 注意第 3 行 ✓：★ **构建默认落进回退后被判冗余** ✓（★ 槽位已经服务 Qm=8 ✓）——
+★ 这正是 §19.99.6 冻结的"★ 冗余而非错误 ✓ ＋ 要说明 ✓" ✓。
+
+★★ **2) 三槽位 ⇒ 全覆盖** ✓：★ `AI ARM ACTIVE over 4 model(s)` ✓（★ QPSK／16QAM／64QAM 来自槽位 ✓、
+★ 256QAM 来自**构建默认的回退** ✓）、★ **degrades 0 行** ✓ ⇒ ★★ 最简命令＋三个槽位＝四种调制都走网络 ✓。
+
+★★ **3) 槽位声明不符** ✓（★ `_qpsk=<64QAM bundle>` ✓）⇒
+★ `slot model '…/d3_64qam.mlmodelc' NOT bound: the slot asks for Qm=2 but the bundle declares Qm=6
+(the arm's envelope is the bundle's own declaration)` ✓ ⇒ ★★ **该槽位被拒 ✓、★ 其余照常** ✓
+（★ 回退默认仍服务 256QAM ✓、★ 覆盖行如实列出三种退化 ✓）。
+
+★★ **4) 路径不存在** ✓ ⇒ ★ `--dryrun` **exit 1** ✓ ＋
+★ `Invalid configuration: the AI receiver's model '/nope.mlmodelc' does not exist (from
+--expert_phy.pusch_receiver_model_qpsk)` ✓ —— ★★ 报错**点名来自哪个旋钮** ✓。
+
+★★ **5) 单元测试** ✓：★★ 新增 `depth3_model_map_test` **7/7** ✓（★ 槽位服务自己 ✓、★ 声明不符被拒 ✓、
+★ 回退补位 ✓、★ 冗余不报错 ✓、★ 未加载的 bundle ✓、★ 四槽位全覆盖 ✓）；
+★ `du_low_phy_pipeline_test` **30/30** ✓（★ 含新增的"四个槽位互相独立"CLI 用例 ✓）；
+★ `ul_chain_replay` 仍可构建 ✓（★ 离线回放不受影响 ✓）。
+
+★★ **6) 端到端矩阵检查 17/17** ✓（★ `probe/check_matrix.sh` ✓，★ 新增四行 ✓）：
+
+```
+-- the per-modulation slots: the coverage must be READ, not inferred
+  PASS  gpu + ai, no slot (the build's default only)               computes 1, degrades 3
+  PASS  gpu + ai + qpsk slot (the default still computes 256QAM)   computes 2, degrades 2
+  PASS  gpu + ai + qpsk/16qam/64qam slots = all four               computes 4, degrades 0
+  PASS  a slot whose bundle declares another modulation            NOT bound: the slot asks for Qm=2 …
+```
+
+★★ **检查器的一处自我修正（★ 记下来 ✓）** ✓：★ 第一版按**原始行数**数 computes／degrades ✓
+⇒ ★ 因为**横幅印两次**（★ 既有行为 ✓）而**全部误判成失败** ✗ ⇒
+★ 改成 **`sort -u` 去重** ✓ —— ★★ 理由写在脚本里：★★ **按原始行数计数，会把"同一个调制被覆盖两次"
+读成"多覆盖了两个调制"** ✗（★ 又是"守卫要在它守的那类数据上跑过"这一族 ✓）。

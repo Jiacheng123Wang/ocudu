@@ -17,6 +17,7 @@
 #include "ocudu/phy/upper/equalization/equalization_factories.h"
 #include "ocudu/phy/upper/signal_processors/pusch/factories.h"
 #include <memory>
+#include <array>
 #include <string>
 
 namespace ocudu {
@@ -114,7 +115,17 @@ struct pusch_processor_factory_sw_configuration {
   /// value it cannot honour, so a value reaching here is always one of these two.
   std::string pusch_receiver_backend = "classic";
   /// Compiled model the `ai` depth-3 arm binds (a `.mlmodelc` directory). Empty means the arm cannot compute.
+  ///
+  /// \note Since the per-modulation slots exist this is the FALLBACK: it serves the modulations no slot claims
+  /// and that its own bundle declares. Which modulations a run computes is therefore read from the startup
+  /// coverage line, not from the command line -- the fallback is filled by the build's default when the knob is
+  /// not given, so a command line that never mentions a model can still compute one modulation.
   std::string pusch_receiver_model_path;
+  /// Per-modulation model slots, in the order QPSK, 16QAM, 64QAM, 256QAM. Empty entries are modulations with no
+  /// slot: they fall back, and degrade when the fallback does not declare them either.
+  std::array<std::string, 4> pusch_receiver_model_slots;
+  /// True when \c pusch_receiver_model_path came from the build's default rather than from the command line.
+  bool pusch_receiver_model_is_build_default = false;
 };
 
 std::shared_ptr<pusch_processor_factory>

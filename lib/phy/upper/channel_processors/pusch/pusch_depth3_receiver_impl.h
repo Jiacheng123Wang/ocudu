@@ -14,8 +14,10 @@
 /// pass arrives it replaces the body of \c pusch_depth3_receiver_ai_identity alone, and nothing else moves.
 #pragma once
 
+#include "pusch_depth3_model_map.h"
 #include "pusch_depth3_receiver.h"
 
+#include <array>
 #include <memory>
 
 namespace ocudu {
@@ -80,6 +82,14 @@ public:
 
   pusch_depth3_kind kind() const override { return pusch_depth3_kind::ai_identity; }
 
+  /// The identity arm binds nothing, so it serves nothing: the coverage line reads these and says so, rather than
+  /// letting a reader assume that a name on the command line meant a modulation was covered.
+  std::vector<pusch_depth3_bound_model> bound_models() const override { return {}; }
+  std::vector<unsigned>                 unserved_modulations() const override
+  {
+    return {depth3_model_map::candidate_qm.begin(), depth3_model_map::candidate_qm.end()};
+  }
+
   /// See the seam interface. True only when the estimator accepted the model, because only then does anything
   /// beyond the classical chain run.
   bool computes_itself() const override { return refinement_bound; }
@@ -118,13 +128,31 @@ private:
   bool refinement_bound = false;
 };
 
+/// \brief The model paths a depth-3 arm is built from.
+///
+/// The fallback is the model bound when a modulation has no slot: it serves the modulations NO slot claims and
+/// that ITS OWN bundle declares. The slots are indexed by the modulation the knob asked for -- QPSK, 16QAM,
+/// 64QAM, 256QAM -- and a slot whose bundle declares a different modulation is refused at binding, with the
+/// mismatch named, because the arm's envelope is the bundle's declaration and not the knob's position.
+struct pusch_depth3_model_paths {
+  /// `--expert_phy.pusch_receiver_model`, or the build's default when the knob was not given.
+  std::string                fallback;
+  /// True when `fallback` came from the build's default rather than from the command line.
+  bool                       fallback_is_build_default = false;
+  /// `--expert_phy.pusch_receiver_model_<modulation>`, in the order QPSK, 16QAM, 64QAM, 256QAM.
+  std::array<std::string, 4> slots;
+};
+
 /// \brief Builds the depth-3 arm the configuration asked for.
 /// \param[in] kind        Which arm.
 /// \param[in] estimator   The classical estimator, already built by the per-module backends.
 /// \param[in] demodulator The classical demodulator, already built by the per-module backends.
-std::unique_ptr<pusch_depth3_receiver> create_pusch_depth3_receiver(pusch_depth3_kind     kind,
-                                                                    dmrs_pusch_estimator& estimator,
-                                                                    pusch_demodulator&    demodulator,
-                                                                    const std::string&    model_path = {});
+/// \param[in] models      The model paths: the fallback first, then the per-modulation slots in the order
+///                        QPSK, 16QAM, 64QAM, 256QAM (empty entries are modulations with no slot).
+std::unique_ptr<pusch_depth3_receiver> create_pusch_depth3_receiver(
+    pusch_depth3_kind                  kind,
+    dmrs_pusch_estimator&              estimator,
+    pusch_demodulator&                 demodulator,
+    const pusch_depth3_model_paths&    models = {});
 
 } // namespace ocudu

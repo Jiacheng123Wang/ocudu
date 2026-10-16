@@ -8,6 +8,8 @@
 #include "ocudu/adt/interval.h"
 #include "ocudu/phy/upper/channel_processors/prach/prach_detector_phy_validator.h"
 #include <filesystem>
+#include <utility>
+#include <vector>
 #include <thread>
 
 using namespace ocudu;
@@ -126,16 +128,33 @@ static bool validate_phy_pipeline_config(const du_low_unit_expert_upper_phy_conf
   // The error_code overload keeps a filesystem that cannot answer (a permission, an encoding this platform rejects)
   // from throwing here and from being read as "does not exist": only a check that RAN and said no is a refusal.
   if (effective->receiver == "ai") {
-    std::error_code model_ec;
-    const bool      model_exists = std::filesystem::exists(effective->receiver_model, model_ec);
-    if (!model_exists && !model_ec) {
-      fmt::print("Invalid configuration: the AI receiver's model '{}' does not exist{}. Pass the COMPILED model "
-                 "directory (.mlmodelc) produced by `xcrun coremlcompiler compile`.\n",
-                 effective->receiver_model,
-                 config.pusch_receiver_model.empty() ? " (this is the build's default: --expert_phy."
-                                                       "pusch_receiver_model was not given)"
-                                                     : "");
-      return false;
+    // Every path the run binds is checked, not just the fallback: a slot that does not exist would be refused at
+    // bind time anyway, and the operator should learn it before the radio is opened.
+    std::vector<std::pair<std::string, std::string>> paths;
+    paths.emplace_back(effective->receiver_model,
+                       config.pusch_receiver_model.empty()
+                           ? " (the build's default: --expert_phy.pusch_receiver_model was not given)"
+                           : "");
+    static constexpr const char* const slot_names[4] = {"--expert_phy.pusch_receiver_model_qpsk",
+                                                        "--expert_phy.pusch_receiver_model_16qam",
+                                                        "--expert_phy.pusch_receiver_model_64qam",
+                                                        "--expert_phy.pusch_receiver_model_256qam"};
+    for (unsigned i = 0; i != config.pusch_receiver_model_slots.size(); ++i) {
+      if (!config.pusch_receiver_model_slots[i].empty()) {
+        paths.emplace_back(config.pusch_receiver_model_slots[i],
+                           std::string(" (from ") + slot_names[i] + ")");
+      }
+    }
+    for (const auto& [path, origin] : paths) {
+      std::error_code model_ec;
+      const bool      model_exists = std::filesystem::exists(path, model_ec);
+      if (!model_exists && !model_ec) {
+        fmt::print("Invalid configuration: the AI receiver's model '{}' does not exist{}. Pass the COMPILED "
+                   "model directory (.mlmodelc) produced by `xcrun coremlcompiler compile`.\n",
+                   path,
+                   origin);
+        return false;
+      }
     }
   }
 

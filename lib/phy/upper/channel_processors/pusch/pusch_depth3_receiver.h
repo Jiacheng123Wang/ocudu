@@ -62,6 +62,16 @@ enum class pusch_depth3_kind {
   ai_network
 };
 
+/// One model the arm has bound, as the startup coverage line reports it.
+struct pusch_depth3_bound_model {
+  /// The modulation the bundle declares (its main head's width divided by the slot's symbols).
+  unsigned    qm = 0;
+  /// The path it was bound from.
+  std::string path;
+  /// True when it came from the fallback knob rather than from a per-modulation slot.
+  bool        fallback = false;
+};
+
 /// \brief The depth-3 unit: channel estimation + equalization + demapping, as one replaceable thing.
 class pusch_depth3_receiver
 {
@@ -108,6 +118,31 @@ public:
   /// carried 256QAM alone; a reader of a leg log had to know that the name was wrong to know that a QPSK
   /// reception would degrade. A name is not a declaration -- this is.
   virtual unsigned bound_qm() const { return 0; }
+
+  /// \brief Every model this arm has bound, with the modulation each declares and where it came from.
+  ///
+  /// This is what the startup coverage line is printed from: a run may bind several models (a slot per modulation
+  /// plus a fallback), and "which modulations does this run actually compute" must be read rather than inferred --
+  /// the fallback is filled by the build's default, so the command line alone does not answer it.
+  virtual std::vector<pusch_depth3_bound_model> bound_models() const { return {}; }
+
+  /// \brief The modulations no bound model serves.
+  ///
+  /// Those are the receptions that degrade to the classical chain, and the arm says so per reception too (counted,
+  /// with the modulation named). Kept here as well because the coverage belongs in one line at startup, before any
+  /// reception has arrived.
+  virtual std::vector<unsigned> unserved_modulations() const { return {}; }
+
+  /// Whether the fallback this arm bound came from the BUILD rather than from the command line.
+  virtual bool fallback_is_the_build_default() const { return false; }
+
+  /// \brief One line per model the arm tried to bind: kept, dropped as redundant, or refused with the reason.
+  ///
+  /// The pool builds one arm per concurrent PUSCH thread, so a per-arm print would repeat the same binding seven
+  /// times; the factory prints these once, for the pool, before the coverage. It is also the only place a REFUSED
+  /// slot is visible: a slot whose bundle declares another modulation is refused while everything else keeps
+  /// working, which is exactly the kind of half-configured state that must not pass unread.
+  virtual std::vector<std::string> binding_notes() const { return {}; }
 
   /// \brief Runs the channel estimation entry point of the unit.
   /// \param[in] notifier Notifier to communicate the end of the estimation process.

@@ -51,3 +51,8 @@ add_test(pusch_demodulator_deferred_chain_test pusch_demodulator_deferred_chain_
 # reason, when it is run inside the unfiltered binary (design document 5.9.112).
 add_test(pusch_demodulator_ce_contract_arm pusch_demodulator_deferred_chain_test
          --gtest_filter=*the_device_estimate_contract_arms*)
+
+add_executable(depth3_model_map_test depth3_model_map_test.cpp)
+target_include_directories(depth3_model_map_test PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(depth3_model_map_test GTest::gtest GTest::gtest_main)
+add_test(depth3_model_map_test depth3_model_map_test)

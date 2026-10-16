@@ -282,6 +282,33 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              "a run as an AI result.")
       ->capture_default_str()
       ->check(pusch_receiver_backend_check);
+  // One option per modulation, and the rule they obey is stated once, here, because the slots only make sense
+  // together: a slot wins over --pusch_receiver_model for its own modulation, the fallback serves the modulations
+  // no slot claims and that ITS OWN bundle declares, and a modulation nobody declares degrades to the classical
+  // chain. A slot must carry a bundle that declares the modulation it was given: the arm's envelope is the
+  // bundle's own declaration (its main head's width), and a mismatch is refused at bind time with both
+  // modulations named -- only binding can know it, the validator cannot open Core ML.
+  const std::string slot_help =
+      "The model this modulation is computed with, when the ai receiver is selected. A slot wins over "
+      "--pusch_receiver_model for its own modulation; modulations with no slot use that fallback if its bundle "
+      "declares them, and otherwise degrade to the classical chain (counted, and named in the log). The bundle "
+      "must declare the modulation of the slot it is given (its main head's width: 14*Qm channels), and a bundle "
+      "that declares another one is refused at startup with the mismatch named.\n"
+      "The startup log prints the COVERAGE (which modulations this run computes and which it degrades), because "
+      "it cannot be read off the command line: --pusch_receiver_model falls back to this build's default model "
+      "when it is not given.";
+  add_option(app, "--pusch_receiver_model_qpsk", expert_phy_params.pusch_receiver_model_slots[0],
+             slot_help + "\nThis slot covers QPSK (Qm=2), which is also what msg3 uses by default.")
+      ->capture_default_str();
+  add_option(app, "--pusch_receiver_model_16qam", expert_phy_params.pusch_receiver_model_slots[1],
+             slot_help + "\nThis slot covers 16QAM (Qm=4).")
+      ->capture_default_str();
+  add_option(app, "--pusch_receiver_model_64qam", expert_phy_params.pusch_receiver_model_slots[2],
+             slot_help + "\nThis slot covers 64QAM (Qm=6).")
+      ->capture_default_str();
+  add_option(app, "--pusch_receiver_model_256qam", expert_phy_params.pusch_receiver_model_slots[3],
+             slot_help + "\nThis slot covers 256QAM (Qm=8).")
+      ->capture_default_str();
   add_option(app,
              "--pusch_receiver_model",
              expert_phy_params.pusch_receiver_model,

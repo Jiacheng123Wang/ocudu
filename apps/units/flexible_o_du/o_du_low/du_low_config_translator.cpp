@@ -195,6 +195,10 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
   // The RESOLVED model: the requested one, or the build's default when the knob is absent (see
   // resolve_phy_pipeline). The factory must not see an empty path here, because an empty path is the identity arm.
   upper_phy_factory_config.pusch_receiver_model_path = effective.receiver_model;
+  upper_phy_factory_config.pusch_receiver_model_slots = du_low.expert_phy_cfg.pusch_receiver_model_slots;
+  // Whether the fallback is the BUILD's default is a fact only this layer knows (the resolver filled it), and the
+  // coverage line says it: a model the operator never asked for is exactly what has to be visible.
+  upper_phy_factory_config.pusch_receiver_model_is_build_default = du_low.expert_phy_cfg.pusch_receiver_model.empty();
   upper_phy_factory_config.pusch_channel_estimator_mmse_tau_rms_us =
       du_low.expert_phy_cfg.pusch_channel_estimator_mmse_tau_rms_us;
   upper_phy_factory_config.pusch_channel_estimator_mmse_fd_hz =

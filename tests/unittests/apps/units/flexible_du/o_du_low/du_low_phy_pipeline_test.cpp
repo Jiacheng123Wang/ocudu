@@ -367,6 +367,34 @@ TEST(phy_pipeline_cli_test, module_backends_accept_auto)
 }
 
 
+/// The per-modulation model slots are four independent knobs; the fallback keeps its own.
+///
+/// This is the surface the coverage line is printed from, so it is parsed here rather than assumed: each slot is
+/// its own option, an unset slot is empty (and NOT a copy of the fallback -- the whole point of the rule is that a
+/// slot and the fallback are different bindings), and the fallback keeps its historical meaning.
+TEST(phy_pipeline_cli_test, the_per_modulation_model_slots_are_independent)
+{
+  const du_low_unit_expert_upper_phy_config defaults = parse_expert_phy({"expert_phy"});
+  for (const std::string& slot : defaults.pusch_receiver_model_slots) {
+    EXPECT_TRUE(slot.empty());
+  }
+  EXPECT_TRUE(defaults.pusch_receiver_model.empty());
+
+  const du_low_unit_expert_upper_phy_config explicit_slots =
+      parse_expert_phy({"expert_phy",
+                        "--pusch_receiver_model_qpsk",
+                        "/m/d3_qpsk.mlmodelc",
+                        "--pusch_receiver_model_256qam",
+                        "/m/d3_256qam.mlmodelc",
+                        "--pusch_receiver_model",
+                        "/m/fallback.mlmodelc"});
+  EXPECT_EQ(explicit_slots.pusch_receiver_model_slots[0], "/m/d3_qpsk.mlmodelc");
+  EXPECT_TRUE(explicit_slots.pusch_receiver_model_slots[1].empty());
+  EXPECT_TRUE(explicit_slots.pusch_receiver_model_slots[2].empty());
+  EXPECT_EQ(explicit_slots.pusch_receiver_model_slots[3], "/m/d3_256qam.mlmodelc");
+  EXPECT_EQ(explicit_slots.pusch_receiver_model, "/m/fallback.mlmodelc");
+}
+
 /// \brief `--phy_pipeline gpu` must select exactly what spelling every module out selects.
 ///
 /// This is the promise that lets the four module knobs be treated as cpu_gpu-only: once the glue is

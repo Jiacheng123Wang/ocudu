@@ -16,6 +16,7 @@
 #include "ocudu/phy/upper/upper_phy.h"
 #include "ocudu/phy/upper/upper_phy_execution_configuration.h"
 #include "ocudu/ran/tdd/tdd_ul_dl_config.h"
+#include <array>
 #include <memory>
 #include <variant>
 
@@ -376,6 +377,14 @@ struct upper_phy_factory_configuration {
   /// than letting a run claim an AI result it never computed. A source `.mlpackage` is NOT accepted: it has to
   /// be compiled with `xcrun coremlcompiler compile`.
   std::string pusch_receiver_model_path;
+  /// \brief Per-modulation model slots (QPSK, 16QAM, 64QAM, 256QAM), empty when a modulation has no slot.
+  ///
+  /// A slot wins over \c pusch_receiver_model_path for its own modulation; a slot whose bundle declares another
+  /// modulation is refused when the arm binds it, with the mismatch named (only binding can know the bundle's
+  /// declaration). See the PUSCH factory configuration for the full rule.
+  std::array<std::string, 4> pusch_receiver_model_slots;
+  /// True when \c pusch_receiver_model_path is the build's default rather than a value from the command line.
+  bool pusch_receiver_model_is_build_default = false;
   /// \brief MMSE estimator: fixed RMS delay spread (in microseconds) - v1 constant.
   /// \remark The estimation-backed provider arrives with the v2 statistics module.
   float pusch_channel_estimator_mmse_tau_rms_us = 0.37F;
