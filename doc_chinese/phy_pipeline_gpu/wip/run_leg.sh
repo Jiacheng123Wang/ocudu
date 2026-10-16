@@ -165,6 +165,30 @@ if ! grep -aq "$STAMP" "$ROOT/build/apps/gnb/gnb" 2>/dev/null; then
   exit 2
 fi
 
+# ---- and the code must be COMMITTED, or the stamp is only half the truth --------------------------------
+# The stamp is generated from HEAD at BUILD time, so uncommitted source changes ARE in the binary and are NOT in
+# the stamp: such a leg is evidence about "HEAD plus a diff nobody can see". Measured 2026-10-16: a leg was flown
+# with a shutdown fix that had been built but not yet committed (18:03:55 link, commit at 18:04:46), so its log
+# says d8354ac8d1 while the binary was fd0b7f82c7's code - and nothing in the report could have told them apart.
+#
+# The check is limited to the paths that become code: documenting a leg, or writing its recipes, does not change
+# the binary and must not block flying the next one. LEG_ALLOW_DIRTY=1 bypasses it, and then the fingerprint of
+# the diff is written next to the leg's files so the run stays attributable to something.
+DIRTY_PATHS="lib apps include tests CMakeLists.txt"
+DIRTY=$(git -C "$ROOT" status --porcelain --untracked-files=no -- $DIRTY_PATHS 2>/dev/null)
+DIRTY_FP=$(git -C "$ROOT" diff -- $DIRTY_PATHS 2>/dev/null | git hash-object --stdin 2>/dev/null | cut -c1-12)
+if [ -n "$DIRTY" ] && [ "${LEG_ALLOW_DIRTY:-0}" != "1" ]; then
+  echo "REFUSING to run: the source tree has uncommitted changes, so this binary carries code that no commit" >&2
+  echo "  describes. A leg is evidence about a BINARY; commit the changes first (or fly with LEG_ALLOW_DIRTY=1)." >&2
+  echo "$DIRTY" | sed 's/^/    /' >&2
+  [ -n "$DIRTY_FP" ] && echo "  the uncommitted diff hashes to: $DIRTY_FP" >&2
+  exit 2
+fi
+if [ -n "$DIRTY" ]; then
+  echo "WARNING: flying with uncommitted source changes (LEG_ALLOW_DIRTY=1); diff fingerprint: $DIRTY_FP"
+  echo "dirty-code fingerprint: $DIRTY_FP" > "$LOG.dirtycode" 2>/dev/null || true
+fi
+
 mkdir -p "$LOGDIR"     # --log.filename never creates it, and a missing one fails silently
 
 # ---- THE CAPTURE DIRECTORY MUST EXIST BEFORE THE FIRST RECEPTION -------------------------------------
