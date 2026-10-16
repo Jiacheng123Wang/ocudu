@@ -303,11 +303,6 @@ int main(int argc, char** argv)
   // Parse arguments.
   CLI11_PARSE(app, argc, argv);
 
-  // Dry run mode, exit.
-  if (gnb_cfg.enable_dryrun) {
-    return 0;
-  }
-
   if (gnb_cfg.metrics_cfg.rusage_config.metrics_consumers_cfg.enable_json_metrics &&
       !gnb_cfg.remote_control_config.enabled) {
     fmt::println("NOTE: No JSON metrics will be generated as the remote server is disabled");
@@ -320,6 +315,15 @@ int main(int argc, char** argv)
       !validate_plmn_and_tacs(o_du_app_unit->get_o_du_high_unit_config().du_high_cfg.config,
                               o_cu_cp_app_unit->get_o_cu_cp_unit_config().cucp_cfg)) {
     report_error("Invalid configuration detected.\n");
+  }
+
+  // Dry run mode, exit -- AFTER the validation above, which is the whole point of the flag: it exists to check a
+  // configuration without opening a radio, and it used to return before any of these validators ran. Measured
+  // 2026-10-16: `--dryrun` exited 0 for `cpu + ai`, for `ai` without a model and for a model path that does not
+  // exist -- three configurations the real run refuses -- so the flight recipe had to grow a real eight-second
+  // startup check to compensate, and a dry run that accepts what the run rejects is worse than no dry run at all.
+  if (gnb_cfg.enable_dryrun) {
+    return 0;
   }
 
   // Set up logging.
