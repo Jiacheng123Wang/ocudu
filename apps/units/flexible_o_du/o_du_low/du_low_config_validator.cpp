@@ -7,6 +7,7 @@
 #include "ocudu/adt/format.h"
 #include "ocudu/adt/interval.h"
 #include "ocudu/phy/upper/channel_processors/prach/prach_detector_phy_validator.h"
+#include <filesystem>
 #include <thread>
 
 using namespace ocudu;
@@ -78,8 +79,9 @@ static bool validate_phy_pipeline_config(const du_low_unit_expert_upper_phy_conf
   request.ch_est    = config.pusch_channel_estimator_algo;
   request.equalizer = config.pusch_channel_equalizer_backend;
   request.ldpc      = config.ldpc_decoder_type;
-  request.device_grid = config.device_resource_grid;
-  request.receiver    = config.pusch_receiver_backend;
+  request.device_grid    = config.device_resource_grid;
+  request.receiver       = config.pusch_receiver_backend;
+  request.receiver_model = config.pusch_receiver_model;
 
   const phy_backend_availability available = query_phy_backend_availability();
 
@@ -110,6 +112,23 @@ static bool validate_phy_pipeline_config(const du_low_unit_expert_upper_phy_conf
   std::string error;
   if (!resolve_phy_pipeline(request, available, error)) {
     fmt::print("Invalid configuration: {}.\n", error);
+    return false;
+  }
+
+  // A model path that does not exist can never bind, and the run would say so only after the radio was opened --
+  // as "AI ARM INACTIVE" plus a corpus whose labels came from the classical chain. It is decidable here, before
+  // anything is built, so it is refused here. Whether a model that DOES exist binds is a runtime outcome (the
+  // bundle may be an uncompiled .mlpackage, or of a shape this build cannot run) and stays reported by the arm.
+  //
+  // The error_code overload keeps a filesystem that cannot answer (a permission, an encoding this platform rejects)
+  // from throwing here and from being read as "does not exist": only a check that RAN and said no is a refusal.
+  std::error_code model_ec;
+  const bool      model_exists = std::filesystem::exists(config.pusch_receiver_model, model_ec);
+  if ((config.pusch_receiver_backend == "ai") && (!config.pusch_receiver_model.empty()) && !model_exists &&
+      !model_ec) {
+    fmt::print("Invalid configuration: --pusch_receiver_model '{}' does not exist. Pass the COMPILED model "
+               "directory (.mlmodelc) produced by `xcrun coremlcompiler compile`.\n",
+               config.pusch_receiver_model);
     return false;
   }
 

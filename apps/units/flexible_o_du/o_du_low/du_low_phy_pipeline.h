@@ -29,6 +29,9 @@ struct phy_pipeline_request {
   std::string device_grid = "auto";
   /// `expert_phy --pusch_receiver_backend`: "auto" (the mode's classic receiver), "classic" or "ai".
   std::string receiver = "auto";
+  /// `expert_phy --pusch_receiver_model`: the compiled model the ai receiver binds. Empty means "none was given",
+  /// which is a conflict rather than a run that quietly computes the classical result (see resolve_phy_pipeline).
+  std::string receiver_model;
 };
 
 /// Which offload backends are linked into this binary (from the ENABLE_METAL_* build options).
@@ -232,6 +235,17 @@ resolve_phy_pipeline(const phy_pipeline_request& request, const phy_backend_avai
               "offload cannot express - use --phy_pipeline gpu";
       return std::nullopt;
     }
+    // A model is what makes the arm COMPUTE. Since the capability became real (2026-10-16) an "ai" request without
+    // one can only produce a run whose output is the classical result under a name that promises another one --
+    // which is the failure this matrix exists to refuse, and it cost a flight before it was refused: the knobs were
+    // in argv, the run reported "receiver=ai", and every reception was decoded by the classical chain. The
+    // diagnostic identity arm is still reachable from the library (pusch_depth3_kind::ai_identity) and from the
+    // replay tool; what is gone is the ability to ask for it by accident, from the application.
+    if (request.receiver_model.empty()) {
+      error = "--pusch_receiver_backend ai requires --pusch_receiver_model: without a model the AI arm is the "
+              "identity, so the run would report receiver=ai while the CLASSICAL chain produced its output";
+      return std::nullopt;
+    }
     out.receiver = "ai";
   } else {
     error = "Invalid PUSCH receiver backend value '" + request.receiver + "'. Accepted values [auto,classic,ai]";
@@ -371,7 +385,8 @@ inline phy_pipeline_effective resolve_phy_pipeline_or_fatal(std::string_view mod
                                                             std::string_view equalizer,
                                                             std::string_view ldpc,
                                                             std::string_view device_grid,
-                                                            std::string_view receiver = "auto")
+                                                            std::string_view receiver       = "auto",
+                                                            std::string_view receiver_model = "")
 {
   const phy_pipeline_request request{std::string(mode),
                                      std::string(dft),
@@ -379,7 +394,8 @@ inline phy_pipeline_effective resolve_phy_pipeline_or_fatal(std::string_view mod
                                      std::string(equalizer),
                                      std::string(ldpc),
                                      std::string(device_grid),
-                                     std::string(receiver)};
+                                     std::string(receiver),
+                                     std::string(receiver_model)};
   std::string                error;
   std::optional<phy_pipeline_effective> resolved =
       resolve_phy_pipeline(request, query_phy_backend_availability(), error);
@@ -402,7 +418,8 @@ phy_pipeline_effective resolve_phy_pipeline_or_fatal(const ExpertPhyConfig& conf
                                        config.pusch_channel_equalizer_backend,
                                        config.ldpc_decoder_type,
                                        config.device_resource_grid,
-                                       config.pusch_receiver_backend);
+                                       config.pusch_receiver_backend,
+                                       config.pusch_receiver_model);
 }
 
 } // namespace ocudu

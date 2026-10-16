@@ -386,6 +386,14 @@ LLR 量化（`LLR_MAX=120`、`range_limit` 24/24/20/20）、**模型输出加扰
 | `gpu` + `auto` / `classic` | ★★ **接受，且与今天逐位一致** | 回归的判据（§1.5.6 判据 0）|
 | `gpu` + `ai` | ★★ **接受**；★ **`lane_fused` 的语义要在日志里重述** | 见 §1.5.4 |
 | ★ `gpu` + `ai` + `--pusch_dft_type metal` | ★ **额外一臂，但必须显式声明** | 网格写入者变了 ⇒ **多一个变量**，不得混进主臂 |
+| ★★ `gpu` + `ai` **不给 `--pusch_receiver_model`** | ★★★ **冲突（报错）**（★ **2026-10-16 补** ✓）| ★★ 没有模型，臂就是**恒等** ⇒ ★ 运行会印 `receiver=ai` 而输出**由经典链产生** ✗ —— ★ 这正是矩阵要拒绝的那类"名字与实际不符" ✓（★ 原表未列此行：★ 当时 S-1 的恒等臂是**必需**的 ✓；★ 能力变真之后它只剩诊断价值 ✓，★ 而诊断可以从库与 replay 工具走 ✓）|
+| ★★ `gpu` + `ai` + **模型路径不存在** | ★★★ **冲突（报错）**（★ 同上补 ✓）| ★★ 这样的模型**永远绑不上** ✓ ⇒ ★ 它只会在开机后变成 `AI ARM INACTIVE` ＋ 一份**经典标签**的语料 ✗；★ 而这在**开射频之前**就可判定 ✓ |
+
+★★ **落地与实测（★ 2026-10-16 补 ✓）**：★ 上表由三处共同执行 ✓ ——
+★ **CLI11 取值校验**（`*_schema.cpp` ✓）、★ **validator 的跨参数校验**（`du_low_config_validator.cpp` ✓，
+★ 含模型路径存在性 ✓）、★ **`resolve_phy_pipeline()`**（★ 工厂也走它 ✓）；
+★★ 每一行都在**真二进制**上跑过 ✓：★ `probe/check_matrix.sh` ⇒ ★★ **12/12 PASS** ✓（★ 6 条非法全部
+`exit 1`／`105` ＋ `Invalid configuration: …` ✓，★ 6 条合法全部印出预期的 `receiver=` ✓）。★ 详见 §19.81。
 
 ★ **最后一行值得单独立臂**：CPU DFT 的翻转理由（`~118 µs`，dev 6.212/6.215）是
 **通道估计器要等 front end 的命令缓冲**。★ **AI 路径不读那些缓冲** ⇒ **那个理由可能不成立**。
@@ -6687,10 +6695,20 @@ ping ＋ `iperf3 -R` 与同条件经典腿同量级 ✓）、★ 译码（★ rv
 ★★ 16:45 那条腿的教训是：★★ **参数在 argv 里 ✓、★ `--dryrun` 退出 0 ✓、★ 模型文件在 ✓ —— 三样都对，
 ★ 而它跑的是经典接收机** ✗✗ ⇒ ★★ 飞行配方**没有任何一步**能挡住它 ✓。
 
-★★★ **顺带量到一件重要的事** ✓：★★ **`--dryrun` 根本不校验 expert_phy 这一层** ✗ ——
-★ 实测：★ `--expert_phy.pusch_receiver_backend=bogus` ⇒ dryrun **退出 0** ✓；
-★ `--phy_pipeline cpu + --pusch_receiver_backend=ai`（★ 非法组合 ✓）⇒ dryrun **也退出 0** ✗ ⇒
+★★★ **顺带量到一件重要的事** ✓：★★ **`--dryrun` 不校验 expert_phy 的跨参数矩阵** ✗ ——
+★ 实测：★ `--phy_pipeline cpu + --pusch_receiver_backend=ai`（★ 非法组合 ✓）⇒ dryrun **退出 0** ✗；
+★ `gpu + ai` 不给模型 ✗、★ 模型路径不存在 ✗ ⇒ ★ dryrun **也都退出 0** ✓ ⇒
 ★★ **"只看 dryrun"的配方是在检查错的东西** ✗（★ 归入 F53/F54 一族：★ 守卫要在**它要守的那一层**上跑过 ✓）。
+
+> ★★★ **2026-10-16 修正（★ 本节原文这里有一处后来过时了 ✓，★ 保留说明 ✓）**：
+> ★ 原文另有一句 ★ *"`--expert_phy.pusch_receiver_backend=bogus` ⇒ dryrun 退出 0"* ✗。
+> ★★ **现在不成立** ✓：★ 实测（★ 提交 `4523282cc6` ✓）★ **两种写法**（`=bogus` ✓、★ ` bogus` ✓）、
+> ★ **加不加 `--dryrun`** ✓ ⇒ ★★ **一律 exit 105** ✓，★ 并打印
+> ★ `Invalid PUSCH receiver backend. Accepted values [auto,classic,ai]` ✓。
+> ★ 原因是**取值校验在 CLI11 解析期就做了** ✓（★ `du_low_config_cli11_schema.cpp` 的
+> `pusch_receiver_backend_check` ✓）：★ 当时量到的 0 是在那条 schema 检查**落地之前** ✓。
+> ★★ **不变的部分仍然不变** ✓：★★ 跨参数矩阵（★ mode × backend × model ✓）在 dryrun 下**确实不检查** ✓
+> （★ 三条都 exit 0 ✓）⇒ ★★ `check_ai_arm_binding.sh` 那次 8 秒真启动**仍然是必需的** ✓。
 
 ★★★ **⇒ 新工具 `probe/check_ai_arm_binding.sh <mod> [秒] [模型路径]`** ✓ ——
 ★★ **不需要 sudo、不需要手机** ✓：★ 用真配置 ＋ 真模型把 app 起 **8 秒** ✓、★ 读它启动路径上的三行 ✓、
@@ -6962,3 +6980,77 @@ cfg.computeUnits          = MLComputeUnitsAll; // ANE > GPU > CPU as the runtime
 
 ★★ **判腿时要先看的四行（★ 顺序即优先级 ✓）** ✓：★★ ① `receiver=` ✓ ② 臂横幅 ✓
 ③ `DEGRADED`（★ 分子/分母 ✓）★ ④ `[depth3-timing]` ✓ —— ★★ 看完这四行，★ `rv=0` 那个数才**属于网络** ✓。
+
+
+### 19.81 ★★★ 矩阵从"文档里的表"变成"**开射频前就拒绝**" ✓：★ `gpu + ai` **没有模型**从此是非法 ✗（★ 2026-10-16 ✓）
+
+★★ **这一节补的是 §1.5.3 表上原来没有的一格** ✓，★ 而它正是**烧掉一条腿**的那一格 ✓。
+
+★★ **为什么补** ✓：★ 16:42／16:45 两条腿"跑的是经典接收机"有两种成因 ✓ ——
+★★ ① **能力位为假**（★ 请求被静默替换 ✓）★ 已由 `OCUDU_DEPTH3_AI_AVAILABLE` 修掉 ✓（★ §19.72 ✓）；
+★★ ② **恒等臂**（★ `ai` 但**没有模型** ⇒ 转发 ⇒ 输出仍是经典结果 ✗）。
+★ ②当时被 §19.4 的实测表判为"**合法但无法计算**" ✓ —— ★ 那在 **S-1 阶段是对的** ✓（★ 恒等臂是唯一
+能跑通接缝的东西 ✓）；★★ 但能力变真之后 ✓，★ 它只剩"**能悄悄产出一条名叫 ai 的经典腿**"这一个作用 ✗，
+★ 而这恰恰是本工作流**全部纪律**要防的事 ✓。
+
+★★★ **改动（三处执行 + 一处拒绝）** ✓：
+
+| ★ 层 | ★★ 改什么 |
+|---|---|
+| ★ 请求结构 | ★★ `phy_pipeline_request` 增加 `receiver_model` ✓；★ `resolve_phy_pipeline_or_fatal` **两个重载都带它** ✓（★ 否则两个入口会解析出不同配置 ✗）|
+| ★★ 裁决 | ★★ `receiver == "ai"` 且 `receiver_model` **为空** ⇒ ★★★ **冲突** ✓，★ 错误信息逐字说明"**没有模型时臂是恒等 ⇒ 输出由经典链产生**" ✓ |
+| ★ validator | ★★ `ai` ＋ **模型路径不存在** ⇒ ★★ **拒绝** ✓（★ 开射频**之前**就可判定 ✓；★ 存在但绑不上仍由臂自己报 `INACTIVE` ✓ —— 那个只有加载器知道 ✓）|
+| ★ CLI11 帮助 | ★★ `LEGAL COMBINATIONS` / `ILLEGAL` 两段**按新表重写** ✓，★ `--pusch_receiver_model` 的说明改成"**被 ai 要求**" ✓ |
+
+★★ **边界是刻意划在这里的** ✓：★ **"存在性"** 归 validator ✓（★ 它有文件系统 ✓）、
+★ **"绑定性"** 归臂 ✓（★ 它有加载器 ✓）—— ★★ 所以 `gpu + ai` ＋ **一个存在但不是 bundle 的目录** ✓
+★ **不被拒绝** ✓，★ 而是照旧报 `AI ARM INACTIVE` ✓ ＋ ★ 说明输出是经典结果 ✓。★ 这一格也**实测过** ✓：
+
+```
+check_ai_arm_binding.sh 256qam 8 /tmp/d3_not_a_bundle
+  receiver : ai (expert_phy --pusch_receiver_backend ai)
+  arm      : AI ARM INACTIVE (the estimator could not bind model '/tmp/d3_not_a_bundle') …
+  VERDICT  : FAIL - the network is not computing
+```
+
+★★★ **端到端实测：`probe/check_matrix.sh` ⇒ 12/12 PASS** ✓（★ 真二进制 ＋ 真配置 ✓、★ 无 sudo ＋ 无手机 ✓）
+
+```
+-- illegal: must be refused, with the reason in the log
+  PASS  cpu + ai                        Invalid configuration: --phy_pipeline cpu conflicts with …
+  PASS  cpu_gpu + ai                    Invalid configuration: --phy_pipeline cpu_gpu conflicts with …
+  PASS  gpu + ai, no model              Invalid configuration: --pusch_receiver_backend ai requires …
+  PASS  gpu + ai, model path missing    Invalid configuration: --pusch_receiver_model '/nonexistent/…' does not exist
+  PASS  gpu + a CPU channel estimator   Invalid configuration: --phy_pipeline gpu conflicts with …
+  PASS  bogus backend value             exit 105 + "Accepted values [auto,classic,ai]"
+-- legal: must resolve, and the startup line must say to what
+  PASS  gpu + auto / gpu + classic / cpu_gpu + classic      receiver=classic …
+  PASS  gpu + ai + model                                    receiver=ai (expert_phy --pusch_receiver_backend ai)
+  PASS  gpu + ai + model + metal DFT (the separate arm)     receiver=ai …
+-- the boundary
+  PASS  gpu + ai + a path that is not a bundle              receiver=ai (arm then reports INACTIVE)
+```
+
+★ 非法行的**退出码实测** ✓：★ 三条跨参数冲突都是 **exit 1** ✓ ＋ `Invalid configuration: …` ✓；
+★ 值非法是 **exit 105** ✓（★ CLI11 解析期 ✓）。
+★★ **单元测试 27/27 PASS** ✓（★ 新增 `receiver_ai_without_a_model_is_refused` ✓），★ `gnb` 已重建 ✓，
+★ 四条飞行配置 `--dryrun` 仍全部 **exit 0** ✓（★ 校验器新增的存在性检查**没有**误伤正常配方 ✓）。
+
+★★★ **一个守卫自己被自己的报错骗到的例子（★ 归 F42/F53/F54 一族 ✓）** ✓：
+★ 新拒绝信息里有这么一句 *"…would report **receiver=ai** while the CLASSICAL chain produced its output"* ✗；
+★★ `check_matrix.sh` 第一版用 `grep "receiver="` 判断"是否解析出了接收机" ✓ ⇒
+★ 它把**拒绝信息里的那句话**当成了"解析结果" ✗，★ 于是把一行**正确拒绝**判成
+★ `refused AND resolved (receiver=ai …) - which is it?` ✗ —— ★★ **检查器误报，而不是代码错** ✓。
+★ 修法：★ 只认**翻译器自己那一行** ✓（`[phy_pipeline]<空白>receiver=` ✓），
+★ 同一修法**同时应用到** `check_matrix.sh` ✓ 与 `check_ai_arm_binding.sh` ✓
+（★ 否则起飞前的 8 秒检查在"被拒绝"时也会打印出一个 `receiver=ai` ✓ 而它的横幅判据会以另一种理由失败 ✓）。
+★★ **教训**：★★ **"守卫要匹配的字符串，不能出现在守卫要拒绝的那条消息里"** ✓ ——
+★ 报错信息是给人读的 ✓，★ 但守卫是机器读的 ✓，★ 两者共用同一个词就会互相污染 ✗。
+
+★★ **顺带修正 §19.73 的一处** ✓：★ 见该节内嵌的 **2026-10-16 修正** ✓ ——
+★ `--pusch_receiver_backend=bogus` 在 dryrun 下**现在是 exit 105** ✗（★ 原记录的 exit 0 是 schema 值校验
+落地之前的实况 ✓）；★★ 仍成立的是"**dryrun 不检查跨参数矩阵**" ✓（★ 三条都 exit 0 ✓）。
+
+★★ **至此 ①–④ 全部落地并各自有实测** ✓，★ ⑤只剩**用户飞一条腿** ✓：
+★ 配方（`tmp/fly_ai_legs.md` ＋ `tmp/fly_ai_leg.sh`）四条调制**全部 pre-flight PASS** ✓，
+★★ 停腿后一条命令 `probe/ai_leg_verdict.py` ✓（★ §19.80 ✓）给出"**这是不是 AI 结果**" ✓。

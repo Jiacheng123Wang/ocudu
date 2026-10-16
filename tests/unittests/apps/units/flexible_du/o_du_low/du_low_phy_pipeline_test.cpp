@@ -26,13 +26,14 @@ constexpr phy_backend_availability all_available{true, true, true, true, true, t
 /// No Metal backend built in (any other platform).
 constexpr phy_backend_availability none_available{false, false, false, false, false, false};
 
-phy_pipeline_request make_request(std::string mode        = "auto",
-                                  std::string dft         = "auto",
-                                  std::string ch_est      = "auto",
-                                  std::string equalizer   = "auto",
-                                  std::string ldpc        = "auto",
-                                  std::string device_grid = "auto",
-                                  std::string receiver    = "auto")
+phy_pipeline_request make_request(std::string mode           = "auto",
+                                  std::string dft            = "auto",
+                                  std::string ch_est         = "auto",
+                                  std::string equalizer      = "auto",
+                                  std::string ldpc           = "auto",
+                                  std::string device_grid    = "auto",
+                                  std::string receiver       = "auto",
+                                  std::string receiver_model = "")
 {
   return phy_pipeline_request{std::move(mode),
                               std::move(dft),
@@ -40,8 +41,13 @@ phy_pipeline_request make_request(std::string mode        = "auto",
                               std::move(equalizer),
                               std::move(ldpc),
                               std::move(device_grid),
-                              std::move(receiver)};
+                              std::move(receiver),
+                              std::move(receiver_model)};
 }
+
+/// A model path for the tests that ask for the AI receiver: the resolver treats a model as "the arm can compute",
+/// it does not open it (the loader lives in the arm, and the validator checks existence).
+constexpr const char* ai_model = "/models/depth3.mlmodelc";
 
 /// Resolves \c request and fails the test when it is rejected.
 phy_pipeline_effective resolve(const phy_pipeline_request&     request,
@@ -477,7 +483,7 @@ TEST(phy_pipeline_mode_test, receiver_ai_resolves_to_the_ai_arm_now_that_its_hea
 
   std::string error;
   const auto  effective = resolve_phy_pipeline(
-      make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai"), all_available, error);
+      make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model), all_available, error);
   ASSERT_TRUE(effective.has_value()) << error;
   EXPECT_EQ(effective->receiver, "ai");
   // The rest of the configuration is untouched: the arm is chosen at the granularity of the whole depth-3
@@ -492,7 +498,7 @@ TEST(phy_pipeline_mode_test, receiver_ai_conflicts_with_the_two_modes_that_canno
   std::string error;
 
   // cpu forbids every offload, so an AI receiver there is the same kind of conflict as a Metal DFT.
-  EXPECT_FALSE(resolve_phy_pipeline(make_request("cpu", "auto", "auto", "auto", "auto", "auto", "ai"),
+  EXPECT_FALSE(resolve_phy_pipeline(make_request("cpu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model),
                                     all_available,
                                     error)
                    .has_value());
@@ -501,7 +507,7 @@ TEST(phy_pipeline_mode_test, receiver_ai_conflicts_with_the_two_modes_that_canno
   // cpu_gpu is per-MODULE offload: it cannot say "these three modules at once", so accepting the knob there
   // would leave the mode unable to describe what it runs.
   error.clear();
-  EXPECT_FALSE(resolve_phy_pipeline(make_request("cpu_gpu", "auto", "auto", "auto", "auto", "auto", "ai"),
+  EXPECT_FALSE(resolve_phy_pipeline(make_request("cpu_gpu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model),
                                     all_available,
                                     error)
                    .has_value());
@@ -521,16 +527,35 @@ TEST(phy_pipeline_mode_test, receiver_ai_substitutes_the_classic_one_when_the_bi
   // hard-coded false, so EVERY "ai" request resolved to classic while the resolver, the pass-through and the
   // factory had all been in place for days - a leg flew and reported "receiver=classic (asked for ai ...)".
   std::string error;
-  const auto  effective =
-      resolve_phy_pipeline(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai"), none_available, error);
+  const auto  effective = resolve_phy_pipeline(
+      make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model), none_available, error);
   ASSERT_TRUE(effective.has_value()) << "a missing capability substitutes, it does not refuse: " << error;
   EXPECT_EQ(effective->receiver, "classic");
 
   // And with the capability on, the same request is honoured - so the two branches are genuinely different
   // answers to the same command line and only the capability decides which one runs.
-  const auto with_capability =
-      resolve_phy_pipeline(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai"), all_available, error);
+  const auto with_capability = resolve_phy_pipeline(
+      make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model), all_available, error);
   ASSERT_TRUE(with_capability.has_value()) << error;
   EXPECT_EQ(with_capability->receiver, "ai");
+}
+
+TEST(phy_pipeline_mode_test, receiver_ai_without_a_model_is_refused)
+{
+  // The arm computes only WITH a model: without one it is the identity, which forwards to the classical estimator
+  // and demodulator. Such a run reports receiver=ai and its corpus is labelled by the classical chain, which is
+  // the failure this matrix exists to refuse -- it is what the first AI leg of 2026-10-16 did, and the leg had to
+  // be thrown away. The identity arm itself stays reachable from the library and the replay tool; the application
+  // no longer offers it by accident.
+  std::string error;
+  EXPECT_FALSE(resolve_phy_pipeline(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai"),
+                                    all_available,
+                                    error)
+                   .has_value());
+  EXPECT_NE(error.find("requires --pusch_receiver_model"), std::string::npos) << error;
+
+  // A model path is accepted without being opened here: whether the bundle EXISTS is the validator's question (it
+  // has a filesystem) and whether it BINDS is the arm's (it has the loader), and both are reported by their owner.
+  EXPECT_EQ(resolve(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model)).receiver, "ai");
 }
 } // namespace
