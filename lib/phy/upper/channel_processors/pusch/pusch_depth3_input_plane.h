@@ -140,6 +140,12 @@ public:
   /// Channels per (subcarrier, symbol) block in the plane this assembler writes.
   unsigned get_plane_channels() const { return plane_channels; }
 
+  /// \brief Sets the block stride, for a caller that learns the model's plane width after construction.
+  ///
+  /// The arm binds its model inside its own constructor body, so the width is not available to an initialiser
+  /// list; a setter keeps the assembler a plain member. Must be called before the first \ref assemble.
+  void set_plane_channels(unsigned channels) { plane_channels = channels; }
+
   /// \brief Fills \c plane with the contract's tensor and reports the reference amplitude.
   /// \param[out] plane                 `[612, 14, 12]` fp16, subcarrier major, channel contiguous.
   /// \param[out] reference_amplitude   RMS of the pilot LS, the divisor the field channels carry.

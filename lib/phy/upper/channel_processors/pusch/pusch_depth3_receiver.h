@@ -144,6 +144,21 @@ public:
   /// working, which is exactly the kind of half-configured state that must not pass unread.
   virtual std::vector<std::string> binding_notes() const { return {}; }
 
+  /// \brief Whether the bound bundle computes every modulation it declares from ONE set of weights, conditioned
+  /// on the modulation order (design section 19.102) instead of specialised per modulation.
+  ///
+  /// It is the BUNDLE's declaration and not a mode the arm chooses: two bundles with an identical 112-channel
+  /// main head -- a conditioned one and a per-modulation 256QAM one -- differ in nothing observable except what
+  /// they declare, so this is what tells a reader which contract a bound model speaks.
+  virtual bool is_modulation_conditioned() const { return false; }
+
+  /// \brief The plane width the bound bundle expects; 0 when no model is bound.
+  ///
+  /// A conditioned bundle takes the contract's twelve channels PLUS its one-hot conditioning ones, so the width
+  /// belongs to the bundle: a startup line reporting the constant while a conditioned bundle is bound would be
+  /// describing a different input than the one the network is fed.
+  virtual unsigned bound_plane_channels() const { return 0; }
+
   /// \brief Runs the channel estimation entry point of the unit.
   /// \param[in] notifier Notifier to communicate the end of the estimation process.
   /// \param[in] grid     Received resource grid.

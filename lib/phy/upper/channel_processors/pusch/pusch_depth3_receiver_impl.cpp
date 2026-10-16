@@ -162,6 +162,14 @@ void revert_scrambling(span<log_likelihood_ratio>       out,
 ///
 /// Every failure degrades to the classical path AND is counted, so an arm that cannot run costs the link
 /// nothing except honesty: the reception is still decoded, and the run says which receiver produced it.
+/// The modulations the conditioned contract's one-hot channels stand for, in the order the training pipeline
+/// writes them (`depth3.COND_QM_ORDER`). A mismatch here would condition the model with the wrong modulation, and
+/// nothing would look broken -- every head would still produce plausible values.
+static constexpr unsigned D3_COND_QM_ORDER[]    = {2, 4, 6, 8};
+static constexpr unsigned D3_COND_QM_ORDER_SIZE = 4;
+/// The LLR head's stride under the conditioned contract: the widest modulation, always.
+static constexpr unsigned COND_STRIDE = 8;
+
 class pusch_depth3_receiver_ai_network_impl : public pusch_depth3_receiver
 {
 public:
@@ -190,29 +198,72 @@ public:
       const bool loaded = engine->init_depth3(path.c_str());
       const unsigned declared_qm = loaded ? engine->depth3_bits_per_symbol() : 0;
 
-      // REFUSED BEFORE IT CAN COMPUTE ANYTHING WRONG. A MODULATION-CONDITIONED bundle is a different contract:
-      // its plane carries four conditioning channels and its main head strides by the widest modulation, so
-      // binding it as a per-modulation model would feed it a 12-channel plane with no Qm and read its head with
-      // the wrong stride -- and it would produce plausible-looking logits for it, which is the failure mode this
-      // whole workstream exists to make impossible. The guard stays until the arm implements that contract; the
-      // per-modulation bundles are unaffected, so a deployment that mixes them up gets a refusal and a reason.
+      // THE MODULATION-CONDITIONED CONTRACT (design section 19.102): one bundle, every modulation it declares,
+      // with the Qm as four extra input channels and a main head whose stride is the widest modulation. It cannot
+      // be told apart from a per-modulation bundle by shape -- both carry 14 * 8 = 112 main-head channels -- so
+      // the bundle's own declaration decides, and only binding can read it.
       if (loaded && engine->depth3_is_modulation_conditioned()) {
-        // The DECLARED SET is printed, not its size: "Qm=4" from a count reads as 16QAM, which is a different
-        // modulation from the four this bundle serves -- a misleading line is worse than a terse one.
-        std::string declared;
-        for (unsigned i = 0; i != engine->depth3_nof_declared_qm(); ++i) {
-          declared += (declared.empty() ? "" : ",") + std::to_string(engine->depth3_declared_qm(i));
+        // ONE CONTRACT PER ARM, refused rather than half-honoured. The two contracts need different input planes
+        // (16 channels against 12), and the plane is assembled once per arm: binding both would feed one of them
+        // the other's width, which the runtime rejects -- a degradation that looks like a missing model rather
+        // than like the configuration error it is. Refusing here names the conflict instead.
+        if (any_model_bound && !conditioned) {
+          notes.push_back(fmt::format("modcond model '{}' NOT bound: this arm already carries per-modulation "
+                                      "model(s), and the two contracts need different input planes ({} against "
+                                      "{}); use one contract per run",
+                                      path, engine->depth3_input_channels(),
+                                      pusch_depth3_input_plane::NOF_CHANNELS));
+          return;
         }
-        notes.push_back(fmt::format("model '{}' NOT bound: it declares the MODULATION-CONDITIONED contract "
-                                    "(depth3_layout=modcond, Qm={}), which this arm does not run yet -- pass a "
-                                    "per-modulation bundle, or wait for the conditioned arm",
-                                    path, declared));
+        std::vector<unsigned> declared;
+        for (unsigned i = 0; i != engine->depth3_nof_declared_qm(); ++i) {
+          declared.push_back(engine->depth3_declared_qm(i));
+        }
+        const depth3_model_map::outcome outcome = models.add_conditioned(declared, path);
+        if (outcome.result == depth3_model_map::status::refused) {
+          notes.push_back(fmt::format("modcond model '{}' NOT bound: {}", path, outcome.reason));
+          return;
+        }
+        // ONE ENGINE SERVES THEM ALL, and it decides the plane the arm assembles and the stride it reads the LLR
+        // head with: the contract's 12 channels plus the four conditioning ones, and a fixed stride of eight
+        // whatever the reception's own Qm is.
+        conditioned        = true;
+        plane_channels     = engine->depth3_input_channels();
+        input_plane.assign(static_cast<size_t>(pusch_depth3_input_plane::NOF_SUBCARRIERS) *
+                               pusch_depth3_input_plane::NOF_SYMBOLS * plane_channels,
+                           0.0F);
+        assembler.set_plane_channels(plane_channels);
+        for (unsigned qm : declared) {
+          scales_by_qm[qm] = read_scales(path, D3_RANGE_LIMIT_256QAM);
+          engine_by_qm[qm] = nullptr; // one engine, shared by every modulation it declares; see `engine`.
+          // The stride of the head THIS bundle computes, which is the widest modulation it declares whatever
+          // the reception's own Qm is: the one-hot channels are what tell the network which bits are live.
+          llr_stride_by_qm[qm] = COND_STRIDE;
+        }
+        scales_by_qm[declared.front()] = read_scales(path, D3_RANGE_LIMIT_256QAM);
+        shared_engine      = std::move(engine);
+        any_model_bound    = true;
+        notes.push_back(fmt::format("modcond model '{}' bound: one bundle computes {} modulation(s) "
+                                    "(Qm set printed by the coverage line), plane {} channels, LLR stride {}",
+                                    path, declared.size(), plane_channels, COND_STRIDE));
+        if (outcome.result == depth3_model_map::status::redundant) {
+          notes.back() += fmt::format("; {}", outcome.reason);
+        }
         return;
       }
 
       const depth3_model_map::outcome outcome = fallback ? models.add_fallback(declared_qm, path)
                                                         : models.add_slot(slot_qm, declared_qm, path);
       const char* const what = fallback ? "fallback" : "slot";
+      // The mirror of the refusal above: a per-modulation model arriving at an arm that already carries a
+      // conditioned bundle cannot be served either, for the same reason -- one input plane per arm.
+      if (conditioned) {
+        notes.push_back(fmt::format("{} model '{}' NOT bound: this arm already carries a modulation-conditioned "
+                                    "bundle, and the two contracts need different input planes ({} against {}); "
+                                    "use one contract per run",
+                                    what, path, plane_channels, pusch_depth3_input_plane::NOF_CHANNELS));
+        return;
+      }
       // The line is COLLECTED, not printed: the pool builds one arm per concurrent PUSCH thread, and the factory
       // prints these once for the pool.
       if (outcome.result != depth3_model_map::status::kept) {
@@ -223,6 +274,11 @@ public:
       // reception picks the one of the model that computed it.
       scales_by_qm[declared_qm] = read_scales(path, D3_RANGE_LIMIT_256QAM);
       engine_by_qm[declared_qm] = std::move(engine);
+      // The LLR head's stride, by the SAME rule as the conditioned case: the head's width per symbol, which for a
+      // per-modulation bundle is its own Qm. Leaving it at the member's default 0 is not a smaller stride but a
+      // single repeated element -- it produced chance-level agreement (sign 0.50, mean |LLR| 19 against 64) on the
+      // per-modulation path while every CRC still looked plausible (measured 2026-10-16).
+      llr_stride_by_qm[declared_qm] = declared_qm;
       notes.push_back(fmt::format("{} model '{}' bound for Qm={} {}", what, path, declared_qm,
                                   depth3_model_map::name(declared_qm)));
       any_model_bound = true;
@@ -285,6 +341,15 @@ public:
   /// True when the fallback bound here came from the build rather than from the command line.
   bool fallback_is_the_build_default() const override { return fallback_is_build_default; }
 
+  /// The conditioned contract is bound: one bundle, one set of weights, the plane carries the one-hot channels and
+  /// the LLR head is read with a stride. What a reader must do with it, and the startup line the factory prints
+  /// from it, are in the interface's comment.
+  bool is_modulation_conditioned() const override { return conditioned; }
+
+  /// The plane width the bound bundle declares. Zero when nothing is bound: the width would then describe no
+  /// input at all, and the contract's constant is a plausible-looking answer to a question that has none.
+  unsigned bound_plane_channels() const override { return any_model_bound ? plane_channels : 0; }
+
   void estimate(dmrs_pusch_estimator_notifier&            notifier,
                 const resource_grid_reader&                grid,
                 const dmrs_pusch_estimator::configuration& config) override
@@ -339,7 +404,16 @@ public:
               detail);
       return;
     }
-    metal::coreml_nn_engine& computing_engine = *engine_by_qm[qm];
+    // WHICH ENGINE COMPUTES is decided per modulation and not per arm: a per-modulation slot can win a
+    // modulation over a conditioned bundle (`depth3_model_map` keeps the slot), and that reception must then
+    // run the slot's engine with the slot's stride. The conditioned engine is the fallback for the
+    // modulations no per-modulation model claimed.
+    metal::coreml_nn_engine& computing_engine =
+        engine_by_qm[qm] != nullptr ? *engine_by_qm[qm] : *shared_engine;
+    // A reception computes only when a model was bound for its modulation, and every binding writes the stride at
+    // the same time as the engine. Asserting it keeps a future binding path from computing with a zero stride,
+    // which does not fail loudly: it reads one element of the head over and over (measured 2026-10-16).
+    ocudu_assert(llr_stride_by_qm[qm] != 0, "Qm={} has a bound model but no main-head stride", qm);
     const depth3_scales&     model_scales     = scales_by_qm[qm];
 
     // ---- the contract's plane, from the grid the chain holds --------------------------------------
@@ -347,6 +421,38 @@ public:
     float reference_amplitude = 0.0F;
     const pusch_depth3_input_plane::status status =
         assembler.assemble(span<__fp16>(input_plane), reference_amplitude, grid, config, dmrs_context);
+    if (conditioned) {
+      // The Qm as the contract wants it: four constant channels per (subcarrier, symbol), all zero but the
+      // reception's own. Written HERE, once per reception, because the assembler describes the grid and this
+      // describes which modulation the grid carries -- and the value is the same in every block, so the loop is
+      // 612 * 14 stores of four values rather than anything per-bit.
+      const unsigned qm_index = [qm]() {
+        for (unsigned i = 0; i != D3_COND_QM_ORDER_SIZE; ++i) {
+          if (D3_COND_QM_ORDER[i] == qm) {
+            return i;
+          }
+        }
+        return D3_COND_QM_ORDER_SIZE;
+      }();
+      if (qm_index != D3_COND_QM_ORDER_SIZE) {
+        const __fp16 one_hot[D3_COND_QM_ORDER_SIZE] = {qm_index == 0 ? __fp16(1) : __fp16(0),
+                                                       qm_index == 1 ? __fp16(1) : __fp16(0),
+                                                       qm_index == 2 ? __fp16(1) : __fp16(0),
+                                                       qm_index == 3 ? __fp16(1) : __fp16(0)};
+        for (unsigned k = 0; k != pusch_depth3_input_plane::NOF_SUBCARRIERS; ++k) {
+          for (unsigned symbol_index = 0; symbol_index != pusch_depth3_input_plane::NOF_SYMBOLS;
+               ++symbol_index) {
+            __fp16* block = input_plane.data() +
+                            (static_cast<size_t>(k) * pusch_depth3_input_plane::NOF_SYMBOLS + symbol_index) *
+                                plane_channels +
+                            pusch_depth3_input_plane::NOF_CHANNELS;
+            for (unsigned c = 0; c != D3_COND_QM_ORDER_SIZE; ++c) {
+              block[c] = one_hot[c];
+            }
+          }
+        }
+      }
+    }
     const auto segment_assembled = std::chrono::steady_clock::now();
     if (status != pusch_depth3_input_plane::status::ok) {
       // The reason is a property of the RECEPTION, not of the code, so it is reported with its own name.
@@ -591,7 +697,8 @@ private:
 
         for (unsigned bit = 0; bit != qm; ++bit) {
           const float logit = static_cast<float>(
-              reinterpret_cast<const __fp16*>(llr_head.data())[(static_cast<size_t>(k) * pusch_depth3_input_plane::NOF_SYMBOLS + symbol) * qm + bit]);
+              reinterpret_cast<const __fp16*>(llr_head.data())[(static_cast<size_t>(k) * pusch_depth3_input_plane::NOF_SYMBOLS + symbol) * llr_stride_by_qm[qm] +
+                                                                                  bit]);
           // The contract's model-external map for the main head: the graph's tanh shape times S_llr, then the
           // chain's own quantiser. `quantize` clips to +-LLR_MAX and can never produce -128 or the reserved
           // +-LLR_INFTY, so the arm cannot fabricate a "certain bit".
@@ -654,6 +761,16 @@ private:
   std::array<depth3_scales, 9>                      scales_by_qm;
   /// True when at least one model bound: the arm will compute for the modulations it covers.
   bool                                              any_model_bound = false;
+  /// The MODULATION-CONDITIONED contract is bound: one engine serves every modulation it declares and the plane
+  /// carries the four conditioning channels. The LLR head's stride is NOT arm-wide but per modulation
+  /// (`llr_stride_by_qm`), because a per-modulation slot can share the arm with a conditioned fallback.
+  bool                                              conditioned   = false;
+  /// The main head's stride, per modulation, as the bundle that computes that modulation DECLARES it: its head
+  /// width divided by the slot's symbols. Qm for a per-modulation bundle, the widest Qm for a conditioned one.
+  /// Zero means nothing is bound for that modulation, and a zero stride must never be used to read a head.
+  std::array<unsigned, 9>                           llr_stride_by_qm{};
+  unsigned                                          plane_channels = pusch_depth3_input_plane::NOF_CHANNELS;
+  std::unique_ptr<metal::coreml_nn_engine>          shared_engine;
   /// What happened to each model, for the factory to print once for the pool (see binding_notes()).
   std::vector<std::string>                          notes;
 

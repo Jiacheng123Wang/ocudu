@@ -8,6 +8,7 @@
 #include "pusch_decoder_hw_impl.h"
 #include "pusch_decoder_impl.h"
 #include "pusch_depth3_model_map.h"
+#include "pusch_depth3_input_plane.h"
 #include "pusch_depth3_receiver_impl.h"
 #include "pusch_processor_impl.h"
 #include "pusch_processor_pool.h"
@@ -231,6 +232,21 @@ public:
                    "chain's measurements. A reception of any other modulation degrades to the classical chain, is "
                    "counted, and says so.\n",
                    arm.bound_models().size());
+        // THE CONTRACT, printed from the bundle's own declaration rather than from the command line. It is the
+        // only way to see the declaration in the artifact that actually loaded: a conditioned bundle and a
+        // per-modulation 256QAM bundle have the same 112-channel main head and the same file name shape, and
+        // differ in nothing else a log could show. A conditioned bundle fed a twelve-channel plane, or read with
+        // a per-modulation stride, does not fail loudly -- it computes the wrong thing.
+        if (arm.is_modulation_conditioned()) {
+          std::string declared;
+          for (const pusch_depth3_bound_model& model : arm.bound_models()) {
+            declared += fmt::format("{}{}", declared.empty() ? "" : ",", model.qm);
+          }
+          fmt::print(stderr,
+                     "[pusch_receiver]   contract=modcond: ONE bundle computes Qm={{{}}} (plane {} channels = {} + "
+                     "the one-hot ones, LLR head read with a stride); the bundle declares this itself.\n",
+                     declared, arm.bound_plane_channels(), pusch_depth3_input_plane::NOF_CHANNELS);
+        }
         for (const pusch_depth3_bound_model& model : arm.bound_models()) {
           fmt::print(stderr, "[pusch_receiver]   computes Qm={} {:<6s} <- '{}' [{}]\n", model.qm,
                      depth3_model_map::name(model.qm), model.path,

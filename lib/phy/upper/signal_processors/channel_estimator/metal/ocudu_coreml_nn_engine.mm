@@ -186,7 +186,11 @@ bool run_prediction_depth3(coreml_nn_engine_impl* e,
   // The contract's input plane: [1, subcarriers, 14 symbols, 12 channels]. The symbol axis is a
   // SPATIAL axis here, which is the whole point of the layout: a 3x3 kernel mixes frequency AND
   // time. The buffer is the caller's, bound with a nil deallocator so nothing is copied.
-  NSArray<NSNumber*>* in_shape = @[ @1, @(nsc), @(NOF_SYMBOLS_PER_SLOT), @(DEPTH3_IN_CHANNELS) ];
+  // The PLANE WIDTH comes from the bundle's declaration, not from the contract's constant: a conditioned bundle
+  // takes the contract's twelve channels plus its four conditioning ones, and a multi-array of the wrong width is
+  // rejected by the runtime -- which is how the first conditioned run degraded every reception instead of
+  // computing (measured 2026-10-16).
+  NSArray<NSNumber*>* in_shape = @[ @1, @(nsc), @(NOF_SYMBOLS_PER_SLOT), @(e->model3_in_channels) ];
   MLMultiArray*       in_arr   = [[MLMultiArray alloc]
       initWithDataPointer:const_cast<uint16_t*>(in.plane)
                     shape:in_shape
