@@ -6121,7 +6121,16 @@ the DM-RS convention is wrong for this capture
 ★ 配方用首次训练的 **150 epoch / batch 8** ✓，★ 其余（★ `--w-ch 0 --w-noise 0` ✓）与部署模型一致 ✓。
 
 ★ 驱动器 `work_tmp/tmp/run_modulation.sh` ✓：★ 切分 → 训练 → 编译 → 对照 → 判据 1 ✓，
-★ 三个调制**串行**跑 ✓（★ GPU 是同一个 ✓），★ 日志 `tmp/run_<tag>.log` ✓。
+★ 三个调制**串行**跑 ✓，★ 日志 `tmp/run_<tag>.log` ✓。
+
+★★ **实测（★ 2026-10-16 ✓）两件影响工时的事实** ✓：★ ① **训练只用 CPU** ✗ ——
+★★ `tensorflow-metal` **没装** ✓（★ `tf.config.list_physical_devices()` 只有 `CPU` ✓），
+★ 所以 `train_depth3.py` 是 **~700% CPU** 在跑 ✓、★ 与 `ul_chain_replay` 抢的是 **CPU 而不是 GPU** ✓；
+★ ② ★★ 原配方（★ 150 epoch / batch 8 ✓）实测 **~1–2 分钟一个 epoch** ✗ ⇒ ★★ 一个模型 **2.5–5 小时** ✗✗
+⇒ ★★ 改成 **80 epoch / batch 32** ✓（★ 每个 epoch 步数少 8 倍 ✓，★ 而**过数据 80 遍** ✓，
+★ 仍然保留"最佳验证 epoch" ✓）⇒ ★ **约 55 分钟一个模型** ✓、★ 三个串行 **~3 小时** ✓。
+★★ **没有去装 `tensorflow-metal`** ✗：★ TF 2.21 与插件的版本匹配是已知的坑 ✓，
+★ 而在目标进行中弄坏一个能跑的环境，代价比等两小时大 ✓。
 ★★ 顺带修掉驱动器自己的一个路径缺陷 ✓：★ 它在仓库根目录 `cd` ✓，★ 而评估清单是相对路径 ✗ ⇒ 已改成绝对 ✓。
 
 
