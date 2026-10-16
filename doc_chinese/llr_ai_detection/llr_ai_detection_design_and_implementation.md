@@ -6741,3 +6741,36 @@ ping ＋ `iperf3 -R` 与同条件经典腿同量级 ✓）、★ 译码（★ rv
 并伴随 `receiver=ai` ✓、★ `lane_fused` 重述 ✓、★ `AI ARM ACTIVE` ✓）★ ⇒ ★★ §1.5.3 末行的"日志必须能区分"落地 ✓；
 ★ ② 四个调制在**重放侧**仍然 `AI ARM ACTIVE` ✓（★ 重放二进制未被本次改动触及 ✓，
 ★ 其 `crc=OK` 证据见 §19.69 ✓）。
+
+
+### 19.75 ★★ 停腿后的**一条命令**：★ `probe/ai_leg_verdict.py` ✓ —— ★ 而它先在 16:45 那条腿上证伪了自己 ✓（★ 2026-10-16 ✓）
+
+★ AI 腿有**两种**"外面看不出来"的失败 ✓（★ 两者的译码率都正常 ✓）：
+★ ① **臂根本没跑** ✓（★ 请求被替换 ✓、★ 模型没绑上 ✓、★ 没给模型 ✓）；★ ② **臂跑了但大多数接收降级** ✓
+（★ 前向失败 ✓、★ 或缺上下文 ✓）—— ★★ **降级的臂与经典链逐位相同** ✓ ⇒ ★★ 两种情况下"这条腿的数"都不是网络的数 ✓。
+
+★★ 新工具 `probe/ai_leg_verdict.py --corpus <dir> --log <log> [--expect-mod …]` ✓：★ 把**臂的证据打在最前面** ✓
+（★ `receiver=` 行 ✓、★ 臂横幅 ✓、★ `DEGRADED` 计数与占比 ✓、★ 降级原因 Top-3 ✓），★ 然后是门槛 ✓
+（★ rv=0 ✓＋近 2000 ✓）、★ SINR/epre（★ 并注明 AI 腿的 SINR 来自**未发布**的网络上报头 ✓）、★ 采集数 ✓、★ 实时故障数 ✓，
+★★ 最后给 `VERDICT` ✓。
+
+★★★ **先拿 16:45 那条腿验伪** ✓（★ 已知它跑的是经典 ✓）：
+
+```
+=== aillr_256qam_classic_s1 (AI leg)
+  receiver line : classic (asked for ai, NOT YET BOUND to a backend - stage 1 …
+  arm           : NO BANNER -- the arm was never constructed
+  !! THIS LEG DID NOT RUN THE NETWORK: its decode rate belongs to the classical chain.
+  degraded      : 0 reception(s) forwarded to the classical chain = 0.0% of the 94592 the filter selected
+  rv=0 rate     : 92407/94592 = 97.7% | last 2000: 97.0%
+  SINR / epre   : median 24.6 dB / -5.3 dB
+  captures      : 40276
+  real-time failures: 6759
+  VERDICT       : NOT an AI result -- do not report these numbers as the network
+```
+
+★★ **⇒ 工具的第一件事是证伪** ✓：★★ 如果 16:45 当天它就在手边 ✓，**一条命令**就能看出那条腿不是 AI 腿 ✓，
+★ 而不是等一整条腿跑完再回头查日志 ✓。
+★★ **顺带两个数** ✓：★ 那条目录里是 **40 276** 个采集 ✓（★ 16:42 与 16:45 两条腿都写进了它 ✓ ——
+★ 与"两次 `ai` 请求都被替换"一致 ✓）；★ **实时故障 6 759 条** ✗（★ 与 §19.60 那条腿的 6 609 同量级 ✓）
+⇒ ★★ 这条腿的负载形态要在 AI 腿上继续盯 ✓。
