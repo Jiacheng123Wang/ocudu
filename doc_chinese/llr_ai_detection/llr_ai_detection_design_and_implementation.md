@@ -7194,3 +7194,69 @@ Could not stop application after 30 seconds. Forcing exit.  ← 定时器兜底 
 ★★ **实测** ✓：★ `gpu + ai`（★ 无模型 ✓）⇒ ★ 日志三行齐全 ✓（★ `ai model: …（build's default）` ✓、
 ★ `receiver=ai` ✓、★ `AI ARM ACTIVE … bound model` ✓）；★ 矩阵检查 **13/13 PASS** ✓
 （★ 含"没给模型也要绑默认"这条 ✓）；★ `gpu + ai + /不存在的路径` 在**开射频前** `exit 1` ✓。
+
+
+### 19.84 ★★★ 关机卡死的**根因找到了**：★ 低层 PHY 把每个 slot 的网格**扣在手里**，★ 而它比"等它的人"**后**才析构 ✗（★ 2026-10-16 ✓）
+
+★★ 上两节把等待**有界化**并**报了名** ✓；这一节把它**修掉** ✓。
+
+★★★ **追到的持有者** ✓：★ 上行 slot 的网格从 FAPI 一路走到低层 PHY ✓ ——
+
+```
+fapi_to_phy_fastpath_translator: ul_pdu_slot_repository.release()   → shared_resource_grid
+  → uplink_request_processor_impl::process_uplink_slot_request()
+  → upper_phy_ru_ul_request_adapter → ru_lower_phy_uplink_request_handler_impl
+  → puxch_processor_impl::handle_request():
+        auto request = requests.exchange({context.slot, grid.copy()});   ← ★★ 存了一份 COPY ✗
+        …
+        shared_resource_grid current_grid;                              ← ★★ 正在收的那个 slot 再扣一份 ✗
+```
+
+★★ `shared_resource_grid` 是**引用计数**的 ✓，★ 而 **只有最后一个持有者**释放时才会
+★ `uplink_resource_grid_controller::notify_release_scope()` ⇒ `stop_token.reset()` ✓
+（★ §19.82 ✓）。★★ **⇒ 只要 `puxch` 手里还有任何一份 copy ✓，★ 上层那个 token 就永远不放** ✗。
+
+★★★ **而 `puxch_processor_impl::stop()` 原来只有一行** ✗：
+
+```cpp
+void stop() override { stopped = true; }      // ← 只立了个旗子，网格一份没放 ✗
+```
+
+★★ **⇒ 环就这么闭上了** ✓：★ `requests` 是一个**按 slot 索引的环**（★ 16 项 ✓），
+★ 每次新请求只**覆盖同一索引**的那一项 ✓ ⇒ ★★ 关机时**最近 16 个 slot 的网格 copy 全都还在** ✗；
+★ 它们要等 `puxch` **析构**才释放 ✓，★ 而 `puxch` 析构在 **O-DU 低层析构**时 ✓ ——
+★★ **比 `upper_phy_impl::stop()` 的等待更晚** ✗ ⇒ ★★ **结构性的死等** ✓，★ 不是偶发泄漏 ✓。
+
+★★★ **这解释了全部观察** ✓：
+★ **空载**从不分配网格 ✓ ⇒ 19 ms 秒退 ✓；
+★ **带业务**必然留下满环的 copy ✓ ⇒ **每次都会卡** ✓ ——
+★ 与"很久以前 5 秒超时就出现过 ✓、后来延长到 30 秒只是等得更久 ✓"**完全一致** ✓。
+
+★★★ **修法（★ 两处小改 ✓）** ✓：
+
+1. ★ `resource_request_pool::clear()` ✓：把环里每一项与空请求交换 ✓ ⇒ 资源**当场析构** ✓
+   （★ 注释写明：★ "存着的请求会**扣住**它的资源" ✓，★ 以及为什么必须在 stop 时放 ✓）；
+2. ★ `puxch_processor_impl::stop()` ✓：★ 先立旗子 ✓、★ 再
+   ★ `current_grid = shared_resource_grid();` ＋ `requests.clear();` ✓ ——
+   ★★ 注释写明**为什么必须在这里放** ✓（★ 生产者已被旗子挡住 ✓、★ 射频此前已停 ✓，
+   ★ 而"等它的人"在**它之前** ✓）。
+
+★★ **顺序上也对得上** ✓：★ `flexible_o_du_impl::stop()` **先停 RU** ✓（★ 低层 PHY 在其中 ✓，
+★ 于是 `puxch` 先放网格 ✓），★ 之后才轮到 `o_du stop: lower_phy`（★ 上层 PHY 的等待 ✓）
+⇒ ★★ 上层等到的时候，token **早就该被放了** ✓。
+
+★★★ **验证（★ 含负向对照 ✓ —— 这一条最关键 ✓）** ✓：★ 新增单测
+★ `StopReleasesTheGridsTheProcessorStillHolds` ✓（★ 24 个参数化全部 ✓）：
+
+```
+把 requests.clear()/current_grid 那两行【临时去掉】→ 24/24 FAIL ✗   ← 证明这条测试真的抓得住缺陷 ✓
+恢复 → 240/240 PASS ✓（整个 puxch 套件 ✓）
+```
+
+★ 判据是**引用计数** ✓：★ 请求后 `ref_count == 2` ✓（★ 调用方 1 ＋ 处理器 1 ✓）、
+★ `stop()` 后 **== 1** ✓（★ 处理器那一份**当场**放了 ✓）、★ 调用方释放后 **== 0** ✓
+（★ 为此给 `shared_resource_grid_spy` 加了 `get_ref_count()` ✓，★ 注释说明：
+★ 之前只能靠"析构时还持有着就 fatal"**间接**发现 ✓ —— ★ 而那正是这个 hang 藏了这么久的原因 ✓）。
+
+★★ **对这次飞行的意义** ✓：★ 即使关机再慢 ✓，★ 现在也有**三层** ✓ —— ★ 根因已修（★ 网格在 stop 时放 ✓）、
+★ 等待有界（★ 2 秒 ＋ 诊断 ✓）、★ 第二次 Ctrl+C 立即强制（★ `SA_NODEFER` ✓）。

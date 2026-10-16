@@ -53,7 +53,26 @@ public:
   void connect(puxch_processor_notifier& notifier_) override { notifier = &notifier_; }
 
   // See interface for documentation.
-  void stop() override { stopped = true; }
+  void stop() override
+  {
+    stopped = true;
+
+    // RELEASE THE GRIDS THIS PROCESSOR STILL HOLDS, and release them HERE.
+    //
+    // Every uplink slot stores a COPY of its shared_resource_grid in `requests` (and the slot being received holds
+    // one in current_grid), and a copy keeps the grid's reference count above zero -- which is exactly what keeps
+    // the upper PHY's stop token held (uplink_resource_grid_controller::notify_release_scope is only called by the
+    // LAST owner). Setting the flag and keeping the copies meant that after any uplink traffic the upper PHY's stop
+    // waited for tokens that could only be released when this object was DESTROYED - which happens after that wait:
+    // measured 2026-10-16 on a flown leg, "o_du stop: lower_phy" never returned, the 30-second termination alarm
+    // fired and the gNB was SIGKILLed. An idle gNB never allocates a grid, which is why the same shutdown took
+    // 19 ms there and why the defect looked like "only busy runs cannot be stopped".
+    //
+    // The producers are already gated by `stopped` above, and the radio has been stopped before this point (see
+    // flexible_o_du_impl::stop), so nothing is writing into these grids any more.
+    current_grid = shared_resource_grid();
+    requests.clear();
+  }
 
   // See interface for documentation.
   puxch_processor_request_handler& get_request_handler() override { return *this; }

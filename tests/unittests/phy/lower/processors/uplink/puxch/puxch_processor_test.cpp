@@ -196,6 +196,29 @@ TEST_P(LowerPhyUplinkProcessorFixture, DemodulatorConfiguration)
   ASSERT_EQ(ofdm_demod_spy->get_configuration(), expected_demod_config);
 }
 
+TEST_P(LowerPhyUplinkProcessorFixture, StopReleasesTheGridsTheProcessorStillHolds)
+{
+  // The processor stores a COPY of every uplink slot's grid in its request ring and one more for the slot being
+  // received, and each copy keeps the grid alive -- which is what holds the upper PHY's stop token (only the LAST
+  // owner notifies the pool: uplink_resource_grid_controller::notify_release_scope). Setting a flag at stop and
+  // keeping the copies made every shutdown after uplink traffic wait for tokens that this object would only release
+  // when DESTROYED, i.e. after the waiter: measured 2026-10-16, "o_du stop: lower_phy" never returned, the
+  // 30-second termination alarm fired and the gNB was SIGKILLed. An idle gNB allocates no grid at all, which is why
+  // the same shutdown took 19 ms there. This asserts the release happens AT THE STOP.
+  const subcarrier_spacing scs   = std::get<2>(GetParam());
+  resource_grid_context    context = {.slot = slot_point(to_numerology_value(scs), 0), .sector = 0};
+  shared_resource_grid     shared_rg = shared_rg_spy.get_grid();
+  puxch_proc->get_request_handler().handle_request(shared_rg.copy(), context);
+  ASSERT_EQ(shared_rg_spy.get_ref_count(), 2) << "the processor must hold the grid it was asked to fill";
+
+  puxch_proc->stop();
+  EXPECT_EQ(shared_rg_spy.get_ref_count(), 1) << "the stop did not release the grid the processor was holding";
+
+  // The caller's own scope still owns the grid; releasing it brings the count to zero as usual.
+  shared_rg.release();
+  EXPECT_EQ(shared_rg_spy.get_ref_count(), 0);
+}
+
 TEST_P(LowerPhyUplinkProcessorFixture, FlowNoRequest)
 {
   unsigned           nof_rx_ports = std::get<0>(GetParam());

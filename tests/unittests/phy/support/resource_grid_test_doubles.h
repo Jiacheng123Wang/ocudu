@@ -522,6 +522,13 @@ public:
     ocudu_assert(available, "The grid must NOT be reserved.");
     return {*this, ref_count};
   }
+
+  /// Number of scopes currently holding the grid: 1 after get_grid(), 2 while a copy is still held elsewhere.
+  ///
+  /// \note Exposed so that a test can assert that a component RELEASED a grid it was holding (for example in its
+  /// stop), rather than only that the grid was eventually released when everything was destroyed -- which is how the
+  /// 2026-10-16 shutdown hang hid: the holders were destroyed after the waiter had already given up.
+  unsigned get_ref_count() const { return ref_count.load(std::memory_order_relaxed); }
 };
 
 /// \brief Describes a resource grid dummy used for testing classes that handle resource grids but do not use the

@@ -53,6 +53,26 @@ public:
     return requests[request.slot.system_slot()].exchange(std::move(request));
   }
 
+  /// \brief Releases every stored request, destroying the resources they hold.
+  ///
+  /// WHY IT EXISTS. A stored request KEEPS its resource alive: `puxch_processor_impl` stores a copy of the slot's
+  /// shared_resource_grid, and that copy holds the grid's reference count above zero -- which is what keeps the
+  /// upper PHY's stop token on the grid. Stop only set a flag, so every shutdown after uplink traffic left the last
+  /// requests (a full ring of them) holding their grids until the processor was DESTROYED, i.e. after the upper PHY
+  /// had already waited for those very tokens: measured 2026-10-16, "o_du stop: lower_phy" never returned, the
+  /// 30-second termination alarm fired and the gNB was SIGKILLed (the operator's report was "只能 kill"). Releasing
+  /// them at stop breaks that cycle.
+  ///
+  /// \note Best effort by construction: a slot whose wrapper is held by a concurrent producer is left alone rather
+  /// than waited for. A caller that must be certain can call this again; the producer refuses new requests once the
+  /// processor has stopped.
+  void clear()
+  {
+    for (request_wrapper& request : requests) {
+      request.exchange(request_type{});
+    }
+  }
+
 private:
   /// Wraps a request in a lock-free, non-blocking access guard.
   class request_wrapper
