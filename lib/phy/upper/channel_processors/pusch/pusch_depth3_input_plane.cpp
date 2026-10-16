@@ -54,8 +54,10 @@ pusch_depth3_dmrs_context ocudu::make_pusch_depth3_dmrs_context(const dmrs_pusch
   return context;
 }
 
-pusch_depth3_input_plane::pusch_depth3_input_plane() :
-  prg(create_pseudo_random_generator_sw_factory()->create()), row(NOF_SUBCARRIERS)
+pusch_depth3_input_plane::pusch_depth3_input_plane(unsigned plane_channels_) :
+  plane_channels(plane_channels_),
+  prg(create_pseudo_random_generator_sw_factory()->create()),
+  row(NOF_SUBCARRIERS)
 {
 }
 
@@ -65,7 +67,7 @@ const char* pusch_depth3_input_plane::to_string(status value)
     case status::ok:
       return "ok";
     case status::wrong_plane_size:
-      return "the destination is not [612, 14, 12]";
+      return "the destination is smaller than [612, 14, plane_channels]";
     case status::unsupported_configuration:
       return "the configuration is outside the contract";
     case status::unsupported_bandwidth:
@@ -103,7 +105,10 @@ pusch_depth3_input_plane::assemble(span<__fp16>                           plane,
                                    const pusch_demodulator::configuration& config,
                                    const pusch_depth3_dmrs_context&       dmrs)
 {
-  if (plane.size() != NOF_SUBCARRIERS * NOF_SYMBOLS * NOF_CHANNELS) {
+  // The plane must hold the contract's 12 channels per block, and a conditioned bundle's plane holds more: the
+  // stride follows the PLANE, so the check is "at least" and the write below uses `plane_channels`. A smaller
+  // plane is still refused, which is the mistake this check has always existed for.
+  if (plane.size() < static_cast<size_t>(NOF_SUBCARRIERS) * NOF_SYMBOLS * plane_channels) {
     return status::wrong_plane_size;
   }
   // The envelope the contract describes. Every case here is a property of the RECEPTION rather than
@@ -285,7 +290,8 @@ pusch_depth3_input_plane::assemble(span<__fp16>                           plane,
       const bool is_allocated = allocated.test(k);
       const bool is_pilot = is_allocated && (ls_index >= 0) && pilot_offsets.test(k % NOF_SUBCARRIERS_PER_RB);
 
-      __fp16* destination = plane.data() + (static_cast<size_t>(k) * NOF_SYMBOLS + symbol) * NOF_CHANNELS;
+      __fp16* destination =
+          plane.data() + (static_cast<size_t>(k) * NOF_SYMBOLS + symbol) * plane_channels;
       destination[CH_GRID_RE]   = static_cast<__fp16>(row[k].real() * inverse_r);
       destination[CH_GRID_IM]   = static_cast<__fp16>(row[k].imag() * inverse_r);
       destination[CH_DMRS_MASK] = static_cast<__fp16>(is_pilot ? 1.0F : 0.0F);

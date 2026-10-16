@@ -131,7 +131,14 @@ public:
     bad_reference_amplitude
   };
 
-  pusch_depth3_input_plane();
+  /// \param[in] plane_channels Channels every (subcarrier, symbol) block occupies in the plane the caller passes
+  ///            to \ref assemble. Defaults to the contract's \ref NOF_CHANNELS; a MODULATION-CONDITIONED bundle
+  ///            takes the same plane plus its conditioning channels, and the block stride has to follow the
+  ///            PLANE rather than the contract, or a wider plane would be filled at the wrong offsets.
+  explicit pusch_depth3_input_plane(unsigned plane_channels = NOF_CHANNELS);
+
+  /// Channels per (subcarrier, symbol) block in the plane this assembler writes.
+  unsigned get_plane_channels() const { return plane_channels; }
 
   /// \brief Fills \c plane with the contract's tensor and reports the reference amplitude.
   /// \param[out] plane                 `[612, 14, 12]` fp16, subcarrier major, channel contiguous.
@@ -150,6 +157,12 @@ public:
   static const char* to_string(status value);
 
 private:
+  /// Block stride in the destination plane: \ref NOF_CHANNELS, or more when a conditioned bundle's plane carries
+  /// its conditioning channels after the contract's own. Written by the constructor and read by the one write site.
+  /// Declared FIRST among the state so the initialiser list reads in declaration order (the build treats a
+  /// mismatch as an error, which is how this ordering was noticed).
+  unsigned plane_channels;
+
   /// The DM-RS reference symbols are rebuilt here rather than taken from the estimator, because the
   /// contract's pilot LS is measured at the pilot resource elements.
   std::unique_ptr<pseudo_random_generator> prg;
