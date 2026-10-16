@@ -8864,3 +8864,27 @@ bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu r6b \
 ★ 否则比值会被算两遍 ✓，★ SNR 会平白多 3 dB ✗。★ 表格里 SNR 那行**一字未动** ✓ 就是这条的验证 ✓。
 
 ★★ 复验：★ 逐调制通路**逐列等于基线** ✓（★ 测量路径的改动不碰 LLR ✓，★ 但纪律是每次都重跑 ✓）。
+
+### 19.123 ★★ R6 剩下的那半：★ 把 RSRP/EPRE 也交给网络 ✓ —— 障碍是**次序** ✓（★ 计划，★ 2026-10-17 ✓）
+
+★ 先查清"★ 调度器读的那份数从哪来 ✓"（★ 三处一起看就明白了 ✓）：
+
+| ★ 环节 | ★ 事实 |
+|---|---|
+| ★ 调度器读的 | ★ `pusch_processor_result_data.csi` ✓（★ `channel_state_information` ✓）|
+| ★ 它从哪来 | ★ `pusch_processor_notifier_adaptor.h:256` ✓ —— `result_data.csi = uci_payload.csi` ✓，★ 在 `on_sch_data` 里拷贝 ✓ |
+| ★ SINR 怎么进 `uci_payload.csi` | ★ 解调通知器的 `demodulation_stats.sinr_dB` ✓ —— ★ **AI 臂已经在填** ✓（★ 从 noise head ✓，★ 且**必须在 `on_end_codeword()` 之前** ✓，★ 这个时间窗已被证明可用 ✓）|
+| ★ RSRP/EPRE 怎么进 | ★ 仍来自**经典估计器**的结果 ✓ |
+
+★★ **障碍（★ 这是这件事为什么大 ✓）**：★ `estimate()` 在 `demodulate()` **之前**完成 ✓，
+★ 而网络的头**只在** `demodulate()` 的前向之后才存在 ✓ ⇒ ★ 臂**无法**在估计器通知器触发时交出"★ 由头算出的结果 ✓" ✗。
+
+★★ **最小且诚实的路线（★ 三步 ✓，★ 都不动 LLR 通路 ✓）**：
+
+1. ★ 给 `pusch_demodulator_notifier::demodulation_stats` 加 `rsrp_dB` / `epre_dB` ✓（★ 同一个结构 ✓、
+   ★ 同一次调用 ✓、★ **同一个已有时间窗** ✓）；★ adaptor 在它们**有值**时优先用 ✓，★ 无值则维持经典 ✓。
+2. ★ 臂在 `--pusch_reporting_source=net` 下把 `measure_depth3` 的 RSRP/EPRE 填进去 ✓ ——
+   ★ 这两个量**刚刚**被 §19.122 校到与经典差 **0.04 dB** ✓，★ 而定义域门 (★ §19.117 ✓) 已经在管"★ 哪里可以发布 ✓" ✓。
+3. ★ 之后才谈**去掉经典估计器** ✓（★ §19.98 那笔最大性能 ✓）：★ 平面装配自己算 LS ✓、
+   ★ DM-RS 上下文由配置构造 ✓ ⇒ ★ `estimate()` 不再需要转发 ✓。★ 这一步必须**最后**做 ✓ ——
+   ★ 它是唯一会让"★ 拿不到测量 ✓"变成硬失败的一步 ✓。
