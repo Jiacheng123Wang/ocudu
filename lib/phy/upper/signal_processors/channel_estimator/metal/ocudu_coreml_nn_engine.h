@@ -102,6 +102,26 @@ public:
   /// pass failed", which is the kind of message that costs an afternoon.
   unsigned depth3_bits_per_symbol() const;
 
+  /// \brief Whether the bound bundle declares the MODULATION-CONDITIONED contract (`depth3_layout=modcond`).
+  ///
+  /// A conditioned bundle serves every modulation from one artifact, with the Qm carried as extra input channels
+  /// and a main head whose stride is the widest modulation. It CANNOT be told apart from a per-modulation bundle
+  /// by shape -- both carry 14 * 8 = 112 main-head channels -- so the bundle declares which contract it follows
+  /// and this reads the declaration.
+  bool depth3_is_modulation_conditioned() const;
+
+  /// How many modulations a conditioned bundle declares it serves (0 for a per-modulation bundle).
+  unsigned depth3_nof_declared_qm() const;
+
+  /// The \p index -th declared modulation, as bits per symbol, ascending; 0 when out of range.
+  unsigned depth3_declared_qm(unsigned index) const;
+
+  /// \brief Input plane channels the bound bundle expects.
+  ///
+  /// 12 for the per-modulation contract; 12 + the four conditioning channels for a conditioned one. The caller
+  /// sizes its plane from this rather than from a constant, so the two contracts cannot be confused at the seam.
+  unsigned depth3_input_channels() const;
+
   /// Wall-clock duration of the last predict() in microseconds.
   double last_predict_us() const { return last_predict_us_; }
 

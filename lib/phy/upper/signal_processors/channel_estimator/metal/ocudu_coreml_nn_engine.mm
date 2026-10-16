@@ -27,6 +27,11 @@ constexpr unsigned NOF_SYMBOLS_PER_SLOT = 14;
 // Input channels per symbol in the contract's SPATIAL plane (`model_network_design` 0.2(b)). The
 // symbol axis is spatial, so this is a per-symbol channel count and not a folded total.
 constexpr unsigned DEPTH3_IN_CHANNELS = 12;
+/// The conditioning channels a MODULATION-CONDITIONED bundle appends to the plane: one per modulation the contract
+/// can serve (QPSK, 16QAM, 64QAM, 256QAM), all zero but the reception's own. Declared by the bundle's metadata
+/// (`depth3_layout=modcond`), because the plane's width alone cannot say which contract it belongs to -- see the
+/// matching note in the training pipeline (design section 19.102).
+constexpr unsigned DEPTH3_COND_CHANNELS = 4;
 
 struct coreml_nn_engine_impl {
   MLModel* model     = nil;
@@ -45,6 +50,17 @@ struct coreml_nn_engine_impl {
   // rejected by Core ML at best and silently truncated at worst, and a truncated main head would
   // hand the decoder a plausible subset of the bits.
   unsigned  model3_channels[4] = {0, 0, 0, 0};
+  /// The bundle's own DECLARATION, read from its metadata (`depth3_layout`): whether it is the
+  /// MODULATION-CONDITIONED contract, which serves every modulation from one artifact with the Qm as extra input
+  /// channels. It cannot be inferred: a conditioned bundle and a per-modulation 256QAM bundle have the same main
+  /// head width (14 * 8 = 112 channels), and they are not interchangeable.
+  bool      model3_conditioned = false;
+  /// The modulations a conditioned bundle declares it serves, as bits per symbol, ascending; empty for a
+  /// per-modulation bundle (whose single modulation is the head width divided by the slot's symbols).
+  unsigned  model3_qm_set[4]   = {0, 0, 0, 0};
+  unsigned  model3_nof_qm      = 0;
+  /// Input plane channels the bundle expects: DEPTH3_IN_CHANNELS, plus the conditioning channels when declared.
+  unsigned  model3_in_channels = 0;
   // The shape of each head AS THE MODEL DECLARES IT, kept whole rather than reduced to a channel
   // count: the output backings must match it exactly, and the spatial contract's heads are
   // [1, nsc, C] while its scalar head stays [1, 1, 1, 1].
@@ -400,15 +416,39 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
     return false;
   }
   NSArray<NSNumber*>* in_shape = in_desc.multiArrayConstraint.shape;
+  // THE DECLARATION IS READ FIRST, because it decides what the input shape is allowed to be. A conditioned bundle
+  // carries the Qm as four extra plane channels, so it is a DIFFERENT contract -- and a shape-based check that
+  // accepted both would run a per-modulation bundle on a plane whose four extra channels mean nothing, or feed a
+  // conditioned bundle a plane with no Qm at all.
+  NSDictionary* creator_meta = desc.metadata[MLModelCreatorDefinedKey];
+  if ([creator_meta[@"depth3_layout"] isEqualToString:@"modcond"]) {
+    e->model3_conditioned = true;
+    NSString* qm_set = creator_meta[@"depth3_qm_set"];
+    for (NSString* token in [qm_set componentsSeparatedByString:@","]) {
+      unsigned qm = (unsigned)[token intValue];
+      if (qm != 0 && e->model3_nof_qm != 4) {
+        e->model3_qm_set[e->model3_nof_qm++] = qm;
+      }
+    }
+    if (e->model3_nof_qm == 0) {
+      ocudulog::fetch_basic_logger("PHY").error(
+          "AI depth-3: the bundle declares depth3_layout=modcond but names no modulation in depth3_qm_set");
+      return false;
+    }
+  }
+  e->model3_in_channels = DEPTH3_IN_CHANNELS + (e->model3_conditioned ? DEPTH3_COND_CHANNELS : 0);
   // The contract's plane: [1, subcarriers, 14, 12], fp16 -- the symbol axis is SPATIAL, which is
   // what lets a 3x3 kernel mix time as well as frequency. A model trained in the superseded folded
   // layout would be fed nonsense and would produce plausible logits for it, so the shape is checked
   // here rather than at the first prediction.
   if (in_shape.count != 4 || in_shape[0].unsignedIntValue != 1 ||
       in_shape[2].unsignedIntValue != NOF_SYMBOLS_PER_SLOT ||
-      in_shape[3].unsignedIntValue != DEPTH3_IN_CHANNELS) {
+      in_shape[3].unsignedIntValue != e->model3_in_channels) {
     ocudulog::fetch_basic_logger("PHY").error(
-        "AI depth-3: input x is not [1, nsc, {}, {}]", NOF_SYMBOLS_PER_SLOT, DEPTH3_IN_CHANNELS);
+        "AI depth-3: input x is [1, nsc, {}, {}] where this contract needs [1, nsc, {}, {}]{}",
+        NOF_SYMBOLS_PER_SLOT, in_shape[3].unsignedIntValue, NOF_SYMBOLS_PER_SLOT, e->model3_in_channels,
+        e->model3_conditioned ? " (a modulation-conditioned bundle takes the Qm as four extra channels)"
+                              : "");
     return false;
   }
   e->model3_nof_subc = in_shape[1].unsignedIntValue;
@@ -466,6 +506,30 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
   // The worker thread may not have been started yet when only a depth-3 model is configured.
   start_worker(e);
   return true;
+}
+
+bool coreml_nn_engine::depth3_is_modulation_conditioned() const
+{
+  auto* e = static_cast<coreml_nn_engine_impl*>(impl);
+  return (e != nullptr) && e->model3_conditioned;
+}
+
+unsigned coreml_nn_engine::depth3_nof_declared_qm() const
+{
+  auto* e = static_cast<coreml_nn_engine_impl*>(impl);
+  return (e == nullptr) ? 0U : e->model3_nof_qm;
+}
+
+unsigned coreml_nn_engine::depth3_declared_qm(unsigned index) const
+{
+  auto* e = static_cast<coreml_nn_engine_impl*>(impl);
+  return (e == nullptr || index >= e->model3_nof_qm) ? 0U : e->model3_qm_set[index];
+}
+
+unsigned coreml_nn_engine::depth3_input_channels() const
+{
+  auto* e = static_cast<coreml_nn_engine_impl*>(impl);
+  return (e == nullptr) ? 0U : e->model3_in_channels;
 }
 
 unsigned coreml_nn_engine::depth3_bits_per_symbol() const
