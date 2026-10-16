@@ -285,6 +285,12 @@ public:
       // The calibration travels with the model (a sidecar next to the bundle), so it is read once, here, and the
       // reception picks the one of the model that computed it.
       scales_by_qm[declared_qm] = read_scales(path, D3_RANGE_LIMIT_256QAM);
+      // EVERYTHING THE ENGINE DECLARES IS READ BEFORE IT IS MOVED. Reading it afterwards dereferences a
+      // moved-from `unique_ptr`, i.e. null -- which is a segfault at construction, and it took the AI arm with a
+      // model down while the arm without one still worked (measured 2026-10-16, on the per-modulation path; the
+      // conditioned path reads inside its loop and was unaffected).
+      const declared_domain domain{engine->depth3_has_snr_range(), engine->depth3_snr_min_db(),
+                                   engine->depth3_snr_max_db()};
       engine_by_qm[declared_qm] = std::move(engine);
       // The LLR head's stride, by the SAME rule as the conditioned case: the head's width per symbol, which for a
       // per-modulation bundle is its own Qm. Leaving it at the member's default 0 is not a smaller stride but a
@@ -293,8 +299,7 @@ public:
       llr_stride_by_qm[declared_qm] = declared_qm;
       // The bundle's declared measurement domain, kept per modulation: a fallback bundle and a slot bundle are
       // different artifacts and were not necessarily trained on the same SNR range.
-      domain_by_qm[declared_qm] = declared_domain{
-          engine->depth3_has_snr_range(), engine->depth3_snr_min_db(), engine->depth3_snr_max_db()};
+      domain_by_qm[declared_qm] = domain;
       notes.push_back(fmt::format("{} model '{}' bound for Qm={} {}", what, path, declared_qm,
                                   depth3_model_map::name(declared_qm)));
       any_model_bound = true;
