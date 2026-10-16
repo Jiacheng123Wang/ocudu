@@ -70,6 +70,10 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
   std::array<pilot_ring, plane::NOF_SYMBOLS> rings{};
   double   residual_sum = 0.0;
   unsigned residual_count = 0;
+  // The pilot power in the PLANE's units, so the SNR below is a ratio of two quantities taken the same way
+  // (section 19.137: the two sides carried different factors and did not cancel).
+  double   ls_power_sum = 0.0;
+  unsigned ls_power_count = 0;
 
   double   epre_sum = 0.0;
   double   rsrp_sum = 0.0;
@@ -111,7 +115,11 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
       const float h_im = static_cast<float>(estimate[1]) * reference_amplitude;
       rsrp_sum += static_cast<double>(h_re) * h_re + static_cast<double>(h_im) * h_im;
 
-      // The independent estimate, from the same LS the EPRE above uses.
+      // The independent estimate, from the same LS the EPRE above uses. `ls_re`/`ls_im` here carry `r` and
+      // `scaling`; the SNR wants the plane's own units, so the power is accumulated from the plane values.
+      ls_power_sum += static_cast<double>(re[plane::CH_LS_RE]) * re[plane::CH_LS_RE] +
+                      static_cast<double>(re[plane::CH_LS_IM]) * re[plane::CH_LS_IM];
+      ++ls_power_count;
       pilot_ring& ring = rings[t];
       ring.re[ring.next] = ls_re;
       ring.im[ring.next] = ls_im;
@@ -178,11 +186,15 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
   measurements.snr_lin  = (measurements.noise_variance_lin > 0.0F)
                               ? (data_rsrp / measurements.noise_variance_lin)
                               : 0.0F;
-  // The same formula with the plane's own noise: `epre` is the pilot power, so the data RE power is it divided by
-  // the DM-RS-to-data ratio squared, and the noise is the residual measured on the same LS.
-  if (measurements.residual_noise_variance_lin > 0.0F) {
-    const float data_epre = measurements.epre_lin * nof_layers / (scaling * scaling);
-    measurements.residual_snr_lin = data_epre / measurements.residual_noise_variance_lin;
+  // BOTH SIDES IN THE PLANE'S UNITS. The estimator's formula is the data RE power over the noise: the pilot power
+  // divided by the DM-RS-to-data ratio squared, over the residual measured on that same LS. Taking the pilot power
+  // from the plane rather than from the grid-unit EPRE is the whole of section 19.137's fix -- the two sides used
+  // to carry different factors (`epre` carries `r`, the residual did not) and did not cancel, which read 17.1 dB
+  // where this reads about 25 dB, against a classical 24.5 dB on the same reception.
+  if ((measurements.residual_plane_units_lin > 0.0F) && (ls_power_count != 0)) {
+    const float pilot_power_plane_units = static_cast<float>(ls_power_sum / static_cast<double>(ls_power_count));
+    const float data_power_plane_units  = pilot_power_plane_units * nof_layers / (scaling * scaling);
+    measurements.residual_snr_lin       = data_power_plane_units / measurements.residual_plane_units_lin;
   }
 
   if (!std::isfinite(measurements.epre_lin) || !std::isfinite(measurements.rsrp_lin) ||
