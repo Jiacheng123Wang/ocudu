@@ -205,6 +205,9 @@ public:
   /// The startup question: the model loaded, so this arm will compute.
   bool is_bound() const override { return engine_ready; }
 
+  /// The model's own declaration, read from its main head: the same number the envelope check compares against.
+  unsigned bound_qm() const override { return engine_ready ? engine->depth3_bits_per_symbol() : 0; }
+
   void estimate(dmrs_pusch_estimator_notifier&            notifier,
                 const resource_grid_reader&                grid,
                 const dmrs_pusch_estimator::configuration& config) override

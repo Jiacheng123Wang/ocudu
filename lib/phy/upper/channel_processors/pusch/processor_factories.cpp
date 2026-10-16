@@ -139,6 +139,24 @@ private:
   task_executor*                                          executor;
 };
 
+/// Name of the modulation a model's head width declares, for the startup lines. Empty when unrecognised (the
+/// arm's own envelope check is what refuses a mismatch; this is only how a human reads which one it carries).
+static const char* qm_name(unsigned qm)
+{
+  switch (qm) {
+    case 2:
+      return ", QPSK";
+    case 4:
+      return ", 16QAM";
+    case 6:
+      return ", 64QAM";
+    case 8:
+      return ", 256QAM";
+    default:
+      return "";
+  }
+}
+
 class pusch_processor_factory_generic : public pusch_processor_factory
 {
 public:
@@ -199,14 +217,22 @@ public:
     // line is what tells an operator which of the two actually happened: "ai" on the command line is a request,
     // not a fact, and a run must never be read as an AI result on the strength of the request alone.
     if (depth3_kind != pusch_depth3_kind::classic) {
-      const bool bound = dependencies.front()->depth3_refinement_bound();
+      const bool     bound = dependencies.front()->depth3_refinement_bound();
+      const unsigned qm    = dependencies.front()->get_depth3().bound_qm();
       if (bound && depth3_kind == pusch_depth3_kind::ai_network) {
+        // The declared modulation is printed WITH the model, because the model's name is not a declaration:
+        // the envelope the arm enforces is the main head's width, and a run whose model carries one modulation
+        // degrades every reception of the others (they are logged, and counted). Measured 2026-10-16: the
+        // default model was called `d3_mixed` while carrying 256QAM alone -- this line would have said so.
         fmt::print(stderr,
-                   "[pusch_receiver] backend=ai: AI ARM ACTIVE. The depth-3 network bound model '{}' and "
-                   "COMPUTES channel estimation, equalisation and demapping itself: the classical demodulator "
-                   "does not run, and the classical estimator still runs only for the chain's measurements. "
-                   "Every degraded reception is logged and counted.\n",
-                   depth3_model_path);
+                   "[pusch_receiver] backend=ai: AI ARM ACTIVE. The depth-3 network bound model '{}' "
+                   "(Qm={}{}) and COMPUTES channel estimation, equalisation and demapping itself: the classical "
+                   "demodulator does not run, and the classical estimator still runs only for the chain's "
+                   "measurements. Every degraded reception is logged and counted (a reception of another "
+                   "modulation is one of them).\n",
+                   depth3_model_path,
+                   qm,
+                   qm_name(qm));
       } else if (bound) {
         fmt::print(stderr,
                    "[pusch_receiver] backend=ai: AI ARM IS THE IDENTITY (no model path was given). The "

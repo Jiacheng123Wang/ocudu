@@ -22,7 +22,7 @@ target_include_directories(ocudu_o_du_low_unit_helpers PRIVATE ${CMAKE_SOURCE_DI
 # deployment overrides this cache variable; a build whose file does not exist refuses every "ai" request that does not
 # name one, with the path in the message.
 set(OCUDU_DEPTH3_DEFAULT_MODEL
-    "${CMAKE_SOURCE_DIR}/doc_chinese/llr_ai_detection/work_tmp/probe/d3_mixed.mlmodelc"
+    "${CMAKE_SOURCE_DIR}/doc_chinese/llr_ai_detection/work_tmp/probe/d3_256qam.mlmodelc"
     CACHE FILEPATH "Model the PUSCH ai receiver binds when --pusch_receiver_model is not given")
 
 target_compile_definitions(ocudu_o_du_low_unit_helpers PRIVATE

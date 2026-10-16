@@ -100,6 +100,15 @@ public:
   /// used the second would report INACTIVE on a perfectly bound arm simply because no slot had arrived yet.
   virtual bool is_bound() const { return computes_itself(); }
 
+  /// \brief The modulation the BOUND model carries, in bits per symbol; 0 when no model is bound.
+  ///
+  /// It is the MODEL's declaration (its main head's width divided by the slot's symbol count), not the
+  /// reception's: the arm refuses every reception whose modulation differs from this one, so a startup line that
+  /// names the model must name this too. WHY IT EXISTS (2026-10-16): the default model was called `d3_mixed` and
+  /// carried 256QAM alone; a reader of a leg log had to know that the name was wrong to know that a QPSK
+  /// reception would degrade. A name is not a declaration -- this is.
+  virtual unsigned bound_qm() const { return 0; }
+
   /// \brief Runs the channel estimation entry point of the unit.
   /// \param[in] notifier Notifier to communicate the end of the estimation process.
   /// \param[in] grid     Received resource grid.
