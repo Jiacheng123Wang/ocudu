@@ -7608,3 +7608,44 @@ vs ★ "第二个信号**不能一律强制**" ✗（★ 那会杀掉正在工�
 （★ 信号/流量条件不同 ✓）；★★ 样本量**写进报告** ✓（★ §19.91 的纪律 ✓：★ 样本量要被读到 ✓）。
 ★ 回放命令与判据：★ `compare_ai_arm.py --list tmp/ai_s1_stride8.txt` → ★ `criterion1.py --csv …` ✓；
 ★★ 结果（★ 判据 1 的裁决 ✓）在下一节补齐 ✓。
+
+
+### 19.94 ★★ 判据 1 的回放**不能后台跑** ✗：★ 它需要一台**空闲的机器** ✓（★ 实测 ✓）
+
+★★ 上节的跨步回放起了之后 ✓，★ 速率从 **3.5 捕获/秒**（★ 起跑时 ✓）掉到 **0.3 捕获/秒** ✗
+（★ 15 分钟只走了 179 个 ✓）⇒ ★★ 查了主机 ✓：★ **VS Code Helper 87%** ✗、★ Chrome 42%＋11% ✗、
+★ Spotlight（`mds`/`mdworker`）在索引那 **13 GB** 的新语料 ✗ ⇒ ★★ 回放进程只拿到约 **10% 的一个核** ✗。
+★★ **按 0.3/秒算，5 177 个要 ≈5 小时** ✗✗ —— ★★ 而且它**会与下一次飞行抢机器** ✗
+（★ 实时腿最怕这个 ✓，★ §19.88 已经量过"线程被饿"的后果 ✓）。
+
+★★ **⇒ 停掉，并把它写成纪律** ✓：★★ **判据 1 的回放是"离线但要独占"的一步** ✓ ——
+★ 与"8 秒臂绑定检查"（★ 秒级、可忙时跑 ✓）和"腿的判据"（★ 秒级 ✓）不同 ✗。
+★★ `probe/accept_ai_leg.sh` 的 `--full` 分支已经**先查 gNB 与已有回放** ✓，★ 这一节补上**第三条**：
+★ **主机上不要有别的重活** ✓（★ 本次的 10× 减速就是证据 ✓）。
+
+★★★ **回放管道本身已端到端验证** ✓（★ 用 80 个捕获的小样本 ✓，★ `nice` 让路 ✓） ✓：
+
+```
+$ compare_ai_arm.py --list tmp/ai_s1_smoke.txt --count 80 …   →  exit 0, CSV 7185 bytes
+$ criterion1.py …
+  criterion 1: classic 54/67 decoded, ai 60/67, same verdict on 59/67
+```
+
+★★ **注意：67 对不是裁决** ✗（★ 置信区间会宽得没意义 ✓），★ 它证明的是**管道通** ✓：
+★ 拉列表 ✓ → ★ 两条臂各回放一遍 ✓ → ★ 出 CSV ✓ → ★ `criterion1.py` 出**预登记格式**的判决行 ✓。
+★★ 顺带看到的**方向**（★ 不可引用 ✓）：★ 经典 54/67 ✓ vs AI 60/67 ✓。
+
+★★ **待跑的那一步（★ 一条命令 ✓，★ 空闲时约 25 分钟 ✓）** ✓：
+
+```bash
+cd doc_chinese/llr_ai_detection/work_tmp
+~/ai_ce_work/venv/bin/python probe/compare_ai_arm.py \
+    --tool ../../..//build/lib/phy/upper/channel_processors/metal/ul_chain_replay \
+    --corpus corpus/aillr_256qam_ai_s1 --model probe/d3_mixed.mlmodelc \
+    --list tmp/ai_s1_stride8.txt --count 5803 \
+    --out tmp/ai_arm_ai_s1_stride8.csv --work tmp/work_ai_s1_stride8 --clean
+~/ai_ce_work/venv/bin/python probe/criterion1.py --csv tmp/ai_arm_ai_s1_stride8.csv --label aillr_256qam_ai_s1
+```
+
+★ 之后（★ 判据 1 的**前置条件** ✓）：★ 取**子集**再跑一遍同一条臂 ✓
+⇒ ★ `criterion1.py --csv <子集> --zero-effect <重复>` ✓ 验"★ 同一条臂对自己逐捕获一致" ✓。
