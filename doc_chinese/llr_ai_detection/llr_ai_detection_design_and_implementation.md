@@ -6480,3 +6480,83 @@ ValueError: the model has 4 outputs, the contract has 3
 
 ★★★ **⇒ 主头没有为这两个上报头买单** ✓✓ —— ★ −13.50 pp 与全量 16 871 的 **−15.90 pp** 同一量级 ✓
 （★ 这里是前 2 000 的子集 ✓，★ 数值不同是样本差异 ✓）。
+
+
+---
+
+### 19.69 ★★★ 实飞配方：★ 把深度-3 网络接进实时 PHY pipeline（★ 四条腿 ✓，★ 2026-10-16 准备完毕 ✓）
+
+★★ **用户提出的测试**（★ 原话要点 ✓）：★★ "既然四个调制（QPSK/16QAM/64QAM/256QAM）的深度-3 网络都有了 ✓，
+★★ 把它们接进 PHY pipeline 直接飞一腿 ✓：`--expert_phy.phy_pipeline gpu` ＋
+`--expert_phy.pusch_receiver_backend ai` ✓，看看手机能不能成功起飞并跑通 ping／iperf3" ✓。
+
+★★★ **这个提议是对的 ✓，而且它问的是离线对照回答不了的问题** ✓：★ 判据 1 只回答"同一份网格上两条臂谁失败得少" ✓
+（★ s4_d：★ −15.90 pp ✓，★ 16 871 对 ✓），★★ 它**不回答"这条链在 AI 臂下能不能活"** ✗ ——
+★ 附着 ✓、鉴权 ✓、RRC ✓、SDAP ✓、★ 到 ping／iperf3 的实际吞吐 ✓，★ 都要真飞才知道 ✓。
+★★ 定位：★★ **实飞是"离线结论上线之前必须过的那道门"** ✓，★ 不是判据 1 的替代 ✓（★ 一条腿的样本量
+与"同网格配对"的强度都比不了离线 ✓）。
+
+#### (a) ★★ 四条腿的对照表（★ 配方 `work_tmp/tmp/fly_ai_leg.sh <mod> [--run]` ✓）
+
+| ★ 调制 | ★★ 配置（★ MCS 钉死 ✓）| ★★ 模型（★ 编译后的 `.mlmodelc` ✓）| ★ 语料目录 ｜ 腿名 |
+|---|---|---|---|
+| ★★ **256QAM** | ★ `..._llr_collect_p0default.yml`（★ MCS 20，★ p0 **−76** ✓）| ★ `probe/d3_mixed.mlmodelc` ✓ | ★ `aillr_256qam_ai_s1` ｜ `aillr-256qam-ai` |
+| ★ **64QAM** | ★ `..._llr_collect_64qam_p0default.yml`（★ MCS 14，★ −76 ✓）| ★ `probe/d3_64qam.mlmodelc` ✓ | ★ `aillr_64qam_ai_s1` ｜ `aillr-64qam-ai` |
+| ★ **16QAM** | ★ `..._llr_collect_16qam_p0default.yml`（★ MCS 9，★ −76 ✓）| ★ `probe/d3_16qam.mlmodelc` ✓ | ★ `aillr_16qam_ai_s1` ｜ `aillr-16qam-ai` |
+| ★ **QPSK** | ★ `..._llr_collect_qpsk.yml`（★ MCS 4，★ −70 ✓，★ 无 p0default 变体 ✓）| ★ `probe/d3_qpsk.mlmodelc` ✓ | ★ `aillr_qpsk_ai_s1` ｜ `aillr-qpsk-ai` |
+
+★★ **为什么 MCS 必须钉死** ✓：★ 契约读模型里的 `Qm` ✓，★★ 不匹配时臂**逐接收报 `DEGRADED` 并转发经典链** ✗
+（★ §19.63 的演练实测 20/20 全转发 ✓、★ 摘要读出来 `same verdict on 20/20` ✓）★ ⇒
+★★ 一个会动的 MCS = **一条"带额外日志的经典腿"** ✗。★★ 钉死同时还把"网络上报的 SINR 不准"这个风险关在门外 ✓
+（★ 调度器没有 MCS 可调 ✓，★ 见 (c) ✓）。
+★★ **为什么用 p0 = −76** ✓：★ §19.58 量过 −70 会把链路推进压缩区 ✓（★ 电平涨 5 dB、★ SINR 掉 13 dB、
+★ 译码率 90% → 0.1% ✗）⇒ ★★ 实飞要的是"能活" ✓。
+
+#### (b) ★★ 起飞前的自检（★ 脚本已实现并逐条跑过 ✓）
+
+★ 本机地址（★ en1 = 192.168.100.125 ✓）、★ AMF 可达 ✓、★ 配置存在且**打印 MCS 与 p0** ✓、
+★★ **配置 `--dryrun` 通过** ✓（★ 四条全过 ✓，★ 顺带打印 `amf.addrs` 确认是新网络 ✓）、
+★ 模型存在且是**目录形态的 `.mlmodelc`** ✓、★ 二进制带 `--pusch_receiver_backend` ✓ 与 UCI 字段 ✓、
+★ 磁盘 ≥60 GB ✓、★ 没有残留 gNB ✓、★★ **主机上没有重活** ✓（★ `ul_chain_replay`／`compare_ai_arm`／
+`train_depth3`／`build_depth3_dataset` ✓ —— 理由见 (d) ✓）、★ 语料目录已建 ＋ 语料树已排除 Spotlight ✓。
+
+★★ **四个模型已逐个冒烟验证** ✓（★ 用重放工具的环境变量绑定 ✓：★ `OCUDU_REPLAY_RECEIVER=ai` ＋
+`OCUDU_REPLAY_MODEL=<path>` ✓ —— 这是**重放侧的绑定方式** ✓，★ 与 gNB 的 `--expert_phy.*` 不同 ✓）：
+★★ 四个都打出 `AI ARM ACTIVE … bound model '…'` ✓ 并且**都把自己的采集译出来了** ✓
+（★256QAM `crc=OK iter=3` ✓、★64QAM `iter=2` ✓、★16QAM `iter=1` ✓、★QPSK `iter=1` ✓）。
+
+#### (c) ★★★ 飞行中与验收：★ 三件事必须分开看 ✓
+
+★★ **① 臂到底跑没跑** ✓ —— 横幅只有三种，含义完全不同 ✓：
+
+| ★ 横幅 | ★★ 含义 | ★★ 处置 |
+|---|---|---|
+| ★★ `AI ARM ACTIVE … bound model '…'` | ★★ 测的**确实是** AI 臂 ✓ | ★ 继续 ✓ |
+| ★ `AI ARM INACTIVE (the estimator could not bind model '…')` | ★ 输出是**经典结果** ✗ | ★ 停腿、查路径/编译 ✗ |
+| ★ `AI ARM IS THE IDENTITY` ／ `backend=ai WITHOUT a model` | ★ 转发 ⇒ **不是 AI 结果** ✗ | ★ 补 `--expert_phy.pusch_receiver_model` ✗ |
+
+★★ **② `DEGRADED` 占比必须 ≈ 0** ✓ —— 离线上量过：★★ **退化的臂 = 转发 = 与经典链逐接收完全一致** ✗
+⇒ ★★ 退化占比高就说明这次没测到 AI ✓。★ `gate_watch.py` 新增 `--ai` ✓ 把三件事并到一行 ✓：
+★★ 臂状态 ✓、★ `DEGRADED` 计数与占比 ✓、★ 实时故障计数 ✓（★ 占比 >50% 时直接印
+`MOSTLY FORWARDED: this leg is measuring the classical chain` ✓）。
+
+★★ **③ AI 腿里不要读 `sinr=`** ✓ —— ★ 那一列在 AI 臂下来自网络自己的上报头 ✓，
+★★ 而 §19.68(f) 的结论是**这些测量目前不发布** ✗（★ EPRE 过关 ✓，★ RSRP −3.04／SNR −4.83／噪声 +1.77 dB 没过门槛 ✗）
+⇒ ★★ 门槛仍然只看 `crc`／译码率 ✓。
+
+★★ **验收表** ✓：★ 集成（★ 横幅 ＋ degraded ≈ 0 ✓）、★ 链路（★ RRC setup／Reconfiguration complete ＋
+ping ＋ `iperf3 -R` 与同条件经典腿同量级 ✓）、★ 译码（★ rv=0 译码率**不低于**同位置经典腿 ✓）、
+★ 上报（★ `[depth3-measure]` 只作诊断 ✓）、★ 时序（★ `Real-time failure` 不成片 ✓）。
+★ 停止规则与经典腿一致 ✓（★ <10% 且 2–3 分钟不回升 ⇒ 停 ✓；★ ≥50% 后再飞 ~20 秒一次 Ctrl+C ✓）。
+
+#### (d) ★★ 已知风险（★ 两条是本会话实测的 ✓）
+
+★★ **实时性风险比经典腿更高** ✗：★ 经典腿已出现过 `[RF] Real-time failure: underflow` ＋
+`FAPI: UL processor is busy` 成片 ✓，★ 最终以 **UL HARQ／软缓冲池耗尽**收场 ✓（★ §19.60 ✓，★ 那条腿 4 894 条 ✓）；
+★★ AI 臂**每个接收多一次网络前向** ✓ ⇒ ★★ 飞行期间主机上**不要跑任何重活** ✓。
+★★ **`cpu_gpu + ai` 会被拒** ✓（★ 二进制里写着 ✓）：★ depth 3 同时替换估计器＋均衡器＋解映射器 ✓
+⇒ ★★ 合法组合只有 `gpu + auto/classic` ✓、★ `gpu + ai` ✓、★ `cpu_gpu + classic` ✓；
+★★ **另有第四条臂**：★ `gpu + ai + --pusch_dft_type metal` ✓（★ 网格写入器不同 ⇒ **是另一条臂** ✓）
+⇒ ★★ 本次**不加**这个开关 ✓，★ 保持与经典腿可比 ✓。
+★★ **语料标签来自当时那条臂** ✓：★ 抓包与臂无关 ✓（★ 网格是好的 ✓），★ 但 `crc` 是 AI 臂给的 ✓
+⇒ ★★ AI 腿用**独立目录** ✓，★ 别与"经典标签语料"混 ✓（★ 判据 1 的基线要经典标签 ✓）。
