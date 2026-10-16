@@ -8569,7 +8569,12 @@ $ gnb … --expert_phy.pusch_receiver_model /tmp/compiled/d3_modcond_smoke.mlmod
 
 ### 19.114 ★★★ R6 的**准确度**：共享上报头在**四种调制上同时成立** ✓（★ 检查点 epoch ~6/40 ✓）（★ 2026-10-16 ✓）
 
-★ 工具：`probe/check_reporting_heads.py --cond --per-modulation 64` ✓（★ 就是 §17.2/R6 要的"★ 对**已知真值** ✓"：
+★ 工具：`ai_train/check_reporting_heads.py --cond --per-modulation 64` ✓
+（★ 2026-10-16 移动并**注明** ✓：★ 该工具原在 `work_tmp/probe/` ✓，★ 而 `work_tmp` 被 **gitignore** ✗ ⇒
+★ 一个用来给模型下判断的工具必须与模型代码一起进版本 ✓，★ 故移入
+`lib/phy/upper/signal_processors/channel_estimator/metal/ai_train/` ✓（★ 与 `measure_ce_error.py` 同目录 ✓，
+★ 原先为跨目录 import 做的 `sys.path` 拼接随之删掉 ✓）。★ 上面 (d) 与 §19.x 验收行里的旧引用
+★ 指的是**同一个文件** ✓，★ 路径以新位置为准 ✓。）（★ 就是 §17.2/R6 要的"★ 对**已知真值** ✓"：
 ★ head 3 对数据集里的真信道 `H/r` ✓，★ head 4 经契约映射后对样本自己的 `sigma2_over_r2` ✓，★ 两者都是**构造已知** ✓）。
 
 | ★ Qm | ★ 调制 | ★ head 3 NMSE（★ 分配内 ✓）| ★ head 3 NMSE（★ 导频处 ✓）| ★ head 3 功率比（★ 估计/真值 ✓）| ★ head 4 上报/真值 |
