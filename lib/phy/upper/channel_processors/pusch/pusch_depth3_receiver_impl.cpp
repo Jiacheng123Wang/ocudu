@@ -19,7 +19,9 @@
 #include "ocudu_coreml_nn_engine.h"
 #endif
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include "fmt/format.h"
 #include <cstdlib>
@@ -253,9 +255,11 @@ public:
     }
 
     // ---- the contract's plane, from the grid the chain holds --------------------------------------
+    const auto segment_start = std::chrono::steady_clock::now();
     float reference_amplitude = 0.0F;
     const pusch_depth3_input_plane::status status =
         assembler.assemble(span<__fp16>(input_plane), reference_amplitude, grid, config, dmrs_context);
+    const auto segment_assembled = std::chrono::steady_clock::now();
     if (status != pusch_depth3_input_plane::status::ok) {
       // The reason is a property of the RECEPTION, not of the code, so it is reported with its own name.
       // The specific reason travels with the count: "refused" alone would say a reception was skipped without
@@ -284,6 +288,7 @@ public:
       degrade(depth3_degradation::forward_failed, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
+    const auto segment_forwarded = std::chrono::steady_clock::now();
 
     // ---- the reporting heads, next to the estimator's own numbers ---------------------------------
     // R6's acceptance is that the network's measurements agree with the classical estimator's to the order
@@ -298,10 +303,71 @@ public:
       degrade(depth3_degradation::no_data_resource_elements, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
+    record_timing(segment_start, segment_assembled, segment_forwarded, std::chrono::steady_clock::now());
     last_forward_ok = true;
   }
 
 private:
+  /// \brief The three segments of the AI path, timed apart, as design section 1.5.5 requires.
+  ///
+  /// That section asks for the split and says why: the lane's gain comes from one submission per hop, and the AI
+  /// path inserts a new three-hop hand-over -- grid ready, then the engine has its input, then the LLR is ready,
+  /// then the LDPC decoder can read it. A fast forward pass does not help if the hand-over around it is slow, and
+  /// the three have different fixes, so they are measured apart rather than as one number.
+  ///
+  /// ADDED 2026-10-16, before the first live AI leg: the arm's cost would otherwise have shown up only as a
+  /// collapse of the kind section 19.60 documents -- the UL HARQ pools exhausting under a pipeline that fell
+  /// behind -- with nothing in the log to attribute it to. The anchors for the forward pass are 141 us and
+  /// 690 us (memo_03 section 1.1).
+  ///
+  /// The sampled measurement reporting sits OUTSIDE the three: it happens once per thousand receptions and is
+  /// reporting rather than path, so folding it into the delivery segment would put a spike in one sample of a
+  /// thousand and nothing anywhere else.
+  static constexpr unsigned TIMING_RING         = 512;
+  static constexpr unsigned TIMING_REPORT_EVERY = 500;
+
+  void record_timing(std::chrono::steady_clock::time_point start,
+                     std::chrono::steady_clock::time_point assembled,
+                     std::chrono::steady_clock::time_point forwarded,
+                     std::chrono::steady_clock::time_point delivered)
+  {
+    const auto micros = [](std::chrono::steady_clock::time_point from,
+                           std::chrono::steady_clock::time_point to) {
+      return static_cast<unsigned>(std::chrono::duration_cast<std::chrono::microseconds>(to - from).count());
+    };
+    timings[0][timing_index] = micros(start, assembled);
+    timings[1][timing_index] = micros(assembled, forwarded);
+    timings[2][timing_index] = micros(forwarded, delivered);
+    timing_index             = (timing_index + 1) % TIMING_RING;
+    ++timing_count;
+
+    // The first forward is reported on its own, because a leg can be short and the first reading is the one that
+    // says whether the cost is in the range the design assumed; then one line every TIMING_REPORT_EVERY, which is
+    // frequent enough to see a drift and rare enough not to become the log.
+    if ((timing_count == 1) || ((timing_count % TIMING_REPORT_EVERY) == 0)) {
+      report_timing();
+    }
+  }
+
+  void report_timing()
+  {
+    const unsigned sampled = std::min(timing_count, TIMING_RING);
+    static const char* const names[3] = {"plane", "forward", "deliver"};
+    fmt::print(stderr, "[depth3-timing] {} forward(s), microseconds:", timing_count);
+    for (unsigned segment = 0; segment != 3; ++segment) {
+      std::array<unsigned, TIMING_RING> sorted = timings[segment];
+      std::sort(sorted.begin(), sorted.begin() + sampled);
+      const unsigned p99_index = std::min((sampled * 99) / 100, sampled - 1);
+      fmt::print(stderr, " {} p50 {} p99 {} max {} |", names[segment], sorted[sampled / 2], sorted[p99_index],
+                 sorted[sampled - 1]);
+    }
+    fmt::print(stderr, "\n");
+  }
+
+  std::array<std::array<unsigned, TIMING_RING>, 3> timings{};
+  unsigned                                         timing_index = 0;
+  unsigned                                         timing_count = 0;
+
   /// The contract's range limit for the modulation in use. Read from the chain's own table so the arm cannot
   /// invent a saturation point the quantiser does not have.
   static constexpr float D3_RANGE_LIMIT_256QAM = 20.0F;
