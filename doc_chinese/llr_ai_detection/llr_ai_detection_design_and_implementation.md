@@ -386,8 +386,8 @@ LLR 量化（`LLR_MAX=120`、`range_limit` 24/24/20/20）、**模型输出加扰
 | `gpu` + `auto` / `classic` | ★★ **接受，且与今天逐位一致** | 回归的判据（§1.5.6 判据 0）|
 | `gpu` + `ai` | ★★ **接受**；★ **`lane_fused` 的语义要在日志里重述** | 见 §1.5.4 |
 | ★ `gpu` + `ai` + `--pusch_dft_type metal` | ★ **额外一臂，但必须显式声明** | 网格写入者变了 ⇒ **多一个变量**，不得混进主臂 |
-| ★★ `gpu` + `ai` **不给 `--pusch_receiver_model`** | ★★★ **冲突（报错）**（★ **2026-10-16 补** ✓）| ★★ 没有模型，臂就是**恒等** ⇒ ★ 运行会印 `receiver=ai` 而输出**由经典链产生** ✗ —— ★ 这正是矩阵要拒绝的那类"名字与实际不符" ✓（★ 原表未列此行：★ 当时 S-1 的恒等臂是**必需**的 ✓；★ 能力变真之后它只剩诊断价值 ✓，★ 而诊断可以从库与 replay 工具走 ✓）|
-| ★★ `gpu` + `ai` + **模型路径不存在** | ★★★ **冲突（报错）**（★ 同上补 ✓）| ★★ 这样的模型**永远绑不上** ✓ ⇒ ★ 它只会在开机后变成 `AI ARM INACTIVE` ＋ 一份**经典标签**的语料 ✗；★ 而这在**开射频之前**就可判定 ✓ |
+| ★★ `gpu` + `ai` **不给 `--pusch_receiver_model`** | ★★ **合法**：★ **跑这份构建的默认模型** ✓（★ **2026-10-16 用户裁定** ✓）| ★★ 只有**一个**模型时不该逼操作员写路径 ✓；★ 默认值随构建而定 ✓（★ CMake `OCUDU_DEPTH3_DEFAULT_MODEL` ✓），★ 且**必须印在腿日志里** ✓ ⇒ ★ 恒等臂**留而不暴露** ✓ |
+| ★★ `gpu` + `ai` + **模型路径不存在** | ★★★ **冲突（报错）** ✓ | ★★ 这样的模型**永远绑不上** ✓ ⇒ ★ 它只会在开机后变成 `AI ARM INACTIVE` ＋ 一份**经典标签**的语料 ✗；★ 而这在**开射频之前**就可判定 ✓ |
 
 ★★ **落地与实测（★ 2026-10-16 补 ✓）**：★ 上表由三处共同执行 ✓ ——
 ★ **CLI11 取值校验**（`*_schema.cpp` ✓）、★ **validator 的跨参数校验**（`du_low_config_validator.cpp` ✓，
@@ -6700,6 +6700,17 @@ ping ＋ `iperf3 -R` 与同条件经典腿同量级 ✓）、★ 译码（★ rv
 ★ `gpu + ai` 不给模型 ✗、★ 模型路径不存在 ✗ ⇒ ★ dryrun **也都退出 0** ✓ ⇒
 ★★ **"只看 dryrun"的配方是在检查错的东西** ✗（★ 归入 F53/F54 一族：★ 守卫要在**它要守的那一层**上跑过 ✓）。
 
+> ★★★ **2026-10-16 用户裁定（★ 同日再修一次 ✓）**：★ 上面第一行"不给模型 ⇒ 冲突"✗
+> **只活了几个小时** ✓。★ 用户的规则更简单 ✓：★★ **"`gpu + ai` 可以执行 default 模型（★ 目前只有一个 ✓，
+> 以后可能有更多 ✓）；★ 也可以明确指定模型 ✓；★ 只有**指定了一个不存在的模型**才拒绝 ✓"** ✓。
+> ★★ 于是 `resolve_phy_pipeline` 改成 ✓：★ `ai` ＋ 未给模型 ⇒ ★ **取构建默认模型** ✓（★ 由 CMake
+> `OCUDU_DEPTH3_DEFAULT_MODEL` 决定 ✓，★ 经 `default_depth3_model_path()` **单一 TU** 暴露 ✓，
+> ★ 理由与 `query_phy_backend_availability()` 同 ✓）；★ 默认模型**也为空**时（★ 这份构建没带默认 ✓）
+> 才冲突 ✓；★ 给了路径就**必须存在** ✓，★ 否则 validator 在**开射频前**拒绝 ✓。
+> ★★ 实测 ✓：★ `gpu + ai`（★ 无模型 ✓）⇒ 腿日志印
+> ★ `[phy_pipeline]   ai model: …/d3_mixed.mlmodelc (the build's default; --pusch_receiver_model was not given)` ✓
+> ＋ ★ `receiver=ai` ✓ ＋ ★ `AI ARM ACTIVE … bound model '…/d3_mixed.mlmodelc'` ✓；★ 矩阵检查 **13/13 PASS** ✓。
+
 > ★★★ **2026-10-16 修正（★ 本节原文这里有一处后来过时了 ✓，★ 保留说明 ✓）**：
 > ★ 原文另有一句 ★ *"`--expert_phy.pusch_receiver_backend=bogus` ⇒ dryrun 退出 0"* ✗。
 > ★★ **现在不成立** ✓：★ 实测（★ 提交 `4523282cc6` ✓）★ **两种写法**（`=bogus` ✓、★ ` bogus` ✓）、
@@ -7054,3 +7065,107 @@ check_ai_arm_binding.sh 256qam 8 /tmp/d3_not_a_bundle
 ★★ **至此 ①–④ 全部落地并各自有实测** ✓，★ ⑤只剩**用户飞一条腿** ✓：
 ★ 配方（`tmp/fly_ai_legs.md` ＋ `tmp/fly_ai_leg.sh`）四条调制**全部 pre-flight PASS** ✓，
 ★★ 停腿后一条命令 `probe/ai_leg_verdict.py` ✓（★ §19.80 ✓）给出"**这是不是 AI 结果**" ✓。
+
+
+### 19.82 ★★★ Ctrl+C 退不出去：★ 根因**不在信号处理，在 lower PHY 的**无界等待 ✗（★ 2026-10-16 ✓）
+
+> ★★★ **用户报告**（★ 2026-10-16 ✓）：★ *"Ctrl+C 退出 gnb，以前的运行不会有 2 次的 Ctrl+C。当按键一次 Ctrl+C，
+> gnb 就会优雅的退出。最初的等待 5 秒（应该是等待 AMF 的某个消息），由于某个错误，超过 5 秒，就会强制 kill
+> 退出。后来由于有一些统计量需要计算（当按一次 Ctrl+C 后），有可能超过 5 秒，所以就延长至等待 30 秒。
+> 但是等待 30 秒也会出现强制 kill 退出。所以应该是某个地方出现了问题，请检查一下。"* ✓
+
+★★★ **检查结果：不是 AMF，是 `lower_phy`** ✓ —— 而且**腿日志里就有铁证** ✓。
+
+★★ **两条今天的腿（★ 16:42／16:45 ✓）都留下了完整的关机时间线** ✓：
+
+```
+[GNB] shutdown: ul_pipeline_probe report took 75 ms
+[GNB] shutdown: phy_pipeline contract report took 5 ms     ← 用户说的"统计量"这一步，5 ms 就跑完了 ✓
+[GNB] shutdown: metrics manager stop took 0 ms
+[GNB] shutdown: DU stop ...                                ← 卡在这里 ✗
+[DU ] o_du stop: mac_fapi_adaptor took 0 ms
+[DU ] o_du stop: lower_phy ...                             ← 真正的卡点 ✗（30 秒后再无输出）
+      …30 秒…
+Could not stop application after 30 seconds. Forcing exit.  ← 定时器兜底 → SIGKILL
+```
+
+★ **`lower_phy` 之下就是 `upper_phy_impl::stop()`** ✓，★ 它是**三个彼此独立的等待** ✓：★ RX 缓冲池 ✓、
+★ 下行处理器池 ✓、★ 上行处理器池 ✓ —— ★★ **而这三个等待原本都是无界的** ✗：
+
+| ★ 等待 | ★★ 代码 | ★★ 它等什么 |
+|---|---|---|
+| ★★ RX 缓冲池 | ★ `while (buffer.is_locked()) sleep(10us);` ✗ | ★★ 每个 `unique_rx_buffer` 归还 ✓ |
+| ★★ 下行处理器池 | ★ `for (;;) CAS(idle→stopped)) sleep(10us);` ✗ | ★★ 未完成的 PDU 计数归零 ✓ |
+| ★★ 上行处理器池 | ★ `stop_control.stop();` ✗ | ★★ 每个 slot 的 **PDU repository 归还 stop token** ✓ |
+
+★★★ **与运行期症状对得上** ✓：★ `get_pdu_slot_repository()` 把 stop token **交给 slot 的 PDU repository** ✓
+（★ `uplink_processor_impl.cpp`：*"Transfer stop token to the PDU repository"* ✓），
+★ 而**同一个 repository 不归还**在运行期就表现为
+★ `FAPI: UL processor is busy for slot …` ✗ —— ★★ 16:45 那条腿记了 **6 553 条** ✓（★ 最后一条在 SIGINT 前 7 秒 ✓）。
+★★ **⇒ 一次泄漏的 slot，在运行期是"处理器忙" ✓，在关机时就是"永远等不到 token" ✗** ✓。
+★ 另外：★ 关机期间 **DL 用户面一直在跑** ✓（★ GTPU/PDCP/RLC 一路打到强制退出前 ✓）——
+★ 这正说明被拆的**只有 PHY** ✓，AMF/上层还活着 ✓，★★ **与"等 AMF 消息"的猜测不符** ✗。
+
+#### ★★★ 第二层根因：★ 第二次 Ctrl+C **根本送不进来** ✗
+
+★★ 先修的那一半（★ §19.75 一带 ✓：★ 后来的信号走**强制**分支 ✓）**不够** ✓ ——
+★★ **POSIX 在信号自己的 handler 执行期间会屏蔽该信号** ✗，★ 而"优雅停止"**就跑在这个 handler 里** ✓
+⇒ ★★ 关不掉的时候再按一次 Ctrl+C（★ **同一个 SIGINT** ✗），★ 它会**一直 pending 到 handler 返回** ✓
+（★ 也就是**永远不** ✗）。★ 这与用户的观察**逐字一致** ✓：★ *"以前的运行不会有 2 次的 Ctrl+C"* ✓
+—— ★ 按了也没用 ✓，★ 所以只能从另一个终端 `kill` ✓。
+★★ **实测证据**：★ 我写的 `signal_handling_test` 第一版**自己就卡住了** ✓（★ handler 里 60 秒不返回 ✓，
+★ 第二次 SIGINT 一直没送到 ✓，★ 测试最后自己把子进程 kill 掉 ✓）。
+★★ **修法**：★ `register_interrupt_signal_handler` 从 `std::signal` 改成 **`sigaction` ＋ `SA_NODEFER`** ✓
+（★ 语义：★ **handler 执行期间不屏蔽它自己** ✓）⇒ ★★ 第二次 Ctrl+C **立刻**进入强制分支 ✓：
+★ 打印 `Interrupted again while stopping. Forcing exit.` ✓ ＋ ★ 跑 cleanup handler（★ 保住最后读数 ✓）
+＋ ★ `raise(SIGKILL)` ✓。★★ 实测：★ 那个"handler 卡 60 秒"的测试现在 **308 ms 通过** ✓
+（★ 输出里就有 `Interrupted again while stopping. Forcing exit.` ✓）。
+
+#### ★★★ 这一轮改了什么（★ 四层防线 ✓）
+
+| ★ 层 | ★★ 改动 |
+|---|---|
+| ★★ 命名 | ★ `upper_phy_impl::stop()` 拆成三步计时：★ `rx buffer pool` ✓／`downlink processor pool` ✓／`uplink processor pool` ✓ ⇒ ★ 下次卡住**自己报名** ✓ |
+| ★★ 有界 | ★★ 上行 token 等待改成 **`stop_for(2 s)`** ✓：★ 超时就**打印**未归还的 repository 数 ＋ 最后一个 slot ✓，★ 然后**继续关机** ✓ —— ★★ "泄漏一个 slot"不再等于"gNB 关不掉" ✓ |
+| ★★ 自述 | ★ RX 池与下行池的等待**保持无界** ✓（★ 锁住的缓冲/未完成的 PDU 还持有内存 ✓，★ 强行越过会变成 use-after-free ✗），★ 但**每秒打印一行** ✓：★ 还锁着几个 ✓、★ 哪个 buffer ✓、★ 哪个 HARQ ✓、★ 还有几个 PDU ✓ |
+| ★★ 逃生 | ★★ `SA_NODEFER` ⇒ ★ **再按一次 Ctrl+C 立即强制退出** ✓；★ `kill <pid>`（★ SIGTERM ✓）一直是有效的 ✓；★ 5／30 秒定时器仍是最后兜底 ✓ |
+
+★★ **实测（★ 都在本机跑过 ✓）** ✓：★ 单元测试 **signal_handling 1/1** ✓（★ 308 ms ✓，★ 强制分支真的走过 ✓）、
+★ **synchronization 23/23** ✓（★ 新增 `stop_for` 两条 ✓）、★ **du_low_phy_pipeline 29/29** ✓；
+★ 真 app（★ ZMQ，★ 10 秒 ✓）：★ **单次 SIGINT 0.52 秒优雅退出** ✓、★ 无残留 ✓、
+★ 新的六行 `upper PHY stop: …` 全部打印 ✓。
+
+★★★ **仍未修的（★ 说清楚 ✓）** ✓：★ **泄漏本身**（★ 哪个对象没归还 repository／buffer ✓）**没有定位到** ✗ ——
+★ 它需要一个**连着手机、有上行流量**的运行 ✓（★ 本机没有 UE ✓，★ ZMQ 空跑 19 ms 就退完了 ✓）。
+★★ 但现在**不需要猜**了 ✓：★ 下一次再发生时，★ 腿日志会**每秒**写出卡在哪一步 ✓、★ 还欠几个 ✓、
+★ 哪个 HARQ ✓；★ 而且上行那一路**最多拖 2 秒** ✓。★ 用户的那条腿（★ §19.79 的轻流量 AI 腿 ✓）
+★ 正好会给出这个答案 ✓。
+
+★★ **对飞行的影响** ✓：★ 单次 Ctrl+C 仍然优雅退出 ✓；★ 如果关机变慢（★ 30 秒那次的量级 ✓），
+★ **再按一次就是立刻强制** ✓（★ 这次真的会生效 ✓）；★ 日志里会先出现
+★ `upper PHY stop: <哪一步> ...` ✓ 和每秒的诊断 ✓ ⇒ ★★ 即使还要强杀，★ **也一定留下了"卡在哪"的证据** ✓。
+
+
+### 19.83 ★★ `gpu + ai` 不给模型 = **跑默认模型** ✓（★ 2026-10-16 用户裁定 ✓）
+
+★★ 用户原话 ✓：★ *"gpu + ai + <不存在的模型> 不应该回退到 CLASSICAL 模式，也应该拒绝执行并退出，
+打印错误信息说明模型并不存在。只有当不明确指定模型：`gpu + ai` 可以执行 default 模型（目前只有一个，
+以后可能有更多的不同模型）。当然也可以明确指定模型：`gpu + ai + <真模型>`。"* ✓
+
+★★ **落地** ✓：
+
+| ★ 请求 | ★★ 行为 |
+|---|---|
+| ★ `gpu + ai`（★ 不给 `--pusch_receiver_model` ✓）| ★★ **合法**：★ 绑**构建默认模型** ✓，★ 日志第一行写明"★ 这是默认值 ✓，★ 没给参数 ✓" ✓ |
+| ★ `gpu + ai + <真模型>` | ★★ **合法**：★ 用指定的那个 ✓ |
+| ★ `gpu + ai + <不存在的路径>` | ★★ **拒绝退出** ✓ ＋ ★ 打印"这个模型不存在" ✓（★ 若它是默认值 ✓，★ 还额外说明"★ 没给参数、★ 这是构建默认" ✓）|
+
+★★ **默认值从哪来** ✓：★ CMake 缓存变量 `OCUDU_DEPTH3_DEFAULT_MODEL` ✓（★ 默认指向本工作流的
+`probe/d3_mixed.mlmodelc` ✓ —— ★ 它是唯一**一套权重覆盖四种调制**的模型 ✓）——
+★★ 经 `default_depth3_model_path()` 从**单一 TU** 暴露 ✓（★ 与 `query_phy_backend_availability()` 同法 ✓），
+★ 避免"★ 不同 TU 看到不同默认值 ✓" ✗。★ 解析结果进 `phy_pipeline_effective::receiver_model` ✓，
+★ 由 validator 检查存在性 ✓、由 translator 交给 PUSCH 工厂 ✓ 并**记进腿日志** ✓。
+
+★★ **实测** ✓：★ `gpu + ai`（★ 无模型 ✓）⇒ ★ 日志三行齐全 ✓（★ `ai model: …（build's default）` ✓、
+★ `receiver=ai` ✓、★ `AI ARM ACTIVE … bound model` ✓）；★ 矩阵检查 **13/13 PASS** ✓
+（★ 含"没给模型也要绑默认"这条 ✓）；★ `gpu + ai + /不存在的路径` 在**开射频前** `exit 1` ✓。

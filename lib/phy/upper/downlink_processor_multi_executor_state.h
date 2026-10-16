@@ -73,13 +73,32 @@ public:
     return prev == 1;
   }
 
+  /// \brief Tries to transition the finite state machine to the stopped state.
+  ///
+  /// \return True if the machine is stopped (or was already), false if a PDU is still pending.
+  [[nodiscard]] bool try_stop()
+  {
+    uint32_t expected_state = state_pending_pdus_idle;
+    return state_pending_pdus.compare_exchange_weak(
+        expected_state, state_pending_pdus_mask_stopped, std::memory_order_acq_rel);
+  }
+
+  /// Number of PDUs whose processing has not completed yet (0 while accepting or stopped).
+  [[nodiscard]] uint32_t nof_pending_pdus() const
+  {
+    return state_pending_pdus.load(std::memory_order_relaxed) & state_pending_pdus_mask_count;
+  }
+
   /// Stops the finite state machine.
+  ///
+  /// The wait is unbounded by design -- a PDU that has not completed still owns memory the shutdown must not take
+  /// away -- so the caller (downlink_processor_multi_executor_impl::stop) is the one that reports what it is waiting
+  /// for, once a second, instead of leaving a hang indistinguishable from the two other waits in the same lower-PHY
+  /// stop (measured 2026-10-16, see uplink_processor_impl::stop).
   void stop()
   {
     // Try transitioning to the stopped state from idle until it is successful.
-    for (uint32_t expected_state = state_pending_pdus_idle; !state_pending_pdus.compare_exchange_weak(
-             expected_state, state_pending_pdus_mask_stopped, std::memory_order_acq_rel);
-         expected_state = state_pending_pdus_idle) {
+    while (!try_stop()) {
       std::this_thread::sleep_for(std::chrono::microseconds(10));
     }
   }

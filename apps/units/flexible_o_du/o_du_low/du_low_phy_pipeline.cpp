@@ -24,8 +24,19 @@
 #ifndef OCUDU_DEPTH3_AI_AVAILABLE
 #define OCUDU_DEPTH3_AI_AVAILABLE 0
 #endif
+// The model an "ai" run binds when the command line does not name one. Same routing, same reason: this file is the
+// only place that sees the build's answer, so the validator, the translator and the arm cannot disagree about which
+// model a run without the knob actually ran.
+#ifndef OCUDU_DEPTH3_DEFAULT_MODEL
+#define OCUDU_DEPTH3_DEFAULT_MODEL ""
+#endif
 
 using namespace ocudu;
+
+std::string_view ocudu::default_depth3_model_path()
+{
+  return OCUDU_DEPTH3_DEFAULT_MODEL;
+}
 
 phy_backend_availability ocudu::query_phy_backend_availability()
 {

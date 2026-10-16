@@ -14,6 +14,7 @@
 #include "ocudu/phy/upper/unique_rx_buffer.h"
 #include "ocudu/phy/upper/upper_phy_rx_results_notifier.h"
 #include "ocudu/ran/sch/sch_segmentation.h"
+#include <chrono>
 #include "ocudu/support/rtsan.h"
 
 using namespace ocudu;
@@ -79,8 +80,24 @@ uplink_slot_processor& uplink_processor_impl::get_slot_processor(slot_point slot
 
 void uplink_processor_impl::stop()
 {
-  // Wait for all asynchronous tasks to complete.
-  stop_control.stop();
+  // Wait for all asynchronous tasks to complete -- but NOT forever.
+  //
+  // MEASURED 2026-10-16, from a flown leg: the gNB could not be stopped. Ctrl+C entered the shutdown, printed the
+  // reports and then sat in `o_du stop: lower_phy` for the entire 30-second termination timeout, after which the
+  // process was SIGKILLed; the operator's report was "只能 kill". The token this wait is about is transferred to the
+  // slot's PDU repository (see get_pdu_slot_repository), so a repository that is never destroyed holds it for good -
+  // and the same condition is visible DURING the run as "UL processor is busy for slot ...", of which that leg logged
+  // 6553. An unbounded wait here converts one leaked slot into a gNB that cannot be stopped and whose shutdown log is
+  // lost with the SIGKILL. The wait is bounded instead, and what did not come back is named: the caller can act on a
+  // number, and the log of the run that hung says what was in flight.
+  static constexpr std::chrono::seconds stop_timeout{2};
+  if (!stop_control.stop_for(stop_timeout)) {
+    logger.warning("UL processor stop: {} slot repository(ies) still in flight after {} s (last slot {}); the "
+                   "shutdown continues without them",
+                   stop_control.nof_tokens_approx(),
+                   stop_timeout.count(),
+                   current_slot);
+  }
 }
 
 unique_uplink_pdu_slot_repository uplink_processor_impl::get_pdu_slot_repository(slot_point slot)

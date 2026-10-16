@@ -540,22 +540,44 @@ TEST(phy_pipeline_mode_test, receiver_ai_substitutes_the_classic_one_when_the_bi
   EXPECT_EQ(with_capability->receiver, "ai");
 }
 
-TEST(phy_pipeline_mode_test, receiver_ai_without_a_model_is_refused)
+TEST(phy_pipeline_mode_test, receiver_ai_without_a_model_takes_the_builds_default)
 {
-  // The arm computes only WITH a model: without one it is the identity, which forwards to the classical estimator
-  // and demodulator. Such a run reports receiver=ai and its corpus is labelled by the classical chain, which is
-  // the failure this matrix exists to refuse -- it is what the first AI leg of 2026-10-16 did, and the leg had to
-  // be thrown away. The identity arm itself stays reachable from the library and the replay tool; the application
-  // no longer offers it by accident.
+  // "ai" with no model is a REQUEST FOR THE DEFAULT MODEL, not an error: the arm computes only with a model, so a
+  // run that says "ai" and binds nothing would report receiver=ai while the classical chain produced its output --
+  // the failure this matrix exists to refuse, and the one that cost the first flight of 2026-10-16. Which default
+  // is a property of the BUILD (OCUDU_DEPTH3_DEFAULT_MODEL), so it is passed into the resolver here instead of
+  // being read from a header by every consumer.
+  std::string  error;
+  const auto   effective = resolve_phy_pipeline(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai"),
+                                              all_available,
+                                              error,
+                                              "/models/default.mlmodelc");
+  ASSERT_TRUE(effective.has_value()) << error;
+  EXPECT_EQ(effective->receiver, "ai");
+  EXPECT_EQ(effective->receiver_model, "/models/default.mlmodelc");
+}
+
+TEST(phy_pipeline_mode_test, receiver_ai_without_a_model_conflicts_when_the_build_has_no_default)
+{
+  // The one case that cannot be honoured: no model on the command line AND none in the build. There is nothing to
+  // bind, so the run is refused rather than run as an identity arm under a name that promises a network.
   std::string error;
   EXPECT_FALSE(resolve_phy_pipeline(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai"),
                                     all_available,
-                                    error)
+                                    error,
+                                    "")
                    .has_value());
-  EXPECT_NE(error.find("requires --pusch_receiver_model"), std::string::npos) << error;
+  EXPECT_NE(error.find("carries no default"), std::string::npos) << error;
+}
 
-  // A model path is accepted without being opened here: whether the bundle EXISTS is the validator's question (it
-  // has a filesystem) and whether it BINDS is the arm's (it has the loader), and both are reported by their owner.
-  EXPECT_EQ(resolve(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model)).receiver, "ai");
+TEST(phy_pipeline_mode_test, receiver_ai_keeps_the_model_it_was_given)
+{
+  // An explicit path wins over the default, and is carried to the consumer unopened: whether the bundle EXISTS is
+  // the validator's question (it has a filesystem) and whether it BINDS is the arm's (it has the loader), and each
+  // reports its own answer.
+  const auto effective =
+      resolve(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model));
+  EXPECT_EQ(effective.receiver, "ai");
+  EXPECT_EQ(effective.receiver_model, ai_model);
 }
 } // namespace

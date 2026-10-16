@@ -108,9 +108,12 @@ static bool validate_phy_pipeline_config(const du_low_unit_expert_upper_phy_conf
     // contract had nothing to check in that mode. The contract is what enforces the claim now.
   }
 
-  // Cross-check the mode against the module backend knobs (see resolve_phy_pipeline for the rules).
+  // Cross-check the mode against the module backend knobs (see resolve_phy_pipeline for the rules). The resolution
+  // also decides WHICH model an "ai" run binds - the requested one, or the build's default when the knob is absent -
+  // so the existence check below asks about the model the run will actually use, and names it.
   std::string error;
-  if (!resolve_phy_pipeline(request, available, error)) {
+  const auto  effective = resolve_phy_pipeline(request, available, error);
+  if (!effective.has_value()) {
     fmt::print("Invalid configuration: {}.\n", error);
     return false;
   }
@@ -122,14 +125,18 @@ static bool validate_phy_pipeline_config(const du_low_unit_expert_upper_phy_conf
   //
   // The error_code overload keeps a filesystem that cannot answer (a permission, an encoding this platform rejects)
   // from throwing here and from being read as "does not exist": only a check that RAN and said no is a refusal.
-  std::error_code model_ec;
-  const bool      model_exists = std::filesystem::exists(config.pusch_receiver_model, model_ec);
-  if ((config.pusch_receiver_backend == "ai") && (!config.pusch_receiver_model.empty()) && !model_exists &&
-      !model_ec) {
-    fmt::print("Invalid configuration: --pusch_receiver_model '{}' does not exist. Pass the COMPILED model "
-               "directory (.mlmodelc) produced by `xcrun coremlcompiler compile`.\n",
-               config.pusch_receiver_model);
-    return false;
+  if (effective->receiver == "ai") {
+    std::error_code model_ec;
+    const bool      model_exists = std::filesystem::exists(effective->receiver_model, model_ec);
+    if (!model_exists && !model_ec) {
+      fmt::print("Invalid configuration: the AI receiver's model '{}' does not exist{}. Pass the COMPILED model "
+                 "directory (.mlmodelc) produced by `xcrun coremlcompiler compile`.\n",
+                 effective->receiver_model,
+                 config.pusch_receiver_model.empty() ? " (this is the build's default: --expert_phy."
+                                                       "pusch_receiver_model was not given)"
+                                                     : "");
+      return false;
+    }
   }
 
   return true;

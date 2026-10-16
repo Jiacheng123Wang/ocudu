@@ -5,6 +5,7 @@
 
 #include "ocudu/support/synchronization/futex_util.h"
 #include <atomic>
+#include <chrono>
 #include <thread>
 #include <utility>
 
@@ -74,6 +75,38 @@ public:
       BlockPolicy::wait(token_count, cur);
       cur = token_count.load(std::memory_order_acquire);
     }
+  }
+
+  /// \brief Requests all tokens to stop and blocks until all tokens are reset, or until \c timeout elapses.
+  ///
+  /// WHY IT EXISTS. \ref stop is unbounded by construction, and a token that is never released therefore blocks the
+  /// caller forever. That is the right default (an observer that is still alive may still be writing), but it is the
+  /// wrong behaviour for an APPLICATION SHUTDOWN: measured 2026-10-16, a gNB with a phone and uplink traffic entered
+  /// its shutdown, printed its reports and then sat in the lower-PHY stop for the whole 30-second termination timeout,
+  /// after which the process was SIGKILLed -- taking the evidence of what it waited for with it. A caller that can
+  /// report what did not come back (\ref nof_tokens_approx, and whatever it knows about the work in flight) uses this
+  /// overload, names the outstanding observers and decides for itself whether continuing is safe.
+  ///
+  /// \return True if every observer is gone, false if the timeout expired with observers outstanding.
+  /// \note The wait below does NOT go through \c BlockPolicy::wait, and it cannot: that wait is unbounded by
+  /// definition (a futex wait returns when the value changes, not when a deadline passes), so using it here would
+  /// make this function block forever on exactly the observer it is supposed to give up on -- which is how it was
+  /// written first, and a unit test caught it by hanging. A timed wait would need a timed futex wait this tree does
+  /// not have; polling the counter every millisecond costs nothing on a shutdown path and is correct for both
+  /// blocking policies. The realtime (busy-wait) policy already polls at this granularity.
+  template <typename Rep, typename Period>
+  [[nodiscard]] bool stop_for(const std::chrono::duration<Rep, Period>& timeout)
+  {
+    auto       cur      = token_count.fetch_or(stop_bit, std::memory_order_acq_rel) | stop_bit;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (cur > stop_bit) {
+      if (std::chrono::steady_clock::now() >= deadline) {
+        return false;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds{1});
+      cur = token_count.load(std::memory_order_acquire);
+    }
+    return true;
   }
 
   /// Resets stop_requested back to false. If there are tokens yet to complete an earlier stop(), this call will block.

@@ -14,6 +14,7 @@
 #include "ocudu/phy/upper/signal_processors/prs/prs_generator.h"
 #include "ocudu/ran/slot_pdu_capacity_constants.h"
 #include "ocudu/support/executors/task_executor.h"
+#include <chrono>
 
 namespace ocudu {
 
@@ -84,7 +85,24 @@ public:
   downlink_processor_controller& get_controller() override { return *this; }
 
   // See downlink_processor_base interface for documentation.
-  void stop() override { state.stop(); }
+  void stop() override
+  {
+    // The state machine only stops from idle, i.e. once every queued PDU has completed, and that wait is unbounded
+    // because an unfinished PDU still owns memory. What it must not be is SILENT: this is one of the three waits of
+    // the lower-PHY stop, and a flown leg that could not be stopped on 2026-10-16 spent its whole 30-second
+    // termination timeout inside one of them without saying which. Once a second, this names the count.
+    static constexpr auto report_period = std::chrono::seconds(1);
+    auto                  next_report   = std::chrono::steady_clock::now() + report_period;
+    while (!state.try_stop()) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= next_report) {
+        logger.warning("downlink processor pool stop: {} PDU(s) still pending; waiting for them before stopping",
+                       state.nof_pending_pdus());
+        next_report = now + report_period;
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(10));
+    }
+  }
 
 private:
   // See downlink_processor_controller interface for documentation.

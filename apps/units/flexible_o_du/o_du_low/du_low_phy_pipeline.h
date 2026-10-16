@@ -72,6 +72,16 @@ constexpr bool ai_receiver_bound()
 /// lower PHY) would otherwise silently take an all-unavailable copy.
 phy_backend_availability query_phy_backend_availability();
 
+/// \brief The model the ai receiver binds when --pusch_receiver_model is not given.
+///
+/// A build-time constant (CMake OCUDU_DEPTH3_DEFAULT_MODEL, defaulting to the LLR AI detection workflow's mixed
+/// model). It lives in one translation unit and not in a macro every TU could see for the same reason
+/// \ref query_phy_backend_availability does: a header-level default would let two consumers disagree about which
+/// model a run without the knob binds, and the run's own log would be the only place to notice.
+///
+/// Empty means this build carries no default, and an "ai" request without a model is then a conflict.
+std::string_view default_depth3_model_path();
+
 /// Effective configuration of the uplink pipeline: one backend per module, all "auto" resolved.
 struct phy_pipeline_effective {
   /// Effective mode (never "auto").
@@ -107,6 +117,13 @@ struct phy_pipeline_effective {
   /// \ref ai_receiver_bound(). The value therefore changes NOTHING measurable yet, which is the point: the knob
   /// is proven inert before a backend is wired to it.
   std::string receiver = "classic";
+  /// \brief The compiled model the ai receiver binds: the requested one, or the build's default when none was given.
+  ///
+  /// Resolved here rather than in the factory so that ONE value describes the run: the validator checks that it
+  /// exists, the translator hands it to the PUSCH factory and logs it, and the arm reports it in its banner. Empty
+  /// only when the request asked for no model AND this build carries no default - which is a conflict, because the
+  /// arm would then be the identity while the run says "ai".
+  std::string receiver_model;
 };
 
 /// Whether a per-module backend value runs on the CPU.
@@ -183,8 +200,10 @@ inline void set_phy_pipeline_conflict(std::string& error, phy_pipeline_mode mode
 /// \param[in]  available Offload backends built into this binary.
 /// \param[out] error     Human-readable reason when the function returns an empty optional.
 /// \return The effective configuration, or an empty optional on a configuration conflict.
-inline std::optional<phy_pipeline_effective>
-resolve_phy_pipeline(const phy_pipeline_request& request, const phy_backend_availability& available, std::string& error)
+inline std::optional<phy_pipeline_effective> resolve_phy_pipeline(const phy_pipeline_request&     request,
+                                                                  const phy_backend_availability& available,
+                                                                  std::string&                    error,
+                                                                  std::string_view default_model = default_depth3_model_path())
 {
   phy_pipeline_effective out;
   out.dft       = request.dft;
@@ -235,15 +254,17 @@ resolve_phy_pipeline(const phy_pipeline_request& request, const phy_backend_avai
               "offload cannot express - use --phy_pipeline gpu";
       return std::nullopt;
     }
-    // A model is what makes the arm COMPUTE. Since the capability became real (2026-10-16) an "ai" request without
-    // one can only produce a run whose output is the classical result under a name that promises another one --
-    // which is the failure this matrix exists to refuse, and it cost a flight before it was refused: the knobs were
-    // in argv, the run reported "receiver=ai", and every reception was decoded by the classical chain. The
-    // diagnostic identity arm is still reachable from the library (pusch_depth3_kind::ai_identity) and from the
-    // replay tool; what is gone is the ability to ask for it by accident, from the application.
-    if (request.receiver_model.empty()) {
-      error = "--pusch_receiver_backend ai requires --pusch_receiver_model: without a model the AI arm is the "
-              "identity, so the run would report receiver=ai while the CLASSICAL chain produced its output";
+    // A model is what makes the arm COMPUTE, so an "ai" request always runs one: the requested model, or the one
+    // this build carries as its default. The distinction matters because the failure this matrix exists to refuse is
+    // a run that REPORTS "ai" while the classical chain produces its output -- which is what an arm without a model
+    // is (it forwards), and which cost a flight before the capability was wired. Leaving the model unspecified is
+    // therefore not an error: it selects the default. The diagnostic identity arm stays reachable from the library
+    // (pusch_depth3_kind::ai_identity) and from the replay tool.
+    out.receiver_model = request.receiver_model.empty() ? std::string(default_model) : request.receiver_model;
+    if (out.receiver_model.empty()) {
+      error = "--pusch_receiver_backend ai needs a model and this build carries no default one: pass "
+              "--pusch_receiver_model <model.mlmodelc>. Without a model the AI arm is the identity, so the run "
+              "would report receiver=ai while the CLASSICAL chain produced its output";
       return std::nullopt;
     }
     out.receiver = "ai";

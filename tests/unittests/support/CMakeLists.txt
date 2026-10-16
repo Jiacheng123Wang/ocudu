@@ -11,6 +11,10 @@ add_subdirectory(format)
 add_subdirectory(rate_limiting)
 add_subdirectory(synchronization)
 
+add_executable(signal_handling_test signal_handling_test.cpp)
+target_link_libraries(signal_handling_test ocudu_support GTest::gtest ocudu_gtest_main)
+add_test(signal_handling_test signal_handling_test)
+
 add_executable(timer_test timer_test.cpp)
 target_link_libraries(timer_test ocudulog ocudu_support GTest::gtest ocudu_gtest_main)
 add_test(timer_test timer_test)

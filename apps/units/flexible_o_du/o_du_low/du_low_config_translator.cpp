@@ -105,6 +105,13 @@ static void log_phy_pipeline_config(const du_low_unit_expert_upper_phy_config& c
                 config.pusch_receiver_backend);
   }
   if (effective.receiver == "ai") {
+    // Which model was bound, said in the leg's own log: the arm's banner repeats it, but this line is written before
+    // anything is built and is the one a reader compares against the run's intent ("I passed no model and got the
+    // default" vs "I passed a path and got THAT path").
+    logger.info("[phy_pipeline]   ai model: {} ({})",
+                effective.receiver_model,
+                config.pusch_receiver_model.empty() ? "the build's default; --pusch_receiver_model was not given"
+                                                    : "explicit --pusch_receiver_model");
     // Section 1.5.3, last row: the grid's writer is a SECOND variable, so an AI run with a device DFT is arm 5 and
     // not the main AI arm. The knob is legal - it just has to be visible, because a leg's log is the only place the
     // arm can be told apart afterwards.
@@ -185,7 +192,9 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
   // create_ul_processor_factory), so an "ai" that reached it would be a hard failure and not a
   // classic chain wearing an AI label.
   upper_phy_factory_config.pusch_receiver_backend  = effective.receiver;
-  upper_phy_factory_config.pusch_receiver_model_path = du_low.expert_phy_cfg.pusch_receiver_model;
+  // The RESOLVED model: the requested one, or the build's default when the knob is absent (see
+  // resolve_phy_pipeline). The factory must not see an empty path here, because an empty path is the identity arm.
+  upper_phy_factory_config.pusch_receiver_model_path = effective.receiver_model;
   upper_phy_factory_config.pusch_channel_estimator_mmse_tau_rms_us =
       du_low.expert_phy_cfg.pusch_channel_estimator_mmse_tau_rms_us;
   upper_phy_factory_config.pusch_channel_estimator_mmse_fd_hz =

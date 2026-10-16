@@ -7,6 +7,8 @@
 #include "ocudu/adt/format.h"
 #include "ocudu/phy/upper/upper_phy_operation_controller.h"
 #include "ocudu/phy/upper/upper_phy_timing_notifier.h"
+#include "ocudu/support/ocudu_assert.h"
+#include <chrono>
 
 using namespace ocudu;
 
@@ -134,7 +136,22 @@ const downlink_pdu_validator& upper_phy_impl::get_downlink_pdu_validator() const
 
 void upper_phy_impl::stop()
 {
-  rx_buf_pool->stop();
-  dl_processor_pool->stop();
-  ul_processor_pool->stop();
+  // Timed step by step, and named. The gNB's shutdown is timed at its own level (gnb.cpp), then again inside the
+  // O-DU (o_du_impl.cpp), which is how "DU stop" was narrowed to "o_du stop: lower_phy" -- and there it stopped
+  // naming things: this function is itself three independent waits, and the leg that could not be stopped on
+  // 2026-10-16 spent its whole 30-second termination timeout inside one of them without saying which. A killed
+  // process takes its log with it, so the cheapest possible fix for that class of outage is to have the log say
+  // what it was waiting for before it is killed.
+  auto stop_step = [](const char* what, auto&& step) {
+    ocudulog::basic_logger& logger = ocudulog::fetch_basic_logger("PHY", true);
+    logger.info("upper PHY stop: {} ...", what);
+    const auto t0 = std::chrono::steady_clock::now();
+    step();
+    logger.info("upper PHY stop: {} took {} ms",
+                what,
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
+  };
+  stop_step("rx buffer pool", [&]() { rx_buf_pool->stop(); });
+  stop_step("downlink processor pool", [&]() { dl_processor_pool->stop(); });
+  stop_step("uplink processor pool", [&]() { ul_processor_pool->stop(); });
 }

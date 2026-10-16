@@ -149,3 +149,35 @@ TEST(stop_event_dtor_test, event_concurrent_destruction_many_threads)
     }
   }
 }
+
+TYPED_TEST(stop_event_test, stop_for_gives_up_on_an_observer_that_never_resets)
+{
+  // The bound exists for the shutdown path that was measured hanging a flown leg for 30 seconds (see
+  // uplink_processor_impl::stop): it must return FALSE rather than block, so its caller can name what is still in
+  // flight and finish the shutdown. It is called from a worker here so that a regression FAILS the test instead of
+  // hanging it -- which is exactly what the first version of this function did with the futex blocking policy.
+  auto              obs = this->ev.get_token();
+  std::atomic<bool> returned{false};
+  std::atomic<bool> result{true};
+  this->workers.push_back(std::make_unique<std::thread>([this, &returned, &result]() {
+    result   = this->ev.stop_for(std::chrono::milliseconds{20});
+    returned = true;
+  }));
+  for (unsigned i = 0; i != 500 && !returned; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+  }
+  ASSERT_TRUE(returned) << "stop_for must return when its bound expires, whatever the blocking policy does";
+  ASSERT_FALSE(result);
+  ASSERT_EQ(this->ev.nof_tokens_approx(), 1) << "the outstanding observer is what the caller reports";
+
+  // ... and it must still return TRUE as soon as that observer is gone, with the stop request already made.
+  obs.reset();
+  this->workers[0]->join();
+  ASSERT_TRUE(this->ev.stop_for(std::chrono::milliseconds{20}));
+  ASSERT_EQ(this->ev.nof_tokens_approx(), 0);
+}
+
+TYPED_TEST(stop_event_test, stop_for_without_observers_returns_immediately)
+{
+  ASSERT_TRUE(this->ev.stop_for(std::chrono::milliseconds{20}));
+}

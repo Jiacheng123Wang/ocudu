@@ -126,8 +126,31 @@ void rx_buffer_pool_impl::stop()
   stopped.store(true);
 
   // Makes sure all buffers are unlocked.
-  for (const auto& buffer : buffers) {
-    while (buffer.is_locked()) {
+  //
+  // THIS WAIT IS DELIBERATELY NOT BOUNDED, and it says so out loud. A locked buffer is one whose unique_rx_buffer is
+  // still alive somewhere -- an owner that may still be writing into it -- so proceeding would hand the shutdown a
+  // buffer that is about to be used, and the failure would appear later and elsewhere. But it is also the second of
+  // the two unbounded waits in the lower-PHY stop that was measured hanging a flown leg for the whole 30-second
+  // termination timeout on 2026-10-16 (the other one is uplink_processor_impl::stop, which is now bounded), and a
+  // wait that says nothing for 30 seconds is what made that hang undiagnosable. So it REPORTS: once a second, how
+  // many buffers are still locked and which HARQ identifiers they were reserved for. Whoever reads the log of a gNB
+  // that would not stop then knows which reservation leaked instead of only that something did.
+  static constexpr auto report_period = std::chrono::seconds(1);
+  auto                  next_report   = std::chrono::steady_clock::now() + report_period;
+  for (std::size_t i_buffer = 0; i_buffer != buffers.size(); ++i_buffer) {
+    while (buffers[i_buffer].is_locked()) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= next_report) {
+        const unsigned nof_locked = std::count_if(buffers.begin(), buffers.end(), [](const rx_buffer_impl& buffer) {
+          return buffer.is_locked();
+        });
+        logger.warning("UL RX buffer pool stop: {} of {} buffer(s) still locked; waiting for buffer {} (HARQ {})",
+                       nof_locked,
+                       buffers.size(),
+                       i_buffer,
+                       identifiers[i_buffer]);
+        next_report = now + report_period;
+      }
       std::this_thread::sleep_for(std::chrono::microseconds(10));
     }
   }
