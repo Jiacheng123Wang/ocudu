@@ -571,7 +571,7 @@ def rename_outputs(mlmodel, qm, keras_names):
     return ct.models.MLModel(spec, weights_dir=mlmodel.weights_dir)
 
 
-def export_deployment(model, qm, path):
+def export_deployment(model, qm, path, cond=False):
     """Convert a TRAINED model to the fp16 deployment graph, with the contract's output names.
 
     The conversion decides the deployment precision, which is why training runs in fp32: the
@@ -593,16 +593,24 @@ def export_deployment(model, qm, path):
         minimum_deployment_target=ct.target.iOS17,
         convert_to="mlprogram")
     converted = rename_outputs(converted, qm, list(model.output_names))
-    # THE DECLARATION. A conditioned bundle and a per-modulation 256QAM bundle have the same main-head width
-    # (14 * 8 = 112 channels), so a shape-based check cannot tell them apart -- and they are not interchangeable:
-    # one serves every modulation, the other one. The exported bundle therefore SAYS which contract it follows,
-    # and the engine reads the declaration instead of inferring a layout from a width two artifacts share
-    # (design section 19.102).
-    if getattr(model, "_depth3_cond", False):
-        metadata = converted.get_spec().description.metadata
-        metadata.userDefined["depth3_layout"] = "modcond"
-        metadata.userDefined["depth3_qm_set"] = ",".join(str(qm_) for qm_ in D3.COND_QM_ORDER)
-        metadata.userDefined["depth3_head_stride"] = str(D3.COND_STRIDE)
+    # EVERY metadata write goes through a SPEC and is REBUILT into a model, because `get_spec()` hands back a COPY:
+    # mutating the returned spec and then saving the MODEL silently drops the write -- which is exactly what
+    # happened on the first export of a conditioned bundle (the metadata came out holding only coremltools' own
+    # keys, and the engine would have refused the bundle it declares). `rename_outputs` above already uses this
+    # pattern for the head names.
+    # `cond` is a PARAMETER and not the model's attribute: the export-only path loads the `.keras` from disk, and
+    # an attribute set at build time does not survive that -- measured 2026-10-16, when an export-only smoke run
+    # wrote a conditioned bundle with no declaration at all, which the engine would then have refused.
+    if cond or getattr(model, "_depth3_cond", False):
+        spec = converted.get_spec()
+        spec.description.metadata.userDefined["depth3_layout"] = "modcond"
+        spec.description.metadata.userDefined["depth3_qm_set"] = ",".join(str(qm_) for qm_ in D3.COND_QM_ORDER)
+        spec.description.metadata.userDefined["depth3_head_stride"] = str(D3.COND_STRIDE)
+        converted = ct.models.MLModel(spec, weights_dir=converted.weights_dir)
+    # A conditioned bundle and a per-modulation 256QAM bundle have the same main-head width (14 * 8 = 112
+    # channels), so a shape-based check cannot tell them apart -- and they are not interchangeable: one serves
+    # every modulation, the other one. The bundle therefore SAYS which contract it follows (written above, through
+    # the spec), and the engine reads the declaration rather than inferring a layout from a shared width.
     converted.save(path)
     print(f"wrote the fp16 deployment graph to {path} (input {[1, *shape]})")
 
@@ -714,7 +722,8 @@ def main():
             custom_objects={"FoldedScaleConv": FoldedScaleConv})
         if not args.export_probe:
             parser.error("--export-only needs --export-probe")
-        export_deployment(exported, D3.BITS_PER_SYMBOL[args.modulation], args.export_probe)
+        export_deployment(exported, D3.BITS_PER_SYMBOL[args.modulation], args.export_probe,
+                          cond=args.modcond)
         return 0
 
     qm = D3.BITS_PER_SYMBOL[args.modulation]
@@ -741,7 +750,7 @@ def main():
                             fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
                             llr_linear=args.llr_linear, dense=args.dense_blocks,
                             layout=args.layout, in_channels=in_channels, cond=args.modcond)
-        export_deployment(probe_model, qm, args.probe_graph)
+        export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
         return 0
 
     if not args.train or not args.val or not args.out:
@@ -940,7 +949,7 @@ def main():
     # reaches a receiver and produces plausible nonsense.
     if args.export_probe:
         model.load_weights(os.path.join(args.out, "depth3_best.keras"))
-        export_deployment(model, qm, args.export_probe)
+        export_deployment(model, qm, args.export_probe, cond=args.modcond)
     return 0
 
 
