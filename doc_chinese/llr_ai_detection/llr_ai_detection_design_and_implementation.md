@@ -9768,3 +9768,26 @@ reception 1 (Qm=8 256QAM) over 552 pilot RE(s): ... noise net=6.1434e-04 classic
 ★（★ 而不只是在主检查点上成立 ✓）。
 
 ★ 复验：★ 本轮**未改任何被编译的代码** ✓（★ 纯测量 ✓）⇒ ★ 不变量与矩阵无需重跑 ✓。
+
+### 19.155 ★★★ 抢救 `/tmp`：★ 交付产物与证据**移入工作目录** ✓（★ 2026-10-17 ✓，★ 用户要求 ✓）
+
+★ 用户提醒：★ macOS 的 `/tmp` **重启即清** ✓，★ 而这个工作流已经因此丢过成果 ✓ ⇒ ★ 立即把属于本工作流的东西
+★ 从 `/tmp` **搬到** `doc_chinese/llr_ai_detection/work_tmp/` ✓，★ 并**改掉所有引用旧路径的脚本** ✓：
+
+| ★ 新位置 | ★ 内容 | ★ 为什么留 |
+|---|---|---|
+| ★ `work_tmp/data/models/` ✓ | ★ `d3_modcond_ft.mlmodelc` ✓（★ **部署产物** ✓）、★ `d3_modcond_final.mlmodelc` ✓、★ `d3_modcond_dom.mlmodelc` ✓、★ `d3_modcond_smoke.mlmodelc` ✓，★ 以及各自的 `.mlpackage` ✓ | ★ 产物是**交付物本身** ✓；★ `.mlpackage` 是编译前的形态 ✓，★ 自声明在它里面可读 ✓ |
+| ★ `work_tmp/data/one_sample/` ✓ | ★ `one.npz` ✓（★ 同口径真值 ✓）、★ `synth.npz` ✓（★ 指定 SNR 数据集 ✓）、★ `index.csv` / `tb/` ✓（★ 单样本构建的输入 ✓）、★ `replay.log` ✓ | ★ §19.130/19.131/19.146 的证据来源 ✓，★ 重跑对照要用 ✓ |
+| ★ `work_tmp/probe/` ✓ | ★ `r6_prescribed_snr.py` ✓、★ `r6_domain.py` ✓ | ★ §19.115–19.146 那一串扫描的探针 ✓ |
+| ★ `work_tmp/tmp/evidence/` ✓ | ★ gnb 冒烟日志 ✓、★ 回放日志 ✓、★ `legtail.txt` ✓、★ `legshot/` ✓、★ `rescue_smoke*` ✓ | ★ 文档里引用的**具体行**（★ 如 `rsrp -1.88` / `published measurement` ✓）以此为准 ✓ |
+
+★★ **脚本已逐个改路径并语法检查** ✓（★ 五个 shell ✓ + ★ 两个 python ✓）：★
+`finalize_conditioned.sh` ✓、★ `finetune_conditioned.sh` ✓、★ `fly_r6_ab.sh` ✓、★ `preview_rest.sh` ✓、
+★ `verify_deployed.sh` ✓、★ `probe/r6_*.py` ✓（★ 后者的模型路径改成**相对自身** ✓，★ 不再依赖任何绝对 `/tmp` ✓）。
+★ 并且**当场冒烟验证**：★ 用**新路径**的部署产物回放 ✓ ⇒ ★ 契约横幅 ✓、★ `trained on 12.00 to 48.00 dB` ✓、
+★ `published measurement 1 … (rsrp -1.88 dB)` ✓、★ 调度器可见字段 `rsrp=-1.88` ✓、★ `crc=OK` ✓ —— ★ 与新位置无关 ✓。
+
+★★ **未搬的东西与理由** ✓：★ `/tmp/r6_stage/`（★ 22 MB 的 staged 捕获 ✓）★ **可再生** ✓（★ 由
+★ `measure_ce_error.build_grid` + 回放脚本随时重建 ✓）；★ 各种 `_llr.bin`/`_h.bin` 回放产物同理 ✓。
+★ 结论写在这里 ✓：★ 从今往后，★ **凡是"★ 以后可能要读的数 ✓"，★ 一律落在 `work_tmp/` 下 ✓，
+★ `/tmp` 只放一次性的中间物** ✓。
