@@ -6680,3 +6680,42 @@ ping ＋ `iperf3 -R` 与同条件经典腿同量级 ✓）、★ 译码（★ rv
 
 ★★ **实测** ✓：★ `du_low_phy_pipeline_test` **26 项全过** ✓；★ 只跑接收机相关的 5 项也全过 ✓
 （★ `--gtest_filter='*receiver*'` ✓）。
+
+
+### 19.73 ★★★ 起飞前先证明"这条腿会跑 AI" ✓：★ 新检查器把 16:45 那次错误变成不可能再静默发生 ✓（★ 2026-10-16 ✓）
+
+★★ 16:45 那条腿的教训是：★★ **参数在 argv 里 ✓、★ `--dryrun` 退出 0 ✓、★ 模型文件在 ✓ —— 三样都对，
+★ 而它跑的是经典接收机** ✗✗ ⇒ ★★ 飞行配方**没有任何一步**能挡住它 ✓。
+
+★★★ **顺带量到一件重要的事** ✓：★★ **`--dryrun` 根本不校验 expert_phy 这一层** ✗ ——
+★ 实测：★ `--expert_phy.pusch_receiver_backend=bogus` ⇒ dryrun **退出 0** ✓；
+★ `--phy_pipeline cpu + --pusch_receiver_backend=ai`（★ 非法组合 ✓）⇒ dryrun **也退出 0** ✗ ⇒
+★★ **"只看 dryrun"的配方是在检查错的东西** ✗（★ 归入 F53/F54 一族：★ 守卫要在**它要守的那一层**上跑过 ✓）。
+
+★★★ **⇒ 新工具 `probe/check_ai_arm_binding.sh <mod> [秒] [模型路径]`** ✓ ——
+★★ **不需要 sudo、不需要手机** ✓：★ 用真配置 ＋ 真模型把 app 起 **8 秒** ✓、★ 读它启动路径上的三行 ✓、
+★ 然后**两次 SIGINT**（★ 第二次是新的强制退出 ✓）确保不留残留 gNB ✓：
+
+| ★ 判据 | ★★ 通过的样子 | ★★ 失败的样子 |
+|---|---|---|
+| ★ `receiver=` | ★★ `ai (expert_phy --pusch_receiver_backend ai)` ✓ | ★ `classic …` ⇒ ★★ **FAIL：这条腿会跑经典** ✗ |
+| ★ 臂横幅 | ★★ `AI ARM ACTIVE … bound model '…'` ✓ | ★ `AI ARM INACTIVE (could not bind …)` ／ `IS THE IDENTITY` ⇒ ★★ **FAIL：输出不是 AI 结果** ✗ |
+
+★★ **两个方向都实测过** ✓：★ 真模型 ⇒ `receiver: ai` ＋ `AI ARM ACTIVE` ＋ **VERDICT: PASS**（★ 退出码 0 ✓）；
+★ 不存在的模型 ⇒ `AI ARM INACTIVE (the estimator could not bind model '/tmp/does_not_exist.mlmodelc')`
+＋ **VERDICT: FAIL**（★ 退出码 1 ✓）。
+
+★★★ **⇒ 已接进飞行配方** ✓（★ `fly_ai_leg.sh` ✓）：★★ 前置检查的最后一步就是它 ✓，
+★ 失败则 `fail=1` ⇒ ★★ **配方拒绝起腿** ✓（★ 想跳过：★ `LEG_CHECK_ARM=0` ✓）。
+★★ 实测输出（★ 256QAM ✓）：
+
+```
+  === 256qam: what the startup path says (binary e54a92a3b7) ===
+    receiver : ai (expert_phy --pusch_receiver_backend ai)
+    arm      : [pusch_receiver] backend=ai: AI ARM ACTIVE. The depth-3 network bound model '…/d3_mixed.mlmodelc'
+    VERDICT  : PASS - this binary, config and model run the AI arm
+  arm binding (8 s, no sudo, no phone)       PASS -- this binary, config and model run the AI arm
+```
+
+★★ **代价与注意** ✓：★ 检查本身会把 app 起 ~8 秒 ✓（★ **会短暂打开电台** ✓、★ 不会有 UE ✓、★ 结束用两次 SIGINT ✓）
+★ ⇒ ★★ 请在**没有腿在飞**的时候跑配方 ✓（★ 配方自己也会先查"有没有残留 gNB" ✓）。
