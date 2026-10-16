@@ -122,9 +122,10 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
     # The MODULATION-CONDITIONED model (design section 19.102): one bundle for all four modulations, with the
     # Qm as an INPUT (four one-hot channels appended to the plane) and a main head whose stride is the widest
     # modulation, so a reception reads `symbol * COND_STRIDE + bit` for its own bits and ignores the rest.
-    head_qm      = D3.COND_STRIDE if cond else qm
-    plane_channels = in_channels + (len(D3.COND_QM_ORDER) if cond else 0)
-    in_channels  = plane_channels
+    # The conditioning channels are APPENDED BY THE DATASET (see Batches.sample), because only the sample knows
+    # its own Qm -- so `in_channels` here is already the data's channel count and must not be widened again. The
+    # build()/data check in main() is what caught the first version of this: it refused 64 against 68.
+    head_qm = D3.COND_STRIDE if cond else qm
     if layout != "folded":
         # Time is a spatial axis here, so the 3x3 kernel mixes frequency AND symbols. `in_channels`
         # is the packing the data carries: 12 for the contract's spatial plane, 8 for the R4.4
@@ -350,6 +351,11 @@ class Batches:
             # rather than per resource element.
             "dmrs_noise": np.float32(L.noise_shape_target(np.asarray([sigma2_norm]))[0][0]),
             "snr": float(data["snr_nominal"][index]),
+            # The scale is model-external per the contract and is PER MODULATION (design section 19.102): a
+            # conditioned batch holds several modulations at once, so the loss cannot use one number for all of
+            # them -- QPSK's limit is 24 and the others' is 20, and a batch scaled with the wrong one trains the
+            # head against the wrong quantiser.
+            "scale": np.float32(D3.RANGE_LIMIT_FLOAT[modulation]),
         }
 
     def epoch(self, batch_size):
@@ -718,6 +724,11 @@ def main():
     # and deploys into a shape the seam cannot fill.
     in_channels = args.in_channels or {"folded": D3.NOF_CHANNELS, "probe8": 8}.get(
         args.layout, D3.NOF_CHANNELS_SPATIAL)
+    if args.modcond:
+        # The conditioning is FOUR EXTRA INPUT CHANNELS, appended by the dataset at sample time (it is the sample
+        # that knows its Qm). The model therefore takes the data's channel count, and this is the one place that
+        # adds them -- build() must not widen again, and the check below compares the two numbers.
+        in_channels += len(D3.COND_QM_ORDER)
 
     if args.probe_graph:
         # Architecture -> ANE latency, before paying for a training run. The weights are random and
@@ -768,8 +779,12 @@ def main():
         model.load_weights(args.init)
         print(f"started from {args.init}")
 
-    # The scale is model-external per the contract, so the loss sees the LLR the quantizer sees.
+    # The scale is model-external per the contract, so the loss sees the LLR the quantizer sees. It is carried
+    # PER SAMPLE (see Batches.sample): a conditioned batch mixes modulations whose limits differ.
     scale = D3.RANGE_LIMIT_FLOAT[args.modulation]
+    # The width of the main head follows the CONTRACT in use, not the default modulation: a conditioned model
+    # always carries COND_STRIDE per symbol (design section 19.102).
+    head_channels = NOF_SYMBOLS * (D3.COND_STRIDE if args.modcond else qm)
     optimizer = tf.keras.optimizers.Adam(args.lr)
     weights = {"llr": args.w_llr, "ch_est": args.w_ch, "post_eq_noise": args.w_noise,
                "dmrs_noise": args.w_noise}
@@ -782,10 +797,10 @@ def main():
             # reshape reads each of them and the loss cannot drift with the trunk's layout: the
             # spatial axes are an implementation detail that stops at the head.
             llr = tf.reshape(tf.cast(outputs["llr"], tf.float32),
-                             (-1, D3.NOF_SUBCARRIERS, NOF_SYMBOLS * qm)) * scale
+                             (-1, D3.NOF_SUBCARRIERS, head_channels)) * targets["scale"][:, None, None]
             if args.llr_linear:
-                # The bound the contract asks for, applied where it is differentiable.
-                llr = tf.clip_by_value(llr, -scale, scale)
+                # The bound the contract asks for, applied where it is differentiable, per sample.
+                llr = tf.clip_by_value(llr, -targets["scale"][:, None, None], targets["scale"][:, None, None])
             terms = {"llr": L.tf_bce_loss(llr, targets["llr_shape"], targets["llr_weights"])}
             if not args.no_aux:
                 ch = tf.reshape(tf.cast(outputs["ch_est"], tf.float32),
@@ -822,6 +837,7 @@ def main():
                 "noise": tf.constant(stack(samples, "noise")),
                 "noise_weights": tf.constant(stack(samples, "noise_weights")),
                 "dmrs_noise": tf.constant(stack(samples, "dmrs_noise")),
+                "scale": tf.constant(stack(samples, "scale")),
             },
         )
 
