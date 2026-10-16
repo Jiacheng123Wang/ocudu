@@ -985,6 +985,10 @@ def main():
     snr_range = cli_snr_range(args)
     if snr_range is None and args.train:
         nominal = np.load(args.train, allow_pickle=True)["snr_nominal"]
+        # ONLY THE FINITE ENTRIES: one NaN poisons the percentile, and a bundle that declares 'nan,nan' is read by
+        # the engine as "no range declared" -- the domain gate would be silently off (measured 2026-10-17, on the
+        # first export of the final checkpoint).
+        nominal = nominal[np.isfinite(nominal)]
         snr_range = (float(np.percentile(nominal, 1)), float(np.percentile(nominal, 99)))
         print(f"declared SNR range from the training set: {snr_range[0]:.2f} to {snr_range[1]:.2f} dB "
               f"(1st to 99th percentile of {nominal.size} sample(s))")
