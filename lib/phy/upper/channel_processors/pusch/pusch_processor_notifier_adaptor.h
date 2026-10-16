@@ -172,9 +172,11 @@ private:
       // run may also fill the per-port vector. A net-mode review has to decide whether the scheduler reads the
       // scalar or the vector before this is switched on (design sections 19.123, 19.124).
       if (stats.rsrp_dB.has_value()) {
+        measured_rsrp_dB = stats.rsrp_dB;
         csi.set_rsrp_dB(*stats.rsrp_dB);
       }
       if (stats.epre_dB.has_value()) {
+        measured_epre_dB = stats.epre_dB;
         csi.set_epre(*stats.epre_dB);
       }
       if (stats.evm.has_value()) {
@@ -182,6 +184,20 @@ private:
         csi.set_sinr_dB(channel_state_information::sinr_type::evm, -20.0F * log10f(*stats.evm) - 3.7F);
       }
     }
+
+    /// \brief The measurements a DEMODULATOR took itself, remembered so they can be re-applied.
+    ///
+    /// WHY THE RE-APPLICATION EXISTS (design section 19.151): the classical estimator writes RSRP into this same
+    /// channel state, and with a DEFERRED estimator backend its results can land AFTER the arm has published the
+    /// network's values -- so writing them once is a race the classical side can win. Measured 2026-10-17 under
+    /// `net`: the arm logged `rsrp -1.88 dB` from its reporting heads while the scheduler-visible field still read
+    /// -1.96, the classical value. The values are therefore latched here and written again onto the result's copy.
+    std::optional<float> measured_rsrp_dB;
+    std::optional<float> measured_epre_dB;
+
+    /// What this demodulator measured itself, if anything; empty on the classical path.
+    const std::optional<float>& get_measured_rsrp_dB() const { return measured_rsrp_dB; }
+    const std::optional<float>& get_measured_epre_dB() const { return measured_epre_dB; }
 
   private:
     channel_state_information& csi;
@@ -267,6 +283,15 @@ private:
     pusch_processor_result_data result_data;
     result_data.data = result;
     result_data.csi  = uci_payload.csi;
+    // RE-APPLIED, and this is the fix of section 19.151: `uci_payload.csi` is shared with the estimator's own
+    // notifier, whose results may arrive after the demodulator's. Writing onto the copy that goes to the scheduler
+    // is order-independent, and it is the last write before anyone reads it.
+    if (pusch_demod_notifier.get_measured_rsrp_dB().has_value()) {
+      result_data.csi.set_rsrp_dB(*pusch_demod_notifier.get_measured_rsrp_dB());
+    }
+    if (pusch_demod_notifier.get_measured_epre_dB().has_value()) {
+      result_data.csi.set_epre(*pusch_demod_notifier.get_measured_epre_dB());
+    }
     notifier->on_sch(result_data);
   }
 
