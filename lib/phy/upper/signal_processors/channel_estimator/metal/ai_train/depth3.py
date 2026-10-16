@@ -98,6 +98,86 @@ METADATA_FIELDS = (
 
 BITS_PER_SYMBOL = {"QPSK": 2, "16QAM": 4, "64QAM": 6, "256QAM": 8}
 
+# ---- the MODULATION-CONDITIONED contract (design section 19.102) ----------------------------------
+#
+# One bundle for all four modulations, instead of one bundle per modulation, with two consequences that
+# are contract and not training detail:
+#
+#  * the MAIN head is always `NOF_SYMBOLS * COND_STRIDE` channels, laid out symbol major and bit
+#    fastest with a stride of EIGHT, which is the widest modulation. A reception of Qm bits reads
+#    channels `symbol * COND_STRIDE + bit` for `bit < Qm`; the rest are don't-care: masked in the loss
+#    during training and ignored by the arm. The stride cannot be the reception's own Qm -- that is the
+#    per-modulation layout this replaces, and a model cannot have two of them at once;
+#  * the Qm itself is an INPUT, carried as a one-hot in the four channels appended to the plane
+#    (`COND_QM_ORDER`). The trunk and the reporting heads are then shared across modulations, which is
+#    what the reporting quantities need: they depend on the DM-RS channel estimate, not on the data
+#    modulation order (user ruling, 2026-10-16).
+#
+# WHY A DECLARATION IS REQUIRED ANYWAY: a conditioned bundle and a per-modulation 256QAM bundle have
+# the SAME main-head width (14*8 = 112 channels), so the width alone cannot tell them apart -- and the
+# two are not interchangeable (one serves every modulation, the other one). The exported bundle
+# therefore declares `depth3_layout=modcond` (and the modulation set) in its metadata, and the engine
+# reads the declaration rather than inferring the layout from a shape that two artifacts share.
+COND_STRIDE = 8
+COND_QM_ORDER = (2, 4, 6, 8)
+NOF_CHANNELS_COND = NOF_CHANNELS + len(COND_QM_ORDER)
+
+
+def qm_one_hot(qm):
+    """The four conditioning channels for a reception of `qm` bits per symbol."""
+    one_hot = np.zeros((len(COND_QM_ORDER),), dtype=np.float32)
+    one_hot[COND_QM_ORDER.index(int(qm))] = 1.0
+    return one_hot
+
+
+def llr_channels_cond():
+    """Channels the conditioned main head carries, for every modulation."""
+    return NOF_SYMBOLS * COND_STRIDE
+
+
+def llr_channel_cond(symbol, bit):
+    """Channel index of `bit` of `symbol` in the conditioned layout (`bit < Qm`)."""
+    if int(bit) >= COND_STRIDE:
+        raise ValueError(f"bit {bit} is outside the conditioned stride {COND_STRIDE}")
+    return int(symbol) * COND_STRIDE + int(bit)
+
+
+def llr_valid_mask_cond(alloc_prb, dmrs_symbols, modulation):
+    """Boolean mask of the conditioned head's channels that carry a coded bit for this modulation."""
+    mask = np.zeros((NOF_SUBCARRIERS, llr_channels_cond()), dtype=bool)
+    data = data_re_mask(alloc_prb, dmrs_symbols)
+    qm = BITS_PER_SYMBOL[modulation]
+    for symbol in range(NOF_SYMBOLS):
+        mask[:, symbol * COND_STRIDE:symbol * COND_STRIDE + qm] = data[:, symbol][:, None]
+    return mask
+
+
+def label_plane_cond(bits, alloc_prb, dmrs_symbols, modulation):
+    """`label_plane` in the conditioned layout: the same scatter with a stride of COND_STRIDE."""
+    qm = BITS_PER_SYMBOL[modulation]
+    bits = np.asarray(bits)
+    subcarriers, symbols = data_re_indices(alloc_prb, dmrs_symbols)
+    if len(bits) != subcarriers.size * qm:
+        raise ValueError(f"{len(bits)} bits for {subcarriers.size * qm} data bits in this allocation")
+    resource_element = np.arange(len(bits)) // qm
+    bit_index = np.arange(len(bits)) % qm
+    plane = np.zeros((NOF_SUBCARRIERS, llr_channels_cond()), dtype=np.float32)
+    plane[subcarriers[resource_element], symbols[resource_element] * COND_STRIDE + bit_index] = 1.0 - bits
+    return plane
+
+
+def llr_gather_cond(plane, alloc_prb, dmrs_symbols, modulation):
+    """`llr_gather` in the conditioned layout: the inverse of `label_plane_cond`, and the arm's rule."""
+    qm = BITS_PER_SYMBOL[modulation]
+    subcarriers, symbols = data_re_indices(alloc_prb, dmrs_symbols)
+    channels = (symbols[:, None] * COND_STRIDE + np.arange(qm)[None, :]).reshape(-1)
+    return np.asarray(plane[subcarriers.repeat(qm), channels], dtype=np.float32)
+
+
+def loss_weights_cond(alloc_prb, dmrs_symbols, modulation):
+    """Per-channel BCE weights for the conditioned head: zero outside this modulation's channels."""
+    return llr_valid_mask_cond(alloc_prb, dmrs_symbols, modulation).astype(np.float32)
+
 # Input value mapped to LLR_MAX by the chain's quantizer, per modulation
 # (`demodulation_mapper_*.cpp`).
 RANGE_LIMIT_FLOAT = {"QPSK": 24.0, "16QAM": 20.0, "64QAM": 20.0, "256QAM": 20.0}

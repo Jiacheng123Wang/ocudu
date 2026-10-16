@@ -93,7 +93,7 @@ class FoldedScaleConv(tf.keras.layers.Layer):
 
 def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, residual=True,
           dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False,
-          layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL):
+          layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -109,6 +109,22 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
       chooses that, so the graph dtype here is a training decision only.
     """
     keras_dtype = tf.float32 if dtype == "float32" else tf.float16
+
+    def finish(graph):
+        """Marks the CONTRACT the graph follows, for the export's metadata declaration (design section 19.102).
+
+        A conditioned bundle and a per-modulation 256QAM bundle have the same main-head width, so the bundle has
+        to SAY which one it is; an attribute here is what lets the export write that down.
+        """
+        graph._depth3_cond = bool(cond)
+        return graph
+
+    # The MODULATION-CONDITIONED model (design section 19.102): one bundle for all four modulations, with the
+    # Qm as an INPUT (four one-hot channels appended to the plane) and a main head whose stride is the widest
+    # modulation, so a reception reads `symbol * COND_STRIDE + bit` for its own bits and ignores the rest.
+    head_qm      = D3.COND_STRIDE if cond else qm
+    plane_channels = in_channels + (len(D3.COND_QM_ORDER) if cond else 0)
+    in_channels  = plane_channels
     if layout != "folded":
         # Time is a spatial axis here, so the 3x3 kernel mixes frequency AND symbols. `in_channels`
         # is the packing the data carries: 12 for the contract's spatial plane, 8 for the R4.4
@@ -132,12 +148,12 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         # count, so a layout that renamed them would be a contract change rather than a choice
         # inside the network. Only the spatial axes differ, and every one of them is flattened back
         # to the contract's `[width, channels]` before the head leaves the model.
-        llr = tf.keras.layers.Conv2D(qm, 1, dtype=keras_dtype, name="llr_1x1")(y)
+        llr = tf.keras.layers.Conv2D(head_qm, 1, dtype=keras_dtype, name="llr_1x1")(y)
         llr = tf.keras.layers.Activation("linear" if llr_linear else "tanh", dtype=keras_dtype,
                                          name="llr")(llr)
         # [batch, width, symbols, qm] -> [batch, width, symbols * qm]: the contract's channel order,
         # symbol major and bit fastest, which is what the label plane already holds.
-        outputs = {"llr": tf.keras.layers.Reshape((width, NOF_SYMBOLS * qm), name="llr_flat")(llr)}
+        outputs = {"llr": tf.keras.layers.Reshape((width, NOF_SYMBOLS * head_qm), name="llr_flat")(llr)}
         if aux_heads:
             noise = tf.keras.layers.Activation("tanh", dtype=keras_dtype, name="post_eq_noise")(
                 tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="noise_1x1")(y))
@@ -153,9 +169,9 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
             outputs["dmrs_noise"] = tf.keras.layers.Activation(
                 "tanh", dtype=keras_dtype, name="dmrs_noise")(
                     tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="dmrs_noise_1x1")(pooled))
-        return tf.keras.Model(inp, outputs)
+        return finish(tf.keras.Model(inp, outputs))
 
-    inp = tf.keras.Input(shape=(width, 1, D3.NOF_CHANNELS), batch_size=None, dtype=keras_dtype,
+    inp = tf.keras.Input(shape=(width, 1, in_channels), batch_size=None, dtype=keras_dtype,
                          name="x")
     y = inp
     if int(inp.shape[-1]) != c_hid:
@@ -197,7 +213,7 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
     # the scale, so every well-classified bit sits in the flat region and stops teaching the trunk.
     # Section 4.2 lists a clamp as the second allowed form of the same bound, and a linear head with
     # an explicit clamp keeps the gradient everywhere the output is not already clipped.
-    llr_head = tf.keras.layers.Conv2D(NOF_SYMBOLS * qm, 1, dtype=keras_dtype, name="llr_1x1")(y)
+    llr_head = tf.keras.layers.Conv2D(NOF_SYMBOLS * head_qm, 1, dtype=keras_dtype, name="llr_1x1")(y)
     outputs = {"llr": tf.keras.layers.Activation(
         "linear" if llr_linear else "tanh", dtype=keras_dtype, name="llr")(llr_head)}
     if aux_heads:
@@ -217,7 +233,7 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         outputs["dmrs_noise"] = tf.keras.layers.Activation(
             "tanh", dtype=keras_dtype, name="dmrs_noise")(
                 tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="dmrs_noise_1x1")(pooled))
-    return tf.keras.Model(inp, outputs)
+    return finish(tf.keras.Model(inp, outputs))
 
 
 class Batches:
@@ -232,7 +248,7 @@ class Batches:
               "qm", "sigma2_over_r2", "snr_nominal", "tb_bits", "nof_tb_bits", "rnti", "n_id",
               "rv")
 
-    def __init__(self, path, modulation, max_samples=0, seed=0, snr_min=None, snr_max=None,
+    def __init__(self, path, modulation, max_samples=0, seed=0, snr_min=None, snr_max=None, cond=False,
                  target="coded", layout="folded"):
         # Read every array once, eagerly. The file is a compressed archive, and accessing
         # `data["X"]` per sample would decompress the whole 200 MB array every time.
@@ -240,6 +256,9 @@ class Batches:
         self.data = {name: archive[name] for name in self.ARRAYS}
         self.modulation = modulation
         self.qm = D3.BITS_PER_SYMBOL[modulation]
+        # A CONDITIONED dataset feeds one model that serves every modulation: the samples carry their own Qm (the
+        # file already does), the label plane uses the stride-8 layout, and the Qm is appended as a one-hot.
+        self.cond = cond
         # "coded" trains against the transmitted bits, which is the contract's task. "genie" trains
         # against the hard decisions a receiver with the TRUE channel would make, which needs only a
         # per-resource-element division and a constellation decision and no interpolation across
@@ -285,10 +304,12 @@ class Batches:
         plane = data["X"][index].astype(np.float32)
         channel = (data["H"][index][:, :, 0].astype(np.float32)
                    + 1j * data["H"][index][:, :, 1].astype(np.float32))
-        label = D3.label_plane(bits, alloc, dmrs_symbols, modulation)
+        label = (D3.label_plane_cond(bits, alloc, dmrs_symbols, modulation) if self.cond
+                 else D3.label_plane(bits, alloc, dmrs_symbols, modulation))
         if self.target == "genie":
-            label = genie_labels(plane, channel, alloc, dmrs_symbols, modulation)
-        llr_weights = D3.loss_weights(alloc, dmrs_symbols, modulation)
+            label = genie_labels(plane, channel, alloc, dmrs_symbols, modulation, cond=self.cond)
+        llr_weights = (D3.loss_weights_cond(alloc, dmrs_symbols, modulation) if self.cond
+                       else D3.loss_weights(alloc, dmrs_symbols, modulation))
         # The channel head is only constrained where the allocation is, and the target is already
         # divided by the reference amplitude, which is what the head produces.
         subcarriers = np.flatnonzero(D3.allocated_subcarriers(alloc))
@@ -307,6 +328,13 @@ class Batches:
             plane_in = unfold_plane(plane, alloc, dmrs_symbols)
         else:
             plane_in = plane[:, None, :]
+        if self.cond:
+            # The Qm CONDITIONS the model as four constant channels: the trunk and the reporting heads are
+            # shared across modulations, so the network has to be told which one this reception is (design
+            # section 19.102). Appending them here keeps every existing dataset usable unchanged.
+            one_hot = D3.qm_one_hot(D3.BITS_PER_SYMBOL[modulation])
+            plane_in = np.concatenate(
+                [plane_in, np.broadcast_to(one_hot, plane_in.shape[:-1] + (one_hot.size,))], axis=-1)
         return {
             "index": index,
             "x": plane_in,
@@ -464,7 +492,7 @@ def unfold_plane(plane, alloc, dmrs_symbols):
     return unfolded
 
 
-def genie_labels(plane, channel, alloc, dmrs_symbols, modulation):
+def genie_labels(plane, channel, alloc, dmrs_symbols, modulation, cond=False):
     """The bits a receiver with the TRUE channel would decide, in the contract's label layout.
 
     Equalize each data resource element by the true channel, take the nearest constellation point
@@ -482,10 +510,14 @@ def genie_labels(plane, channel, alloc, dmrs_symbols, modulation):
     equalized = grid[symbols, subcarriers] / channel[subcarriers, symbols]
     nearest = np.argmin(np.abs(equalized[:, None] - genie_labels.points[None, :]), axis=1)
     bits = genie_labels.labels[nearest].reshape(-1)
-    plane_out = np.zeros((D3.NOF_SUBCARRIERS, D3.NOF_SYMBOLS * qm), dtype=np.float32)
+    # The layout follows the MODEL's, not the modulation's: a conditioned head strides by COND_STRIDE for every
+    # reception, so a genie target scattered with the per-modulation stride would put the bits in channels the
+    # head does not label -- and the loss would quietly train on a plane whose non-zero entries moved.
+    stride = D3.COND_STRIDE if cond else qm
+    plane_out = np.zeros((D3.NOF_SUBCARRIERS, D3.NOF_SYMBOLS * stride), dtype=np.float32)
     resource_element = np.arange(bits.size) // qm
     bit_index = np.arange(bits.size) % qm
-    plane_out[subcarriers[resource_element], symbols[resource_element] * qm + bit_index] = 1.0 - bits
+    plane_out[subcarriers[resource_element], symbols[resource_element] * stride + bit_index] = 1.0 - bits
     return plane_out
 
 
@@ -555,6 +587,16 @@ def export_deployment(model, qm, path):
         minimum_deployment_target=ct.target.iOS17,
         convert_to="mlprogram")
     converted = rename_outputs(converted, qm, list(model.output_names))
+    # THE DECLARATION. A conditioned bundle and a per-modulation 256QAM bundle have the same main-head width
+    # (14 * 8 = 112 channels), so a shape-based check cannot tell them apart -- and they are not interchangeable:
+    # one serves every modulation, the other one. The exported bundle therefore SAYS which contract it follows,
+    # and the engine reads the declaration instead of inferring a layout from a width two artifacts share
+    # (design section 19.102).
+    if getattr(model, "_depth3_cond", False):
+        metadata = converted.get_spec().description.metadata
+        metadata.userDefined["depth3_layout"] = "modcond"
+        metadata.userDefined["depth3_qm_set"] = ",".join(str(qm_) for qm_ in D3.COND_QM_ORDER)
+        metadata.userDefined["depth3_head_stride"] = str(D3.COND_STRIDE)
     converted.save(path)
     print(f"wrote the fp16 deployment graph to {path} (input {[1, *shape]})")
 
@@ -566,6 +608,12 @@ def main():
     parser.add_argument("--val", default="", help="validation dataset; not needed with --export-only")
     parser.add_argument("--out", default="", help="run directory; not needed with --export-only")
     parser.add_argument("--modulation", default="256QAM")
+    parser.add_argument("--modcond", action="store_true",
+                        help="train the MODULATION-CONDITIONED model (design section 19.102): one bundle for "
+                             "every modulation, with the Qm as four one-hot input channels and a main head "
+                             "whose stride is COND_STRIDE. The dataset must carry mixed modulations (its `qm` "
+                             "column already does) and --modulation only picks the sample's DEFAULT where the "
+                             "file has none.")
     parser.add_argument("--blocks", type=int, default=18)
     parser.add_argument("--layout", choices=("folded", "spatial", "probe8", "unfolded"),
                         default="spatial",
@@ -681,7 +729,7 @@ def main():
                             residual=not args.no_residual, dtype=args.dtype,
                             fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
                             llr_linear=args.llr_linear, dense=args.dense_blocks,
-                            layout=args.layout, in_channels=in_channels)
+                            layout=args.layout, in_channels=in_channels, cond=args.modcond)
         export_deployment(probe_model, qm, args.probe_graph)
         return 0
 
@@ -690,12 +738,19 @@ def main():
                      "is given")
     train = Batches(args.train, args.modulation, args.max_train, seed=args.seed,
                     snr_min=args.snr_min, snr_max=args.snr_max, target=args.target,
-                    layout=args.layout)
+                    layout=args.layout, cond=args.modcond)
     val = Batches(args.val, args.modulation, args.max_val, seed=args.seed + 1,
                   snr_min=args.snr_min, snr_max=args.snr_max, target=args.target,
-                  layout=args.layout)
+                  layout=args.layout, cond=args.modcond)
     qm = train.qm
-    print(f"train {train.n} samples, val {val.n} samples, {args.modulation} (Qm={qm})")
+    if args.modcond:
+        # The head serves every modulation, so its stride is the widest one; the per-sample Qm travels as the
+        # conditioning channels and as the label mask. This is the whole difference from a per-modulation run.
+        print(f"train {train.n} samples, val {val.n} samples, MODULATION-CONDITIONED "
+              f"(head stride {D3.COND_STRIDE}, {len(D3.COND_QM_ORDER)} conditioning channels, "
+              f"modulations from the dataset)")
+    else:
+        print(f"train {train.n} samples, val {val.n} samples, {args.modulation} (Qm={qm})")
 
     from_data = int(train.sample(0)["x"].shape[-1])
     if from_data != in_channels:
@@ -706,7 +761,7 @@ def main():
                   residual=not args.no_residual, dtype=args.dtype,
                   fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
                   llr_linear=args.llr_linear, dense=args.dense_blocks, layout=args.layout,
-                  in_channels=in_channels)
+                  in_channels=in_channels, cond=args.modcond)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}")
     if args.init:
@@ -752,6 +807,10 @@ def main():
             optimizer.apply_gradients(zip(gradients, model.trainable_variables))
         return total, terms, llr
 
+    # The gather rule follows the MODEL: a conditioned head carries every modulation in one stride-8 layout, so
+    # the LLRs it produces must be gathered with that layout rather than with the reception's own Qm.
+    GATHER = D3.llr_gather_cond if getattr(val, "cond", False) else D3.llr_gather
+
     def tensors(samples):
         return (
             tf.constant(stack(samples, "x")),
@@ -780,7 +839,7 @@ def main():
         for row, sample in enumerate(samples):
             index = int(sample["index"])
             plane = perfect_llr(sample) if use_perfect else sample["llr_prediction"]
-            bler.add(index, D3.llr_gather(plane, val.allocation_of(index),
+            bler.add(index, GATHER(plane, val.allocation_of(index),
                                           val.dmrs_symbols_of(index), val.modulation_of(index)))
         return bler.rate()
 
@@ -792,7 +851,7 @@ def main():
                 if checked >= max(1, min(args.bler_samples, 8)):
                     break
                 index = int(samples[index_sample]["index"])
-                bler.add(index, D3.llr_gather(perfect_llr(samples[index_sample]),
+                bler.add(index, GATHER(perfect_llr(samples[index_sample]),
                                               val.allocation_of(index), val.dmrs_symbols_of(index),
                                               val.modulation_of(index)))
                 checked += 1
@@ -820,7 +879,7 @@ def main():
                     if decoded >= args.bler_samples:
                         break
                     index = int(samples[row]["index"])
-                    gathered = D3.llr_gather(llr.numpy()[row], val.allocation_of(index),
+                    gathered = GATHER(llr.numpy()[row], val.allocation_of(index),
                                              val.dmrs_symbols_of(index), val.modulation_of(index))
                     bler.add(index, gathered)
                     decoded += 1
