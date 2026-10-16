@@ -511,4 +511,26 @@ TEST(phy_pipeline_mode_test, receiver_ai_conflicts_with_the_two_modes_that_canno
   EXPECT_EQ(resolve(make_request("cpu", "auto", "auto", "auto", "auto", "auto", "classic")).receiver, "classic");
   EXPECT_EQ(resolve(make_request("cpu_gpu", "auto", "auto", "auto", "auto", "auto", "classic")).receiver, "classic");
 }
+
+TEST(phy_pipeline_mode_test, receiver_ai_substitutes_the_classic_one_when_the_binary_cannot_compute_it)
+{
+  // The capability flag is the difference between "the request was refused" and "the request was honoured": a
+  // binary built without the Metal receive stack CANNOT run the network, and for that binary the substitution is
+  // the right answer -- not an error, and not a silent one either (the translator prints it; see
+  // du_low_config_translator.cpp). This is the branch that mattered in production on 2026-10-16: the field was a
+  // hard-coded false, so EVERY "ai" request resolved to classic while the resolver, the pass-through and the
+  // factory had all been in place for days - a leg flew and reported "receiver=classic (asked for ai ...)".
+  std::string error;
+  const auto  effective =
+      resolve_phy_pipeline(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai"), none_available, error);
+  ASSERT_TRUE(effective.has_value()) << "a missing capability substitutes, it does not refuse: " << error;
+  EXPECT_EQ(effective->receiver, "classic");
+
+  // And with the capability on, the same request is honoured - so the two branches are genuinely different
+  // answers to the same command line and only the capability decides which one runs.
+  const auto with_capability =
+      resolve_phy_pipeline(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai"), all_available, error);
+  ASSERT_TRUE(with_capability.has_value()) << error;
+  EXPECT_EQ(with_capability->receiver, "ai");
+}
 } // namespace

@@ -6654,3 +6654,29 @@ ping ＋ `iperf3 -R` 与同条件经典腿同量级 ✓）、★ 译码（★ rv
 ★★ **下一次若还卡** ✓：★★ 在另一端先取一份线程栈再杀 ✓ ——
 `sudo sample <gnb pid> 3 -file /tmp/gnb_hang.txt` ✓（★ macOS ✓）★ ⇒ ★★ 那样"卡在哪"就变成可读的证据 ✓，
 ★ 而不是又一次只能 kill ✓。
+
+
+### 19.72 ★★ ②的"硬校验"落进**单元测试** ✓：★ 冲突矩阵与能力位各有测试守着 ✓（★ 2026-10-16 ✓）
+
+★★ 复核发现：**裁决矩阵早就有一份专门的测试** ✓ ——
+`tests/unittests/apps/units/flexible_du/o_du_low/du_low_phy_pipeline_test.cpp` ✓（★ 514 行 ✓、
+★ `ctest -L phy` 的里程碑门 ✓）★★ 已经断言了 ✓：
+
+| ★ 已覆盖 ✓ | ★★ 断言 |
+|---|---|
+| ★ 默认与显式 `classic` | ★ 四个模式都解析成 `classic` ✓ |
+| ★ 非法取值 | ★ `bogus` 被拒 ✓ 且报错含 `Accepted values [auto,classic,ai]` ✓ |
+| ★★ **`gpu + ai`** | ★★ **`receiver == "ai"`** ✓（★ 并断言 `lane_fused` ✓、★ 其余模块仍是 lane 的默认 ✓）|
+| ★★ **`cpu + ai` 与 `cpu_gpu + ai`** | ★★ **被拒** ✓（★ 报错分别含 `--pusch_receiver_backend` 与 `depth 3 is one unit` ✓）|
+| ★ `cpu`／`cpu_gpu` + `classic` | ★ 接受 ✓（★ 证明拒绝是针对 `ai` 而不是旋钮本身 ✓）|
+
+★★★ **⇒ 这解释了本轮的根本判断** ✓：★★ **缺的从来不是矩阵，而是生产里的那个能力位** ✓
+（★ 测试传的是 `all_available` ✓ —— 里面 `ai_receiver = true` ✓ ⇒ ★ **测试一直绿，生产一直降级** ✗✗ ——
+★ 这正是"守卫要在它要守的那类数据上跑过"的又一例 ✓，★ 归入 F53/F54 一族 ✓）。
+
+★★ **本轮补上的测试** ✓：★ `receiver_ai_substitutes_the_classic_one_when_the_binary_cannot_compute_it` ✓ ——
+★★ 同一个 `gpu + ai` 请求，★ **能力关闭 ⇒ 替换成 `classic`**（★ 且**不是错误** ✓：缺能力是替换，缺合法性才是拒绝 ✓）、
+★ **能力打开 ⇒ `ai`** ✓ ⇒ ★★ 两条分支被判开 ✓，★ 而"只有能力位决定跑哪条"这件事从此有测试守着 ✓。
+
+★★ **实测** ✓：★ `du_low_phy_pipeline_test` **26 项全过** ✓；★ 只跑接收机相关的 5 项也全过 ✓
+（★ `--gtest_filter='*receiver*'` ✓）。
