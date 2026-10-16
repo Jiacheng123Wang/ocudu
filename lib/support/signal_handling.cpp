@@ -34,15 +34,25 @@ static void signal_handler(int signal)
       std::raise(SIGKILL);
       [[fallthrough]];
     default:
-      // All other registered signals try to stop the application gracefully.
-      // Call the user handler, if present, and remove it so that further signals are treated by the default handler.
+      // The first registered signal tries to stop the application gracefully, and arms a timer so that a stop that
+      // hangs still ends: the timer is the only thing that used to be able to do it.
       if (auto handler = interrupt_handler.exchange(nullptr)) {
         handler(signal);
-      } else {
+        ::alarm(TERMINATION_TIMEOUT_S);
         return;
       }
-      ::alarm(TERMINATION_TIMEOUT_S);
-      break;
+      // EVERY LATER SIGNAL FORCES THE EXIT. Measured 2026-10-16: an operator whose Ctrl+C did not stop the gNB
+      // pressed it again, and the second press did NOTHING - the graceful handler had already been consumed above,
+      // so the only escape left was the timer, and when that did not fire either the process had to be killed from
+      // another terminal. A stop that hangs is exactly the situation in which an operator presses again, so the
+      // second press must be the forcible one: dump what the leg was flown for (the cleanup handler does that),
+      // flush, and go. SIGTERM, SIGHUP and SIGINT all take this path, so `kill <pid>` is a real escape too.
+      fmt::print(stderr, "Interrupted again while stopping. Forcing exit.\n");
+      if (auto handler = cleanup_handler.exchange(nullptr)) {
+        handler(signal);
+      }
+      std::raise(SIGKILL);
+      return;
   }
 }
 

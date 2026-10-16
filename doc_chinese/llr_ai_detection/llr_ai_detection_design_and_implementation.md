@@ -6574,3 +6574,83 @@ ping ＋ `iperf3 -R` 与同条件经典腿同量级 ✓）、★ 译码（★ rv
 ⇒ ★★ 本次**不加**这个开关 ✓，★ 保持与经典腿可比 ✓。
 ★★ **语料标签来自当时那条臂** ✓：★ 抓包与臂无关 ✓（★ 网格是好的 ✓），★ 但 `crc` 是 AI 臂给的 ✓
 ⇒ ★★ AI 腿用**独立目录** ✓，★ 别与"经典标签语料"混 ✓（★ 判据 1 的基线要经典标签 ✓）。
+
+
+---
+
+### 19.70 ★★★ 实飞配方 + 首飞取证：★ "AI 腿"其实是一条经典腿 ✗ —— ★★ 根因是一个**写死为 false 的能力位** ✓（★ 2026-10-16 ✓）
+
+★★ **用户实飞了 256QAM 那条腿 ✓**（★ 97.9% 译码 ✓、★ 手机附着 ✓、★ iperf3 通 ✓、★ 40 276 个采集 ✓），
+★★★ **但那条腿跑的是经典接收机** ✗ —— 腿自己的启动行写着 ✓：
+
+```
+[phy_pipeline] receiver=classic (asked for ai, NOT YET BOUND to a backend - stage 1 of design section 1.5:
+               the knob is accepted and reported, and selecting it changes nothing measurable)
+```
+
+★★ **取证链** ✓：★ 主日志与 `.stderr` 里**没有任何** `AI ARM ACTIVE/INACTIVE` 横幅 ✓；
+★ gNB 进程里两个参数都在 ✓（★ `run_leg.sh` 的 `gNB options` 行也证明它们进了 argv ✓）；
+★★ 二进制里**没有**任何实时绑定用的环境变量（★ 只有 `OCUDU_RECEIVER_PROBE` 等 ✓；
+★ 重放工具那套 `OCUDU_REPLAY_*` 不在 gNB 里 ✓）★ ⇒ ★★ 不是"再加个开关"的事 ✓。
+★★ **离线能跑、实时不能**的原因 ✓：★★ 两条路径的绑定点不同 ✓ —— ★ 离线走**重放工具自己**的绑定 ✓，
+★ 实时走 **app 配置路径** ✓。
+
+★★ **根因（★ 定位到一行 ✓）**：★ `phy_backend_availability::ai_receiver` ✓ ——
+★★ 一个**初始化为 `false` 的字段** ✓（★ 注释写着 "FALSE IN STAGE 1" ✓），
+★ 而 `resolve_phy_pipeline()` 末尾的收口是 ✓：
+`if ((out.receiver == "ai") && (!available.ai_receiver || !ai_receiver_bound())) out.receiver = "classic";`
+⇒ ★★ **每一个 `ai` 请求都被替换成经典** ✗ —— ★ 而**冲突矩阵、透传、工厂、臂对象全都已经就位** ✓
+（★ `du_low_phy_pipeline.h` 的裁决 ✓、★ `du_low_config_translator.cpp:169` 把 backend/model 交给上层 PHY 工厂 ✓、
+★ `processor_factories.cpp:157-194` 按 `ai` 造 `create_pusch_depth3_receiver(...)` ✓）。
+
+★★★ **修法：把那个能力位接到构建上** ✓（★ 与旁边四个 Metal 开关同一形态 ✓）：
+★★ `OCUDU_DEPTH3_AI_AVAILABLE=$<BOOL:${ENABLE_METAL_CHEST}>` ✓ ——
+★★ 理由写在 CMake 注释里 ✓：★ **臂的估计器就是 Metal 那一个** ✓ ⇒ ★ 没有这条栈它只能转发 ✓，
+★ 那时替换才是对的 ✓。
+
+★★★ **本地验证（★ 四正四反 ✓，全部不需要电台 ✓）** ✓：
+
+| ★ 命令行 | ★★ 结果 |
+|---|---|
+| ★★ `gpu + ai + model=<真模型>` | ★★ **`receiver=ai`** ✓ ＋ ★★ **`AI ARM ACTIVE … bound model '…/d3_mixed.mlmodelc' and COMPUTES channel estimation, equalisation and demapping itself`** ✓✓ |
+| ★ `gpu + ai + model=<不存在的>` | ★★ `AI ARM INACTIVE (could not bind model '…'). This run's depth-3 output is the CLASSICAL result` ✓（★ 可见、不冒充 ✓）|
+| ★ `cpu + ai` | ★★ **拒绝** ✓：`Invalid configuration: --phy_pipeline cpu conflicts with --pusch_receiver_backend ai …` ＋ `OCUDU ERROR: Invalid configuration detected.` ✓ |
+| ★ `cpu_gpu + ai` | ★★ **拒绝** ✓：`… cpu_gpu conflicts with --pusch_receiver_backend ai: … per-module offload cannot express …` ✓ |
+| ★ `--pusch_receiver_backend=bogus` | ★★ **拒绝** ✓：`Invalid PUSCH receiver backend. Accepted values [auto,classic,ai]` ✓ |
+
+★★ **另外按 §1.5.3 补了两条"日志必须能区分"的行** ✓：★ ① **AI 臂 + 设备侧 DFT ⇒ 印
+"SEPARATE arm of design section 1.5.7 (arm 5), not the main AI arm"** ✓（★ 网格写入者是第二个变量 ✓）；
+★ ② **`lane_fused` 的重述** ✓：★ 在 AI 臂里它读作"深度 3 段由**一次前向**完成 ✓，★ 而 lane 的其他成员不变" ✓。
+
+★★ **语料改名** ✓：★ 那条腿的目录 `aillr_256qam_ai_s1` → **`aillr_256qam_classic_s1`** ✓（★ 40 276 个采集 ✓，
+★ 13 GB ✓）；★★ **日志文件【不改名】** ✓ —— ★ 它们是证据 ✓，★ 改名会让"文件名说 classic、内容说 ai"更难读 ✓
+⇒ ★★ 改用本节留档：★ **腿名 `aillr-256qam-ai` ↔ 实际是经典腿** ✓。
+
+---
+
+### 19.71 ★★ 修掉"Ctrl+C 停不下来"：★ 第二个信号必须强制退出 ✓（★ 2026-10-16 ✓）
+
+★★ **用户的报告** ✓：★★ "Ctrl+C 退出 gNB 时有时会超时，只能 kill" ✓。
+
+★★ **先读代码（★ 设计本来是对的 ✓）**：★ `lib/support/signal_handling.cpp` ✓ ——
+★ 第一个 SIGINT/SIGTERM/SIGHUP ⇒ 优雅停 ＋ `::alarm(5)` ✓；★ 5 秒没停 ⇒ `SIGALRM` ⇒
+`Could not stop application after 5 seconds. Forcing exit.` ⇒ cleanup handler（★ flush ＋ p0 读数转储 ✓）⇒ `SIGKILL` ✓。
+
+★★★ **但发现一个真缺陷** ✗：★★ 第一个信号把 `interrupt_handler` **exchange 掉了** ✓ ⇒
+★★ **之后的任何信号走进 `else { return; }` ⇒ 什么都不做** ✗✗ ——
+★★ 连 `kill`（SIGTERM）也一样 ✗ ⇒ ★★ 操作员"再按一次"**没有任何效果** ✓，
+★ 唯一出路是等那个 5 秒定时器 ✓，★ 而它一旦没响（★ 或被杀软/库清掉 ✗）就只能 `kill -9` ✓。
+
+★★★ **修法** ✓：★★ **第一个信号仍然优雅停（并arm 定时器 ✓）；之后【任何】信号一律走强制路径** ✓ ——
+★ 印 `Interrupted again while stopping. Forcing exit.` ✓ ⇒ cleanup handler（★ flush ＋ p0 转储 ✓）⇒ `SIGKILL` ✓。
+★ 理由写进代码注释 ✓：★★ **"停不下来"正是操作员会再按一次的场合** ✓，★ 所以第二次按必须是强制的那一次 ✓。
+
+★★ **本地验证（★ 不需要电台 ✓）**：★ ① **单次 SIGINT** ⇒ 优雅退出 **2 秒** ✓（★ 行为未变 ✓）；
+★ ② **连续两次 SIGINT** ⇒ **1 秒**退出 ✓ 并打印 `Interrupted again while stopping. Forcing exit.` ✓
+＋ `Emergency flush of the logger` ✓。
+★★ **诚实说明** ✓：★★ 我**没能复现**用户在全状态（★ 电台在跑、UE 已附着 ✓）下的那次超时 ✗ ——
+★ 本机没有 sudo/电台 ✗ ⇒ ★★ 能证明的是"第二次信号从【无效】变成【强制退出】" ✓，
+★ 以及"单次信号的行为未被改变" ✓。
+★★ **下一次若还卡** ✓：★★ 在另一端先取一份线程栈再杀 ✓ ——
+`sudo sample <gnb pid> 3 -file /tmp/gnb_hang.txt` ✓（★ macOS ✓）★ ⇒ ★★ 那样"卡在哪"就变成可读的证据 ✓，
+★ 而不是又一次只能 kill ✓。
