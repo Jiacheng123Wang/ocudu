@@ -58,6 +58,10 @@ public:
     std::string path;
     /// True when this model was bound from the fallback knob rather than from a per-modulation slot.
     bool        fallback = false;
+    /// True when this model is the MODULATION-CONDITIONED contract: one artifact serving several modulations,
+    /// whose Qm arrives as extra input channels. The coverage line says so, because "one bundle computes all
+    /// four" and "four bundles compute one each" are different deployments with the same coverage.
+    bool        conditioned = false;
   };
 
   /// Whether a model was kept, refused, or dropped as redundant.
@@ -83,6 +87,18 @@ public:
   /// \param[in] declared_qm The modulation the bundle declares (0 when the bundle did not load).
   /// \param[in] path        The bundle's path.
   outcome add_slot(unsigned slot_qm, unsigned declared_qm, std::string path);
+
+  /// \brief Adds a model that DECLARES a set of modulations: the modulation-conditioned contract.
+  ///
+  /// The bundle is one artifact -- a shared trunk, the Qm as four extra input channels, one shared reporting head
+  /// set -- and it can only be told apart from a per-modulation bundle by its declaration, never by its shape.
+  /// Each declared modulation gets an entry that points at the same path, so the per-reception lookup is
+  /// unchanged; a slot that already serves one of them keeps it (the slot is the more specific request) and the
+  /// outcome reports how many the conditioned model actually serves.
+  ///
+  /// \param[in] declared_qm The modulations the bundle declares, in bits per symbol (2, 4, 6, 8).
+  /// \param[in] path        The bundle's path.
+  outcome add_conditioned(const std::vector<unsigned>& declared_qm, std::string path);
 
   /// \brief Adds the fallback model.
   /// \param[in] declared_qm The modulation the bundle declares (0 when the bundle did not load).
@@ -125,6 +141,39 @@ inline depth3_model_map::outcome depth3_model_map::add_slot(unsigned    slot_qm,
     return {status::redundant, "another slot already serves Qm=" + std::to_string(declared_qm)};
   }
   kept.push_back(entry{declared_qm, std::move(path), false});
+  return {};
+}
+
+inline depth3_model_map::outcome depth3_model_map::add_conditioned(const std::vector<unsigned>& declared_qm,
+                                                                   std::string                  path)
+{
+  if (declared_qm.empty()) {
+    return {status::refused, "the bundle declares the conditioned contract but names no modulation"};
+  }
+  unsigned added = 0;
+  for (unsigned qm : declared_qm) {
+    if (std::none_of(candidate_qm.begin(), candidate_qm.end(), [qm](unsigned c) { return c == qm; })) {
+      return {status::refused,
+              "the conditioned bundle declares Qm=" + std::to_string(qm) +
+                  ", which is not one of the four modulations the arm serves"};
+    }
+    if (find(qm) != nullptr) {
+      // A slot (or an earlier declaration) already serves this modulation: the more specific request wins, and
+      // the caller's coverage line still shows the modulation as computed.
+      continue;
+    }
+    kept.push_back(entry{qm, path, false, true});
+    ++added;
+  }
+  if (added == 0) {
+    return {status::redundant, "every modulation this bundle declares is already served by a slot"};
+  }
+  if (added != declared_qm.size()) {
+    // Partly redundant: not an error, but silent partial use is what this report exists to prevent.
+    return {status::redundant, "the bundle declares " + std::to_string(declared_qm.size()) +
+                                   " modulations and serves " + std::to_string(added) +
+                                   "; the rest are already bound to slots"};
+  }
   return {};
 }
 

@@ -113,3 +113,42 @@ TEST(depth3_model_map_test, all_four_slots_serve_all_four_modulations)
   EXPECT_TRUE(models.missing().empty());
   EXPECT_EQ(models.entries().size(), 4);
 }
+
+TEST(depth3_model_map_test, a_conditioned_bundle_serves_every_modulation_it_declares)
+{
+  // One artifact, four modulations: the per-reception lookup is unchanged, and what the bundle serves comes from
+  // its DECLARATION -- the only thing that can say it, since its main head is as wide as a 256QAM model's.
+  depth3_model_map models;
+  EXPECT_EQ(models.add_conditioned({qpsk, qam16, qam64, qam256}, "/m/d3_modcond.mlmodelc").result,
+            depth3_model_map::status::kept);
+  for (unsigned qm : depth3_model_map::candidate_qm) {
+    ASSERT_NE(models.find(qm), nullptr) << "Qm=" << qm;
+    EXPECT_EQ(models.find(qm)->path, "/m/d3_modcond.mlmodelc");
+    EXPECT_TRUE(models.find(qm)->conditioned);
+  }
+  EXPECT_TRUE(models.missing().empty());
+}
+
+TEST(depth3_model_map_test, a_slot_wins_over_the_conditioned_bundle_and_partial_use_is_reported)
+{
+  depth3_model_map models;
+  EXPECT_EQ(models.add_slot(qam256, qam256, "/m/d3_256qam.mlmodelc").result, depth3_model_map::status::kept);
+  const auto outcome = models.add_conditioned({qpsk, qam16, qam64, qam256}, "/m/d3_modcond.mlmodelc");
+
+  // Not an error, but it must not pass unread: the bundle serves three of the four it declares.
+  EXPECT_EQ(outcome.result, depth3_model_map::status::redundant);
+  EXPECT_NE(outcome.reason.find("4"), std::string::npos) << outcome.reason;
+  EXPECT_NE(outcome.reason.find("3"), std::string::npos) << outcome.reason;
+  EXPECT_EQ(models.find(qam256)->path, "/m/d3_256qam.mlmodelc");
+  EXPECT_FALSE(models.find(qam256)->conditioned);
+  EXPECT_TRUE(models.find(qpsk)->conditioned);
+}
+
+TEST(depth3_model_map_test, a_conditioned_bundle_naming_a_modulation_the_arm_cannot_serve_is_refused)
+{
+  depth3_model_map models;
+  const auto       outcome = models.add_conditioned({qpsk, 3}, "/m/bogus.mlmodelc");
+  EXPECT_EQ(outcome.result, depth3_model_map::status::refused);
+  EXPECT_NE(outcome.reason.find("Qm=3"), std::string::npos) << outcome.reason;
+  EXPECT_EQ(models.add_conditioned({}, "/m/empty.mlmodelc").result, depth3_model_map::status::refused);
+}
