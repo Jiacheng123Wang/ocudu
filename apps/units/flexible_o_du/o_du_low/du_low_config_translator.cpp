@@ -92,15 +92,33 @@ static void log_phy_pipeline_config(const du_low_unit_expert_upper_phy_config& c
 
   // The depth-3 receiver. It gets a line of its own because it is the axis of the LLR AI detection workflow's A/B:
   // the classic receiver is the arm it is compared against, and a run whose line says "ai" while the classic chain
-  // runs would be the one number nobody could catch afterwards. STAGE 1 takes exactly that path - 'ai' resolves to
-  // the classic receiver because no backend is bound to it yet - so the substitution is stated in as many words.
+  // runs would be the one number nobody could catch afterwards. Two things are therefore stated in as many words: a
+  // substitution (a binary without the capability), and - when the arm really runs - the two variables that make a
+  // run a DIFFERENT arm from the main AI one (design section 1.5.3, last row, and the lane_fused restatement).
   if (config.pusch_receiver_backend == "ai" && effective.receiver != "ai") {
-    logger.warning("[phy_pipeline]   receiver=classic (asked for ai, NOT YET BOUND to a backend - stage 1 of design "
-                   "section 1.5: the knob is accepted and reported, and selecting it changes nothing measurable)");
+    logger.warning("[phy_pipeline]   receiver=classic (asked for ai, and this binary cannot compute it: the Metal "
+                   "receive stack the network runs on is not built in, so the classic receiver is what runs - the "
+                   "run is NOT an AI result)");
   } else {
     logger.info("[phy_pipeline]   receiver={} (expert_phy --pusch_receiver_backend {})",
                 effective.receiver,
                 config.pusch_receiver_backend);
+  }
+  if (effective.receiver == "ai") {
+    // Section 1.5.3, last row: the grid's writer is a SECOND variable, so an AI run with a device DFT is arm 5 and
+    // not the main AI arm. The knob is legal - it just has to be visible, because a leg's log is the only place the
+    // arm can be told apart afterwards.
+    if (!is_cpu_phy_backend(effective.dft)) {
+      logger.warning("[phy_pipeline]   AI arm with a DEVICE grid writer (--pusch_dft_type {}): this is the SEPARATE "
+                     "arm of design section 1.5.7 (arm 5), not the main AI arm - the grid's writer is a second "
+                     "variable and a run that does not say so cannot be told apart afterwards",
+                     effective.dft);
+    }
+    // The lane_fused restatement (section 1.5.3): in an AI run "fused" must be read as "the depth-3 unit is one
+    // forward pass and the lane's other members are unchanged", which is NOT what it means in a classic run.
+    logger.info("[phy_pipeline]   lane_fused={} read as: the depth-3 unit (channel estimation, equalisation and "
+                "demapping) is ONE forward pass of the bound model, and the lane's other members are unchanged",
+                effective.lane_fused ? "yes" : "no");
   }
 }
 

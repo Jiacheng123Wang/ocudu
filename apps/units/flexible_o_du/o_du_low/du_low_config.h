@@ -54,12 +54,14 @@ struct du_low_unit_expert_upper_phy_config {
   /// an A/B against the fused lane changes exactly one thing.
   ///
   /// \note Only meaningful with \c --phy_pipeline gpu (the fused lane): the AI receiver runs on the device, so
-  ///       \c cpu rejects it and \c cpu_gpu cannot express "three modules at once".
-  /// \warning STAGE 1 (2026-10-08): \c ai is PARSED AND REPORTED but NOT YET BOUND to a backend - it resolves to the
-  ///          classic receiver, so selecting it changes nothing measurable. The startup log says so in as many
-  ///          words. This stage exists to prove the knob is inert before anything is wired to it: an accepted value
-  ///          that silently ran the classic chain is the failure mode this workflow keeps correcting (design
-  ///          document, section 1.5).
+  ///       \c cpu rejects it and \c cpu_gpu cannot express "three modules at once". Both are REFUSED by the
+  ///       resolver with an error rather than silently overridden.
+  /// \note BOUND SINCE 2026-10-16. Stage 1 (2026-10-08) accepted and reported the value while resolving it to the
+  ///       classic receiver, so that selecting it changed nothing measurable; the capability
+  ///       (\c OCUDU_DEPTH3_AI_AVAILABLE - the Metal receive stack the network runs on) is now on, and a
+  ///       \c gpu + \c ai run really binds the model. What the capability cannot promise is that a MODEL loaded:
+  ///       an \c ai run with no model, or with one that failed to bind, prints that its output is the CLASSICAL
+  ///       result, and such a run must never be read as an AI result.
   std::string pusch_receiver_backend = "auto";
   /// Compiled model (`.mlmodelc` directory) the `ai` receiver binds. Empty means the AI arm cannot run and the
   /// run says so; ignored for `classic`/`auto`.

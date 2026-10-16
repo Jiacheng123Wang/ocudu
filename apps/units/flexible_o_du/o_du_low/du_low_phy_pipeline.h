@@ -38,8 +38,12 @@ struct phy_backend_availability {
   bool equalizer = false;
   bool demapper  = false;
   bool ldpc      = false;
-  /// Whether the AI depth-3 receiver is built into this binary. FALSE IN STAGE 1 (see ai_receiver_bound): there is
-  /// no AI backend yet, so a command line that asks for one falls back to the classic receiver and says so.
+  /// Whether the AI depth-3 receiver can COMPUTE in this binary: the Metal receive stack it runs on is built, so a
+  /// command line that asks for it gets the network rather than a substitution. It is a build capability like the
+  /// four Metal flags above, and it became true on 2026-10-16 - before that the resolver substituted the classic
+  /// receiver for every "ai" request and said so (stage 1, see the STAGE 1 note in du_low_config.h). What is NOT
+  /// settled by this flag is whether a model bound at run time: an "ai" run with no model, or with one that failed
+  /// to load, reports that its output is the CLASSICAL result (pusch_depth3_receiver::is_identity).
   bool ai_receiver = false;
 };
 
@@ -311,7 +315,8 @@ resolve_phy_pipeline(const phy_pipeline_request& request, const phy_backend_avai
   // A receiver the binary does not carry falls back to the classic one, exactly like a missing device backend falls
   // back to its CPU implementation above - the difference being that this substitution MUST be visible, because the
   // command line asked for a different receiver and would otherwise get the classic chain under a name that promises
-  // another one. STAGE 1 takes this path for every "ai" request: ai_receiver_bound() is false.
+  // another one. Since 2026-10-16 the capability is real (OCUDU_DEPTH3_AI_AVAILABLE, the Metal receive stack), so
+  // this path is taken only by a binary built without it - and there the substitution is exactly right.
   if ((out.receiver == "ai") && (!available.ai_receiver || !ai_receiver_bound())) {
     out.receiver = "classic";
   }

@@ -21,6 +21,9 @@
 #ifndef OCUDU_METAL_LDPC_AVAILABLE
 #define OCUDU_METAL_LDPC_AVAILABLE 0
 #endif
+#ifndef OCUDU_DEPTH3_AI_AVAILABLE
+#define OCUDU_DEPTH3_AI_AVAILABLE 0
+#endif
 
 using namespace ocudu;
 
@@ -30,5 +33,6 @@ phy_backend_availability ocudu::query_phy_backend_availability()
                                   OCUDU_METAL_CHEST_AVAILABLE != 0,
                                   OCUDU_METAL_EQUALIZER_AVAILABLE != 0,
                                   OCUDU_METAL_DEMODULATION_AVAILABLE != 0,
-                                  OCUDU_METAL_LDPC_AVAILABLE != 0};
+                                  OCUDU_METAL_LDPC_AVAILABLE != 0,
+                                  OCUDU_DEPTH3_AI_AVAILABLE != 0};
 }

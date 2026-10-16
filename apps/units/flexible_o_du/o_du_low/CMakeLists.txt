@@ -22,7 +22,12 @@ target_compile_definitions(ocudu_o_du_low_unit_helpers PRIVATE
         OCUDU_METAL_CHEST_AVAILABLE=$<BOOL:${ENABLE_METAL_CHEST}>
         OCUDU_METAL_EQUALIZER_AVAILABLE=$<BOOL:${ENABLE_METAL_EQUALIZER}>
         OCUDU_METAL_DEMODULATION_AVAILABLE=$<BOOL:${ENABLE_METAL_DEMODULATION}>
-        OCUDU_METAL_LDPC_AVAILABLE=$<BOOL:${ENABLE_METAL_LDPC}>)
+        OCUDU_METAL_LDPC_AVAILABLE=$<BOOL:${ENABLE_METAL_LDPC}>
+        # The AI depth-3 receiver itself is an object inside the PUSCH processor library, which is built
+        # unconditionally; what it needs in order to COMPUTE is the Metal receive stack (its estimator is the Metal
+        # one) and a Core ML model at run time. The Metal estimator is therefore the honest capability test: without
+        # it the arm could only forward to the classical chain, and the resolver would be right to substitute it.
+        OCUDU_DEPTH3_AI_AVAILABLE=$<BOOL:${ENABLE_METAL_CHEST}>)
 set(DU_LOW_UNIT_HELPERS_LIBRARIES ocudu_upper_phy ocudu_cpu_affinities_helper ocudu_o_du_low ocudu_app_helpers)
 
 # Hardware acceleration for both PUSCH and PDSCH is enabled by default when using DPDK.
