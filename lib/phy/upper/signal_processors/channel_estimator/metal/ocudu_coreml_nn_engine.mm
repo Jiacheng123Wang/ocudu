@@ -32,6 +32,10 @@ constexpr unsigned DEPTH3_IN_CHANNELS = 12;
 /// (`depth3_layout=modcond`), because the plane's width alone cannot say which contract it belongs to -- see the
 /// matching note in the training pipeline (design section 19.102).
 constexpr unsigned DEPTH3_COND_CHANNELS = 4;
+/// The main head's stride under the conditioned contract: the widest modulation, whatever the reception's own Qm
+/// is (the bundle declares it as `depth3_head_stride`). The arm reads the head with it and the engine checks the
+/// reception's bits against it, so the constant has one meaning in both places.
+constexpr unsigned DEPTH3_COND_STRIDE = 8;
 
 struct coreml_nn_engine_impl {
   MLModel* model     = nil;
@@ -191,14 +195,22 @@ bool run_prediction_depth3(coreml_nn_engine_impl* e,
   // rejected by the runtime -- which is how the first conditioned run degraded every reception instead of
   // computing (measured 2026-10-16).
   NSArray<NSNumber*>* in_shape = @[ @1, @(nsc), @(NOF_SYMBOLS_PER_SLOT), @(e->model3_in_channels) ];
+  NSError*            in_err   = nil;
   MLMultiArray*       in_arr   = [[MLMultiArray alloc]
       initWithDataPointer:const_cast<uint16_t*>(in.plane)
                     shape:in_shape
                  dataType:MLMultiArrayDataTypeFloat16
                   strides:strides_of(in_shape)
               deallocator:nil
-                    error:nil];
+                    error:&in_err];
   if (in_arr == nil) {
+    // A SILENT `return false` here is indistinguishable, one level up, from a model that cannot run at all:
+    // both arrive as "the forward pass failed" and the reception degrades. The reason is available and is the
+    // difference between a wrong shape and a wrong buffer, so it is printed (2026-10-16).
+    ocudulog::fetch_basic_logger("PHY").error(
+        "AI depth-3: the input plane could not be bound: shape [1, {}, 14, {}] over {} element(s); {}",
+        nsc, e->model3_in_channels, in.nof_subcarriers * NOF_SYMBOLS_PER_SLOT * e->model3_in_channels,
+        in_err != nil ? in_err.localizedDescription.UTF8String : "no reason given");
     return false;
   }
 
@@ -234,12 +246,25 @@ bool run_prediction_depth3(coreml_nn_engine_impl* e,
               deallocator:nil
                     error:nil];
   if (llr_arr == nil || noise_arr == nil || ch_arr == nil || dmrs_arr == nil) {
+    // Same reason as the input above: the caller only ever sees "the forward pass failed", so the head whose
+    // declared shape did not fit its backing -- the one fact that identifies the contract mismatch -- is named
+    // here.
+    ocudulog::fetch_basic_logger("PHY").error(
+        "AI depth-3: a declared head does not fit the arm's backing (llr {}, post_eq_noise {}, ch_est {}, "
+        "dmrs_noise {})",
+        llr_arr != nil ? "ok" : "FAILED", noise_arr != nil ? "ok" : "FAILED", ch_arr != nil ? "ok" : "FAILED",
+        dmrs_arr != nil ? "ok" : "FAILED");
     return false;
   }
 
-  MLDictionaryFeatureProvider* input =
-      [[MLDictionaryFeatureProvider alloc] initWithDictionary:@{e->in3_name : in_arr} error:nil];
+  NSError*                     provider_err = nil;
+  MLDictionaryFeatureProvider* input        = [[MLDictionaryFeatureProvider alloc]
+      initWithDictionary:@{e->in3_name : in_arr}
+                   error:&provider_err];
   if (input == nil) {
+    ocudulog::fetch_basic_logger("PHY").error(
+        "AI depth-3: the model refused the input named '{}': {}", e->in3_name.UTF8String,
+        provider_err != nil ? provider_err.localizedDescription.UTF8String : "no reason given");
     return false;
   }
   MLPredictionOptions* opts = [[MLPredictionOptions alloc] init];
@@ -557,10 +582,32 @@ bool coreml_nn_engine::predict_depth3(const depth3_input& in, const depth3_outpu
   }
   // The caller states which modulation's model it expects; the model states what it is. A mismatch
   // means the wrong model was bound for this reception, which must fail rather than run.
-  if (NOF_SYMBOLS_PER_SLOT * out.bits_per_symbol != e->model3_channels[0]) {
+  //
+  // A CONDITIONED bundle is the case the declaration exists for, and comparing the two numbers there is wrong:
+  // it emits ONE head for every modulation it declares, so the reception's Qm is not the head's width. The arm
+  // reads that head with the head's own stride and only the first Qm bits of each group are live. Comparing them
+  // refused every conditioned reception whose modulation was not the widest one -- QPSK, 16QAM and 64QAM degraded
+  // deterministically while 256QAM ran, which reads like a modulation-specific model fault (measured 2026-10-16).
+  // The rule for a conditioned bundle is instead: the reception's modulation must be one the bundle DECLARES, and
+  // its bits must fit the head's stride.
+  bool modulation_ok = false;
+  if (e->model3_conditioned) {
+    // ANY modulation the bundle declares, not every one: the set is what the single bundle serves, and a
+    // reception carries exactly one of them. (Written as a loop that stops at the first mismatch, this refused
+    // all four modulations including the widest, which had passed the per-modulation comparison before.)
+    bool declared = false;
+    for (unsigned i = 0; i != e->model3_nof_qm; ++i) {
+      declared = declared || (e->model3_qm_set[i] == out.bits_per_symbol);
+    }
+    modulation_ok = declared && (out.bits_per_symbol <= DEPTH3_COND_STRIDE);
+  }
+  else {
+    modulation_ok = (NOF_SYMBOLS_PER_SLOT * out.bits_per_symbol == e->model3_channels[0]);
+  }
+  if (!modulation_ok) {
     ocudulog::fetch_basic_logger("PHY").error(
-        "AI depth-3: the bound model emits {} LLR channels, the caller expects {}",
-        e->model3_channels[0], NOF_SYMBOLS_PER_SLOT * out.bits_per_symbol);
+        "AI depth-3: the bound model emits {} LLR channels{} and does not serve Qm={}", e->model3_channels[0],
+        e->model3_conditioned ? " (modulation-conditioned)" : "", out.bits_per_symbol);
     return false;
   }
   {
