@@ -273,7 +273,15 @@ fi
 CLI_ARGS=()
 REGIME=default
 SMOKE=0
-for kv in "$@"; do
+# TWO FORMS FOR AN OPTION, because the application accepts both and the leg must not speak a dialect of its own.
+# `--option=value` has always been accepted here; `--option value` -- which is how every command line in the docs
+# and every gnb invocation outside this script is written -- was REFUSED with "join them with '='". Measured
+# 2026-10-16: the operator's own four-slot AI command line mixed both forms, which is exactly what that contract
+# produced. Both are taken now, and the rule for the two-word form is arity, not guessing: a `--option` with no
+# '=' consumes the NEXT word as its value unless that word is itself a long option, which leaves flags working and
+# keeps negative values where they belong (`--expert_phy.p0_nominal_with_grant -76`).
+while [ $# -gt 0 ]; do
+  kv=$1
   case "$kv" in
     # CONSUMED here, not forwarded: this one is a property of the LEG, not a gNB option. It is written
     # into the leg's own stderr as `[leg] regime=`, which is where wip/milestone_audit.sh reads it back.
@@ -286,6 +294,8 @@ for kv in "$@"; do
     --regime=default) REGIME=default ;;
     --regime=stress)  REGIME=stress ;;
     --regime=*)       echo "refusing '$kv': regime must be default or stress" >&2; exit 2 ;;
+    --regime)         shift; [ $# -gt 0 ] || { echo "refusing '--regime': it needs a value (default or stress)" >&2; exit 2; }
+                      case "$1" in default|stress) REGIME=$1 ;; *) echo "refusing '--regime $1': regime must be default or stress" >&2; exit 2 ;; esac ;;
     # SMOKE SECONDS: watch the first N seconds for the radio's own failure lines and stop the leg if they appear.
     # Added after p94 (2026-09-28) died of a B200 USB drop: the receive stream had been timing out for ~104 s
     # ("exceeded maximum number of timed out receive calls", 10 x 200 ms trials each) while the DL queue grew to
@@ -294,22 +304,37 @@ for kv in "$@"; do
     # adds no behaviour to any leg that does not ask for it.
     --smoke=*)        SMOKE=${kv#*=}
                       case "$SMOKE" in ''|*[!0-9]*) echo "refusing '$kv': --smoke=SECONDS (a number)" >&2; exit 2 ;; esac ;;
-    --*)                  CLI_ARGS+=("$kv") ;;
-    OCUDU_*=*)            export "$kv" ;;
-    *=*)                  echo "refusing '$kv': a knob must be OCUDU_*=…, and a gNB option must start with --" >&2; exit 2 ;;
+    --smoke)          shift; [ $# -gt 0 ] || { echo "refusing '--smoke': it needs a value in seconds" >&2; exit 2; }
+                      SMOKE=$1
+                      case "$SMOKE" in ''|*[!0-9]*) echo "refusing '--smoke $SMOKE': --smoke SECONDS (a number)" >&2; exit 2 ;; esac ;;
+    --*)              case "$kv" in
+                        *=*) CLI_ARGS+=("$kv") ;;
+                        *)   # A long option with no '=': take the next word as its value unless that word is itself a
+                             # long option (then this one is a flag and stands alone).
+                             if [ $# -gt 1 ] && [ "${2#--}" = "$2" ]; then
+                               CLI_ARGS+=("$kv" "$2"); shift
+                             else
+                               CLI_ARGS+=("$kv")
+                             fi ;;
+                      esac ;;
+    OCUDU_*=*)        export "$kv" ;;
+    OCUDU_*)          # The same two forms for a knob: OCUDU_NAME=value, or OCUDU_NAME value.
+                      CLI_NAME=$kv; shift
+                      [ $# -gt 0 ] || { echo "refusing '$CLI_NAME': it needs a value (OCUDU_NAME=value or OCUDU_NAME value)" >&2; exit 2; }
+                      case "$1" in --*) echo "refusing '$CLI_NAME $1': the knob has no value" >&2; exit 2 ;; esac
+                      export "$CLI_NAME=$1" ;;
+    *=*)              echo "refusing '$kv': a knob must be OCUDU_*=…, and a gNB option must start with --" >&2; exit 2 ;;
     # REFUSED, not ignored. This branch used to warn and drop the word, which contradicts the rule stated at
     # the top of this file ("Anything else is refused loudly rather than dropped") and cost a leg: the operator
-    # wrote `--log.phy_level debug` as two words, `debug` was dropped here, gNB was handed `--log.phy_level`
-    # with no value, it consumed the NEXT option as that value and died at startup with
-    #   --phy_level: Log level '--expert_phy.phy_pipeline' not supported
-    # leaving a report in which every counter was zero (measured 2026-09-22 23:15, leg s55-racefix). The
-    # option=value form is this loop's contract, so say the fix instead of dropping the half that matters.
-    *)                    echo "refusing '$kv': neither a knob (OCUDU_*=value) nor a gNB option (--option=value)." >&2
-                          echo "  A bare word here is almost always the VALUE of the option before it: this loop" >&2
-                          echo "  reads one word at a time, so '--log.phy_level debug' arrives as the option plus" >&2
-                          echo "  this word. Join them with '=':   --log.phy_level=debug" >&2
-                          exit 2 ;;
+    # wrote `--log.phy_level debug` as two words, `debug` was dropped, gNB was handed `--log.phy_level` with no
+    # value, it consumed the NEXT option as that value and died at startup with "--phy_level: Log level
+    # '--expert_phy.phy_pipeline' not supported" (measured 2026-09-22 23:15, leg s55-racefix). That two-word form
+    # is accepted since 2026-10-16 (see the loop's header), so a bare word here is now genuinely stray.
+    *)                echo "refusing '$kv': neither a knob (OCUDU_NAME=value or OCUDU_NAME value) nor a gNB option" >&2
+                      echo "  (--option=value or --option value). A bare word here has no option to belong to." >&2
+                      exit 2 ;;
   esac
+  shift
 done
 
 # Pre-flight: the gNB's own parser is the only authority on which options exist. A leg that dies on
