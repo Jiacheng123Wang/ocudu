@@ -7260,3 +7260,35 @@ void stop() override { stopped = true; }      // ← 只立了个旗子，网格
 
 ★★ **对这次飞行的意义** ✓：★ 即使关机再慢 ✓，★ 现在也有**三层** ✓ —— ★ 根因已修（★ 网格在 stop 时放 ✓）、
 ★ 等待有界（★ 2 秒 ＋ 诊断 ✓）、★ 第二次 Ctrl+C 立即强制（★ `SA_NODEFER` ✓）。
+
+
+### 19.85 ★★ 起飞前新增一道闸：★ 二进制**不许**由未提交的代码编出来 ✓（★ 2026-10-16 ✓）
+
+★★ **这道闸是这次飞行现场发现的** ✓：★ 18:04 起飞的那条腿 ✓，★ 二进制在 **18:03:55** 链接 ✓、
+★ 而我修关机根因的提交在 **18:04:46** ✓ ⇒ ★★ **腿跑的是"`d8354ac8d1` ＋ 一份没人看得见的 diff"** ✗ ——
+★ 而 `run_leg.sh` 原有的 stamp 检查**只比 stamp 与 HEAD** ✓，★ **对未提交改动完全免疫** ✗
+（★ stamp 是**构建时**从 HEAD 生成的 ✓）。★★ 报告里那行 `commit:` 因此**半真** ✓。
+
+★★ **加在 `run_leg.sh` 的预检里** ✓（★ 紧跟"stamp 必须在二进制里"那道之后 ✓） ✓：
+
+```bash
+DIRTY_PATHS="lib apps include tests CMakeLists.txt"     # ★ 只有会进二进制的路径 ✓
+DIRTY=$(git status --porcelain --untracked-files=no -- $DIRTY_PATHS)
+DIRTY_FP=$(git diff -- $DIRTY_PATHS | git hash-object --stdin | cut -c1-12)
+# ★ 有改动 ⇒ 拒绝起飞（exit 2）并列出文件与指纹；LEG_ALLOW_DIRTY=1 可越权，★ 此时把指纹写进
+#   $LOG.dirtycode（★ 腿的产物旁边 ✓）⇒ ★ "这条腿到底跑的什么码"始终有据可查 ✓
+```
+
+★★ **为什么只查那几类路径** ✓：★ 写文档 ✓、★ 改配方 ✓ **不会进二进制** ✓ ⇒
+★ 不该因为它们**挡住下一条腿** ✓（★ 这次若写成"整棵树 dirty 就拒" ✓，★ 那我刚写的文档就会挡住飞行 ✗）。
+
+★★ **实测** ✓：★ 当前代码路径 **0 条改动** ✓（★ 下一条腿会干净通过 ✓）；
+★ 把同一套命令指向**确实脏**的 `doc_chinese/` ✓ ⇒ ★ 正确列出文件并算出指纹 `833352625c56` ✓
+（★ 证明管道本身是通的 ✓，★ 而不是"永远返回空" ✗）。★ 提交：`a9ecd7368d` ✓。
+
+★★ **顺带记下这次飞行（★ 18:04 起飞 ✓，★ 实时读到 ✓）** ✓：★★ **这是第一条真正跑 AI 网络的腿** ✓ ——
+★ `receiver=ai` ✓、★ `ai model: …/d3_mixed.mlmodelc` ✓、
+★ `AI ARM ACTIVE … COMPUTES channel estimation, equalisation and demapping` ✓；
+★ 飞行中读到 ✓：★ `[depth3-timing] 6500 forward(s)` ✓、
+★ **plane p50 28 µs ✓／forward p50 1 036 µs、p99 1 795 ✓／deliver p50 474 µs**（★ max 127 869 µs ✗ 一个 128 ms 的尾 ✓）、
+★ **DEGRADED = 2 次** ✓（★ 基本为零 ✓）。★ 完整判读待腿停后由 `probe/ai_leg_verdict.py` 给出 ✓。
