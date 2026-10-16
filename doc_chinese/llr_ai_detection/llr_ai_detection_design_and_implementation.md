@@ -8750,3 +8750,36 @@ $ gnb … --expert_phy.pusch_receiver_model /tmp/compiled/d3_modcond_smoke.mlmod
 ★★ **修完后三件都复验通过** ✓：★ ① 逐调制通路**逐列等于基线** ✓（★ 3/3 跑网络 ✓ 0 退化 ✓）；
 ★ ② 配置矩阵 **21/21** ✓（★ 这次 gnb 里确实带着域代码 ✓）；★ ③ 域门扫描**逐条复现 §19.117 的表** ✓
 （★ 0/6/12/18 dB 回落经典且与经典**逐位相同** ✓，★ 24 dB 算网络 ✓）✓。
+
+### 19.119 ★★ R6 的**效用**判据怎么飞（★ 交错 A/B ✓）—— 以及它缺什么 ✓（★ 2026-10-16 ✓）
+
+★ 目标里写的是"★ 效用用**同信道条件下的闭环吞吐**（★ 交错 A/B 腿 ✓）" ✓。★ 因为 R6 的唯一变量是**测量来源** ✓，
+★ 两条腿的其他一切必须相同 ✓：
+
+```bash
+# 腿 A（★ 对照 ✓）：AI 接收机 + 默认测量来源（classic ✓）
+bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu r6a \
+  --expert_phy.pusch_receiver_backend=ai \
+  --expert_phy.pusch_receiver_model=/tmp/compiled/d3_modcond_final.mlmodelc
+# 腿 B（★ 换源 ✓）：同一个产物、同一个后端，只有测量来源不同
+bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu r6b \
+  --expert_phy.pusch_receiver_backend=ai \
+  --expert_phy.pusch_receiver_model=/tmp/compiled/d3_modcond_final.mlmodelc \
+  --expert_phy.pusch_reporting_source=net
+```
+
+★★ **判据（★ 先写下来，再跑 ✓ —— 免得事后挑对自己有利的读法 ✓）**：
+
+1. ★ 两腿**同信道条件** ✓：★ 交错（★ A→B→A→B ✓）而不是"★ 先跑完 A 再跑 B ✓"，★ 因为信道/干扰会漂 ✓；
+   ★ 每腿的 `rsrp`/`sinr` 分布必须**重叠** ✓，★ 否则这一对腿作废 ✓（★ 这是"★ 同条件 ✓"的**可检验**形式 ✓）。
+2. ★ 主判据：★ **上行吞吐**（★ `iperf3 -R` 与 `ping` ✓ 的达成率 ✓）★ 腿 B 不低于腿 A ✓ ——
+   ★ 即"★ 换成网络测量不会让链路变差 ✓" ✓。
+3. ★ 次判据：★ 两腿的**译码率**（★ crc 通过率 ✓）★ 同量级 ✓，★ 且 `net` 腿的**回落计数**（★
+   `measurement_outside_domain` ✓）★ 必须打印出来 ✓ —— ★ 回落比例就是"★ 模型定义域覆盖了多少真实接收 ✓" ✓，
+   ★ 若覆盖很低 ✓ ⇒ ★ 结论是"★ 该模型在当前工作点没有资格换源 ✓"，★ 与吞吐结果无关 ✓。
+4. ★★ **不达标不采纳** ✓：★ 若 ② 或 ③ 不过 ✓ ⇒ ★ `--pusch_reporting_source` 默认仍是 `classic` ✓，
+   ★ 在本文件里记下数字与原因 ✓。
+
+★★ **现状（★ 卡点写清楚 ✓）**：★ 飞腿需要**手机附着 + `ping`/`iperf3 -R` 流量** ✓（★ 见
+`tmp/fly_ai_legs.md` ✓，★ 那是唯一的外部依赖 ✓），★ 脚本与配置都已就绪 ✓ ⇒ ★ 这一条**等设备/用户** ✓，
+★ 不是技术未知 ✓。★ 另外两条腿都必须在**训练结束、机器空闲**后跑 ✓（★ 回放/腿对时序敏感 ✓）。
