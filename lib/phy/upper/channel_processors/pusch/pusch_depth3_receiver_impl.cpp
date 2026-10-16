@@ -190,6 +190,26 @@ public:
       const bool loaded = engine->init_depth3(path.c_str());
       const unsigned declared_qm = loaded ? engine->depth3_bits_per_symbol() : 0;
 
+      // REFUSED BEFORE IT CAN COMPUTE ANYTHING WRONG. A MODULATION-CONDITIONED bundle is a different contract:
+      // its plane carries four conditioning channels and its main head strides by the widest modulation, so
+      // binding it as a per-modulation model would feed it a 12-channel plane with no Qm and read its head with
+      // the wrong stride -- and it would produce plausible-looking logits for it, which is the failure mode this
+      // whole workstream exists to make impossible. The guard stays until the arm implements that contract; the
+      // per-modulation bundles are unaffected, so a deployment that mixes them up gets a refusal and a reason.
+      if (loaded && engine->depth3_is_modulation_conditioned()) {
+        // The DECLARED SET is printed, not its size: "Qm=4" from a count reads as 16QAM, which is a different
+        // modulation from the four this bundle serves -- a misleading line is worse than a terse one.
+        std::string declared;
+        for (unsigned i = 0; i != engine->depth3_nof_declared_qm(); ++i) {
+          declared += (declared.empty() ? "" : ",") + std::to_string(engine->depth3_declared_qm(i));
+        }
+        notes.push_back(fmt::format("model '{}' NOT bound: it declares the MODULATION-CONDITIONED contract "
+                                    "(depth3_layout=modcond, Qm={}), which this arm does not run yet -- pass a "
+                                    "per-modulation bundle, or wait for the conditioned arm",
+                                    path, declared));
+        return;
+      }
+
       const depth3_model_map::outcome outcome = fallback ? models.add_fallback(declared_qm, path)
                                                         : models.add_slot(slot_qm, declared_qm, path);
       const char* const what = fallback ? "fallback" : "slot";

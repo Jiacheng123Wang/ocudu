@@ -8445,3 +8445,33 @@ if (plane.size() < 612 * 14 * plane_channels) return wrong_plane_size;   // 由 
 ★★ **下一步** ✓：★ 臂侧（★ 定尺 `engine->depth3_input_channels()` ✓、★ 写 4 个 one-hot ✓、
 ★ 按 stride 8 取 LLR ✓、★ 包络用 `add_conditioned()` ✓、★ 横幅打印 `contract=modcond` ＋ 平面通道数 ✓），
 ★ 然后训练完 → 导出 → **引擎验声明** → **分调制判据 1** → **R6** ✓。
+
+
+### 19.110 ★★★ **声明挺过了编译** ✓ —— 而且条件化 bundle **无法被误当按调制模型跑** ✓（★ 2026-10-16 ✓）
+
+★★ §19.107 留了一个**未验的边界** ✓：★ coremltools **读不回**编译后的 `.mlmodelc` ✗ ⇒
+★★ "★ 声明是否还在部署产物里"**只能由引擎回答** ✓。★★ **本轮它回答了** ✓：
+
+```
+$ gnb … --expert_phy.pusch_receiver_model /tmp/compiled/d3_modcond_smoke.mlmodelc   # 编译后的条件化产物
+[pusch_receiver] AI depth-3: model '…/d3_modcond_smoke.mlmodelc' NOT bound: it declares the
+    MODULATION-CONDITIONED contract (depth3_layout=modcond, Qm=2,4,6,8), which this arm does not run yet
+[pusch_receiver] backend=ai: AI ARM INACTIVE … This run's depth-3 output is the CLASSICAL result
+```
+
+★★ **一句话验了两件事** ✓：★★ ① **`depth3_layout=modcond` 与 `depth3_qm_set=2,4,6,8` 挺过了
+`xcrun coremlcompiler compile`** ✓ —— ★ 引擎在**部署产物**里读到了声明 ✓✓（★ 这正是上一轮欠的验证 ✓）；
+★★ ② **条件化 bundle 不会被静默地当成按调制模型跑** ✓ —— ★ 这是本轮新加的**保护性拒绝** ✓。
+
+★★★ **为什么这个拒绝必须先有** ✓：★ 条件化 bundle 的平面是 **16** 通道 ✓、★ 主头按 **stride 8** ✓，
+★ 而按调制的臂会**按 12 通道装配平面** ✗、★ 且**按本接收的 `qm` 读头** ✗ ⇒
+★★ 它**会算出看起来合理的 logits** ✗✗ —— ★★ 这正是本工作流从第一天起要杜绝的失败模式 ✓
+（★ "★ 跑的不是它声称的那条臂 ✓"）。★ 现在它**开射频前就被拒** ✓，★ 并说明原因与出路 ✓
+（★ "★ 换按调制 bundle，★ 或等条件化臂" ✓）。
+
+★★ **一处自我修正（★ 记下 ✓）** ✓：★ 拒绝信息初版打的是 `Qm={nof_declared_qm}` ✓ ——
+★★ 那是**个数 4** ✗，★ 读起来像"★ Qm=4（16QAM）" ✗（★ 与它真正服务的四种调制**都不是一个意思** ✓）⇒
+★ 改成打印**集合**（★ `Qm=2,4,6,8` ✓）✓。★★ 又一次：★ **会误导人的日志比简短的日志更糟** ✓。
+
+★★ **按调制的路径不受影响** ✓（★ 拒绝只针对声明了 `modcond` 的产物 ✓；★ 矩阵检查里的
+`AI ARM ACTIVE` 行照旧 ✓）。
