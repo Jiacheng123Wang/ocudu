@@ -3,6 +3,8 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "../../../lib/phy/upper/uplink_processor_impl.h"
+#include <chrono>
+#include <thread>
 #include "../../support/task_executor_test_doubles.h"
 #include "../support/prach_buffer_test_doubles.h"
 #include "../support/resource_grid_test_doubles.h"
@@ -379,6 +381,42 @@ TEST_F(UplinkProcessorFixture, prach_request_after_stop)
   // Assert tap handles were not invoked.
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), 0);
   ASSERT_EQ(tap_spy->get_handle_quiet_grid_count(), 0);
+}
+
+TEST_F(UplinkProcessorFixture, stop_gives_up_on_a_grid_that_is_still_in_use)
+{
+  // A UL resource grid that is still referenced carries the processor's stop token (the token is handed to
+  // uplink_resource_grid_controller::create_shared_grid and released when the grid leaves its last scope), so a grid
+  // nobody releases is a stop that nobody can finish. Measured 2026-10-16 on a flown leg: the unbounded version of
+  // this wait held the whole gNB shutdown for the full 30-second termination timeout and the process was SIGKILLed
+  // ("只能 kill"). What is asserted here is the contract that replaced it: the wait HAPPENS (the token is honoured),
+  // it is BOUNDED, and giving up also releases the token -- because that token gates the processor's DESTRUCTION
+  // too, and leaving it outstanding would move the same hang a few milliseconds later.
+  shared_resource_grid grid = ul_processor->get_pdu_slot_repository(slot).release();
+
+  std::atomic<bool> stopped{false};
+  const auto        t0 = std::chrono::steady_clock::now();
+  std::thread       stopper([&]() {
+    ul_processor->stop();
+    stopped = true;
+  });
+
+  // It must not return while the grid is alive: that is the reason the token exists.
+  std::this_thread::sleep_for(std::chrono::milliseconds{100});
+  EXPECT_FALSE(stopped) << "the stop must wait for the grid that carries its token";
+
+  // ... but it must return on its own, without anything releasing the grid.
+  for (unsigned i = 0; i != 1000 && !stopped; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+  }
+  const auto elapsed = std::chrono::steady_clock::now() - t0;
+  ASSERT_TRUE(stopped) << "the stop never returned: the wait is unbounded again";
+  EXPECT_LT(elapsed, std::chrono::seconds{10}) << "the stop waited for " << std::chrono::duration<double>(elapsed).count() << " s";
+
+  stopper.join();
+
+  // The destruction must not hang either, with the grid still alive: the token was released when the stop gave up.
+  ul_processor.reset();
 }
 
 TEST_F(UplinkProcessorFixture, pusch_normal_workflow)

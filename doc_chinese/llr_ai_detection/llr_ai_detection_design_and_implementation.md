@@ -7098,13 +7098,20 @@ Could not stop application after 30 seconds. Forcing exit.  ← 定时器兜底 
 | ★★ 下行处理器池 | ★ `for (;;) CAS(idle→stopped)) sleep(10us);` ✗ | ★★ 未完成的 PDU 计数归零 ✓ |
 | ★★ 上行处理器池 | ★ `stop_control.stop();` ✗ | ★★ 每个 slot 的 **PDU repository 归还 stop token** ✓ |
 
-★★★ **与运行期症状对得上** ✓：★ `get_pdu_slot_repository()` 把 stop token **交给 slot 的 PDU repository** ✓
-（★ `uplink_processor_impl.cpp`：*"Transfer stop token to the PDU repository"* ✓），
-★ 而**同一个 repository 不归还**在运行期就表现为
-★ `FAPI: UL processor is busy for slot …` ✗ —— ★★ 16:45 那条腿记了 **6 553 条** ✓（★ 最后一条在 SIGINT 前 7 秒 ✓）。
-★★ **⇒ 一次泄漏的 slot，在运行期是"处理器忙" ✓，在关机时就是"永远等不到 token" ✗** ✓。
-★ 另外：★ 关机期间 **DL 用户面一直在跑** ✓（★ GTPU/PDCP/RLC 一路打到强制退出前 ✓）——
-★ 这正说明被拆的**只有 PHY** ✓，AMF/上层还活着 ✓，★★ **与"等 AMF 消息"的猜测不符** ✗。
+★★★ **token 究竟挂在哪（★ 这一轮又往下追了两层 ✓）** ✓：★ `get_pdu_slot_repository()` 取到 token 后 ✓
+★ 它被放进 `uplink_pdu_slot_repository_impl::stop_token` ✓，★ 然后在 `finish_adding_pdus()` 里
+★ **转交给 `uplink_resource_grid_controller::create_shared_grid()`** ✓ —— ★★ 也就是说
+★★ **token 实际挂在那一个 slot 的上行资源网格上** ✓；★ 网格离开**最后一个 scope** 时 ✓
+★ `notify_release_scope()` 才 `stop_token.reset()` ✓。★★ 所以"关机等不到 token" ≡
+★★ **"那个 slot 的上行网格还有人持有"** ✓ —— ★ 而不只是"repository 没还" ✓（★ 先前那句话说得太窄 ✓，★ 此处更正 ✓）。
+
+★★ **`UL processor is busy` 的正确读法（★ 更正 ✓）** ✓：★ `is_available()` 为假 = **上一个 slot 的网格还没释放** ✓
+⇒ ★ 它首先说明**处理跟不上**（★ 迟到一个 slot 以上 ✓），★★ **不等于永久泄漏** ✗ ——
+★ 16:45 那条腿的 **6 553 条** ✓ 主要是**过载**的证据 ✓（★ 与 6 759 条实时故障同源 ✓；
+★ AI 臂每次接收 1.43 ms ✓）。★★ 关机时的真正条件更可能是 **顺序问题** ✓：
+★ `flexible_o_du_impl::stop()` **先停 RU** ✓、★ 再停 `lower_phy` ✓ ⇒
+★★ 若关机那一刻还有网格被"**已经被停掉的接收路径**"持有 ✓，★ 它就**永远不会被释放** ✗
+⇒ ★★ 这解释了"**空载秒退（19 ms ✓）、带业务必卡**" ✓ —— ★ 而不需要假设一个罕见的泄漏 ✓。
 
 #### ★★★ 第二层根因：★ 第二次 Ctrl+C **根本送不进来** ✗
 
@@ -7140,6 +7147,24 @@ Could not stop application after 30 seconds. Forcing exit.  ← 定时器兜底 
 ★★ 但现在**不需要猜**了 ✓：★ 下一次再发生时，★ 腿日志会**每秒**写出卡在哪一步 ✓、★ 还欠几个 ✓、
 ★ 哪个 HARQ ✓；★ 而且上行那一路**最多拖 2 秒** ✓。★ 用户的那条腿（★ §19.79 的轻流量 AI 腿 ✓）
 ★ 正好会给出这个答案 ✓。
+
+★★★ **还有第二条挂点（★ 同一轮发现并修掉 ✓）** ✓：★ token 也**守着 processor 的析构** ✓ ——
+★ `~stop_event_source_impl()` 调的是**无界** `stop()` ✓ ⇒ ★ 光是"超时后继续"不够 ✓：
+★ 关机几毫秒后**析构**会**再挂一次** ✗。★ 修法：★ 超时分支**释放 token** ✓
+（★ `uplink_resource_grid_controller::force_release_stop_token()` ✓，★ 注释写明它不释放内存 ✓、
+★ 只放弃等待 ✓，★ 并说明接受的窗口 ✓）⇒ ★★ 关机与析构**都不会再挂** ✓。
+
+★★★ **类级端到端证明（★ 新增单测 ✓）** ✓：★ `UplinkProcessorFixture.stop_gives_up_on_a_grid_that_is_still_in_use` ✓
+—— ★ 取一个 repository ✓、★ `release()` 拿到网格 ✓、★ **一直不释放** ✓、★ 在另一个线程里 `stop()` ✓：
+
+```
+100 ms 后仍未返回        → 证明"该等" ✓（token 语义没被丢掉）
+自 2 005 ms 自己返回     → 证明"有界" ✓
+随后 ul_processor.reset() 不挂 → 证明超时分支真的释放了 token ✓（否则析构里的无界 stop 会挂死）
+```
+
+★ 顺带：★ 既有测试 `stop_while_grid_alive` ✓ 早就在测这个形状 ✓ ——
+★ 但它**马上释放**网格 ✓ ⇒ ★★ 无界等待**从来没在 CI 里暴露过** ✗（★ 测试覆盖了场景，★ 没覆盖"没人释放" ✓）。
 
 ★★ **对飞行的影响** ✓：★ 单次 Ctrl+C 仍然优雅退出 ✓；★ 如果关机变慢（★ 30 秒那次的量级 ✓），
 ★ **再按一次就是立刻强制** ✓（★ 这次真的会生效 ✓）；★ 日志里会先出现

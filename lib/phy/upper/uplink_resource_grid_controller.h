@@ -38,6 +38,16 @@ public:
   /// Returns true if the resource grid is not present in any scope.
   bool is_available() const { return ref_counter.load(std::memory_order_acquire) == 0; }
 
+  /// \brief Gives up waiting for the grid's users and releases the stop token.
+  ///
+  /// The stop path waits for the token (\ref stop_event_source_impl::stop_for) so that a grid still being written is
+  /// not torn down under its writer's feet. When that wait expires the shutdown has to continue anyway, and it must
+  /// not then hang a second time in the destructor -- \ref stop_event_source_impl::~stop_event_source_impl calls the
+  /// UNBOUNDED stop(). This is the escape: the token is reset, so the token count reaches zero and the destruction
+  /// of the processor can proceed. It does not free or invalidate the grid: the memory stays owned by the processor
+  /// and a late release from a still-running writer is still honoured (which is the window this trades a hang for).
+  void force_release_stop_token() { stop_token.reset(); }
+
 private:
   // See the shared_resource_grid::pool_interface interface for documentation.
   resource_grid& get() override { return grid; }

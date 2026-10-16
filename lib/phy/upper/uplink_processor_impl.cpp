@@ -92,11 +92,15 @@ void uplink_processor_impl::stop()
   // number, and the log of the run that hung says what was in flight.
   static constexpr std::chrono::seconds stop_timeout{2};
   if (!stop_control.stop_for(stop_timeout)) {
-    logger.warning("UL processor stop: {} slot repository(ies) still in flight after {} s (last slot {}); the "
+    logger.warning("UL processor stop: {} uplink resource grid(s) still in use after {} s (last slot {}); the "
                    "shutdown continues without them",
                    stop_control.nof_tokens_approx(),
                    stop_timeout.count(),
                    current_slot);
+    // Give up on the wait for good: the token also gates the DESTRUCTION of this processor (the source's destructor
+    // calls the unbounded stop()), so leaving it outstanding would move the same hang a few milliseconds later,
+    // after the shutdown has already reported success. See force_release_stop_token.
+    grid_controller.force_release_stop_token();
   }
 }
 
