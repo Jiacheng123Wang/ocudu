@@ -38,8 +38,17 @@ void note_cleanup(int)
 /// without doing anything. The only ways out were the five-second timer or `kill -9` from another terminal -- and the
 /// operator's report was "只能 kill". A stop that hangs is exactly the situation in which someone presses again, so
 /// the second press is the one that must not be a no-op.
-TEST(signal_handling_test, the_second_signal_forces_an_exit_that_the_first_one_did_not_finish)
+TEST(signal_handling_test, a_duplicate_interrupt_is_ignored_and_a_deliberate_one_forces_the_exit)
 {
+  // Two opposite failures, measured on 2026-10-16, and this test is the contract that keeps both closed:
+  //
+  //  * a second press did NOTHING, so an operator whose stop hung had only the timer or `kill -9`;
+  //  * and once later signals forced the exit, an ORDINARY Ctrl+C started killing working shutdowns: the runner
+  //    starts the gNB in the same process group, so the terminal and the runner's trap both send SIGINT -- two
+  //    signals, microseconds apart, from one key press. The leg aillr-256qam-ai_1016_1804 died that way and lost
+  //    its report block ("THIS LEG HAS NO COMPLETE REPORT").
+  //
+  // The child below stands in for a gNB whose graceful stop is still running: its handler does not return.
   int started[2];
   int cleaned[2];
   ASSERT_EQ(::pipe(started), 0);
@@ -48,13 +57,19 @@ TEST(signal_handling_test, the_second_signal_forces_an_exit_that_the_first_one_d
   const pid_t pid = ::fork();
   ASSERT_GE(pid, 0) << "fork failed";
   if (pid == 0) {
-    // The child stands in for a gNB whose graceful stop hangs: the handler below is entered by the first signal and
-    // does not return.
     cleanup_fd = cleaned[1];
-    ocudu::register_interrupt_signal_handler([](int) { ::sleep(60); });
+    // NOT a single sleep(): the duplicate signal interrupts it (nanosleep returns EINTR however the handler was
+    // installed), the handler then returns, and the child exits normally -- which the parent's waitpid reads as
+    // "the duplicate forced the exit". The stand-in has to keep the graceful handler inside for as long as the
+    // test needs, exactly like a stop that is still working.
+    ocudu::register_interrupt_signal_handler([](int) {
+      for (;;) {
+        ::sleep(1);
+      }
+    });
     ocudu::register_cleanup_signal_handler(note_cleanup);
     note(started[1]);
-    std::raise(SIGINT); // enters the handler above; returns only if the handler was not installed
+    std::raise(SIGINT); // enters the handler above and does not return
     ::_exit(0);         // not reached while the handler sleeps
   }
 
@@ -62,27 +77,43 @@ TEST(signal_handling_test, the_second_signal_forces_an_exit_that_the_first_one_d
   ::close(cleaned[1]);
   char byte = 0;
   ASSERT_EQ(::read(started[0], &byte, 1), 1) << "the child did not install its handlers";
-  ::usleep(200000); // let it enter the handler and consume the first signal
-  ASSERT_EQ(::kill(pid, SIGINT), 0) << "the second signal could not be delivered";
 
-  int   status = 0;
-  pid_t waited = 0;
-  for (unsigned i = 0; i != 100; ++i) {
-    waited = ::waitpid(pid, &status, WNOHANG);
-    if (waited == pid) {
-      break;
+  auto alive = [&]() { return ::kill(pid, 0) == 0; };
+  auto wait_for_exit = [&](unsigned tenths) {
+    int   status = 0;
+    pid_t waited = 0;
+    for (unsigned i = 0; i != tenths; ++i) {
+      waited = ::waitpid(pid, &status, WNOHANG);
+      if (waited == pid) {
+        return std::pair<pid_t, int>{waited, status};
+      }
+      ::usleep(100000);
     }
-    ::usleep(100000);
+    return std::pair<pid_t, int>{waited, status};
+  };
+
+  // 1. A DUPLICATE, inside the grace window: it must be ignored, and the child must still be alive.
+  ::usleep(200000);
+  ASSERT_EQ(::kill(pid, SIGINT), 0);
+  auto [waited_early, status_early] = wait_for_exit(5);
+  if (waited_early == pid) {
+    ::kill(pid, SIGKILL);
+    ::waitpid(pid, &status_early, 0);
+    FAIL() << "a duplicate interrupt forced the exit: one Ctrl-C would kill a working shutdown again";
   }
+  EXPECT_TRUE(alive()) << "the child must still be stopping gracefully";
+
+  // 2. A DELIBERATE one, after the grace window: it must force, and the cleanup handler must run first.
+  ::sleep(2);
+  ASSERT_EQ(::kill(pid, SIGINT), 0);
+  auto [waited, status] = wait_for_exit(50);
   if (waited != pid) {
     ::kill(pid, SIGKILL);
     ::waitpid(pid, &status, 0);
-    FAIL() << "the second signal did not force the exit; the test had to kill the child itself";
+    FAIL() << "the deliberate second signal did not force the exit; the test had to kill the child itself";
   }
-
   EXPECT_TRUE(WIFSIGNALED(status)) << "the forced path must not return normally";
   EXPECT_EQ(WTERMSIG(status), SIGKILL) << "the forced path raises SIGKILL";
-  // The cleanup handler runs BEFORE the kill: it is what flushes the last readings of the run being stopped.
   EXPECT_EQ(::read(cleaned[0], &byte, 1), 1) << "the cleanup handler did not run on the forced exit";
   ::close(started[0]);
   ::close(cleaned[0]);

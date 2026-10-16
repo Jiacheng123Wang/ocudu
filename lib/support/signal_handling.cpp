@@ -4,6 +4,7 @@
 #include "ocudu/support/signal_handling.h"
 #include "fmt/core.h"
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <unistd.h>
@@ -17,6 +18,20 @@ static constexpr unsigned TERMINATION_TIMEOUT_S =
 #else
     TERM_TIMEOUT_S;
 #endif
+
+/// How long after the first signal a later one is still read as a DUPLICATE rather than as a deliberate second
+/// press. See the force path below: Ctrl+C reaches a process twice in the ordinary runner setup, and treating that
+/// duplicate as "the operator pressed again" SIGKILLs a shutdown that was working.
+static constexpr auto FORCE_GRACE_S = std::chrono::seconds{2};
+
+/// When the first signal was handled, in nanoseconds on the steady clock. Zero means "no stop has begun".
+static std::atomic<int64_t> stop_began_ns{0};
+
+static int64_t steady_ns()
+{
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 /// Handler called after the user interrupts the program.
 static std::atomic<ocudu_signal_handler> interrupt_handler = nullptr;
@@ -37,16 +52,34 @@ static void signal_handler(int signal)
       // The first registered signal tries to stop the application gracefully, and arms a timer so that a stop that
       // hangs still ends: the timer is the only thing that used to be able to do it.
       if (auto handler = interrupt_handler.exchange(nullptr)) {
+        stop_began_ns.store(steady_ns(), std::memory_order_relaxed);
         handler(signal);
         ::alarm(TERMINATION_TIMEOUT_S);
         return;
       }
-      // EVERY LATER SIGNAL FORCES THE EXIT. Measured 2026-10-16: an operator whose Ctrl+C did not stop the gNB
-      // pressed it again, and the second press did NOTHING - the graceful handler had already been consumed above,
-      // so the only escape left was the timer, and when that did not fire either the process had to be killed from
-      // another terminal. A stop that hangs is exactly the situation in which an operator presses again, so the
-      // second press must be the forcible one: dump what the leg was flown for (the cleanup handler does that),
-      // flush, and go. SIGTERM, SIGHUP and SIGINT all take this path, so `kill <pid>` is a real escape too.
+      // A DELIBERATE SECOND SIGNAL FORCES THE EXIT -- and a duplicate one must not. Measured 2026-10-16, twice, in
+      // opposite directions, and both readings matter here:
+      //
+      //  * an operator whose Ctrl+C did not stop the gNB pressed it again, and the second press did NOTHING: the
+      //    graceful handler had already been consumed above, so the only escape left was the timer;
+      //  * and once that was fixed, a NORMAL Ctrl+C started killing working shutdowns. The runner starts the gNB in
+      //    its own background job but in the SAME process group, so the terminal delivers SIGINT to both the runner
+      //    and the gNB, and the runner's own trap sends it a second one -- two signals, microseconds apart, from ONE
+      //    key press. The leg `aillr-256qam-ai_1016_1804` was killed that way: the report block was truncated and
+      //    the runner printed "THIS LEG HAS NO COMPLETE REPORT".
+      //
+      // So the force path needs the later signal to be at least FORCE_GRACE_S after the first. Within that window a
+      // signal is a duplicate and is ignored (the graceful stop is running and will be given its time); after it,
+      // the operator has waited, seen nothing happen, and pressed again -- which is exactly the escape that must
+      // work. SIGTERM, SIGHUP and SIGINT all take this path, so `kill <pid>` remains a real escape too.
+      if ((steady_ns() - stop_began_ns.load(std::memory_order_relaxed)) <
+          std::chrono::duration_cast<std::chrono::nanoseconds>(FORCE_GRACE_S).count()) {
+        fmt::print(stderr,
+                   "Ignoring a duplicate interrupt that arrived within {} s of the first: the graceful stop is "
+                   "still running. Press again (or kill) if it stays stuck.\n",
+                   FORCE_GRACE_S.count());
+        return;
+      }
       fmt::print(stderr, "Interrupted again while stopping. Forcing exit.\n");
       if (auto handler = cleanup_handler.exchange(nullptr)) {
         handler(signal);
