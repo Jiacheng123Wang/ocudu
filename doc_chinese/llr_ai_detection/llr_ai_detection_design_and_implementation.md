@@ -6520,6 +6520,20 @@ ValueError: the model has 4 outputs, the contract has 3
 ★ 磁盘 ≥60 GB ✓、★ 没有残留 gNB ✓、★★ **主机上没有重活** ✓（★ `ul_chain_replay`／`compare_ai_arm`／
 `train_depth3`／`build_depth3_dataset` ✓ —— 理由见 (d) ✓）、★ 语料目录已建 ＋ 语料树已排除 Spotlight ✓。
 
+> ★★★ **更正（★ 2026-10-16 ✓，★ 首次实飞前当场发生 ✓）**：★★ 配方第一版把额外参数写成了
+> ★ `--expert_phy.phy_pipeline gpu` ✓（★ 空格分隔 ✓）★ ⇒ ★★ `run_leg.sh` **拒绝执行** ✗：
+> `refusing 'gpu': neither a knob (OCUDU_*=value) nor a gNB option (--option=value).` ✓
+> ★★ **两个原因** ✓：★ ① **脚本自己已经传了** `--expert_phy.phy_pipeline "$MODE"` ✓
+> （★ `run_leg.sh` 里那一行就是它 ✓）⇒ ★ **不必再传** ✗；★ ② 它读额外参数是**一次一个词** ✓
+> ⇒ ★★ 选项与值必须用 **`=`** 连起来 ✓（★ 脚本的报错信息自己就这么说 ✓）。
+> ★★ **⇒ 正确形式** ✓：★ `--expert_phy.pusch_receiver_backend=ai` ✓ ＋
+> `--expert_phy.pusch_receiver_model=<绝对路径>.mlmodelc` ✓。
+> ★★ **已加的守卫** ✓：★ 配方里的参数只写**一份**（数组 `EXTRA` ✓）★ ⇒
+> ★★ **打印出来的命令与真正 `exec` 的命令都从它派生** ✓ ⇒ 两者不会再漂移 ✓；
+> ★ 起飞前还逐个校验每个参数匹配 `--*=*` ✓。
+> ★★ **纪律（★ 归入 F42/F53/F54 一族 ✓）**：★★ **"打印给你看的命令"与"真正执行的命令"必须是同一个来源** ✓ ——
+> ★ 各写一遍就会漂移 ✓，★ 而这次漂移的代价是**一次手机测试** ✓。
+
 ★★ **四个模型已逐个冒烟验证** ✓（★ 用重放工具的环境变量绑定 ✓：★ `OCUDU_REPLAY_RECEIVER=ai` ＋
 `OCUDU_REPLAY_MODEL=<path>` ✓ —— 这是**重放侧的绑定方式** ✓，★ 与 gNB 的 `--expert_phy.*` 不同 ✓）：
 ★★ 四个都打出 `AI ARM ACTIVE … bound model '…'` ✓ 并且**都把自己的采集译出来了** ✓
