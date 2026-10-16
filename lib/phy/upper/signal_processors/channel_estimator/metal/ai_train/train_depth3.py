@@ -489,7 +489,7 @@ def genie_labels(plane, channel, alloc, dmrs_symbols, modulation):
     return plane_out
 
 
-def rename_outputs(mlmodel, qm):
+def rename_outputs(mlmodel, qm, keras_names):
     """Rename a converted model's outputs to the contract's names.
 
     The TensorFlow frontend names the outputs `Identity`, `Identity_1`, ... and loses the Keras
@@ -497,24 +497,38 @@ def rename_outputs(mlmodel, qm):
     artifact self-describing, and it is checked downstream: `depth3_engine_check` refuses a bundle
     whose heads are not named `llr`, `post_eq_noise`, `ch_est` and `dmrs_noise`.
 
-    The heads are matched by their CHANNEL COUNT and not by their order, because the order the
-    converter emits them in is an implementation detail of the frontend. The counts are unique
-    (`14 * Qm`, 14, 28 and 1), so a mismatch is detectable rather than silently bound to the wrong
-    head: binding the channel estimate to the LLR head would produce a receiver that decodes
-    garbage from an artifact that looks correct.
+    The heads are identified by the ORDER OF THE KERAS MODEL'S OWN OUTPUT NAMES, which the caller
+    passes in, and each one's shape is then CHECKED against the contract. Two simpler rules were
+    tried and both are wrong. Matching by channel count alone assumes the counts are unique: the LLR
+    head carries `14 * Qm` channels and the channel head `2 * 14`, so at QPSK both are 28 and the
+    map collapses from four entries to three -- which surfaced as "the model has 4 outputs, the
+    contract has 3" and refused the export, while at 16QAM (56), 64QAM (84) and 256QAM (112) the
+    counts differ and the bug stayed hidden. Matching by a hardcoded order assumes the frontend
+    emits the heads in the sequence they were built, and it does not: `Identity_1` turned out to
+    carry one channel, which is the DM-RS noise head. Taking the names from the model removes both
+    assumptions, and checking every shape keeps a mismatch detectable rather than silently bound to
+    the wrong head -- binding the channel estimate to the LLR head would produce a receiver that
+    decodes garbage from an artifact that looks correct.
     """
     import coremltools as ct
-    spec     = mlmodel.get_spec()
-    expected = {NOF_SYMBOLS * qm: "llr", NOF_SYMBOLS: "post_eq_noise",
-                2 * NOF_SYMBOLS: "ch_est", 1: "dmrs_noise"}
-    actual   = list(spec.description.output)
-    if len(actual) != len(expected):
-        raise ValueError(f"the model has {len(actual)} outputs, the contract has {len(expected)}")
-    for output in actual:
-        channels = output.type.multiArrayType.shape[-1]
-        name     = expected.pop(channels, None)
+    spec = mlmodel.get_spec()
+    # The Keras names the heads are known by, and the shape each must have in the contract. `llr` is
+    # per resource element (14 * Qm), the channel estimate is complex (2 * 14), and the two noise
+    # heads carry one value per symbol and one for the whole slot.
+    contract = {"llr_flat": ("llr", NOF_SYMBOLS * qm), "noise_flat": ("post_eq_noise", NOF_SYMBOLS),
+                "ch_est_flat": ("ch_est", 2 * NOF_SYMBOLS), "dmrs_noise": ("dmrs_noise", 1)}
+    actual = list(spec.description.output)
+    if len(actual) != len(keras_names) or len(actual) != len(contract):
+        raise ValueError(f"the model has {len(actual)} outputs, the caller named {len(keras_names)}, "
+                         f"the contract has {len(contract)}")
+    for output, keras_name in zip(actual, keras_names):
+        name, channels = contract.get(keras_name, (None, None))
         if name is None:
-            raise ValueError(f"no contract head has {channels} channels")
+            raise ValueError(f"the model's output {keras_name} is not one of the contract's heads")
+        got = output.type.multiArrayType.shape[-1]
+        if got != channels:
+            raise ValueError(f"output {output.name} ({keras_name}) carries {got} channels where the "
+                             f"contract's {name} head has {channels}")
         ct.utils.rename_feature(spec, output.name, name)
     return ct.models.MLModel(spec, weights_dir=mlmodel.weights_dir)
 
@@ -540,7 +554,7 @@ def export_deployment(model, qm, path):
         compute_precision=ct.precision.FLOAT16,
         minimum_deployment_target=ct.target.iOS17,
         convert_to="mlprogram")
-    converted = rename_outputs(converted, qm)
+    converted = rename_outputs(converted, qm, list(model.output_names))
     converted.save(path)
     print(f"wrote the fp16 deployment graph to {path} (input {[1, *shape]})")
 
