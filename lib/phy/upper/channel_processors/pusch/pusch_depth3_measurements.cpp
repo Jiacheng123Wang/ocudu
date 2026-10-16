@@ -50,10 +50,17 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
   // of white noise into sigma^2, and its value is MEASURED rather than derived: 1.5 is the analytic factor for a
   // three-point mean (2/3), and against the datasets' true noise the estimate lands 3.15 dB low -- a stable
   // factor of 2.07, p10/p90 within 0.55 dB -- so the constant carries the correction (design section 19.128).
-  static constexpr float RESIDUAL_FACTOR = 1.5F * 2.07F;
+  // The window is TWO pilots: section 19.132 measured the three-point version compressing badly at high SNR (12 dB
+  // of prescribed SNR bought 4 dB of output) because the residual carried the channel's own variation, and widening
+  // the window to five made it WORSE, not better (1.5 dB at prescribed 12 dB against 4.0) -- a trailing mean over a
+  // wider span picks up MORE of the channel. Two ADJACENT pilots are the least contaminated pair the comb offers,
+  // and the analytic factor for a two-point difference is 1/2. The empirical correction still carries the value
+  // measured for three points, so the sweep below is what decides whether this direction helps at all.
+  static constexpr unsigned RESIDUAL_WINDOW = 2;
+  static constexpr float    RESIDUAL_FACTOR = 0.5F * 2.07F;
   struct pilot_ring {
-    float re[3] = {0.0F, 0.0F, 0.0F};
-    float im[3] = {0.0F, 0.0F, 0.0F};
+    float re[RESIDUAL_WINDOW] = {0.0F, 0.0F};
+    float im[RESIDUAL_WINDOW] = {0.0F, 0.0F};
     unsigned count = 0;
     unsigned next  = 0;
   };
@@ -105,16 +112,23 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
       pilot_ring& ring = rings[t];
       ring.re[ring.next] = ls_re;
       ring.im[ring.next] = ls_im;
-      ring.next          = (ring.next + 1) % 3;
-      if (ring.count < 3) {
+      ring.next          = (ring.next + 1) % RESIDUAL_WINDOW;
+      if (ring.count < RESIDUAL_WINDOW) {
         ++ring.count;
       }
       else {
-        // The window is the three most recent pilots of this symbol, so the middle one of the ring is the value
-        // the mean is tested against. The comb is every other subcarrier, so these are neighbours in frequency.
-        const unsigned middle = ring.next;
-        const float    mean_re = (ring.re[0] + ring.re[1] + ring.re[2]) / 3.0F;
-        const float    mean_im = (ring.im[0] + ring.im[1] + ring.im[2]) / 3.0F;
+        // The window is the most recent pilots of this symbol and the value tested against their mean is the
+        // newest one (the ring's `next` slot, about to be overwritten). The comb is every other subcarrier, so
+        // these are neighbours in frequency.
+        const unsigned middle  = ring.next;
+        float          mean_re = 0.0F;
+        float          mean_im = 0.0F;
+        for (unsigned w = 0; w != RESIDUAL_WINDOW; ++w) {
+          mean_re += ring.re[w];
+          mean_im += ring.im[w];
+        }
+        mean_re /= static_cast<float>(RESIDUAL_WINDOW);
+        mean_im /= static_cast<float>(RESIDUAL_WINDOW);
         const float    d_re    = ring.re[middle] - mean_re;
         const float    d_im    = ring.im[middle] - mean_im;
         residual_sum += static_cast<double>(d_re) * d_re + static_cast<double>(d_im) * d_im;
