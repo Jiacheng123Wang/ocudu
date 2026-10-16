@@ -14,6 +14,7 @@ using plane = pusch_depth3_input_plane;
 } // namespace
 
 depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
+                                          unsigned            plane_channels,
                                           span<const __fp16> channel_head,
                                           float               reference_amplitude,
                                           float               noise_shape,
@@ -22,8 +23,12 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
 {
   depth3_measurements measurements;
 
+  // The plane's own width, not the contract's constant. This guard is the one that actually bit: a conditioned
+  // plane is 612*14*16 and the check demanded 612*14*12, so the measurement returned "no pilot" before reading
+  // anything -- a message that says the CAPTURE has no DM-RS when the truth was that the reader was looking for
+  // the wrong shape (measured 2026-10-16, on the conditioned contract).
   const size_t plane_size =
-      static_cast<size_t>(plane::NOF_SUBCARRIERS) * plane::NOF_SYMBOLS * plane::NOF_CHANNELS;
+      static_cast<size_t>(plane::NOF_SUBCARRIERS) * plane::NOF_SYMBOLS * plane_channels;
   const size_t head_size = static_cast<size_t>(plane::NOF_SUBCARRIERS) * plane::NOF_SYMBOLS * 2;
   if ((plane_values.size() != plane_size) || (channel_head.size() != head_size)) {
     return measurements;
@@ -47,8 +52,11 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
 
   for (unsigned k = 0; k != plane::NOF_SUBCARRIERS; ++k) {
     for (unsigned t = 0; t != plane::NOF_SYMBOLS; ++t) {
-      const __fp16* re = plane_values.data() +
-                         (static_cast<size_t>(k) * plane::NOF_SYMBOLS + t) * plane::NOF_CHANNELS;
+      // The plane's block width, not the contract's constant: a conditioned plane is wider, and walking it with
+      // 12 reads the mask channel out of a neighbouring resource element -- which reports "no pilot" rather than
+      // a wrong number, so the failure looks like a capture without DM-RS (measured 2026-10-16).
+      const __fp16* re =
+          plane_values.data() + (static_cast<size_t>(k) * plane::NOF_SYMBOLS + t) * plane_channels;
       // The plane's mask channel is set exactly at the allocated pilot resource elements of this port,
       // which is where both averages are defined. Everywhere else the LS channels are zero and head 3 is
       // unconstrained (training only constrains it inside the allocation), so walking the window instead

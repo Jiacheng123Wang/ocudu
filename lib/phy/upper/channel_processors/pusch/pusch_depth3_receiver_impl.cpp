@@ -581,13 +581,17 @@ private:
       return;
     }
     const depth3_measurements net = measure_depth3(span<const __fp16>(input_plane),
+                                                   plane_channels,
                                                    span<const __fp16>(channel_head),
                                                    reference_amplitude,
                                                    static_cast<float>(dmrs_noise_head),
                                                    scales.a_noise,
                                                    scales.b_noise);
     if (net.nof_pilot_re == 0) {
-      fmt::print(stderr, "[depth3-measure] the plane carries no pilot resource element; nothing measured\n");
+      fmt::print(stderr,
+                 "[depth3-measure] nothing measured: the plane (width {}) carries no pilot resource element, or it "
+                 "is not the shape the measurement expects\n",
+                 plane_channels);
       return;
     }
     const unsigned port        = config.rx_ports.empty() ? 0 : config.rx_ports.front();

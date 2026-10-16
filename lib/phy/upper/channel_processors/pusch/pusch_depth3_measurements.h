@@ -53,7 +53,13 @@ struct depth3_measurements {
 ///   from the plane's scalar channels rather than assumed, so the two sides cannot disagree about the
 ///   direction the DM-RS-to-data ratio points.
 ///
-/// \param[in] plane               The contract's plane, `[612, 14, 12]` fp16, as `assemble()` wrote it.
+/// \param[in] plane               The contract's plane, fp16, as `assemble()` wrote it: `[612, 14, plane_channels]`.
+/// \param[in] plane_channels      The plane's block width: the contract's 12, plus the one-hot conditioning
+///                                channels when a MODULATION-CONDITIONED bundle is bound. It is a parameter and not
+///                                the constant because every consumer of the plane has to walk it with the width it
+///                                was written with -- a hard-coded 12 reads the mask channel from the wrong element
+///                                and the measurement silently finds no pilot at all (measured 2026-10-16, the
+///                                fourth consumer of this plane to make the same mistake).
 /// \param[in] channel_head        Head 3, `[612, 14, 2]` fp16, carrying `Re/Im(H/r)` per RE.
 /// \param[in] reference_amplitude The `r` `assemble()` reported for the same plane.
 /// \param[in] noise_shape         Head 4's scalar output, the `u` of the noise map.
@@ -66,6 +72,7 @@ struct depth3_measurements {
 /// that estimates a channel per resource element has no time-domain observable to report it from, so TA
 /// keeps coming from the classical estimator and this unit deliberately does not invent one.
 depth3_measurements measure_depth3(span<const __fp16> plane,
+                                   unsigned            plane_channels,
                                    span<const __fp16> channel_head,
                                    float               reference_amplitude,
                                    float               noise_shape,
