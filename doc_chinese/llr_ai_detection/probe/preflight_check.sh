@@ -103,6 +103,19 @@ done
 [ -n "$leaked" ] && warn "these are set in this shell and will be STRIPPED by the flight script:$leaked" \
                  || ok "no capture / heavy-probe variables in this shell"
 
+echo "== the batch directories"
+# The runner stamps every log with a new timestamp, so re-flying into a directory that already holds a batch leaves both
+# copies and the verdict would average over four legs of an arm the operator believes has two. It refuses now, but the
+# cheapest place to catch it is here.
+for batch in r9r r9c; do
+  dir=$W/legs/$batch
+  if [ -d "$dir" ] && [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
+    bad "$dir already holds a batch ($(ls -1 "$dir"/*.log.stderr 2>/dev/null | wc -l | tr -d ' ') leg log(s)): fly the re-run into a NEW name (r10)"
+  else
+    ok "$dir is empty (a fresh batch)"
+  fi
+done
+
 echo "== the radio and the peer"
 [ "$(pgrep -x gnb | wc -l | tr -d ' ')" = 0 ] && ok "no gNB running" || bad "a gNB is already running: stop it first"
 sudo -n true 2>/dev/null && ok "sudo is passwordless (no prompt per batch)" \
@@ -116,8 +129,8 @@ fi
 
 echo
 if [ "$fail" = 0 ]; then
-  echo "GO: $fail failing check(s). Start with:"
-  echo "    UE_IP=<phone ip> bash $HERE/fly_both.sh r9"
+  echo "GO: $fail failing check(s). Fly it with the manual runbook (one leg at a time, the gNB first):"
+  echo "    $HERE/FLIGHT_RUNBOOK_MANUAL.md"
 else
   echo "NO-GO: $fail failing check(s) above."
 fi

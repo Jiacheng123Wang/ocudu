@@ -155,6 +155,20 @@ def main():
         print("no leg log matched; check --legs and --batch", file=sys.stderr)
         return 1
 
+    # A TAG THAT APPEARS TWICE IS TWO SESSIONS IN ONE DIRECTORY. The runner stamps every log with a new timestamp, so
+    # re-flying a leg into the same batch directory leaves BOTH copies, and the means would then be computed over four
+    # legs of arm a while the operator believes there are two. That is not a subtle wrong answer; it is an answer to a
+    # different experiment, so it is refused rather than averaged.
+    seen_tags = collections.Counter(row["tag"] for row in rows)
+    duplicated = {tag: count for tag, count in seen_tags.items() if count > 1}
+    if duplicated:
+        print("REFUSING to read this batch: a leg tag appears more than once, which means two sessions are mixed in "
+              "one directory:", file=sys.stderr)
+        for tag, count in sorted(duplicated.items()):
+            print(f"  {tag}: {count} log(s)", file=sys.stderr)
+        print("Move the older logs aside, or fly the re-run into a new batch name (r9 -> r10).", file=sys.stderr)
+        return 2
+
     arm_order = sorted({row["arm"] for row in rows})
 
     print(f"{'leg':>8} {'arm':>4} {'Mbit/s':>8} {'rtt ms':>7} {'comparability':>13} {'basis':>14} {'plane est':>10} "
