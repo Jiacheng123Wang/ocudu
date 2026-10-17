@@ -373,6 +373,50 @@ coreml_nn_engine::~coreml_nn_engine()
   delete static_cast<coreml_nn_engine_impl*>(impl);
 }
 
+/// \brief Which compute units a bundle is loaded with, from a measurement variable (`all` when unset).
+///
+/// `MLComputeUnitsAll` lets Core ML choose among the ANE, the GPU and the CPU, and nothing reports the choice
+/// back, so "the network runs on the ANE" has been an assumption in this design rather than a measurement
+/// (section 19.164). Loading the SAME bundle at one tier at a time is what makes placement measurable from
+/// outside: `cpu_gpu` matching `all` means the ANE is not carrying the forward pass, and `all` being much faster
+/// means it is. The default is `all`, i.e. unchanged behaviour -- this is a measurement knob, not a deployment
+/// one, and a run that does not set the variable asks for exactly what it asked for before.
+struct compute_units_choice {
+  MLComputeUnits units = MLComputeUnitsAll;
+  const char*    name  = "all";
+};
+
+compute_units_choice compute_units_from_env(const char* variable)
+{
+  const char* env = std::getenv(variable);
+  if (env == nullptr) {
+    return compute_units_choice{};
+  }
+  if (std::strcmp(env, "all") == 0) {
+    return {MLComputeUnitsAll, "all"};
+  }
+  if (std::strcmp(env, "cpu_gpu") == 0) {
+    return {MLComputeUnitsCPUAndGPU, "cpu_gpu"};
+  }
+  if (std::strcmp(env, "cpu") == 0) {
+    return {MLComputeUnitsCPUOnly, "cpu"};
+  }
+  if (std::strcmp(env, "cpu_ne") == 0) {
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && (__MAC_OS_X_VERSION_MAX_ALLOWED >= 130000)
+    if (@available(macOS 13.0, *)) {
+      return {MLComputeUnitsCPUAndNeuralEngine, "cpu_ne"};
+    }
+#endif
+    ocudulog::fetch_basic_logger("PHY").warning(
+        "AI depth-3: OCUDU_DEPTH3_COMPUTE_UNITS=cpu_ne needs macOS 13 or a newer SDK than this build has; "
+        "using all");
+    return compute_units_choice{};
+  }
+  ocudulog::fetch_basic_logger("PHY").warning(
+      "AI engine: {}='{}' is not one of all|cpu_gpu|cpu_ne|cpu; using all", variable, env);
+  return compute_units_choice{};
+}
+
 bool coreml_nn_engine::init(const char* modelc_path)
 {
   if (impl == nullptr) {
@@ -388,8 +432,11 @@ bool coreml_nn_engine::init(const char* modelc_path)
     ocudulog::fetch_basic_logger("PHY").error("AI-CE: model bundle not found at {}", modelc_path);
     return false;
   }
+  const compute_units_choice units_choice = compute_units_from_env("OCUDU_CE_COMPUTE_UNITS");
   MLModelConfiguration* cfg = [[MLModelConfiguration alloc] init];
-  cfg.computeUnits          = MLComputeUnitsAll; // ANE > GPU > CPU as the runtime sees fit
+  // ANE > GPU > CPU as the runtime sees fit, unless the measurement knob names one tier (see depth3_compute_units;
+  // the same reasoning applies to this network, and design section 19.171 compares the two on the same units).
+  cfg.computeUnits          = units_choice.units;
   NSError* err              = nil;
   e->model                  = [MLModel modelWithContentsOfURL:url configuration:cfg error:&err];
   if (e->model == nil) {
@@ -424,50 +471,6 @@ bool coreml_nn_engine::init(const char* modelc_path)
   return true;
 }
 
-/// \brief Which compute units the depth-3 bundle is loaded with, from `OCUDU_DEPTH3_COMPUTE_UNITS`.
-///
-/// `MLComputeUnitsAll` lets Core ML choose among the ANE, the GPU and the CPU, and nothing reports the choice
-/// back, so "the network runs on the ANE" has been an assumption in this design rather than a measurement
-/// (section 19.164). Loading the SAME bundle at one tier at a time is what makes placement measurable from
-/// outside: `cpu_gpu` matching `all` means the ANE is not carrying the forward pass, and `all` being much faster
-/// means it is. The default is `all`, i.e. unchanged behaviour -- this is a measurement knob, not a deployment
-/// one, and a run that does not set the variable asks for exactly what it asked for before.
-struct depth3_compute_units_choice {
-  MLComputeUnits units = MLComputeUnitsAll;
-  const char*    name  = "all";
-};
-
-depth3_compute_units_choice depth3_selected_compute_units()
-{
-  const char* env = std::getenv("OCUDU_DEPTH3_COMPUTE_UNITS");
-  if (env == nullptr) {
-    return depth3_compute_units_choice{};
-  }
-  if (std::strcmp(env, "all") == 0) {
-    return {MLComputeUnitsAll, "all"};
-  }
-  if (std::strcmp(env, "cpu_gpu") == 0) {
-    return {MLComputeUnitsCPUAndGPU, "cpu_gpu"};
-  }
-  if (std::strcmp(env, "cpu") == 0) {
-    return {MLComputeUnitsCPUOnly, "cpu"};
-  }
-  if (std::strcmp(env, "cpu_ne") == 0) {
-#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && (__MAC_OS_X_VERSION_MAX_ALLOWED >= 130000)
-    if (@available(macOS 13.0, *)) {
-      return {MLComputeUnitsCPUAndNeuralEngine, "cpu_ne"};
-    }
-#endif
-    ocudulog::fetch_basic_logger("PHY").warning(
-        "AI depth-3: OCUDU_DEPTH3_COMPUTE_UNITS=cpu_ne needs macOS 13 or a newer SDK than this build has; "
-        "using all");
-    return depth3_compute_units_choice{};
-  }
-  ocudulog::fetch_basic_logger("PHY").warning(
-      "AI depth-3: OCUDU_DEPTH3_COMPUTE_UNITS='{}' is not one of all|cpu_gpu|cpu_ne|cpu; using all", env);
-  return depth3_compute_units_choice{};
-}
-
 bool coreml_nn_engine::init_depth3(const char* modelc_path)
 {
   if (impl == nullptr) {
@@ -484,7 +487,7 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
                                               modelc_path);
     return false;
   }
-  const depth3_compute_units_choice units_choice = depth3_selected_compute_units();
+  const compute_units_choice units_choice = compute_units_from_env("OCUDU_DEPTH3_COMPUTE_UNITS");
   MLModelConfiguration* cfg = [[MLModelConfiguration alloc] init];
   cfg.computeUnits          = units_choice.units;
   e->model3_compute_units   = units_choice.name;

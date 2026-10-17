@@ -111,3 +111,10 @@ target_link_libraries(k1_check PRIVATE ocudu_channel_estimator_metal ocudu_suppo
 add_executable(depth3_engine_check test/depth3_engine_check.cpp)
 target_include_directories(depth3_engine_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(depth3_engine_check PRIVATE ocudu_channel_estimator_metal ocudu_support)
+
+# ---- Core ML bundle latency: one number per bundle, on the engine's own measurement point ----
+# Two shipped networks are compared with it (AI CE HELENA against the depth-3 receiver), so the comparison shares
+# the engine, the machine and the measurement: `coreml_latency_probe --model <bundle>`.
+add_executable(coreml_latency_probe test/coreml_latency_probe.cpp)
+target_include_directories(coreml_latency_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(coreml_latency_probe PRIVATE ocudu_channel_estimator_metal ocudu_support)

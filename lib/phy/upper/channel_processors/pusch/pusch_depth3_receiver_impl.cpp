@@ -572,6 +572,11 @@ public:
       return;
     }
     const auto segment_forwarded = std::chrono::steady_clock::now();
+    // The engine's own reading of the `predictionFromFeatures` call, taken before anything else can overwrite it.
+    // `forward` above is the ARM's segment and contains the engine's glue as well: the worker-thread hand-off, the
+    // five `MLMultiArray` bindings and the feature provider. Printing both is what separates "our glue" from
+    // "Core ML and the ANE", which are different problems with different fixes (design section 19.171).
+    const auto predict_us = static_cast<unsigned>(computing_engine.last_predict_us());
 
     // ---- the reporting heads, next to the estimator's own numbers ---------------------------------
     // R6's acceptance is that the network's measurements agree with the classical estimator's to the order
@@ -586,7 +591,8 @@ public:
       degrade(depth3_degradation::no_data_resource_elements, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
-    record_timing(segment_start, segment_assembled, segment_forwarded, std::chrono::steady_clock::now());
+    record_timing(segment_start, segment_assembled, segment_forwarded, std::chrono::steady_clock::now(),
+                  predict_us);
     last_forward_ok = true;
   }
 
@@ -612,7 +618,8 @@ private:
   void record_timing(std::chrono::steady_clock::time_point start,
                      std::chrono::steady_clock::time_point assembled,
                      std::chrono::steady_clock::time_point forwarded,
-                     std::chrono::steady_clock::time_point delivered)
+                     std::chrono::steady_clock::time_point delivered,
+                     unsigned                               predict_us)
   {
     const auto micros = [](std::chrono::steady_clock::time_point from,
                            std::chrono::steady_clock::time_point to) {
@@ -621,6 +628,7 @@ private:
     timings[0][timing_index] = micros(start, assembled);
     timings[1][timing_index] = micros(assembled, forwarded);
     timings[2][timing_index] = micros(forwarded, delivered);
+    timings[3][timing_index] = predict_us;
     timing_index             = (timing_index + 1) % TIMING_RING;
     ++timing_count;
 
@@ -635,9 +643,11 @@ private:
   void report_timing()
   {
     const unsigned sampled = std::min(timing_count, TIMING_RING);
-    static const char* const names[3] = {"plane", "forward", "deliver"};
+    static const char* const names[4] = {"plane", "forward", "deliver", "predict"};
     fmt::print(stderr, "[depth3-timing] {} forward(s), microseconds:", timing_count);
-    for (unsigned segment = 0; segment != 3; ++segment) {
+    // `predict` last on purpose: it is the PART of `forward` that Core ML and the ANE spend, so the two are read
+    // together and their difference is the engine's glue.
+    for (unsigned segment = 0; segment != 4; ++segment) {
       std::array<unsigned, TIMING_RING> sorted = timings[segment];
       std::sort(sorted.begin(), sorted.begin() + sampled);
       const unsigned p99_index = std::min((sampled * 99) / 100, sampled - 1);
@@ -647,7 +657,7 @@ private:
     fmt::print(stderr, "\n");
   }
 
-  std::array<std::array<unsigned, TIMING_RING>, 3> timings{};
+  std::array<std::array<unsigned, TIMING_RING>, 4> timings{};
   unsigned                                         timing_index = 0;
   unsigned                                         timing_count = 0;
 
