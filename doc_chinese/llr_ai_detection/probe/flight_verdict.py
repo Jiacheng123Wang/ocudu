@@ -35,6 +35,10 @@ PUBLISHED = re.compile(r"\[depth3-sinr\] (\d+) reception\(s\): PUBLISHED SINR ra
                        r"calibration (\w+)")
 TIMING = re.compile(r"\[depth3-timing\] (\d+) forward\(s\).*?plane p50 (\d+).*?forward p50 (\d+).*?deliver p50 (\d+)")
 LEG = re.compile(r"([a-z0-9]*?)([a-c])(\d+)$")
+# The PHY logs every reception at INFO with the value the chain published, so a CLASSICAL leg -- which has no
+# `[depth3-measure]` line at all, because the arm is not running -- still yields a comparability basis. `tbs` filters
+# the MSG3 receptions out: they are QPSK, tiny, and their SINR is not the traffic's.
+PUSCH = re.compile(r"PUSCH: .*?tbs=(\d+).*?sinr=(-?(?:inf|[\d.]+))dB")
 
 
 def parse_iperf(text):
@@ -58,10 +62,22 @@ def read_leg(path):
         # The LAST line is the whole leg's ring by then; the calibration state is taken from it as well.
         _, raw10, raw50, raw90, cal10, cal50, cal90, calibration = published_hits[-1]
         published = (float(raw50), float(cal50))
+    # The published value per reception, from the PHY log beside the stderr one (see PUSCH above).
+    chain = []
+    log_path = path.replace(".log.stderr", ".log")
+    if os.path.exists(log_path):
+        for tbs, sinr in PUSCH.findall(open(log_path, "r", errors="replace").read()):
+            if int(tbs) < 100 or "inf" in sinr:
+                continue
+            chain.append(float(sinr))
     timing = TIMING.findall(raw)
     last_timing = timing[-1] if timing else None
     return {
-        "classic_snr": statistics.median(classic) if classic else None,
+        # The classical ESTIMATOR's SNR: sampled in an AI leg (`[depth3-measure] classic=`), and equal to what the
+        # chain publishes in a classical leg, where the PHY line above carries it at full rate.
+        "classic_snr": statistics.median(classic) if classic else (statistics.median(chain) if chain else None),
+        "classic_source": "depth3-measure" if classic else ("pusch line" if chain else "none"),
+        "published_chain": statistics.median(chain) if chain else None,
         "plane_estimate": statistics.median(net) if net else None,
         "published": published,
         "calibration": calibration,
@@ -111,15 +127,16 @@ def main():
         return 1
 
     arm_order = sorted({row["arm"] for row in rows})
-    print(f"{'leg':>8} {'arm':>4} {'Mbit/s':>8} {'classic SNR':>12} {'plane est':>10} {'published':>18} "
-          f"{'degr':>5} {'recv':>7} {'plane us':>9} {'fwd us':>7} {'deliv us':>9}")
+    print(f"{'leg':>8} {'arm':>4} {'Mbit/s':>8} {'comparability':>13} {'basis':>14} {'plane est':>10} "
+          f"{'published':>18} {'degr':>5} {'recv':>7} {'plane us':>9} {'fwd us':>7} {'deliv us':>9}")
     for row in rows:
         published = "-"
         if row["published"] is not None:
             raw, cal = row["published"]
             published = f"{raw:.2f} -> {cal:.2f} ({row['calibration']})"
         print(f"{row['tag']:>8} {row['arm']:>4} {row['mbit'] if row['mbit'] is not None else float('nan'):>8.2f} "
-              f"{row['classic_snr'] if row['classic_snr'] is not None else float('nan'):>12.2f} "
+              f"{row['classic_snr'] if row['classic_snr'] is not None else float('nan'):>13.2f} "
+              f"{row['classic_source']:>14} "
               f"{row['plane_estimate'] if row['plane_estimate'] is not None else float('nan'):>10.2f} "
               f"{published:>18} {row['degradations']:>5} "
               f"{row['receptions'] if row['receptions'] else 0:>7} {row['plane'] if row['plane'] else 0:>9} "
@@ -132,10 +149,17 @@ def main():
         if before["classic_snr"] is None or after["classic_snr"] is None:
             continue
         delta = abs(before["classic_snr"] - after["classic_snr"])
-        flag = "ok" if delta <= args.tolerance_db else "NOT COMPARABLE"
+        flags = []
         if delta > args.tolerance_db:
+            flags.append("NOT COMPARABLE")
             classic_ok = False
-        print(f"  comparability {before['tag']:>6} vs {after['tag']:<6} classic SNR differs {delta:5.2f} dB  {flag}")
+        # A basis that differs between the two legs is the circularity this script exists to avoid: the AI legs'
+        # basis is the estimator's PRE-equalisation SNR (sampled), while a classical leg publishes a POST-equalisation
+        # value. They are close but not the same quantity, so the reading is labelled rather than trusted.
+        if before["classic_source"] != after["classic_source"]:
+            flags.append("different basis: " + before["classic_source"] + " vs " + after["classic_source"])
+        print(f"  comparability {before['tag']:>6} vs {after['tag']:<6} differs {delta:5.2f} dB  "
+              f"{'ok' if not flags else '; '.join(flags)}")
     by_arm = collections.defaultdict(list)
     for row in rows:
         if row["mbit"] is not None:
