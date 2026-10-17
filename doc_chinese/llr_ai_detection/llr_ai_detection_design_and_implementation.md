@@ -11417,3 +11417,18 @@ UE_IP=<手机IP> ARMS="a b c d d c b a" bash doc_chinese/llr_ai_detection/probe/
 
 **(c) 操作流 ✓**：★ `preflight_check.sh both <IP>` ⇒ **GO** ⇒ ★ `fly_both.sh r9` ✓ ⇒ ★ 贴回 iperf3 + ping ✓ ⇒
 ★ 两条 `flight_verdict.py` 命令（由 `fly_both.sh` 结尾打印 ✓）。
+
+**(d) 环境泄漏与磁盘 ✓（★ 2026-10-17 追补 ✓）**
+
+★ 查配置与 runner 后确认：★ **两者都不开采集** ✓（★ `OCUDU_UL_DUMP` 未被设置 ✓，★ runner 只在它存在时建目录 ✓）
+⇒ ★ 飞行默认**不采语料** ✓。★★ **但 `sudo -E` 会保留环境** ✓ ⇒ ★ 若当前 shell 里还留着采语料时的 `OCUDU_UL_DUMP` ✓，
+★ 飞行会把**每个接收**都落盘 ✓（★ 旁边的 `corpus/` 是 **74 GB** ✓ ⇒ ★ 一条腿就能写掉几十 GB ✓、★ 可能中途写满盘 ✓）；
+★ 而 `OCUDU_UL_PHASE_SEGMENTS` / `OCUDU_METAL_GPU_TIME` 会**把测量代码放进被计时的路径** ✓。
+
+★ 两道防线 ✓：★ ① 飞行脚本**从每条腿的环境里剥掉**这三个变量 ✓ 并**说明剥掉了什么** ✓；
+★ ② `preflight_check.sh` **在飞行前报告**它们 ✓。★ 同时加了**磁盘检查** ✓（★ 日志 info 级 **170 MB/腿** ✓、
+★ 12 腿 ≈2 GB ✓；★ 本卷 **94% 已用 ✓、★ 61 GB 空闲** ✓）。
+★★ 此外修了一个**自身的**缺陷 ✓：★ 泄漏检测的第一版用**嵌套 `eval`** ✓ ⇒ ★ 把所有变量都报成"已设置" ✓
+（★ 连没设的也报 ✓），★ 是**单独跑那段**才发现的 ✓ ⇒ ★ 改为 bash 的**间接取值 `${!var}`** ✓。
+
+★ 现在 preflight 无 UE 时 **13 项 ok** ✓、★ 仅"★ 手机回 ping"一项待操作 ✓。
