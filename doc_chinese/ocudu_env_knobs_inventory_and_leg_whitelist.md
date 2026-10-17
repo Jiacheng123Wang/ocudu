@@ -270,6 +270,7 @@ OCUDU_PROBE_RE
 | `LEG_LOGDIR` | 日志目录；建议指向本工作流：`doc_chinese/llr_ai_detection/work_tmp/legs/<批次>` |
 | `OCUDU_REPLAY_RECEIVER` / `OCUDU_REPLAY_MODEL` / `OCUDU_REPLAY_REPORTING` | 回放工具对应的三个旋钮（`classic|ai` / 模型路径 / `classic|net`） |
 | `LEG_ALLOW_DIRTY` | 跳过"二进制由未提交代码构建"的拒绝（默认拒绝） |
+| `OCUDU_DEPTH3_COMPUTE_UNITS` | **只用于测量**的放置旋钮：`all`（默认）/ `cpu_gpu` / `cpu_ne` / `cpu`。Core ML **不回读**实际放置，只能一次只给一档、从外部反推。实测（2026-10-17）：`all` ≈ `cpu_ne`（同位、同速、四列输出逐位相同）⇒ 前向跑在 **ANE** 上；仅 CPU 慢 6.6×（7.06 ms vs 1.07 ms）；**`cpu_gpu` 的输出是错的**（crc 0/700，噪声头差 5 个数量级）⇒ ANE 不能确定的机器用 `cpu_ne`。臂的 startup 注记写的是"compute units `X` **requested**"，不声称实际使用的档位 |
 
 ### 模型与几何
 
@@ -278,29 +279,3 @@ OCUDU_PROBE_RE
 - **N1 / 5 MHz / FDD 不能直接用**：5 MHz（15 kHz SCS）只有 25 PRB = 300 子载波，几何不匹配的产物在**绑定时被拒绝**（本轮新增），而不是每次接收静默回落。
 
 ---
-
-## 增补：深度-3 AI 接收机（2026-10-17）
-
-### 命令行（`--expert_phy.*`）
-
-| 旋钮 | 取值 | 说明 |
-|---|---|---|
-| `pusch_receiver_backend` | `auto` / `classic` / `ai` | `ai` 走 depth-3 臂；`cpu`/`cpu_gpu` 模式下与 `ai` 冲突 |
-| `pusch_receiver_model` | `.mlmodelc` 路径 | **回退**模型：服务没有被下面四个槽认领、且它自己声明了的调制。空 ⇒ 用本构建的默认模型 |
-| `pusch_receiver_model_qpsk` / `_16qam` / `_64qam` / `_256qam` | `.mlmodelc` 路径 | 按调制的槽；槽优先于回退；产物声明的调制与槽不符 ⇒ 绑定时**拒绝**并具名 |
-| `pusch_reporting_source` | `classic`（默认）/ `net` | 链条测量来源。`classic` = 经典估计器（后均衡噪声仍由臂自己测）；`net` = 臂的上报头。`net` 需要 `backend=ai`，否则 validator 拒绝。默认**不是** `net`：活网实测 `net` 的公布 SINR 低约 2.5 dB、吞吐低 12.6% |
-
-### 环境变量（飞行脚本 / 回放）
-
-| 变量 | 作用 |
-|---|---|
-| `LEG_CONFIG` | **必给**：`configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml`。**`run_leg.sh` 的默认是 `gnb_rf_b200_fdd_n1_5mhz_bridge.yml`（N1 / 5 MHz / FDD），不是训练语料的小区** |
-| `LEG_LOGDIR` | 日志目录；建议指向本工作流：`doc_chinese/llr_ai_detection/work_tmp/legs/<批次>` |
-| `OCUDU_REPLAY_RECEIVER` / `OCUDU_REPLAY_MODEL` / `OCUDU_REPLAY_REPORTING` | 回放工具对应的三个旋钮（`classic|ai` / 模型路径 / `classic|net`） |
-| `LEG_ALLOW_DIRTY` | 跳过"二进制由未提交代码构建"的拒绝（默认拒绝） |
-
-### 模型与几何
-
-- 训练产物入库：`lib/phy/upper/signal_processors/channel_estimator/metal/ai_assets/depth3_modcond_ft/`（含 README、契约声明、重建命令）。
-- 该模型是 **N78 / 20 MHz / TDD / 30 kHz / 51 PRB**：平面固定 `[1, 612, 14, 16]`，产物声明 `depth3_nsc=612`。
-- **N1 / 5 MHz / FDD 不能直接用**：5 MHz（15 kHz SCS）只有 25 PRB = 300 子载波，几何不匹配的产物在**绑定时被拒绝**（本轮新增），而不是每次接收静默回落。

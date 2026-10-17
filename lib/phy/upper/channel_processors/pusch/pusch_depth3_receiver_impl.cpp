@@ -284,11 +284,16 @@ public:
                                                  engine->depth3_snr_max_db()};
         }
         scales_by_qm[declared.front()] = read_scales(path, D3_RANGE_LIMIT_256QAM);
+        // Read BEFORE the move, for the reason the per-modulation path below spells out: reading a moved-from
+        // `unique_ptr` is a null dereference, and it took the arm down at construction the first time this line
+        // was written after the move (measured 2026-10-17, the same trap as 2026-10-16).
+        const char* const compute_units = engine->depth3_compute_units();
         shared_engine      = std::move(engine);
         any_model_bound    = true;
         notes.push_back(fmt::format("modcond model '{}' bound: one bundle computes {} modulation(s) "
-                                    "(Qm set printed by the coverage line), plane {} channels, LLR stride {}",
-                                    path, declared.size(), plane_channels, COND_STRIDE));
+                                    "(Qm set printed by the coverage line), plane {} channels, LLR stride {}; "
+                                    "compute units '{}' requested",
+                                    path, declared.size(), plane_channels, COND_STRIDE, compute_units));
         if (outcome.result == depth3_model_map::status::redundant) {
           notes.back() += fmt::format("; {}", outcome.reason);
         }
@@ -322,6 +327,7 @@ public:
       // conditioned path reads inside its loop and was unaffected).
       const declared_domain domain{engine->depth3_has_snr_range(), engine->depth3_snr_min_db(),
                                    engine->depth3_snr_max_db()};
+      const char* const     compute_units = engine->depth3_compute_units();
       engine_by_qm[declared_qm] = std::move(engine);
       // The LLR head's stride, by the SAME rule as the conditioned case: the head's width per symbol, which for a
       // per-modulation bundle is its own Qm. Leaving it at the member's default 0 is not a smaller stride but a
@@ -331,8 +337,8 @@ public:
       // The bundle's declared measurement domain, kept per modulation: a fallback bundle and a slot bundle are
       // different artifacts and were not necessarily trained on the same SNR range.
       domain_by_qm[declared_qm] = domain;
-      notes.push_back(fmt::format("{} model '{}' bound for Qm={} {}", what, path, declared_qm,
-                                  depth3_model_map::name(declared_qm)));
+      notes.push_back(fmt::format("{} model '{}' bound for Qm={} {}; compute units '{}' requested", what, path,
+                                  declared_qm, depth3_model_map::name(declared_qm), compute_units));
       any_model_bound = true;
     };
 

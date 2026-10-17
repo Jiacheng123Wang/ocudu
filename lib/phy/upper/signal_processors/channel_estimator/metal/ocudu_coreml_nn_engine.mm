@@ -14,6 +14,8 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -74,6 +76,9 @@ struct coreml_nn_engine_impl {
   unsigned  model3_nof_qm      = 0;
   /// Input plane channels the bundle expects: DEPTH3_IN_CHANNELS, plus the conditioning channels when declared.
   unsigned  model3_in_channels = 0;
+  /// The compute-unit tier the depth-3 bundle was LOADED with (see depth3_selected_compute_units). Kept so a run
+  /// can say which tier it asked for; nothing can read back which one the runtime actually used.
+  const char* model3_compute_units = "all";
   // The shape of each head AS THE MODEL DECLARES IT, kept whole rather than reduced to a channel
   // count: the output backings must match it exactly, and the spatial contract's heads are
   // [1, nsc, C] while its scalar head stays [1, 1, 1, 1].
@@ -419,6 +424,50 @@ bool coreml_nn_engine::init(const char* modelc_path)
   return true;
 }
 
+/// \brief Which compute units the depth-3 bundle is loaded with, from `OCUDU_DEPTH3_COMPUTE_UNITS`.
+///
+/// `MLComputeUnitsAll` lets Core ML choose among the ANE, the GPU and the CPU, and nothing reports the choice
+/// back, so "the network runs on the ANE" has been an assumption in this design rather than a measurement
+/// (section 19.164). Loading the SAME bundle at one tier at a time is what makes placement measurable from
+/// outside: `cpu_gpu` matching `all` means the ANE is not carrying the forward pass, and `all` being much faster
+/// means it is. The default is `all`, i.e. unchanged behaviour -- this is a measurement knob, not a deployment
+/// one, and a run that does not set the variable asks for exactly what it asked for before.
+struct depth3_compute_units_choice {
+  MLComputeUnits units = MLComputeUnitsAll;
+  const char*    name  = "all";
+};
+
+depth3_compute_units_choice depth3_selected_compute_units()
+{
+  const char* env = std::getenv("OCUDU_DEPTH3_COMPUTE_UNITS");
+  if (env == nullptr) {
+    return depth3_compute_units_choice{};
+  }
+  if (std::strcmp(env, "all") == 0) {
+    return {MLComputeUnitsAll, "all"};
+  }
+  if (std::strcmp(env, "cpu_gpu") == 0) {
+    return {MLComputeUnitsCPUAndGPU, "cpu_gpu"};
+  }
+  if (std::strcmp(env, "cpu") == 0) {
+    return {MLComputeUnitsCPUOnly, "cpu"};
+  }
+  if (std::strcmp(env, "cpu_ne") == 0) {
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && (__MAC_OS_X_VERSION_MAX_ALLOWED >= 130000)
+    if (@available(macOS 13.0, *)) {
+      return {MLComputeUnitsCPUAndNeuralEngine, "cpu_ne"};
+    }
+#endif
+    ocudulog::fetch_basic_logger("PHY").warning(
+        "AI depth-3: OCUDU_DEPTH3_COMPUTE_UNITS=cpu_ne needs macOS 13 or a newer SDK than this build has; "
+        "using all");
+    return depth3_compute_units_choice{};
+  }
+  ocudulog::fetch_basic_logger("PHY").warning(
+      "AI depth-3: OCUDU_DEPTH3_COMPUTE_UNITS='{}' is not one of all|cpu_gpu|cpu_ne|cpu; using all", env);
+  return depth3_compute_units_choice{};
+}
+
 bool coreml_nn_engine::init_depth3(const char* modelc_path)
 {
   if (impl == nullptr) {
@@ -435,8 +484,10 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
                                               modelc_path);
     return false;
   }
+  const depth3_compute_units_choice units_choice = depth3_selected_compute_units();
   MLModelConfiguration* cfg = [[MLModelConfiguration alloc] init];
-  cfg.computeUnits          = MLComputeUnitsAll;
+  cfg.computeUnits          = units_choice.units;
+  e->model3_compute_units   = units_choice.name;
   NSError* err              = nil;
   e->model3                 = [MLModel modelWithContentsOfURL:url configuration:cfg error:&err];
   if (e->model3 == nil) {
@@ -445,6 +496,13 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
         err != nil ? err.localizedDescription.UTF8String : "nil error");
     return false;
   }
+  // What the run ASKED FOR, once per process. Deliberately not phrased as placement: Core ML offers no way to
+  // read back which units a prediction went to, and a log line that implied it had would be the assumption this
+  // knob exists to replace (design section 19.169).
+  ocudulog::fetch_basic_logger("PHY").info(
+      "AI depth-3: bundle loaded with compute units '{}' requested (OCUDU_DEPTH3_COMPUTE_UNITS); Core ML does "
+      "not report which units it used",
+      e->model3_compute_units);
 
   MLModelDescription* desc = e->model3.modelDescription;
   e->in3_name              = @"x";
@@ -628,6 +686,13 @@ unsigned coreml_nn_engine::depth3_input_channels() const
 {
   auto* e = static_cast<coreml_nn_engine_impl*>(impl);
   return (e == nullptr) ? 0U : e->model3_in_channels;
+}
+
+const char* coreml_nn_engine::depth3_compute_units() const
+{
+  const auto* e = static_cast<const coreml_nn_engine_impl*>(impl);
+  // A null impl means nothing was loaded, which asked for the default and got it.
+  return (e == nullptr) ? "all" : e->model3_compute_units;
 }
 
 unsigned coreml_nn_engine::depth3_bits_per_symbol() const

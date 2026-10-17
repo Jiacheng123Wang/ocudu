@@ -143,6 +143,20 @@ public:
   /// sizes its plane from this rather than from a constant, so the two contracts cannot be confused at the seam.
   unsigned depth3_input_channels() const;
 
+  /// \brief The compute-unit tier the depth-3 bundle was loaded with: `all` unless asked otherwise.
+  ///
+  /// `MLComputeUnitsAll` lets Core ML choose among the ANE, the GPU and the CPU, and NOTHING reports back which
+  /// one it chose -- so "the network runs on the ANE" was an assumption in this design rather than a
+  /// measurement (design section 19.164). Loading the same bundle at ONE tier at a time is what makes the
+  /// placement measurable from outside: if `cpu_gpu` matches `all`, the ANE is not carrying the forward pass,
+  /// and if `all` is much faster, it is. The tier comes from `OCUDU_DEPTH3_COMPUTE_UNITS` =
+  /// `all` (default, unchanged behaviour) | `cpu_gpu` | `cpu_ne` | `cpu`, and it is a measurement knob rather
+  /// than a deployment one: a run that does not set it asks for exactly what it asked for before.
+  ///
+  /// The name is what was REQUESTED, never what was used: the difference matters and cannot be closed from
+  /// inside Core ML, which is why the receiver prints it as "requested" (design section 19.169).
+  const char* depth3_compute_units() const;
+
   /// Wall-clock duration of the last predict() in microseconds.
   double last_predict_us() const { return last_predict_us_; }
 
