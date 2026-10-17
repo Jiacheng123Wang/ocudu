@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <array>
+#include <tuple>
 #include <chrono>
 #include <cstdio>
 #include "fmt/format.h"
@@ -389,6 +390,7 @@ public:
         calibrated += fmt::format("Qm={} slope {:.3f} offset {:+.3f}", qm, sinr_cal_by_qm[qm].slope,
                                   sinr_cal_by_qm[qm].offset);
       }
+      any_calibrated = !calibrated.empty();
       if (!calibrated.empty()) {
         notes.push_back(fmt::format("the published SINR is CALIBRATED by the bundle "
                                     "(published' = slope * published + offset, dB): {}; the soft bits are not "
@@ -694,6 +696,35 @@ private:
     fmt::print(stderr, "\n");
   }
 
+  /// The published SINR per reception: raw, and after the bundle's calibration. A ring, like the timing one, so a
+  /// long leg reports percentiles instead of the last value.
+  std::array<std::tuple<float, float>, TIMING_RING> published_sinr{};
+  unsigned                                          sinr_index = 0;
+  unsigned                                          sinr_count = 0;
+
+  /// \brief Prints the percentiles of what the scheduler was told, raw against calibrated.
+  ///
+  /// One line per thousand receptions: enough for a flight to compare two legs without turning the log into data.
+  void report_published_sinr()
+  {
+    const unsigned sampled = std::min(sinr_count, TIMING_RING);
+    std::array<float, TIMING_RING> raw{};
+    std::array<float, TIMING_RING> calibrated{};
+    for (unsigned i = 0; i != sampled; ++i) {
+      raw[i]        = std::get<0>(published_sinr[i]);
+      calibrated[i] = std::get<1>(published_sinr[i]);
+    }
+    std::sort(raw.begin(), raw.begin() + sampled);
+    std::sort(calibrated.begin(), calibrated.begin() + sampled);
+    const unsigned p10 = sampled / 10;
+    const unsigned p90 = std::min((sampled * 9) / 10, sampled - 1);
+    fmt::print(stderr,
+               "[depth3-sinr] {} reception(s): PUBLISHED SINR raw p10 {:.2f} p50 {:.2f} p90 {:.2f} dB | calibrated "
+               "p10 {:.2f} p50 {:.2f} p90 {:.2f} dB | calibration {} (this is the number the scheduler acts on)\n",
+               sinr_count, raw[p10], raw[sampled / 2], raw[p90], calibrated[p10], calibrated[sampled / 2],
+               calibrated[p90], any_calibrated ? "APPLIED" : "not declared");
+  }
+
   std::array<std::array<unsigned, TIMING_RING>, 4> timings{};
   unsigned                                         timing_index = 0;
   unsigned                                         timing_count = 0;
@@ -935,8 +966,21 @@ private:
       // it (design section 19.172). The correction is the artifact's declaration, applied here and only to what the
       // scheduler reads -- the soft bits are scaled by `s_llr`, never by this map, so the decisions cannot move.
       float published_dB = -convert_power_to_dB(mean_noise);
+      const float raw_dB = published_dB;
       if (sinr_cal_by_qm[qm].has) {
         published_dB = (sinr_cal_by_qm[qm].slope * published_dB) + sinr_cal_by_qm[qm].offset;
+      }
+      std::get<0>(published_sinr[sinr_index]) = raw_dB;
+      std::get<1>(published_sinr[sinr_index]) = published_dB;
+      sinr_index                              = (sinr_index + 1) % TIMING_RING;
+      ++sinr_count;
+      // WHAT THE SCHEDULER ACTS ON, reported on its own cadence, because a flight has no other way to read it: the
+      // `[depth3-measure]` line compares the arm's plane-window estimate against the ESTIMATOR's SNR, which is a
+      // different quantity and, on the live legs, disagrees in BOTH directions (measured: -8.3 dB on one reception,
+      // +5.0 on another) -- that comparison told us nothing about the published number and once misled the design
+      // record (section 19.172(a)). This line is the published value itself.
+      if ((sinr_count == 1) || ((sinr_count % 1000) == 0)) {
+        report_published_sinr();
       }
       stats.sinr_dB.emplace(published_dB);
 
@@ -1046,6 +1090,8 @@ private:
     float offset = 0.0F;
   };
   std::array<sinr_calibration, 9> sinr_cal_by_qm;
+  /// Whether ANY bound modulation declares a published-SINR calibration (the reporter says which state it is in).
+  bool any_calibrated = false;
 
   /// What happened to each model, for the factory to print once for the pool (see binding_notes()).
   std::vector<std::string>                          notes;

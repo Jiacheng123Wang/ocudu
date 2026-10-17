@@ -20,5 +20,6 @@
 | `verify_compact.sh` | 压缩候选的五条预登记判据（判决等价 / head 3 / head 4 / criterion 1 / 时延与放置） |
 | `verify_sinr_cal.sh` | 公布 SINR 标定的**留出**验证（拟合偶数位、验证奇数位） |
 | `verify_xfer.sh` | 标定的**跨语料迁移**检验（另一采集会话） |
+| `flight_verdict.py` | 把一次飞行的腿目录 + 操作者贴回的 iperf3 变成**判据裁决**：每腿经典 SNR（可比性依据）、**公布 SINR（`[depth3-sinr]`）**、退化、时延，以及 **B≥A / B≥C** 的预登记结论。**按时间戳排腿**（ABBA 顺序就是判据本身），已用 r8abba / r7abba 复算出与记录一致的数 |
 
 `work_tmp/probe/` 里仍有同样的工作副本；**以本目录为准**，改动请改这里再同步过去。
