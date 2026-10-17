@@ -10905,12 +10905,18 @@ cell_cfg.pusch:
 ★ `ue_link_adaptation_controller::calculate_ul_mcs`（★ `:150` ✓）：
 
 ```cpp
-if (cell_cfg.expert_cfg.ue.ul_mcs.length() == 0) {
-  return cell_cfg.expert_cfg.ue.ul_mcs.start();   // fixed MCS: never consults the SNR, never consults OLLA
-}
+if (cell_cfg.expert_cfg.ue.ul_mcs.length() == 0) { return ul_mcs.start(); }   // not this branch (see below)
+sch_mcs_index mcs = map_snr_to_mcs_ul(get_effective_snr(), mcs_table, use_transform_precoder);
+mcs = std::min(std::max(mcs, ul_mcs_lims.start()), ul_mcs_lims.stop());       // <-- THIS is what pins it
 ```
 
-★ `interval[20,20].length() == 0` ✓ ⇒ ★ **直接返回 20** ✓，★ **既不读 `get_effective_snr()` ✓、★ 也不过 OLLA** ✓。
+★★ **★ 事后更正（★ 同一节内 ✓）**：★ 本节初稿说"`[20,20].length() == 0` ⇒ ★ 走固定 MCS 的**早退分支** ✓" ✗ ——
+★ **错了** ✓：★ `interval::length() = stop − start + (右闭且非实数 ? 1 : 0)` ✓
+（★ `include/ocudu/adt/interval.h:54` ✓）⇒ ★ `[20,20]` 的 `length()` 是 **1** ✓，★ **早退不触发** ✗。
+★★ **真正的机制是后面的 clamp** ✓：★ `ul_mcs_lims` = `[ul_mcs.start(), min(ul_mcs.stop(), 该表的最大 MCS)]`
+（★ `update_ul_mcs_lims` ✓ `:254` ✓）★ = **[20, 20]** ✓ ⇒ ★ `mcs = min(max(mcs, 20), 20)` = **20** ✓
+★ **恒等于 20** ✓。★ ⇒ ★ **结论不变** ✓（★ 公布 SINR 对 MCS **没有影响** ✓），★ 但**过路不同** ✓：
+★ `get_effective_snr()` **会**被读 ✓、★ **OLLA 也会**更新 ✓（★ 只是结果被 clamp 掉 ✓）。
 
 ★★ ⇒ ★ **§19.161 记的"★ 公布 SINR 低 2.5 dB ⇒ MCS 更保守 ⇒ 吞吐低 12.6% ✓"是错了两重** ✗：
 ★ ① `net` 与 `classic` 公布的 SINR **完全相同**（★ §19.172(a) ✓）；
