@@ -34,7 +34,7 @@ PUBLISHED = re.compile(r"\[depth3-sinr\] (\d+) reception\(s\): PUBLISHED SINR ra
                        r"p90 (-?[\d.]+) dB \| calibrated p10 (-?[\d.]+) p50 (-?[\d.]+) p90 (-?[\d.]+) dB \| "
                        r"calibration (not declared|APPLIED)")
 TIMING = re.compile(r"\[depth3-timing\] (\d+) forward\(s\).*?plane p50 (\d+).*?forward p50 (\d+).*?deliver p50 (\d+)")
-LEG = re.compile(r"([a-z0-9]*?)([a-c])(\d+)$")
+LEG = re.compile(r"([a-z0-9]*?)([a-d])(\d+)$")
 # The PHY logs every reception at INFO with the value the chain published, so a CLASSICAL leg -- which has no
 # `[depth3-measure]` line at all, because the arm is not running -- still yields a comparability basis. `tbs` filters
 # the MSG3 receptions out: they are QPSK, tiny, and their SINR is not the traffic's.
@@ -133,6 +133,10 @@ def main():
         # gnb_gpu_r8a1_1017_0951 -> r8a1
         parts = [part for part in name.split("_") if LEG.match(part)]
         if not parts:
+            # LOUD, not silent. The first version of this pattern ended at `c`, so an eight-leg batch's `d` legs were
+            # dropped without a word and the verdict reported three arms out of four -- a result that looks fine and
+            # answers a different question.
+            print(f"  IGNORED: {name} -- no leg tag of the form <batch><a-d><n> in it, so this leg is not in the verdict")
             continue
         tag = parts[-1]
         if args.batch and not tag.startswith(args.batch):

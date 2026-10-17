@@ -67,5 +67,19 @@ rm -rf "$MIXED"
 check_in "comparability metric: rtt" "$mixed_out" "mixed batch falls back to the ping RTT basis"
 check_in "AI arm is BETTER by 43.1%" "$mixed_out" "the classical arm is READ as a reference, not PASS/FAILed"
 
+# A FOURTH fixture: one leg per arm, a/b/c/d. The leg-name pattern originally ended at `c`, so the eight-leg batch's
+# `d` legs were dropped silently and the verdict answered a three-arm question. This asserts arm D is judged.
+FOUR=$(mktemp -d -t verdict_four_XXXXXX)
+mkdir -p "$FOUR/legs"
+for spec in a1:1200 b1:1205 c1:1210 d1:1215; do
+  arm=${spec%%:*}; stamp=${spec##*:}
+  printf '%s\n' '[depth3-measure] reception 1 (Qm=8 256QAM) over 612 pilot RE(s): epre net=-2.58 classic=-2.58 dB | rsrp net=-2.55 classic=-2.61 dB | snr net=21.92 classic=26.00 dB | noise net=8.9879e-04 classic=6.9088e-04 residual=4.0276e-03 plane_units=2.0198e-03 (570 residual(s)) | snr plane-only=23.95 dB' > "$FOUR/legs/gnb_gpu_r9x${arm}_1017_${stamp}.log.stderr"
+  : > "$FOUR/legs/gnb_gpu_r9x${arm}_1017_${stamp}.log"
+done
+four_out=$($PY "$HERE/flight_verdict.py" --legs "$FOUR/legs" --iperf "r9xa1=10.0,r9xb1=10.1,r9xc1=10.2,r9xd1=10.3" --batch r9x 2>&1)
+rm -rf "$FOUR"
+check_in "arm D: 1 leg(s)" "$four_out" "an arm-d leg is parsed and grouped (it was silently dropped before)"
+check_in "[R6's delivery form" "$four_out" "arm D's pre-registered meaning is printed"
+
 [ "$fail" = 0 ] && echo "SELFTEST PASS" || echo "SELFTEST FAIL ($fail)"
 exit "$fail"
