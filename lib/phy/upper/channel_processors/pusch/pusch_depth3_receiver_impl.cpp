@@ -463,7 +463,24 @@ public:
 
     // The classical estimator still runs: the chain's measurements (RSRP, EPRE, SNR, timing advance) are read
     // from its results, and the network's own reporting heads replace them in R6.
+    //
+    // ITS COST IS TIMED HERE, alone, because it is the one piece of the pre-existing chain the AI path still pays
+    // for on EVERY reception while almost none of its output is used: the published value is the arm's own noise,
+    // and the estimator's SNR is read by the domain gate and by nothing else. Without this segment the arm's cost
+    // reads as the three path segments and the estimator's share is invisible (asked 2026-10-17: what does the
+    // classical measurement chain cost the AI path in total). The segment is appended LAST in the report line so
+    // that every reader of the existing four keeps working.
+    estimate_started = std::chrono::steady_clock::now();
     estimator.estimate(notifier, grid, config);
+    const auto estimate_submitted = std::chrono::steady_clock::now();
+    pending_estimate_call_us       = static_cast<unsigned>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                          estimate_submitted - estimate_started)
+                                                          .count());
+    // THE END OF THE SEGMENT IS NOT HERE. With the device estimator this call only ENQUEUES the kernels; the
+    // reception waits for them the first time its results are read, which is the domain gate below. Timing only the
+    // submission would report microseconds for work that costs a millisecond, so the segment is closed at the read
+    // and the two numbers are kept apart (`pending_estimate_call_us` for the submission).
+    pending_estimate_open = true;
   }
 
   void demodulate(pusch_codeword_buffer&                 codeword_buffer,
@@ -532,6 +549,15 @@ public:
       // The estimator reports a linear power (`report_measurements` prints it through `convert_power_to_dB`), so
       // it is converted once and the comparison is in the same units the declaration uses.
       const float snr_db = convert_power_to_dB(est_results.get_snr(port));
+      // The estimator's result is READ here for the first time, so this is where the reception has paid for it --
+      // submission plus device completion. That cost was outside every segment before 2026-10-17, so the arm's
+      // reported total understated the path by exactly this much.
+      if (pending_estimate_open) {
+        pending_estimate_open    = false;
+        pending_estimate_total_us = static_cast<unsigned>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                             std::chrono::steady_clock::now() - estimate_started)
+                                                             .count());
+      }
       if ((snr_db < domain_by_qm[qm].min_db) || (snr_db > domain_by_qm[qm].max_db)) {
         char detail[224];
         std::snprintf(detail, sizeof(detail),
@@ -668,6 +694,11 @@ private:
     timings[1][timing_index] = micros(assembled, forwarded);
     timings[2][timing_index] = micros(forwarded, delivered);
     timings[3][timing_index] = predict_us;
+    // The TOTAL when the gate closed the segment, otherwise the submission alone: a bundle that declares no
+    // trained range skips the gate and its results are read later, where nothing here can see it.
+    timings[4][timing_index] = pending_estimate_open ? pending_estimate_call_us : pending_estimate_total_us;
+    pending_estimate_open    = false;
+    pending_estimate_total_us = 0;
     timing_index             = (timing_index + 1) % TIMING_RING;
     ++timing_count;
 
@@ -682,11 +713,13 @@ private:
   void report_timing()
   {
     const unsigned sampled = std::min(timing_count, TIMING_RING);
-    static const char* const names[4] = {"plane", "forward", "deliver", "predict"};
+    // `estimate` last: it is the CLASSICAL estimator's time, which happens before the three path segments, but
+    // appending it keeps every existing field at the position its readers expect.
+    static const char* const names[5] = {"plane", "forward", "deliver", "predict", "estimate"};
     fmt::print(stderr, "[depth3-timing] {} forward(s), microseconds:", timing_count);
     // `predict` last on purpose: it is the PART of `forward` that Core ML and the ANE spend, so the two are read
     // together and their difference is the engine's glue.
-    for (unsigned segment = 0; segment != 4; ++segment) {
+    for (unsigned segment = 0; segment != 5; ++segment) {
       std::array<unsigned, TIMING_RING> sorted = timings[segment];
       std::sort(sorted.begin(), sorted.begin() + sampled);
       const unsigned p99_index = std::min((sampled * 99) / 100, sampled - 1);
@@ -725,9 +758,16 @@ private:
                calibrated[p90], any_calibrated ? "APPLIED" : "not declared");
   }
 
-  std::array<std::array<unsigned, TIMING_RING>, 4> timings{};
+  std::array<std::array<unsigned, TIMING_RING>, 5> timings{};
   unsigned                                         timing_index = 0;
   unsigned                                         timing_count = 0;
+  /// The classical estimator's cost for the reception in flight, carried from `estimate()` to `record_timing()`
+  /// because the two are separate entry points and the ring is advanced by the second one. `..._total_us` is
+  /// closed by the domain gate (submission plus device completion), `..._call_us` is the submission alone.
+  std::chrono::steady_clock::time_point estimate_started{};
+  unsigned                              pending_estimate_call_us  = 0;
+  unsigned                              pending_estimate_total_us = 0;
+  bool                                  pending_estimate_open     = false;
 
   /// The contract's range limit for the modulation in use. Read from the chain's own table so the arm cannot
   /// invent a saturation point the quantiser does not have.
