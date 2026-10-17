@@ -25,18 +25,41 @@ import statistics
 import sys
 
 SOURCE = "/Users/jiachengwang/dev/ocudu/lib/scheduler/support/mcs_calculator.cpp"
+# The (modulation, code rate) of each MCS index, from the same tables the PUSCH path resolves to for a 256QAM or 64QAM
+# table without a transform precoder (`pusch_mcs.cpp` delegates to the PDSCH tables).
+SE_SOURCE = "/Users/jiachengwang/dev/ocudu/lib/ran/pdsch/pdsch_mcs.cpp"
+SE_TABLE = {"qam256": "MCS_INDEX_TABLE_2", "qam64": "MCS_INDEX_TABLE_1"}
+QAM_BITS = {"PI_2_BPSK": 1, "QPSK": 2, "QAM16": 4, "QAM64": 6, "QAM256": 8}
+
+
+def strip_comments(text):
+    """Removes C and C++ comments.
+
+    Not cosmetic: the tables annotate themselves with `/* MCS 0 1 2 ... */` and a number pulled from a COMMENT becomes
+    a threshold. The first version of this parser did exactly that and produced a 56-entry table whose thresholds were
+    small integers, i.e. MCS indices above 31 -- invalid, and they made the MCS results meaningless.
+    """
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"//[^\n]*", "", text)
 
 
 def load_thresholds():
     """The two UL SNR tables, parsed out of the scheduler's own source."""
-    text = open(SOURCE).read()
+    text = strip_comments(open(SOURCE).read())
 
     def array(name):
         block = re.search(name + r"\s*=\s*\{(.*?)\};", text, re.S).group(1)
-        block = block.split("// clang-format on")[0]
-        return [float(value) for value in re.findall(r"-?\d+\.?\d*", re.sub(r"//[^\n]*", "", block))]
+        return [float(value) for value in re.findall(r"-?\d+\.?\d*", block)]
 
     return {"qam256": array("ul_snr_256qam_mcs_table"), "qam64": array("ul_snr_mcs_table")}
+
+
+def load_spectral_efficiency(name):
+    """Spectral efficiency per MCS index, parsed from the (modulation, R x 1024) pairs of the repo's own table."""
+    text = strip_comments(open(SE_SOURCE).read())
+    block = re.search(SE_TABLE[name] + r"\s*=\s*\{(.*?)\}\};", text, re.S).group(1)
+    pairs = re.findall(r"modulation_scheme::(\w+)\s*,\s*([\d.]+)F", block)
+    return [QAM_BITS[modulation] * float(rate) / 1024.0 for modulation, rate in pairs]
 
 
 def mcs_for(snr, thresholds):
@@ -100,15 +123,18 @@ def main():
             return 1
     print(f"{args.modulation} over {len(shared)} capture(s), UL MCS table '{table}' "
           f"({len(thresholds)} entries, thresholds {thresholds[0]:.2f} to {thresholds[-1]:.2f} dB)")
-    print(f"{'arm':>22} {'SINR p50':>9} {'MCS p50':>8} {'MCS p10':>8} {'MCS p90':>8} {'MCS=0':>7}")
+    spectral_efficiency = load_spectral_efficiency(table)
+    print(f"{'arm':>22} {'SINR p50':>9} {'MCS p50':>8} {'MCS p10':>8} {'MCS p90':>8} {'SE p50':>7} {'MCS=0':>6}")
     mcs_by_run = {}
     for name, run in runs.items():
         values = [run[capture] for capture in shared]
         mcs = [mcs_for(value, thresholds) for value in values]
         mcs_by_run[name] = (values, mcs)
+        se = [spectral_efficiency[min(value, len(spectral_efficiency) - 1)] for value in mcs]
         print(f"{name:>22} {statistics.median(values):>9.2f} {statistics.median(mcs):>8.1f} "
               f"{sorted(mcs)[len(mcs)//10]:>8d} {sorted(mcs)[9*len(mcs)//10]:>8d} "
-              f"{sum(1 for value in mcs if value == 0):>7d}")
+              f"{statistics.median(se):>7.3f} {sum(1 for value in mcs if value == 0):>6d}")
+        mcs_by_run.setdefault("_se", {})[name] = se
     # The classical chain's publication is the reference the scheduler has always used, so it is the baseline the
     # other arms are compared against -- not the "classic" column of the arm, which is the ESTIMATOR's SNR.
     names = list(runs)
@@ -119,6 +145,11 @@ def main():
             if name == "classical":
                 continue
             deltas = [value - reference for value, reference in zip(mcs_by_run[name][1], base)]
+            se = mcs_by_run["_se"][name]
+            se_ref = mcs_by_run["_se"]["classical"]
+            ratios = [value / reference for value, reference in zip(se, se_ref) if reference > 0]
+            print(f"  spectral efficiency {name:>14} / classical: median {statistics.median(ratios):.3f} "
+                  f"(instantaneous, no OLLA)")
             print(f"  MCS steps {name:>20} - classical: median {statistics.median(deltas):+.1f}  "
                   f"p10 {sorted(deltas)[len(deltas)//10]:+.1f}  p90 {sorted(deltas)[9*len(deltas)//10]:+.1f}  "
                   f"({sum(1 for value in deltas if value > 0)} higher, {sum(1 for value in deltas if value < 0)} lower)")
