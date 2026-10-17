@@ -116,6 +116,20 @@ else
   echo "note: running as root, so the legs are started directly (no nested sudo)"
 fi
 
+# SCRUB THE HEAVY INSTRUMENTATION OUT OF THE LEG'S ENVIRONMENT. `sudo -E` PRESERVES the environment, and the cell config
+# and the runner both leave these alone -- so an `OCUDU_UL_DUMP` left over from a corpus-collection session would make the
+# flight capture EVERY reception to disk (the corpus beside this work is 74 GB; a leg would write tens of GB and could
+# fill the volume mid-batch), and the phase-segment / GPU-time probes would put measurement code inside the timed path.
+# They are stripped here rather than warned about, because a flight that dies on a full disk wastes the phone.
+leaked=""
+for variable in OCUDU_UL_DUMP OCUDU_UL_PHASE_SEGMENTS OCUDU_METAL_GPU_TIME; do
+  # Indirect expansion, not `eval`: a nested eval here quoted wrong in its own test and reported every variable as set.
+  value="${!variable:-}"
+  [ -n "$value" ] && leaked="$leaked $variable=$value"
+done
+SCRUB="env -u OCUDU_UL_DUMP -u OCUDU_UL_PHASE_SEGMENTS -u OCUDU_METAL_GPU_TIME"
+[ -n "$leaked" ] && echo "note: stripped from the legs' environment:$leaked"
+
 ARMS=${ARMS:-a b c c b a}
 declare -A seen=()
 for arm in $ARMS; do
@@ -123,13 +137,13 @@ for arm in $ARMS; do
   name="${BATCH}${arm}${seen[$arm]}"
   echo "=== $(date '+%T') leg $name (arm $arm)"
   case "$arm" in
-    a) "$SUDO" bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=ai \
+    a) "$SUDO" "$SCRUB" bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=ai \
          --expert_phy.pusch_receiver_model="$DEPLOYED" > "$OUT/$name.run" 2>&1 ;;
-    b) "$SUDO" bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=ai \
+    b) "$SUDO" "$SCRUB" bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=ai \
          --expert_phy.pusch_receiver_model="$CALIBRATED" > "$OUT/$name.run" 2>&1 ;;
-    c) "$SUDO" bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=classic \
+    c) "$SUDO" "$SCRUB" bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=classic \
          > "$OUT/$name.run" 2>&1 ;;
-    d) "$SUDO" bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=ai \
+    d) "$SUDO" "$SCRUB" bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=ai \
          --expert_phy.pusch_receiver_model="$CALIBRATED" \
          --expert_phy.pusch_reporting_source=net > "$OUT/$name.run" 2>&1 ;;
   esac

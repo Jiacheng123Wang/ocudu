@@ -84,6 +84,25 @@ case "$MODE" in
   *)        echo "== phase check: both phases (r9r on collect, r9c on delivery)" ;;
 esac
 
+echo "== disk and a clean environment"
+# The logs are the big artefact: 170 MB per leg at info, so twelve legs are about two gigabytes. The volume here is at
+# 94% used, which is the kind of thing a batch discovers halfway through.
+avail_gb=$(df -g / | awk 'NR==2 {print $4}')
+if [ -n "$avail_gb" ] && [ "$avail_gb" -ge 10 ]; then
+  ok "${avail_gb} GB free (twelve legs are about 2 GB)"
+else
+  bad "${avail_gb:-?} GB free: twelve legs plus the pre-flight build may not fit"
+fi
+# `sudo -E` preserves the environment, so a capture knob left over from a corpus session would record EVERY reception
+# (the corpus beside this work is 74 GB). The flight script strips these itself; this says so before the fact.
+leaked=""
+for variable in OCUDU_UL_DUMP OCUDU_UL_PHASE_SEGMENTS OCUDU_METAL_GPU_TIME; do
+  value="${!variable:-}"
+  [ -n "$value" ] && leaked="$leaked $variable=$value"
+done
+[ -n "$leaked" ] && warn "these are set in this shell and will be STRIPPED by the flight script:$leaked" \
+                 || ok "no capture / heavy-probe variables in this shell"
+
 echo "== the radio and the peer"
 [ "$(pgrep -x gnb | wc -l | tr -d ' ')" = 0 ] && ok "no gNB running" || bad "a gNB is already running: stop it first"
 sudo -n true 2>/dev/null && ok "sudo is passwordless (no prompt per batch)" \
