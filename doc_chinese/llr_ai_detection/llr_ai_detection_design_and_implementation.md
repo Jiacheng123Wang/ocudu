@@ -9791,3 +9791,27 @@ reception 1 (Qm=8 256QAM) over 552 pilot RE(s): ... noise net=6.1434e-04 classic
 ★ `measure_ce_error.build_grid` + 回放脚本随时重建 ✓）；★ 各种 `_llr.bin`/`_h.bin` 回放产物同理 ✓。
 ★ 结论写在这里 ✓：★ 从今往后，★ **凡是"★ 以后可能要读的数 ✓"，★ 一律落在 `work_tmp/` 下 ✓，
 ★ `/tmp` 只放一次性的中间物** ✓。
+
+### 19.156 ★★ 飞行前抓到两个**配置级**错误 ✓ —— ★ 默认小区配置是 N1 5 MHz ✗（★ 2026-10-17 ✓，★ 用户发现 ✓）
+
+★ 用户指出：★ `run_leg.sh` 实际用的是 **N1（★ 5 MHz ✓，★ FDD ✓）** ✗，★ 而**训练语料与以往所有飞行**都是
+★ **N78（★ 20 MHz ✓，★ TDD ✓，★ 30 kHz ✓，★ 51 PRB ✓）** ✓。★ 查脚本证实 ✓：
+
+| ★ 事实 | ★ 出处 |
+|---|---|
+| ★ `run_leg.sh` 的**默认**小区配置是 `configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml` ✗ | ★ `run_leg.sh:67` `CONFIG=${LEG_CONFIG:-…n1_5mhz_bridge.yml}` ✓ |
+| ★ 正确开关是 **`LEG_CONFIG=<path>`** ✓ | ★ 同上 ✓ |
+| ★ 该跑的配置：★ `configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml` ✓ | ★ `band: 78` ✓、★ `channel_bandwidth_MHz: 20` ✓、★ `common_scs: 30` ✓ —— ★ 与语料 `scs_khz=30` / `bwp_size_rb=51` **一致** ✓ |
+
+★ 用户那次尝试正是在 N1 配置下起来的 ✓，★ 随后 `Failed to bind UDP socket to 192.168.0.231:2152` ✗ ⇒
+★ rc=1 退出 ✓（★ 与 AI 通路无关 ✓，★ 是几何/网络不匹配 ✓）。★ 而运行器自己的守门是**响亮**的 ✓：
+★ `THIS LEG HAS NO COMPLETE REPORT - DO NOT READ IT AS A RESULT` ✓（★ 要求契约行 + `[metal_stats]` 块 ✓，
+★ 且要求**一次 Ctrl+C** 后等报告打完 ✓）—— ★ 这条守门按设计工作 ✓。
+
+★★ **同时照用户要求改日志去向** ✓：★ 飞行日志不再落在 `doc_chinese/phy_pipeline_gpu/wip/logs/` ✓
+（★ 那是**上一个**工作流的目录 ✓，★ 留着容易混 ✓），★ 改到
+★ `doc_chinese/llr_ai_detection/work_tmp/legs/r6ab/` ✓ —— ★ 用 `LEG_LOGDIR` 指定 ✓（★ 运行器会自己 `mkdir -p` ✓）。
+
+★★ **`fly_r6_ab.sh` 已同步加固** ✓：★ 默认 bundle 改成**部署产物** `d3_modcond_ft.mlmodelc` ✓、
+★ 显式 `export LEG_CONFIG` ✓ 与 `LEG_LOGDIR` ✓，★ 并**拒绝**任何非"★ band 78 + 20 MHz ✓"的配置 ✓
+★（★ 免得自动路径重犯同一个错 ✗）。
