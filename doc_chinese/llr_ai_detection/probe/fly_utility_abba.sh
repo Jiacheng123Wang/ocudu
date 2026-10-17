@@ -124,6 +124,17 @@ for arm in $ARMS; do
          --expert_phy.pusch_receiver_model="$CALIBRATED" \
          --expert_phy.pusch_reporting_source=net > "$OUT/$name.run" 2>&1 ;;
   esac
+  leg_rc=$?
+  # A FAILED LEG ENDS THE BATCH. Carrying on would leave a batch with fewer legs than arms, and the verdict would
+  # either refuse or -- worse -- compare arms that ran different numbers of times. The leg's own output is printed
+  # because the reason (a refused configuration, a radio that would not open, a password never entered) is in it.
+  if [ "$leg_rc" != 0 ]; then
+    echo "  LEG $name EXITED $leg_rc -- stopping the batch."
+    echo "  ---- last 15 line(s) of $OUT/$name.run ----"
+    tail -15 "$OUT/$name.run" | sed 's/^/  /'
+    echo "  The legs already flown are on disk under $LEG_LOGDIR, but a batch with a failure is not a verdict."
+    exit "$leg_rc"
+  fi
   log=$(grep -ao '/[^ ]*gnb_gpu_'"$name"'_[0-9]*\.log' "$OUT/$name.run" 2>/dev/null | head -1)
   [ -n "$log" ] || log=$(ls -t "$ROOT"/doc_chinese/phy_pipeline_gpu/wip/logs/*"$name"*.log 2>/dev/null | head -1)
   if [ -z "$log" ]; then
@@ -142,6 +153,15 @@ for arm in $ARMS; do
 done
 
 echo
-echo "=== all six legs done. Turn the iperf3 numbers into the verdict with:"
-echo "    \$ROOT/doc_chinese/llr_ai_detection/probe/flight_verdict.py --legs $LEG_LOGDIR \\"
-echo "        --iperf \"${BATCH}a1=?,${BATCH}b1=?,${BATCH}c1=?,${BATCH}c2=?,${BATCH}b2=?,${BATCH}a2=?\" --batch $BATCH"
+# The hint is BUILT FROM THE ARMS THAT RAN: the two-flight plan runs "a c c a" as often as the four-arm one, and a hint
+# listing b1/b2 for a batch that never had them is a hint that produces an error message at the moment the operator has
+# just finished the hard part.
+pair_list=""
+for arm in "${!seen[@]}"; do
+  for index in $(seq 1 "${seen[$arm]}"); do
+    pair_list="${pair_list:+$pair_list,}${BATCH}${arm}${index}=?"
+  done
+done
+echo "=== legs done: ${!seen[*]}  (${#seen[@]} arm(s))"
+echo "    $ROOT/doc_chinese/llr_ai_detection/probe/flight_verdict.py --legs $LEG_LOGDIR \\"
+echo "        --iperf \"$pair_list\" --batch $BATCH"
