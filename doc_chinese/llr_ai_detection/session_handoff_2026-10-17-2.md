@@ -99,13 +99,16 @@
 
 ## 7. 下一步（按代价排序）
 
-### ① ★★ 唯一挡路的一条：**闭环效用飞行**（需要手机 ✓）
+### ① ★★ 唯一挡路的一条：**闭环效用飞行**（需要手机 ✓）—— ★ **分两批飞 ✓**（★ §19.182 ✓）
 ```bash
 cd ~/dev/ocudu
-UE_IP=<手机IP> bash doc_chinese/llr_ai_detection/probe/fly_utility_abba.sh r9
-#   四臂（含 R6 交付形态 d）：
-UE_IP=<手机IP> ARMS="a b c d d c b a" bash doc_chinese/llr_ai_detection/probe/fly_utility_abba.sh r9
+# ① 先飞：接收机对照（采集配置 = MCS 钉死 ⇒ 两条臂同一码率；不需要校准产物）
+LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml ARMS="a c c a" \
+  UE_IP=<手机IP> bash doc_chinese/llr_ai_detection/probe/fly_utility_abba.sh r9r
+# ② 再飞：标定 / R6（投递配置 = MCS 自由；四臂）
+UE_IP=<手机IP> ARMS="a b c d d c b a" bash doc_chinese/llr_ai_detection/probe/fly_utility_abba.sh r9c
 ```
+★ **两批不要混 ✓**、★ 各自裁决 ✓。★ ① 的判据：★ **c ≥ a**（★ 接收机不亏 ✓）；★ ② 的判据见下 ✓。
 ★ 手册：★ `probe/FLIGHT_RUNBOOK.md` ✓（★ 含"★ 不能加 `-b` ✓、★ 不能用采集配置 ✓、★ 要贴回什么 ✓"）。
 ★ 判据（★ 事先写死 ✓）：★ **B ≥ A**（标定 ✓）、★ **B ≥ C**（AI 臂不亏 ✓）、★ 可选 **D ≥ A**；★ 相邻腿经典 SNR ≤1.5 dB ✓。
 ★ 裁决：★ `probe/flight_verdict.py --legs <dir> --iperf "r9a1=…,r9b1=…" --batch r9` ✓（★ 改过脚本先跑 `selftest_flight_verdict.sh` ✓）。
