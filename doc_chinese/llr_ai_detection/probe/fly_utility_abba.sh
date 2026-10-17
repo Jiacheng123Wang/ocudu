@@ -22,7 +22,13 @@
 # WHAT IT NEEDS: a UE attached and answering ping, and the operator running the traffic (iperf3 -R -t 120, with NO -b,
 # and ping -i 0.2 -c 200) during each leg. The throughput numbers are the operator's; the script produces the gNB side.
 #
+# A FOURTH ARM IS AVAILABLE and the order is overridable: `d` is the calibrated bundle WITH `net` reporting, i.e. what
+# R6 actually delivers. Offline it publishes the same numbers as `b` to within 0.1 dB (RSRP/EPRE) and 0.4 dB (SINR),
+# because under either reporting mode the arm publishes its own SINR and the difference is only where RSRP/EPRE come
+# from -- so d is EXPECTED to equal b, and running it is how that expectation gets tested rather than assumed.
+#
 # Usage: fly_utility_abba.sh <batch>            e.g. fly_utility_abba.sh r9
+#        ARMS="a b c d d c b a" to include the R6 arm (eight legs, ~20 minutes)
 #        UE_IP=<address> to skip the ping probe's default guess; LEG_SECONDS for the operator's own timing.
 set -u
 BATCH=${1:-}
@@ -63,11 +69,13 @@ echo "=== batch $BATCH: cell $CELL_CONFIG (MCS free), logs $LEG_LOGDIR"
 echo "    a = AI arm, deployed bundle   $DEPLOYED"
 echo "    b = AI arm, calibrated bundle $CALIBRATED"
 echo "    c = classical chain"
+echo "    d = AI arm, calibrated bundle, reporting=net (the R6 delivery; add it with ARMS=\"a b c d d c b a\")"
 
 # Mirrored order: each arm once per half, so a drift over the six legs lands on all three equally.
 # Leg names carry an occurrence number per arm (`r9a1`, `r9a2`, ...), which is what `flight_verdict.py` groups by.
+ARMS=${ARMS:-a b c c b a}
 declare -A seen=()
-for arm in a b c c b a; do
+for arm in $ARMS; do
   seen[$arm]=$(( ${seen[$arm]:-0} + 1 ))
   name="${BATCH}${arm}${seen[$arm]}"
   echo "=== $(date '+%T') leg $name (arm $arm)"
@@ -78,6 +86,9 @@ for arm in a b c c b a; do
          --expert_phy.pusch_receiver_model="$CALIBRATED" > "$OUT/$name.run" 2>&1 ;;
     c) bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=classic \
          > "$OUT/$name.run" 2>&1 ;;
+    d) bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=ai \
+         --expert_phy.pusch_receiver_model="$CALIBRATED" \
+         --expert_phy.pusch_reporting_source=net > "$OUT/$name.run" 2>&1 ;;
   esac
   log=$(grep -ao '/[^ ]*gnb_gpu_'"$name"'_[0-9]*\.log' "$OUT/$name.run" 2>/dev/null | head -1)
   [ -n "$log" ] || log=$(ls -t "$ROOT"/doc_chinese/phy_pipeline_gpu/wip/logs/*"$name"*.log 2>/dev/null | head -1)
