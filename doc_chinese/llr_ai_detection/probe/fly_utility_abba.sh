@@ -27,6 +27,14 @@
 # because under either reporting mode the arm publishes its own SINR and the difference is only where RSRP/EPRE come
 # from -- so d is EXPECTED to equal b, and running it is how that expectation gets tested rather than assumed.
 #
+# TRAFFIC. `TRAFFIC=ssh` (the default) drives the operator's traffic from HERE over ssh: the CN machine that sits on
+# the 5G core's tun interface starts `ping` and `iperf3 -c <phone> -R -t 120` for each leg, logs them next to the leg,
+# and prints on the terminal when they finish so the operator knows when to Ctrl+C the gNB. `TRAFFIC=manual` leaves the
+# traffic to the operator, which is what the earlier flights used.
+# The reason to automate it is not convenience: every rule those legs depend on -- `-R`, no `-b`, the same two commands
+# word for word -- is then applied by the script instead of remembered, and the numbers land in the batch directory
+# instead of in a chat message.
+#
 # Usage: fly_utility_abba.sh <batch>            e.g. fly_utility_abba.sh r9
 #        ARMS="a b c d d c b a" to include the R6 arm (eight legs, ~20 minutes)
 #        UE_IP=<address> to skip the ping probe's default guess; LEG_SECONDS for the operator's own timing.
@@ -41,6 +49,10 @@ CALIBRATED=${CALIBRATED:-$W/data/models/d3_modcond_cal.mlmodelc}
 # MCS table by default. The AI bundle's geometry declaration matches this cell, which was checked offline on
 # 2026-10-17: four modulations bound, contract=modcond, and the calibration note printed.
 CELL_CONFIG=${CELL_CONFIG:-$ROOT/configs/gnb_rf_b200_tdd_n78_20mhz.yml}
+TRAFFIC=${TRAFFIC:-manual}
+CN_HOST=${CN_HOST:-jwang@jwang-dn}
+IPERF_SECONDS=${IPERF_SECONDS:-120}
+PING_COUNT=${PING_COUNT:-200}
 
 die() { echo "REFUSING: $*"; exit 2; }
 
@@ -136,6 +148,27 @@ for arm in $ARMS; do
   seen[$arm]=$(( ${seen[$arm]:-0} + 1 ))
   name="${BATCH}${arm}${seen[$arm]}"
   echo "=== $(date '+%T') leg $name (arm $arm)"
+  traffic_pid=""
+  if [ "$TRAFFIC" = ssh ]; then
+    # SUPERSEDED. This mode started the traffic before the runner, which is backwards -- the gNB has to be up and the
+    # UE attached before iperf3 has a route. fly_one_leg.sh runs the gNB first and waits for the peer, one leg at a
+    # time, which is also the granularity the hardware wants.
+    die "TRAFFIC=ssh is superseded by fly_one_leg.sh, which starts the gNB first; use that script or TRAFFIC=manual"
+    [ -n "${UE_IP:-}" ] || die "TRAFFIC=ssh needs UE_IP"
+    # The traffic is started BEFORE the receiver: the runner blocks for the whole leg, so anything started after it
+    # would only run once the leg was already over.
+    ssh -o BatchMode=yes "$CN_HOST" \
+      "ping -i 0.2 -c $PING_COUNT $UE_IP; echo '--- iperf3 ---'; iperf3 -c $UE_IP -R -t $IPERF_SECONDS" \
+      > "$OUT/$name.traffic" 2>&1 &
+    traffic_pid=$!
+    # `wait` in a subshell only sees its own children, so the end is announced by polling the pid. The message goes to
+    # the terminal because the runner is occupying the script's own output for the whole leg.
+    ( while kill -0 "$traffic_pid" 2>/dev/null; do sleep 2; done
+      printf '\n>>> traffic for %s finished -- Ctrl+C the gNB to end this leg\n' "$name" > /dev/tty 2>/dev/null ) &
+    echo "    traffic started on $CN_HOST (iperf3 ${IPERF_SECONDS}s to $UE_IP)"
+  else
+    echo "    traffic: run it yourself now (ping -i 0.2 -c $PING_COUNT $UE_IP ; iperf3 -c $UE_IP -R -t $IPERF_SECONDS)"
+  fi
   case "$arm" in
     a) "$SUDO" "$SCRUB" bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=ai \
          --expert_phy.pusch_receiver_model="$DEPLOYED" > "$OUT/$name.run" 2>&1 ;;
