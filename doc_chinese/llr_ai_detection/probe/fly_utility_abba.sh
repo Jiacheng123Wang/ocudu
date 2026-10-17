@@ -51,10 +51,8 @@ die() { echo "REFUSING: $*"; exit 2; }
 # elevation is skipped rather than doubled.
 if [ "$(id -u)" = "0" ]; then
   SUDO=()
-  echo "note: running as root, so the legs are started directly (no nested sudo)"
 else
   SUDO=(sudo -E)
-  echo "note: each leg is started with 'sudo -E'; you may be asked for your password"
 fi
 
 [ -n "$BATCH" ] || die "no batch name; usage: fly_utility_abba.sh <batch> (e.g. r9)"
@@ -107,6 +105,17 @@ fi
 
 # Mirrored order: each arm once per half, so a drift over the six legs lands on all three equally.
 # Leg names carry an occurrence number per arm (`r9a1`, `r9a2`, ...), which is what `flight_verdict.py` groups by.
+# AUTHENTICATE ONCE, and only after every configuration guard has passed: asking for a password and then refusing the
+# cell would waste the operator's attention on a batch that was never going to run. `sudo -v` refreshes the timestamp,
+# and a leg takes about two and a half minutes, so the cached credential outlives the batch in practice; without it the
+# operator is asked once per leg, and one that expires mid-batch stops a leg for a reason unrelated to the measurement.
+if [ "$(id -u)" != "0" ]; then
+  sudo -v || die "sudo authentication failed, so no leg could start the radio"
+  echo "note: sudo authenticated once; the legs reuse the cached credential"
+else
+  echo "note: running as root, so the legs are started directly (no nested sudo)"
+fi
+
 ARMS=${ARMS:-a b c c b a}
 declare -A seen=()
 for arm in $ARMS; do
