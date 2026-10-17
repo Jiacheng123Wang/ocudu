@@ -50,12 +50,29 @@ die() { echo "REFUSING: $*"; exit 2; }
 pgrep -x gnb >/dev/null && die "a gNB is already running: stop it first"
 grep -q "band: 78" "$CELL_CONFIG" || die "$CELL_CONFIG is not the n78 cell this model was trained on"
 grep -q "channel_bandwidth_MHz: 20" "$CELL_CONFIG" || die "$CELL_CONFIG is not 20 MHz"
-# The guard this script exists for.
-if grep -qE '^\s*(min_ue_mcs|max_ue_mcs)\s*:' "$CELL_CONFIG"; then
-  die "$CELL_CONFIG pins the UL MCS ($(grep -oE '(min|max)_ue_mcs: [0-9]+' "$CELL_CONFIG" | tr '\n' ' ')).
-       With the MCS pinned the published SINR never reaches the scheduler, so the calibration cannot show any effect
-       and this flight would measure nothing (design section 19.176). Use the delivery-shaped config, e.g.
-       $ROOT/configs/gnb_rf_b200_tdd_n78_20mhz.yml."
+# THE GUARD DEPENDS ON WHICH ARMS ARE RUN, and that is the whole subtlety.
+#
+# Arms b and d exist to test the PUBLISHED SINR (the calibration, and R6's delivery form). With the MCS pinned that
+# quantity never reaches the scheduler, so those arms would measure exactly nothing -- refused (design section 19.176).
+#
+# Arms a and c are a different question: the AI RECEIVER against the classical one, at whatever MCS the cell is
+# running. A pinned MCS is not only harmless there, it is the cleanest form of the comparison, because both arms then
+# face the same code rate and the only thing that can differ is whether the reception decodes. That is why the collect
+# configuration -- which pins the MCS -- is the right cell for the receiver contrast and the wrong cell for the
+# calibration.
+ARMS_EARLY=${ARMS:-a b c c b a}
+pins_mcs=0
+grep -qE '^\s*(min_ue_mcs|max_ue_mcs)\s*:' "$CELL_CONFIG" && pins_mcs=1
+needs_free_mcs=0
+for arm in $ARMS_EARLY; do
+  case "$arm" in b|d) needs_free_mcs=1 ;; esac
+done
+if [ "$pins_mcs" = 1 ] && [ "$needs_free_mcs" = 1 ]; then
+  die "$CELL_CONFIG pins the UL MCS ($(grep -oE '(min|max)_ue_mcs: [0-9]+' "$CELL_CONFIG" | tr '\n' ' '))
+       and this run includes arm(s) b/d, which test the PUBLISHED SINR. With the MCS pinned that quantity never reaches
+       the scheduler, so those arms would measure nothing (design section 19.176).
+       Use the delivery-shaped config for the calibration: $ROOT/configs/gnb_rf_b200_tdd_n78_20mhz.yml
+       Or run the RECEIVER contrast on this cell with ARMS=\"a c c a\" -- both arms then face the same code rate."
 fi
 if ! ping -c 1 -W 2000 "${UE_IP:-192.168.1.2}" >/dev/null 2>&1; then
   die "the UE at ${UE_IP:-192.168.1.2} does not answer ping: attach it, or pass UE_IP=<address>"
@@ -70,6 +87,9 @@ echo "    a = AI arm, deployed bundle   $DEPLOYED"
 echo "    b = AI arm, calibrated bundle $CALIBRATED"
 echo "    c = classical chain"
 echo "    d = AI arm, calibrated bundle, reporting=net (the R6 delivery; add it with ARMS=\"a b c d d c b a\")"
+if [ "$pins_mcs" = 1 ]; then
+  echo "    NOTE: this cell pins the UL MCS, so the arms here measure the RECEIVER (a vs c) and not the publication."
+fi
 
 # Mirrored order: each arm once per half, so a drift over the six legs lands on all three equally.
 # Leg names carry an occurrence number per arm (`r9a1`, `r9a2`, ...), which is what `flight_verdict.py` groups by.

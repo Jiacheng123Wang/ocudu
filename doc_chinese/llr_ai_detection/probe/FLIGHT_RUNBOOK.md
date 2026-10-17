@@ -16,13 +16,28 @@
    （n78 / 20 MHz / 30 kHz / 51 PRB，MCS 0–28 + OLLA 在环）。**不要**用
    `..._llr_collect_p0default.yml` —— 它钉死 MCS，脚本会直接拒绝。
 
-## 1. 开始一批
+## 1. 两次飞行，不是一次
+
+| 批次 | 配置 | 臂 | 回答什么 | 预期 |
+|---|---|---|---|---|
+| **`r9r`（先飞这个）** | **采集** `..._llr_collect_p0default.yml`（MCS 钉死 20）| `ARMS="a c c a"` | **AI 接收机 vs 经典链**，同一码率 | 若以 256QAM 为主：c **明显高于** a（接收侧 100% vs 41.7%）；若以 QPSK/16QAM 为主：打平 |
+| `r9c` | **投递** `gnb_rf_b200_tdd_n78_20mhz.yml`（MCS 自由）| `ARMS="a b c d d c b a"` | 公布值**标定**与 **R6 交付形态** | **B ≈ A**（OLLA 吸收恒定偏差）、**D ≈ B** |
+
+**为什么不能合成一次**：采集配置钉死 MCS ⇒ `b`/`d`（测公布值）在那里恒等于 `a`；而投递配置的自由 MCS 会把接收机差异抹平。
+脚本按**臂**判断：`ARMS` 含 `b`/`d` 且配置钉死 ⇒ 拒绝；只有 `a`/`c` ⇒ 允许。
+
+- 先飞 `r9r`：它不需要校准产物、对比度大、而且用的是**已经飞熟**的采集配置。
+- 再飞 `r9c`：它才需要投递配置与校准产物。
+
+## 2. 开始一批
 
 ```bash
 cd ~/dev/ocudu
-UE_IP=<手机IP> bash doc_chinese/llr_ai_detection/probe/fly_utility_abba.sh r9
-# 想连 R6 的交付形态一起测（八条腿，约 20 分钟）：
-UE_IP=<手机IP> ARMS="a b c d d c b a" bash doc_chinese/llr_ai_detection/probe/fly_utility_abba.sh r9
+# ① 接收机对照（采集配置）
+LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml ARMS="a c c a" \
+  UE_IP=<手机IP> bash doc_chinese/llr_ai_detection/probe/fly_utility_abba.sh r9r
+# ② 标定 / R6（投递配置，八条腿，约 20 分钟）
+UE_IP=<手机IP> ARMS="a b c d d c b a" bash doc_chinese/llr_ai_detection/probe/fly_utility_abba.sh r9c
 ```
 
 臂的含义：
@@ -70,7 +85,10 @@ doc_chinese/llr_ai_detection/probe/flight_verdict.py --legs doc_chinese/llr_ai_d
 （**B ≥ A**、**B ≥ C**）。语料不在时自检脚本会跳过；改过脚本的话先跑
 `probe/selftest_flight_verdict.sh`。
 
-## 5. 三条判据与预期（**飞行前写下，不许事后改**）
+## 5. 判据与预期（**飞行前写下，不许事后改**）
+
+- **接收机对照（`r9r`）**：**c ≥ a** 才算"接收机不亏"；若 **a ≫ c** 则接收机**明确有益**，可写进结论。
+- 下面三条只适用于 `r9c`。
 
 - **B ≥ A** ⇒ 标定在闭环里不减吞吐。
 - **B ≥ C** ⇒ AI 臂在同信道下不亏于经典链。
