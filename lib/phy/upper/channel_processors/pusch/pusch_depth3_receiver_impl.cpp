@@ -809,7 +809,13 @@ private:
             reinterpret_cast<const __fp16*>(noise_head.data())[static_cast<size_t>(k) * pusch_depth3_input_plane::NOF_SYMBOLS + symbol]);
         // The contract's model-external map, section 0.2(e) head 2. A non-finite value is the seam's marker for
         // a resource element the chain must skip, exactly as the classical path writes +inf on DC.
-        const float noise_variance = std::pow(10.0F, scales.a_noise * noise_shape + scales.b_noise);
+        // `10^y` as `exp2(y * log2(10))`: the same function, but `std::pow` is the general routine and costs about
+        // 40 ns per call here, which dominated this loop (7344 resource elements per reception, and it measured
+        // 0.29 ms of deliver's 0.47-0.60 ms -- design section 19.165). exp2 is the hardware path, accuracy is one
+        // ulp, and it touches only the noise/SINR path: the LLR path never sees this value, which is why the soft
+        // bits stay bit-identical.
+        static constexpr float LOG2_OF_10 = 3.32192809489F;
+        const float noise_variance = std::exp2((scales.a_noise * noise_shape + scales.b_noise) * LOG2_OF_10);
         if (std::isfinite(noise_variance)) {
           noise_sum += static_cast<double>(noise_variance) * qm;
           noise_count += qm;
