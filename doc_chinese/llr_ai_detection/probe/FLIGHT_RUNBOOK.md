@@ -35,14 +35,26 @@
 
 ## 2. 开始一批
 
+**一条命令跑完两批**（推荐 —— 它替每一批选好小区，并在两批之间停下来要你重新附着的 IP）：
+
 ```bash
 cd ~/dev/ocudu
-# ① 接收机对照（采集配置）
+UE_IP=<手机IP> bash doc_chinese/llr_ai_detection/probe/fly_both.sh r9
+```
+
+两批也可以分开跑（同样正确，只是各选一次小区）：
+
+```bash
+cd ~/dev/ocudu
+# ① 接收机对照（采集配置，四腿，约 10 分钟）
 LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml ARMS="a c c a" \
   UE_IP=<手机IP> bash doc_chinese/llr_ai_detection/probe/fly_utility_abba.sh r9r
-# ② 标定 / R6（投递配置，八条腿，约 20 分钟）
+# ② 标定 / R6（投递配置，八腿，约 20 分钟）
 UE_IP=<手机IP> ARMS="a b c d d c b a" bash doc_chinese/llr_ai_detection/probe/fly_utility_abba.sh r9c
 ```
+
+★ **两批之间手机必须重新附着**（每批都重启 gNB ⇒ **IP 会变**）；`fly_both.sh` 会停下来问你新 IP。
+★ 别把上一批的 IP 带到下一批 —— 那会让第二条腿测到一个**没有对端**的闭环。
 
 臂的含义：
 
