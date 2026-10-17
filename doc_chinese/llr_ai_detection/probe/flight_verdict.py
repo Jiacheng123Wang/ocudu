@@ -251,19 +251,43 @@ def main():
         print(f"  comparability {before['tag']:>6} vs {after['tag']:<6} differs {delta:5.2f} {unit}  "
               f"{'ok' if not flags else '; '.join(flags)}")
     by_arm = collections.defaultdict(list)
+    legs_by_arm = collections.Counter(row["arm"] for row in rows)
+    missing = []
     for row in rows:
         if row["mbit"] is not None:
             by_arm[row["arm"]].append(row["mbit"])
+        else:
+            missing.append(row["tag"])
     print()
     for arm in arm_order:
         values = by_arm.get(arm, [])
         if values:
-            print(f"  arm {arm}: {len(values)} leg(s), mean {statistics.mean(values):.2f} Mbit/s  "
-                  f"({', '.join(f'{value:.2f}' for value in values)})")
+            # A MEAN OVER FEWER LEGS THAN THE ARM HAS IS NOT THE ARM'S MEAN. If one leg's iperf number was never
+            # written down, averaging the others silently compares an arm measured twice against one measured once,
+            # which is the same class of error as two sessions in one directory.
+            # The COMPLETE case keeps the plain wording -- it is the normal one and the tests and the operator both
+            # read it -- and only a partial arm says so.
+            if len(values) == legs_by_arm[arm]:
+                print(f"  arm {arm}: {len(values)} leg(s), mean {statistics.mean(values):.2f} Mbit/s  "
+                      f"({', '.join(f'{value:.2f}' for value in values)})")
+            else:
+                print(f"  arm {arm}: only {len(values)} of {legs_by_arm[arm]} leg(s) have a number, "
+                      f"mean {statistics.mean(values):.2f} Mbit/s  ({', '.join(f'{value:.2f}' for value in values)})"
+                      f"  <-- NOT the arm's mean")
         else:
-            print(f"  arm {arm}: no throughput given")
+            print(f"  arm {arm}: NO throughput given -- the verdict below cannot be read for this arm")
+    if missing:
+        print()
+        print(f"  WARNING {len(missing)} leg(s) carry no iperf number: {', '.join(sorted(missing))}")
+        print("          fill them in and re-run this command; a verdict computed over a subset is not the verdict")
 
     print()
+    if missing:
+        # NO VERDICT FROM A PARTIAL BATCH. Printing "BETTER by 42%" under a warning line is how a number that is not
+        # the answer gets quoted later; the operator can fill the gap in one command and re-run.
+        print(f"  NO VERDICT: {len(missing)} leg(s) have no throughput number ({', '.join(sorted(missing))}).")
+        print("  Fill them in and re-run; the criteria are on arms, so every leg of every arm has to be present.")
+        return 1
     print("  VERDICTS (pre-registered: A is the reference, no arm may be worse than it)")
     meanings = {"B": "the published-SINR calibration", "C": "the classical chain",
                 "D": "R6's delivery form (calibrated + net)"}

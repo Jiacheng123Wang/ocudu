@@ -278,6 +278,10 @@ doc_chinese/llr_ai_detection/probe/flight_verdict.py \
 它会给每腿：可比性依据（经典 SNR 或 ping RTT，并注明是哪一种）、公布 SINR（原始 → 校准）、
 时延、退化数，以及裁决。
 
+> **两条会被拒绝的情形**（都是防止把错的数当结论）：
+> - **某条腿没给数字** ⇒ 打印 `NO VERDICT: … have no throughput number`，**不出裁决**（补齐再跑）；
+> - **同一个腿名出现两次**（两次会话混在一个批次目录）⇒ `REFUSING to read this batch`。重飞请换批次名（`r9` → `r10`）。
+
 ---
 
 ## 8. 判据与预期（**飞行前已写死，不许事后改**）
