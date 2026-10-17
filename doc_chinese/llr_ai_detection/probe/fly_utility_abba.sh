@@ -43,6 +43,20 @@ CALIBRATED=${CALIBRATED:-$W/data/models/d3_modcond_cal.mlmodelc}
 CELL_CONFIG=${CELL_CONFIG:-$ROOT/configs/gnb_rf_b200_tdd_n78_20mhz.yml}
 
 die() { echo "REFUSING: $*"; exit 2; }
+
+# THE RADIO NEEDS ROOT, and the runner is designed to be started under `sudo -E` (it uses SUDO_USER to run its
+# pre-flight BUILD as the invoking user, so no root-owned objects are left in build/). The first version of this script
+# called the runner directly and would have died at radio init on the first leg -- the kind of bug that costs a flight.
+# Each leg is therefore elevated here while the script itself stays unprivileged; if it is already running as root the
+# elevation is skipped rather than doubled.
+if [ "$(id -u)" = "0" ]; then
+  SUDO=()
+  echo "note: running as root, so the legs are started directly (no nested sudo)"
+else
+  SUDO=(sudo -E)
+  echo "note: each leg is started with 'sudo -E'; you may be asked for your password"
+fi
+
 [ -n "$BATCH" ] || die "no batch name; usage: fly_utility_abba.sh <batch> (e.g. r9)"
 [ -d "$DEPLOYED" ] || die "no deployed bundle at $DEPLOYED"
 [ -d "$CALIBRATED" ] || die "no calibrated bundle at $CALIBRATED"
@@ -100,13 +114,13 @@ for arm in $ARMS; do
   name="${BATCH}${arm}${seen[$arm]}"
   echo "=== $(date '+%T') leg $name (arm $arm)"
   case "$arm" in
-    a) bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=ai \
+    a) "$SUDO" bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=ai \
          --expert_phy.pusch_receiver_model="$DEPLOYED" > "$OUT/$name.run" 2>&1 ;;
-    b) bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=ai \
+    b) "$SUDO" bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=ai \
          --expert_phy.pusch_receiver_model="$CALIBRATED" > "$OUT/$name.run" 2>&1 ;;
-    c) bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=classic \
+    c) "$SUDO" bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=classic \
          > "$OUT/$name.run" 2>&1 ;;
-    d) bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=ai \
+    d) "$SUDO" bash "$RUNNER" gpu "$name" --expert_phy.pusch_receiver_backend=ai \
          --expert_phy.pusch_receiver_model="$CALIBRATED" \
          --expert_phy.pusch_reporting_source=net > "$OUT/$name.run" 2>&1 ;;
   esac
