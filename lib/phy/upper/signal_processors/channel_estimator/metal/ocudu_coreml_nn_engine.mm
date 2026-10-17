@@ -15,6 +15,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <mutex>
 #include <thread>
@@ -79,6 +81,13 @@ struct coreml_nn_engine_impl {
   /// The compute-unit tier the depth-3 bundle was LOADED with (see depth3_selected_compute_units). Kept so a run
   /// can say which tier it asked for; nothing can read back which one the runtime actually used.
   const char* model3_compute_units = "all";
+  /// Per-modulation affine calibration of the PUBLISHED SINR (`depth3_sinr_cal`), keyed by bits per symbol:
+  /// `published' = slope * published + offset` in dB. The arm's post-equalisation noise is its own estimate, and its
+  /// scale does not coincide with the classical chain's, so the scheduler read a SINR 1.2-3.4 dB low -- in the
+  /// default reporting mode too (design section 19.172). Absent keys publish the raw value.
+  bool  model3_sinr_cal_set[9]    = {false};
+  float model3_sinr_cal_slope[9]  = {0.0F};
+  float model3_sinr_cal_offset[9] = {0.0F};
   // The shape of each head AS THE MODEL DECLARES IT, kept whole rather than reduced to a channel
   // count: the output backings must match it exactly, and the spatial contract's heads are
   // [1, nsc, C] while its scalar head stays [1, 1, 1, 1].
@@ -561,6 +570,39 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
     }
   }
 
+  // THE PUBLISHED SINR'S CALIBRATION (design section 19.172): per modulation, affine in dB.
+  NSString* sinr_cal = creator_meta[@"depth3_sinr_cal"];
+  if (sinr_cal != nil) {
+    for (NSString* entry in [sinr_cal componentsSeparatedByString:@";"]) {
+      NSArray<NSString*>* parts = [entry componentsSeparatedByString:@":"];
+      if (parts.count != 2) {
+        continue;
+      }
+      NSArray<NSString*>* pair = [parts[1] componentsSeparatedByString:@","];
+      if (pair.count != 2) {
+        continue;
+      }
+      const long qm = parts[0].integerValue;
+      const float slope = pair[0].floatValue;
+      const float offset = pair[1].floatValue;
+      // A slope that is not positive would INVERT the measurement (a better channel reported as worse), which is
+      // worse than no calibration at all, so it is refused here rather than applied.
+      if ((qm < 2) || (qm > 8) || !(slope > 0.0F) || !std::isfinite(slope) || !std::isfinite(offset)) {
+        ocudulog::fetch_basic_logger("PHY").error(
+            "AI depth-3: depth3_sinr_cal entry '{}' is not usable (need qm in 2..8 and a positive finite slope); "
+            "the SINR stays uncalibrated",
+            entry.UTF8String);
+        continue;
+      }
+      e->model3_sinr_cal_set[qm]    = true;
+      e->model3_sinr_cal_slope[qm]  = slope;
+      e->model3_sinr_cal_offset[qm] = offset;
+    }
+    ocudulog::fetch_basic_logger("PHY").info(
+        "AI depth-3: the bundle declares a published-SINR calibration for {} modulation(s) (depth3_sinr_cal)",
+        static_cast<unsigned>(std::count(std::begin(e->model3_sinr_cal_set), std::end(e->model3_sinr_cal_set), true)));
+  }
+
   // A DECLARATION THAT DISAGREES WITH THE GRAPH IS REFUSED HERE. The two state the same fact, so a bundle that
   // declares one width and carries another would otherwise fail at the first reception; at load time the mismatch
   // names itself (design section 19.162).
@@ -689,6 +731,17 @@ unsigned coreml_nn_engine::depth3_input_channels() const
 {
   auto* e = static_cast<coreml_nn_engine_impl*>(impl);
   return (e == nullptr) ? 0U : e->model3_in_channels;
+}
+
+bool coreml_nn_engine::depth3_sinr_calibration(unsigned bits_per_symbol, float& slope, float& offset) const
+{
+  const auto* e = static_cast<const coreml_nn_engine_impl*>(impl);
+  if ((e == nullptr) || (bits_per_symbol >= 9) || !e->model3_sinr_cal_set[bits_per_symbol]) {
+    return false;
+  }
+  slope  = e->model3_sinr_cal_slope[bits_per_symbol];
+  offset = e->model3_sinr_cal_offset[bits_per_symbol];
+  return true;
 }
 
 const char* coreml_nn_engine::depth3_compute_units() const

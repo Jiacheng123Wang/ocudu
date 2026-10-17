@@ -143,6 +143,18 @@ public:
   /// sizes its plane from this rather than from a constant, so the two contracts cannot be confused at the seam.
   unsigned depth3_input_channels() const;
 
+  /// \brief The bundle's declared calibration of the PUBLISHED SINR, for one modulation.
+  ///
+  /// `published' = slope * published + offset`, in dB. The arm publishes its OWN post-equalisation noise in either
+  /// reporting mode (the classical equaliser's per-RE residual is a quantity this arm does not compute), and that
+  /// estimate's scale does not coincide with the classical chain's: measured against the CLASSICAL ARM on the same
+  /// receptions, the published SINR read 1.2-3.4 dB low and the error GREW with SNR -- a slope error, so no constant
+  /// factor can fix it (design section 19.172). The bundle declares the correction, fitted against the classical
+  /// chain's publication and validated on held-out captures, so it travels with the artifact that needs it.
+  ///
+  /// \return False when the bundle declares none for this modulation, in which case the raw value is published.
+  bool depth3_sinr_calibration(unsigned bits_per_symbol, float& slope, float& offset) const;
+
   /// \brief The compute-unit tier the depth-3 bundle was loaded with: `all` unless asked otherwise.
   ///
   /// `MLComputeUnitsAll` lets Core ML choose among the ANE, the GPU and the CPU, and NOTHING reports back which

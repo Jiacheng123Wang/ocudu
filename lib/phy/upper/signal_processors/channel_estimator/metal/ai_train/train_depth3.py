@@ -571,7 +571,7 @@ def rename_outputs(mlmodel, qm, keras_names):
     return ct.models.MLModel(spec, weights_dir=mlmodel.weights_dir)
 
 
-def export_deployment(model, qm, path, cond=False, snr_range=None):
+def export_deployment(model, qm, path, cond=False, snr_range=None, sinr_cal=None):
     """Convert a TRAINED model to the fp16 deployment graph, with the contract's output names.
 
     The conversion decides the deployment precision, which is why training runs in fp32: the
@@ -612,6 +612,18 @@ def export_deployment(model, qm, path, cond=False, snr_range=None):
         spec = converted.get_spec()
         spec.description.metadata.userDefined["depth3_snr_range"] = f"{snr_range[0]:.2f},{snr_range[1]:.2f}"
         converted = ct.models.MLModel(spec, weights_dir=converted.weights_dir)
+    if sinr_cal:
+        # THE PUBLISHED SINR'S CALIBRATION, declared by the artifact that needs it (design section 19.172). The arm's
+        # noise head estimates a post-equalisation noise whose scale does not coincide with the classical chain's, so
+        # the scheduler was reading a SINR 1.2-3.4 dB low -- in the DEFAULT reporting mode as well, because the arm
+        # publishes its own post-equalisation noise in either mode. The correction is affine IN DB
+        # (`slope * published + offset`) and per modulation, which is what a slope error needs; it is measured
+        # against the classical chain's publication on the corpus and validated on held-out captures, and it never
+        # touches the LLR path (the main head is scaled by S_llr, not by this map).
+        spec = converted.get_spec()
+        spec.description.metadata.userDefined["depth3_sinr_cal"] = ";".join(
+            f"{qm_}:{sinr_cal[qm_][0]:.4f},{sinr_cal[qm_][1]:.4f}" for qm_ in sorted(sinr_cal))
+        converted = ct.models.MLModel(spec, weights_dir=converted.weights_dir)
     if cond or getattr(model, "_depth3_cond", False):
         spec = converted.get_spec()
         spec.description.metadata.userDefined["depth3_layout"] = "modcond"
@@ -635,6 +647,23 @@ def export_deployment(model, qm, path, cond=False, snr_range=None):
     converted = ct.models.MLModel(spec, weights_dir=converted.weights_dir)
     converted.save(path)
     print(f"wrote the fp16 deployment graph to {path} (input {[1, *shape]}, depth3_nsc={shape[0]})")
+
+
+def cli_sinr_cal(args):
+    """{"bits_per_symbol": (slope, offset)} from `--sinr-cal`, or None."""
+    if not args.sinr_cal:
+        return None
+    out = {}
+    for entry in args.sinr_cal.split(";"):
+        if not entry.strip():
+            continue
+        qm_text, _, cal_text = entry.partition(":")
+        slope_text, _, offset_text = cal_text.partition(",")
+        qm = int(qm_text)
+        if qm not in D3.COND_QM_ORDER:
+            raise SystemExit(f"--sinr-cal: {qm} is not one of the declared modulations {D3.COND_QM_ORDER}")
+        out[qm] = (float(slope_text), float(offset_text))
+    return out
 
 
 def cli_snr_range(args):
@@ -667,6 +696,10 @@ def main():
                              "set's own snr_nominal percentiles (1st to 99th) when training, and declare nothing "
                              "with --export-only -- a bundle that declares no range cannot be gated, and the "
                              "receiver says so once per arm.")
+    parser.add_argument("--sinr-cal", default="",
+                        help="affine calibration of the PUBLISHED SINR, per modulation, in dB: "
+                             "'2:slope,offset;4:...;6:...;8:...'. Measured against the classical chain's own "
+                             "publication (design section 19.172); it corrects the reporting path only.")
     parser.add_argument("--blocks", type=int, default=18)
     parser.add_argument("--layout", choices=("folded", "spatial", "probe8", "unfolded"),
                         default="spatial",
@@ -764,7 +797,7 @@ def main():
         # The range has to come from the knob on this path: --export-only loads a `.keras` and no dataset, so
         # there are no `snr_nominal` percentiles to derive it from (see the note where training derives it).
         export_deployment(exported, D3.BITS_PER_SYMBOL[args.modulation], args.export_probe,
-                          cond=args.modcond, snr_range=cli_snr_range(args))
+                          cond=args.modcond, snr_range=cli_snr_range(args), sinr_cal=cli_sinr_cal(args))
         return 0
 
     qm = D3.BITS_PER_SYMBOL[args.modulation]
@@ -1005,7 +1038,8 @@ def main():
     # reaches a receiver and produces plausible nonsense.
     if args.export_probe:
         model.load_weights(os.path.join(args.out, "depth3_best.keras"))
-        export_deployment(model, qm, args.export_probe, cond=args.modcond, snr_range=snr_range)
+        export_deployment(model, qm, args.export_probe, cond=args.modcond, snr_range=snr_range,
+                          sinr_cal=cli_sinr_cal(args))
     return 0
 
 

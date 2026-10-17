@@ -288,6 +288,14 @@ public:
         // `unique_ptr` is a null dereference, and it took the arm down at construction the first time this line
         // was written after the move (measured 2026-10-17, the same trap as 2026-10-16).
         const char* const compute_units = engine->depth3_compute_units();
+        // The published-SINR calibration, read before the move for the same reason (design section 19.172).
+        for (unsigned qm : declared) {
+          float slope = 0.0F;
+          float offset = 0.0F;
+          if (engine->depth3_sinr_calibration(qm, slope, offset)) {
+            sinr_cal_by_qm[qm] = sinr_calibration{true, slope, offset};
+          }
+        }
         shared_engine      = std::move(engine);
         any_model_bound    = true;
         notes.push_back(fmt::format("modcond model '{}' bound: one bundle computes {} modulation(s) "
@@ -328,6 +336,13 @@ public:
       const declared_domain domain{engine->depth3_has_snr_range(), engine->depth3_snr_min_db(),
                                    engine->depth3_snr_max_db()};
       const char* const     compute_units = engine->depth3_compute_units();
+      {
+        float slope  = 0.0F;
+        float offset = 0.0F;
+        if (engine->depth3_sinr_calibration(declared_qm, slope, offset)) {
+          sinr_cal_by_qm[declared_qm] = sinr_calibration{true, slope, offset};
+        }
+      }
       engine_by_qm[declared_qm] = std::move(engine);
       // The LLR head's stride, by the SAME rule as the conditioned case: the head's width per symbol, which for a
       // per-modulation bundle is its own Qm. Leaving it at the member's default 0 is not a smaller stride but a
@@ -359,6 +374,28 @@ public:
     // for a run whose estimator never ran.
     register_phy_pipeline_crossing_check();
     phy_pipeline_crossings::declare_reporter("depth3_receiver");
+    // R6 asks for a startup line for every switch that changes what the chain publishes, and this one changes a
+    // number the scheduler acts on: a calibrated run must SAY so, with the coefficients, or an operator comparing two
+    // legs has no way to know which publication they are looking at (design section 19.172).
+    {
+      std::string calibrated;
+      for (unsigned qm : {2U, 4U, 6U, 8U}) {
+        if (!sinr_cal_by_qm[qm].has) {
+          continue;
+        }
+        if (!calibrated.empty()) {
+          calibrated += ", ";
+        }
+        calibrated += fmt::format("Qm={} slope {:.3f} offset {:+.3f}", qm, sinr_cal_by_qm[qm].slope,
+                                  sinr_cal_by_qm[qm].offset);
+      }
+      if (!calibrated.empty()) {
+        notes.push_back(fmt::format("the published SINR is CALIBRATED by the bundle "
+                                    "(published' = slope * published + offset, dB): {}; the soft bits are not "
+                                    "affected",
+                                    calibrated));
+      }
+    }
     if (!any_model_bound) {
       // Nothing bound: every reception forwards to the classical chain. The notes above say why each model failed,
       // and the factory turns this state into an error for the whole pool -- a run in this state must not be read
@@ -892,7 +929,16 @@ private:
     if (noise_count != 0 && noise_sum > 0.0) {
       const float mean_noise = static_cast<float>(noise_sum / static_cast<double>(noise_count));
       pusch_demodulator_notifier::demodulation_stats stats;
-      stats.sinr_dB.emplace(-convert_power_to_dB(mean_noise));
+      // THE PUBLISHED SINR IS THE ARM'S OWN IN EITHER REPORTING MODE (see the note above), and that publication needs
+      // the bundle's calibration: measured against the CLASSICAL ARM's own publication on the same receptions, the raw
+      // value reads 1.2-3.4 dB low and the error grows with SNR, so it is a slope error and no constant factor fixes
+      // it (design section 19.172). The correction is the artifact's declaration, applied here and only to what the
+      // scheduler reads -- the soft bits are scaled by `s_llr`, never by this map, so the decisions cannot move.
+      float published_dB = -convert_power_to_dB(mean_noise);
+      if (sinr_cal_by_qm[qm].has) {
+        published_dB = (sinr_cal_by_qm[qm].slope * published_dB) + sinr_cal_by_qm[qm].offset;
+      }
+      stats.sinr_dB.emplace(published_dB);
 
       // R6: RSRP and EPRE from the reporting heads, in the same window and through the same call as the SINR.
       // ONLY UNDER `net`: under `classic` the chain's measurements are the classical chain's, and these two would
@@ -989,6 +1035,18 @@ private:
   std::array<declared_domain, 9>                    domain_by_qm{};
   unsigned                                          plane_channels = pusch_depth3_input_plane::NOF_CHANNELS;
   std::unique_ptr<metal::coreml_nn_engine>          shared_engine;
+  /// \brief The bundle's declared calibration of the PUBLISHED SINR, read at BIND time per modulation.
+  ///
+  /// Read at construction rather than at delivery because the engine is moved into its slot during binding (and
+  /// reading a moved-from engine is a null dereference, measured twice), and because the declaration is static: a
+  /// run either publishes calibrated numbers from its first reception or says why it does not.
+  struct sinr_calibration {
+    bool  has    = false;
+    float slope  = 1.0F;
+    float offset = 0.0F;
+  };
+  std::array<sinr_calibration, 9> sinr_cal_by_qm;
+
   /// What happened to each model, for the factory to print once for the pool (see binding_notes()).
   std::vector<std::string>                          notes;
 
