@@ -141,7 +141,18 @@ W=doc_chinese/llr_ai_detection/work_tmp
 ls -t $W/legs/<批名>/*<腿名>*.log.stderr | head -1                     # 应该有日志
 grep -ac 'DEGRADED to the classical chain' <上面那一行打印的路径>        # 期望 0；几百条说明大量回落
 grep -a 'depth3-sinr' <路径> | tail -1                                  # 臂 a/b/d 应有一行；臂 c 没有
+grep -ao 'AI ARM ACTIVE\|CALIBRATED by the bundle\|pusch_reporting_source[= ][a-z]*' <路径> | sort -u
+                                                                        # 核对臂身份，见下面的对照
 ```
+
+**臂身份对照**（第三行打印出来必须和腿名里的字母一致，2026-10-17 起 `flight_verdict.py` 也会查这一条）：
+
+| 腿名里的字母 | 应该有 | 不应该有 |
+|---|---|---|
+| a | `AI ARM ACTIVE`、`pusch_reporting_source=classic` | `CALIBRATED by the bundle`、`=net` |
+| b | `AI ARM ACTIVE`、`CALIBRATED by the bundle`、`=classic` | `=net` |
+| c | 什么都没有（臂没在跑，所以连 `AI ARM ACTIVE` 都不该有） | 任何 `AI ARM ACTIVE` |
+| d | `AI ARM ACTIVE`、`CALIBRATED by the bundle`、`pusch_reporting_source=net` | `=classic` |
 
 > **臂 a/b/d 没有 `[depth3-sinr]` 行** ⇒ 那条腿的公布值没被记录 ⇒ 见 §9.5。
 
@@ -227,6 +238,31 @@ sudo -E LEG_CONFIG="$PWD/configs/gnb_rf_b200_tdd_n78_20mhz.yml" \
 | `r9ca2` | a | 同 `r9ca1` |
 
 > 臂 b/d 启动时**必须有** `the published SINR is CALIBRATED by the bundle` 那一行；没有就说明用错了 bundle。
+
+### 5.1 臂 a 和臂 b 到底差什么（2026-10-17 补注）
+
+用户看这张表后问"第 2 批的臂 a 和 b 是完全一样的吗"——**看错了一行，但这个问题本身必须写下来**，因为两条命令
+**只差三个字符**：
+
+| | 臂 a | 臂 b |
+|---|---|---|
+| bundle 路径 | `d3_modcond_ft.mlmodelc`（现役） | `d3_modcond_cal.mlmodelc`（标定） |
+| 命令行其余部分 | 完全相同 | 完全相同 |
+
+差别就是**产物文件**：标定值（每个 Qm 一组 slope/offset）写在 `.mlmodelc` 的**元数据**里，**不在命令行上**，
+所以 `d3_modcond_ft` 与 `d3_modcond_cal` 之外一个字都不差。这正是最容易把 a 和 b 跑成同一条的地方 ——
+而一旦跑成同一条，这一批就**回答不了自己的问题**，并且**吞吐数字上完全看不出来**（两边都会是正常数字）。
+
+因此现在有三道防线：
+
+1. `preflight_check.sh` 在起飞前检查两个 bundle 都存在、且 `cal` 的元数据里确实有 `depth3_sinr_cal`；
+2. `flight_verdict.py` **从每条腿自己的日志里**核对臂（`AI ARM ACTIVE` / `CALIBRATED by the bundle` /
+   `gNB options :` 行里的 `pusch_reporting_source=classic|net`），三者与腿名字母不符就**拒绝读整批**并指名腿和标记；
+3. §2.6 那第四行 `grep` 让操作者每条腿自己也能看一眼。
+
+> **臂字母的含义在不同批次之间变过**（这是第二道防线里"臂方案"存在的原因）：r6/r7/r8 三批的 a/b 是**上报来源**
+> （a=classic、b=net，那时还没有标定产物），从 r9 起 a/b 才是 **bundle**、`net` 挪到了 d。
+> 回头读老批次要加 `--arm-scheme legacy`，否则新语义会判定"标签与实际不符"而拒读 —— 那是**正确但没用**的拒绝。
 
 ---
 

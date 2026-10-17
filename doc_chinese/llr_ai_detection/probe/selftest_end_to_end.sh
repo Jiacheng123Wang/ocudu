@@ -39,6 +39,11 @@ make_leg() {   # make_leg <dir> <tag> <a|b|c|d>
   if [ "$arm" = c ]; then : > "$dir/gnb_gpu_${tag}.log"; else ln -sf "$BIGLOG" "$dir/gnb_gpu_${tag}.log"; fi
   # `c` legs have no depth3 lines at all, which is what makes the RTT fallback the comparability basis there
   if [ "$arm" = b ] || [ "$arm" = d ]; then cp "$SOAK_B" "$dir/gnb_gpu_${tag}.log.stderr"; fi
+  # A SOAK LOG IS NOT A FLOWN LEG: it has no `gNB options` line, so arm d's net marker has no source and the arm check
+  # refuses the leg. Append the line a real flight prints, in the canonical `=` spelling that a real log actually uses.
+  if [ "$arm" = d ]; then
+    echo "gNB options   : --expert_phy.pusch_receiver_backend=ai --expert_phy.pusch_reporting_source=net --expert_phy.pusch_receiver_model=/models/d3_modcond_cal.mlmodelc" >> "$dir/gnb_gpu_${tag}.log.stderr"
+  fi
 }
 
 echo "== batch one: the receiver contrast (a c c a)"

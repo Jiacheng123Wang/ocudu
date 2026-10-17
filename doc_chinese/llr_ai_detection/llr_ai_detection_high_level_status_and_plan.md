@@ -1121,3 +1121,19 @@ RSRP 3 dB、调度器读标量）、**§19.125/19.141**（采纳清单）、**§
   ★ 与 r7abba（★ 自动判 **conditions NOT matched** ✓，★ 末两腿差 4.67 dB ✓）。
 - ★ 活网时延顺带确认 ✓（★ 47 000 次接收 ✓）：★ plane 29–30 µs ✓、★ forward **994–1 016 µs** ✓、
   ★ deliver **104–106 µs** ✓ ⇒ ★ 臂 ≈**1.13 ms** ✓ —— ★ 与实验室稳态一致 ✓ ⇒ ★ "★ deliver 0.5 ms ✓"确属冷样本 ✓。
+
+### 8.9 ★★ 裁决脚本现在从日志核对"这条腿真的是它自称的那个臂"（2026-10-17 追补）
+
+★ 起因 ✓：★ 用户问"★ 第 2 批的臂 a 和 b 是完全一样的吗 ✓？" —— ★ 两条命令**只差三个字符**
+（`d3_modcond_ft` 对 `d3_modcond_cal` ✓），★ 标定写在**产物元数据**里而非命令行 ⇒ ★ 跑错**看不出来** ✗。
+
+★ 已落地 ✓（★ 细节见设计记录 **§19.193** ✓、★ 操作端口径见 `probe/FLIGHT_RUNBOOK_MANUAL.md` **§5.1** ✓）：
+
+- ★ `flight_verdict.py` 读每条腿自己的三个标记 ✓（`AI ARM ACTIVE` / `CALIBRATED by the bundle` /
+  `gNB options :` 行里的 `pusch_reporting_source=classic|net` ✓），★ 与腿名字母不符 ⇒ **拒读整批**并指名 ✓。
+- ★ `--arm-scheme {r9,legacy}` ✓：★ r6/r7/r8 的 a/b 是**上报来源**（★ b = `net` ✓），★ r9 起 a/b 才是**bundle**、
+  `net` 挪到 d ✓ ⇒ ★ 读老批次要显式 `legacy` ✓。
+- ★ 顺带修掉一个会**拒读合法批次**的盲点 ✓：★ `net` 标记原来只认空格拼法 ✗，★ 而真实日志是
+  `--expert_phy.pusch_reporting_source=net`（★ 等号 ✓）；★ 现在容忍三种拼法 ✓ 并优先读命令行 ✓。
+- ★ 两个自测修好后 ✓：★ `selftest_flight_verdict.sh` **15/15** ✓、★ `selftest_end_to_end.sh` **7/7** ✓
+  （★ 之前 8 + 7 项红 ✓，★ 起因是夹具里的 `arm_banner` 从未定义 ✗）。

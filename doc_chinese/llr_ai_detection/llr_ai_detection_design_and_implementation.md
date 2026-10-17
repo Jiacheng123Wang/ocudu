@@ -11628,3 +11628,56 @@ UE_IP=<手机IP> ARMS="a b c d d c b a" bash doc_chinese/llr_ai_detection/probe/
 ★ 原因清楚 ✓：★ 预测用的 **41.7%** 来自**语料回放**（★ §19.180 ✓），★ 而这次**活网**上经典链在 20–21 dB 解出 **70–81%** ✓
 ⇒ ★ **语料回放低估了经典链** ✗（★ 与 §19.191 同一类"工作点/口径依赖" ✓）。★ 教训 ✓：
 ★ **语料回放的接收率不能直接当活网预测** ✗。
+
+### 19.193 ★★ 臂身份校验：三个标记、两种臂语义、一个会漏读 `=net` 的盲点（★ 2026-10-17 ✓）
+
+**(a) 起因 ✓**
+
+★ 用户看图后问"★ 第 2 批的臂 a 和 b 是**完全一样**的吗 ✓？"（★ 随后自己更正：★ 不一样 ✓，★ 差 bundle 路径 ✓）。
+★ 这个问题本身值得改代码 ✓：★ 两条命令**只差三个字符**（`d3_modcond_ft` 对 `d3_modcond_cal` ✓），
+★ 标定值写在**产物元数据**里而**不在命令行上** ⇒ ★ 跑错一眼看不出 ✓，★ 而吞吐数字**两边都正常** ✗。
+
+**(b) 加上的校验 ✓（★ `flight_verdict.py` ✓）**
+
+★ 从**每条腿自己的** `.log.stderr` 读三个标记 ✓，★ 与腿名字母的期望比对 ✓，★ 不符就 `REFUSING`（★ 返回 2 ✓）：
+
+| ★ 臂 | ★ `AI ARM ACTIVE` | ★ `CALIBRATED by the bundle` | ★ `pusch_reporting_source` |
+|---|---|---|---|
+| ★ a | ✓ | ✗ | ★ `=classic` |
+| ★ b | ✓ | ✓ | ★ `=classic` |
+| ★ c | ✗ | ✗ | ★ — |
+| ★ d | ✓ | ✓ | ★ `=net` |
+
+★ 实测 ✓：★ 把 `r9ra1` 改名成 `r9cb1` ⇒ ★ 拒读 ✓，★ 输出 `r9cb1 is labelled arm B but its log shows
+ai=True cal=False net=False` ✓（★ 而不是算进均值 ✓）。
+
+**(c) 校验自己暴露的两个**真缺陷** ✓**
+
+1. ★ **字面串匹配漏掉规范拼法** ✗（★ 会**拒读合法批次** ✓）：★ 原来写 `"--pusch_reporting_source net"`（★ 空格 ✓），
+   ★ 而真实 `gNB options :` 行是 `--expert_phy.pusch_reporting_source=net`（★ **等号** ✓）⇒ ★ 臂 d 一律被判
+   `net=False` ✗。★ 日志里三种拼法实测计数 ✓：★ `--pusch_reporting_source classic` ×20、★ `--pusch_reporting_source net` ×12、
+   ★ `--expert_phy.pusch_reporting_source=net` ×6 ✓。★ 修 ✓：★ 正则 `pusch_reporting_source[= ](classic|net)` ✓，
+   ★ 并**优先取 `gNB options` 行**（★ 真实 argv ✓），★ banner 散文只做回退 ✓。
+2. ★ **臂字母撞车** ✗：★ r6/r7/r8 的 b 是 **`net` 上报** ✓（★ 当时没有标定产物 ✓），★ r9 起 b 才是**标定产物**、
+   `net` 挪到 d ✓ ⇒ ★ 新校验照 r9 语义读 r8 就拒读**合法历史批次** ✓。★ 修 ✓：★ `--arm-scheme {r9,legacy}`（★ 默认 r9 ✓），
+   ★ legacy 下 cal 不查 ✓、★ b 期望 `net=True` ✓；★ 裁决行里的含义注释也随方案切换 ✓
+   （★ 否则会把"上报来源对比"标成"标定对比" ✗）。★ 实测 ✓：★ r8 的裁决现在标
+   `[the net reporting source, on the deployed bundle]` ✓ 而不是 r9 的"标定" ✓。
+
+**(d) 两个自测自身也坏了 ✓（★ 15 项里 8 项红 ✓ → 现 15/15 与 7/7 全绿 ✓）**
+
+1. ★ `arm_banner` **函数根本没定义** ✗ —— ★ 我加校验时只加了**调用** ✓ ⇒ ★ 每个合成夹具的第一行是
+   `command not found` ✓，★ 三个标记全 False ✓。
+2. ★ 端到端夹具的 d 腿来自 **soak 日志** ✓（★ soak 不是飞行腿 ✓、★ 没有 `gNB options` 行 ✓）⇒ ★ 同样缺 `net` 源 ✗。
+
+**(e) 教训 ✓（★ 这条最值钱 ✓）**
+
+★ **夹具里的标记必须来自真实格式** ✗。★ 我在夹具里写 `--pusch_reporting_source net`（★ 短横线+空格 ✓），
+★ 恰好和检查器里**同一个错误字面串**一致 ✓ ⇒ ★ 检查器"看起来被测过了" ✓，★ 而真实日志的**规范拼法一次都没被覆盖** ✗，
+★ 直到把夹具改成 `gNB options : --expert_phy....=net` 才暴露 ✓。★ **用实现里的常量去写夹具，测的只是自洽** ✗。
+
+**(f) 真实批次复核 ✓**
+
+★ `r9r`（★ 默认 r9 方案 ✓）：★ **14.4%** ✓，★ 与 §19.192 一致 ✓（★ 用记录里的 8.83/8.87 重跑确认 ✓；
+★ 复核时手抄成 9.17/8.53，★ 均值碰巧相同 ✓，★ 已按记录改正 ✓）。
+★ `r8abba --arm-scheme legacy` ✓：★ **−12.6% FAIL** ✓，★ 注释为"上报来源" ✓，★ 与 §19.185 一致 ✓。

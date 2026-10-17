@@ -19,7 +19,7 @@ if [ ! -d "$LEGS" ]; then
   exit 0
 fi
 out=$($PY "$HERE/flight_verdict.py" --legs "$LEGS" \
-        --iperf "r8a1=10.9,r8b1=9.58,r8b2=10.0,r8a2=11.5" --batch r8 2>&1)
+        --iperf "r8a1=10.9,r8b1=9.58,r8b2=10.0,r8a2=11.5" --batch r8 --arm-scheme legacy 2>&1)
 
 fail=0
 check() {
@@ -36,13 +36,36 @@ check "FAIL" "verdict = FAIL"
 # `[depth3-sinr]` instrument, so without this the publication column -- the one number the flight exists to compare --
 # would be untested. The lines below are the arm's exact formats (taken from a 2100-reception soak), and the fixture
 # is rebuilt in a temp dir on every run so it cannot rot.
+# THE DETECTOR READS THREE LITERAL SUBSTRINGS the gNB prints at startup: the arm banner ("AI ARM ACTIVE"), the
+# bundle's calibration note ("CALIBRATED by the bundle"), and the echoed command line ("--pusch_reporting_source net").
+# A real log supplies them; a synthetic leg has to print the same strings or it is testing a log nobody produces. This
+# helper emits them per arm, in the real wording, and -- importantly -- emits NOTHING for arm c, whose log has none,
+# so the "classical leg" fixtures stay honest about the absence.
+arm_banner() {
+  local backend=classic source=classic bundle=none
+  if [ "$1" != c ]; then
+    backend=ai
+    bundle=d3_modcond_ft.mlmodelc
+    echo "[pusch_receiver] backend=ai: AI ARM ACTIVE over 4 model(s). Each bound model COMPUTES channel estimation, equalisation and demapping for the modulation it declares; the classical demodulator does not run for those receptions."
+  fi
+  if [ "$1" = b ] || [ "$1" = d ]; then
+    bundle=d3_modcond_cal.mlmodelc
+    echo "[pusch_receiver] backend=ai: the published SINR is CALIBRATED by the bundle (published' = slope * published + offset, dB): Qm=2 slope 1.004 offset +0.010, Qm=4 slope 1.010 offset +0.020, Qm=6 slope 1.062 offset +0.040, Qm=8 slope 1.137 offset +0.070; the soft bits are not affected"
+  fi
+  # THE CANONICAL SPELLING, with `=`, because that is what a real `gNB options :` line prints and the one the first
+  # version of the marker test could not see.
+  [ "$1" = d ] && source=net
+  echo "gNB options   : --expert_phy.pusch_receiver_backend=$backend --expert_phy.pusch_reporting_source=$source --expert_phy.pusch_receiver_model=/models/$bundle"
+}
+
 FIXTURE=$(mktemp -d -t verdict_fixture_XXXXXX)
 mkdir -p "$FIXTURE/legs"
-cat > "$FIXTURE/legs/gnb_gpu_r9b1_1017_1200.log.stderr" <<'FIXTURE_EOF'
+{ arm_banner b; cat <<'FIXTURE_EOF'
 [depth3-measure] reception 1 (Qm=8 256QAM) over 612 pilot RE(s): epre net=-2.58 classic=-2.58 dB | rsrp net=-2.55 classic=-2.61 dB | snr net=21.92 classic=26.00 dB | noise net=8.9879e-04 classic=6.9088e-04 residual=4.0276e-03 plane_units=2.0198e-03 (570 residual(s)) | snr plane-only=23.95 dB
 [depth3-sinr] 2000 reception(s): PUBLISHED SINR raw p10 23.08 p50 23.08 p90 23.08 dB | calibrated p10 26.31 p50 26.31 p90 26.31 dB | calibration APPLIED (this is the number the scheduler acts on)
 [depth3-timing] 2000 forward(s), microseconds: plane p50 39 p99 50 max 60 | forward p50 1079 p99 1200 max 1300 | deliver p50 112 p99 150 max 200 | predict p50 1050 p99 1150 max 1250 |
 FIXTURE_EOF
+} > "$FIXTURE/legs/gnb_gpu_r9b1_1017_1200.log.stderr"
 fixture_out=$($PY "$HERE/flight_verdict.py" --legs "$FIXTURE/legs" --iperf "r9b1=9.6" --batch r9 2>&1)
 rm -rf "$FIXTURE"
 check_in() {
@@ -57,7 +80,7 @@ check_in "1079" "$fixture_out" "forward p50 parsed from the timing line"
 # then has to fall back to ping RTT, and the classical arm has to be READ rather than PASS/FAILed.
 MIXED=$(mktemp -d -t verdict_mixed_XXXXXX)
 mkdir -p "$MIXED/legs"
-printf '%s\n' '[depth3-measure] reception 1 (Qm=8 256QAM) over 612 pilot RE(s): epre net=-2.58 classic=-2.58 dB | rsrp net=-2.55 classic=-2.61 dB | snr net=21.92 classic=26.00 dB | noise net=8.9879e-04 classic=6.9088e-04 residual=4.0276e-03 plane_units=2.0198e-03 (570 residual(s)) | snr plane-only=23.95 dB' > "$MIXED/legs/gnb_gpu_r9a1_1017_1200.log.stderr"
+{ arm_banner a; printf '%s\n' '[depth3-measure] reception 1 (Qm=8 256QAM) over 612 pilot RE(s): epre net=-2.58 classic=-2.58 dB | rsrp net=-2.55 classic=-2.61 dB | snr net=21.92 classic=26.00 dB | noise net=8.9879e-04 classic=6.9088e-04 residual=4.0276e-03 plane_units=2.0198e-03 (570 residual(s)) | snr plane-only=23.95 dB'; } > "$MIXED/legs/gnb_gpu_r9a1_1017_1200.log.stderr"
 : > "$MIXED/legs/gnb_gpu_r9a1_1017_1200.log"
 : > "$MIXED/legs/gnb_gpu_r9c1_1017_1205.log.stderr"
 : > "$MIXED/legs/gnb_gpu_r9c1_1017_1205.log"
@@ -73,7 +96,7 @@ FOUR=$(mktemp -d -t verdict_four_XXXXXX)
 mkdir -p "$FOUR/legs"
 for spec in a1:1200 b1:1205 c1:1210 d1:1215; do
   arm=${spec%%:*}; stamp=${spec##*:}
-  printf '%s\n' '[depth3-measure] reception 1 (Qm=8 256QAM) over 612 pilot RE(s): epre net=-2.58 classic=-2.58 dB | rsrp net=-2.55 classic=-2.61 dB | snr net=21.92 classic=26.00 dB | noise net=8.9879e-04 classic=6.9088e-04 residual=4.0276e-03 plane_units=2.0198e-03 (570 residual(s)) | snr plane-only=23.95 dB' > "$FOUR/legs/gnb_gpu_r9x${arm}_1017_${stamp}.log.stderr"
+  { arm_banner "${arm%%[0-9]*}"; printf '%s\n' '[depth3-measure] reception 1 (Qm=8 256QAM) over 612 pilot RE(s): epre net=-2.58 classic=-2.58 dB | rsrp net=-2.55 classic=-2.61 dB | snr net=21.92 classic=26.00 dB | noise net=8.9879e-04 classic=6.9088e-04 residual=4.0276e-03 plane_units=2.0198e-03 (570 residual(s)) | snr plane-only=23.95 dB'; } > "$FOUR/legs/gnb_gpu_r9x${arm}_1017_${stamp}.log.stderr"
   : > "$FOUR/legs/gnb_gpu_r9x${arm}_1017_${stamp}.log"
 done
 four_out=$($PY "$HERE/flight_verdict.py" --legs "$FOUR/legs" --iperf "r9xa1=10.0,r9xb1=10.1,r9xc1=10.2,r9xd1=10.3" --batch r9x 2>&1)

@@ -53,6 +53,28 @@ def parse_iperf(text):
 def read_leg(path):
     """Everything one leg's stderr says, reduced to the numbers the verdict needs."""
     raw = open(path, "r", errors="replace").read()
+    # THE THREE MARKERS THAT SAY WHICH ARM THIS LEG ACTUALLY RAN, because the command lines for arms a and b differ by
+    # three characters inside a 120-character path (`d3_modcond_ft` against `d3_modcond_cal`) and the calibration lives
+    # in the bundle's metadata rather than in a flag. Picking the wrong bundle gives a==b, i.e. a batch that cannot
+    # answer its own question, and nothing in a throughput number would say so.
+    # THE FLAG IS SPELLED THREE WAYS IN THE LOGS ALREADY ON DISK: the banner prose `(--pusch_reporting_source net)`,
+    # the short command line `--pusch_reporting_source net`, and the canonical `--expert_phy.pusch_reporting_source=net`.
+    # A literal substring test therefore missed the canonical spelling and read `net=False` for legs that were in fact
+    # flown with net reporting -- which the arm check turned into a refusal of a valid arm d. Match the option name and
+    # then `=` or a space, and take the FIRST occurrence: the command line is echoed at the top of the log (`gNB
+    # options : ...`) and is the actual invocation, while the banner note follows once per pool thread.
+    # THE COMMAND LINE IS THE AUTHORITY: `gNB options : --expert_phy...pusch_reporting_source=net` is the invocation
+    # itself, printed at the top of a real log. The banner's prose note is a per-thread restatement of the same value and
+    # is only the fallback -- for a leg flown before the flag existed the command line has no flag at all while the
+    # banner still names the default, and a synthetic leg carries the banner without any command line.
+    source_on_cmdline = re.findall(r"gNB options[^\n]*?pusch_reporting_source[= ](classic|net)", raw)
+    source_anywhere = re.findall(r"pusch_reporting_source[= ](classic|net)", raw)
+    source_flags = source_on_cmdline or source_anywhere
+    markers = {
+        "ai":   "AI ARM ACTIVE" in raw,
+        "cal":  "CALIBRATED by the bundle" in raw,
+        "net":  bool(source_flags) and source_flags[0] == "net",
+    }
     classic, net, published, calibration = [], [], None, None
     for qm, net_db, classic_db in MEASURE.findall(raw):
         classic.append(float(classic_db))
@@ -98,6 +120,7 @@ def read_leg(path):
         "forward": int(last_timing[2]) if last_timing else None,
         "deliver": int(last_timing[3]) if last_timing else None,
         "samples": len(classic),
+        "markers": markers,
     }
 
 
@@ -111,6 +134,10 @@ def main():
                              "one available at all: the PHY's per-reception `PUSCH: ... sinr=` line is not in every "
                              "build, and a classical leg has no `[depth3-measure]` line.")
     parser.add_argument("--batch", default="", help="only legs whose tag starts with this")
+    parser.add_argument("--arm-scheme", choices=("r9", "legacy"), default="r9",
+                        help="which meaning the arm letters carry in this batch: 'r9' (a=deployed bundle, "
+                             "b=calibrated bundle, c=classical, d=calibrated+net) or 'legacy' (the r6/r7/r8 batches, "
+                             "where a/b were the reporting source: a=classic, b=net)")
     parser.add_argument("--equivalence-pct", type=float, default=5.0,
                         help="a difference smaller than this is NOT read as a result. Pre-registered from the "
                              "leg-to-leg spread inside one arm in the r8 batch (A 10.9 vs 11.5 = 5.5%%, "
@@ -154,6 +181,45 @@ def main():
     if not rows:
         print("no leg log matched; check --legs and --batch", file=sys.stderr)
         return 1
+
+    # THE LEG'S LABEL MUST MATCH THE ARM ITS LOG SHOWS. The expected markers are a property of the arm letter:
+    #   a  the AI arm with the deployed bundle          ai, no calibration, classic reporting
+    #   b  the AI arm with the calibrated bundle        ai + cal
+    #   c  the classical chain                          not ai
+    #   d  the calibrated bundle with net reporting     ai + cal + net
+    # TWO ARM SCHEMES, because the letters meant different things in different flights. In the r6/r7/r8 batches the
+    # pair under test was the REPORTING SOURCE (a = classic, b = net) and the calibrated bundle did not exist yet; from
+    # r9 on the pair is the BUNDLE (a = deployed, b = calibrated) and `net` moved to d. Reading an old batch with the
+    # new scheme refuses it, correctly but unhelpfully, so the scheme is named. None means "not checked".
+    schemes = {
+        "r9":     {"a": {"ai": True, "cal": False, "net": False},
+                   "b": {"ai": True, "cal": True,  "net": False},
+                   "c": {"ai": False, "cal": False, "net": False},
+                   "d": {"ai": True, "cal": True,  "net": True}},
+        "legacy": {"a": {"ai": True, "cal": None, "net": False},
+                   "b": {"ai": True, "cal": None, "net": True},
+                   "c": {"ai": False, "cal": None, "net": None}},
+    }
+    expected = schemes[args.arm_scheme]
+    mislabelled = []
+    for row in rows:
+        want = expected.get(row["arm"].lower())   # the rows carry the arm UPPERCASE for display
+        got = row["markers"]
+        if want is None:
+            continue
+        wrong = [key for key in ("ai", "cal", "net") if (want[key] is not None) and (want[key] != got[key])]
+        if wrong:
+            mislabelled.append(f"{row['tag']} is labelled arm {row['arm']} but its log shows "
+                               f"ai={got['ai']} cal={got['cal']} net={got['net']}"
+                               f" (expected ai={want['ai']} cal={want['cal']} net={want['net']})")
+    if mislabelled:
+        print("REFUSING to read this batch: a leg ran a different arm than its name says, so the arms are not the ones "
+              "the criteria are about:", file=sys.stderr)
+        for line in mislabelled:
+            print(f"  {line}", file=sys.stderr)
+        print("Re-fly the leg with the right bundle (a: d3_modcond_ft, b/d: d3_modcond_cal; d also needs "
+              "--pusch_reporting_source=net).", file=sys.stderr)
+        return 2
 
     # A TAG THAT APPEARS TWICE IS TWO SESSIONS IN ONE DIRECTORY. The runner stamps every log with a new timestamp, so
     # re-flying a leg into the same batch directory leaves BOTH copies, and the means would then be computed over four
@@ -289,8 +355,14 @@ def main():
         print("  Fill them in and re-run; the criteria are on arms, so every leg of every arm has to be present.")
         return 1
     print("  VERDICTS (pre-registered: A is the reference, no arm may be worse than it)")
-    meanings = {"B": "the published-SINR calibration", "C": "the classical chain",
-                "D": "R6's delivery form (calibrated + net)"}
+    # THE ANNOTATION MUST MATCH THE BATCH'S OWN SCHEME, or the verdict mislabels what it just compared: under `r9`
+    # arm B is the calibrated bundle, but under `legacy` (r6/r7/r8) it was the `net` reporting source and no calibrated
+    # bundle existed -- quoting the r9 meaning there would describe an experiment that was never flown.
+    if args.arm_scheme == "legacy":
+        meanings = {"B": "the net reporting source, on the deployed bundle", "C": "the classical chain"}
+    else:
+        meanings = {"B": "the published-SINR calibration", "C": "the classical chain",
+                    "D": "R6's delivery form (calibrated + net)"}
     for candidate in [arm for arm in arm_order if arm != "A"]:
         if "A" not in by_arm:
             continue
