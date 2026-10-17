@@ -156,6 +156,7 @@ def main():
         return 1
 
     arm_order = sorted({row["arm"] for row in rows})
+
     print(f"{'leg':>8} {'arm':>4} {'Mbit/s':>8} {'rtt ms':>7} {'comparability':>13} {'basis':>14} {'plane est':>10} "
           f"{'published':>18} {'degr':>5} {'recv':>7} {'plane us':>9} {'fwd us':>7} {'deliv us':>9}")
     print("    (timings and the published SINR are medians over EVERY [depth3-*] line in the leg: the pools run one arm"
@@ -174,6 +175,30 @@ def main():
               f"{row['receptions'] if row['receptions'] else 0:>7} {row['plane'] if row['plane'] else 0:>9} "
               f"{row['forward'] if row['forward'] else 0:>7} {row['deliver'] if row['deliver'] else 0:>9}")
 
+    # LEG HEALTH, before any verdict. Two ways a leg can be vacuous or diluted, and both are invisible in a throughput
+    # number: an AI leg that received NOTHING (no traffic reached it), and an AI arm that fell back to the classical
+    # chain for a large share of its receptions (the domain gate does exactly that outside 12-48 dB). In the second case
+    # arm a is only partly the AI receiver, so the contrast it is supposed to show is diluted -- the verdict is then
+    # still valid in direction but conservative, and the reader has to be told.
+    unhealthy = []
+    for row in rows:
+        if row["arm"] == "C":
+            continue
+        receptions = row["receptions"] or 0
+        if receptions == 0:
+            unhealthy.append(f"{row['tag']}: an AI arm leg with NO reception in its log (no traffic reached it?)")
+            continue
+        rate = 100.0 * row["degradations"] / receptions
+        if rate > 1.0:
+            unhealthy.append(f"{row['tag']}: {row['degradations']}/{receptions} receptions degraded ({rate:.1f}%) -- "
+                             f"arm {row['arm']} is only partly the AI receiver")
+    if unhealthy:
+        print()
+        print("  LEG HEALTH:")
+        for line in unhealthy:
+            print(f"    WARNING {line}")
+        print("    (a diluted or vacuous leg makes a contrast CONSERVATIVE, not wrong; check the traffic and the SNR "
+              "per leg before reading it)")
     print()
     # COMPARABILITY, and which metric it uses is decided by what the legs actually carry:
     #   * every leg has an estimator SNR of the SAME kind  -> use it (dB, the tolerance is in dB);

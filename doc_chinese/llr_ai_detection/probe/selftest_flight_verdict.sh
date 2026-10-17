@@ -80,6 +80,9 @@ four_out=$($PY "$HERE/flight_verdict.py" --legs "$FOUR/legs" --iperf "r9xa1=10.0
 rm -rf "$FOUR"
 check_in "arm D: 1 leg(s)" "$four_out" "an arm-d leg is parsed and grouped (it was silently dropped before)"
 check_in "[R6's delivery form" "$four_out" "arm D's pre-registered meaning is printed"
+# The four-leg fixture has a measure line but no timing line, i.e. no reception: the health check must say so rather
+# than reading a throughput off a leg that received nothing.
+check_in "NO reception in its log" "$four_out" "a leg with no reception line is flagged as vacuous"
 
 [ "$fail" = 0 ] && echo "SELFTEST PASS" || echo "SELFTEST FAIL ($fail)"
 exit "$fail"
