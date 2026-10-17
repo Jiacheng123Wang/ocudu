@@ -35,7 +35,16 @@
 
 ## 2. 开始一批
 
-**一条命令跑完两批**（推荐 —— 它替每一批选好小区，并在两批之间停下来要你重新附着的 IP）：
+**先跑 go/no-go 自检**（它把这几轮踩过的每个坑编成检查项：脏树、过期二进制、错小区、钉死 MCS、
+没有 `depth3_sinr_cal` 的"校准"产物、已在跑的 gNB、没附着的手机）：
+
+```bash
+cd ~/dev/ocudu
+bash doc_chinese/llr_ai_detection/probe/preflight_check.sh both <手机IP>
+#   GO  ⇒ 继续；NO-GO ⇒ 按它逐条说的修
+```
+
+**然后一条命令跑完两批**（它替每一批选好小区，并在两批之间停下来要你重新附着的 IP）：
 
 ```bash
 cd ~/dev/ocudu
