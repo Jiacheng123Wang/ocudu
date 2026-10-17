@@ -59,9 +59,13 @@ def read_leg(path):
         net.append(float(net_db))
     published_hits = PUBLISHED.findall(raw)
     if published_hits:
-        # The LAST line is the whole leg's ring by then; the calibration state is taken from it as well.
-        _, raw10, raw50, raw90, cal10, cal50, cal90, calibration = published_hits[-1]
-        published = (float(raw50), float(cal50))
+        # The leg runs ONE ARM PER POOL THREAD, and each arm keeps its own ring: the counters interleave (measured on
+        # the r8 logs: 1 1 500 1000 500 1500 ... -- two series), so the last line is whichever arm printed last and a
+        # single line would describe one thread. The median over ALL lines is the leg.
+        raw50s = [float(hit[2]) for hit in published_hits]
+        cal50s = [float(hit[5]) for hit in published_hits]
+        calibration = published_hits[-1][7]
+        published = (statistics.median(raw50s), statistics.median(cal50s))
     # The published value per reception, from the PHY log beside the stderr one (see PUSCH above).
     chain = []
     log_path = path.replace(".log.stderr", ".log")
@@ -71,7 +75,14 @@ def read_leg(path):
                 continue
             chain.append(float(sinr))
     timing = TIMING.findall(raw)
-    last_timing = timing[-1] if timing else None
+    # Same reason as the published SINR: several arms, several series. Each line is a ring's p50, so the median over
+    # the lines is the leg's value; the reception count is the LARGEST counter, which is the busiest arm's.
+    if timing:
+        def median_at(position):
+            return int(statistics.median(int(line[position]) for line in timing))
+        last_timing = (max(int(line[0]) for line in timing), median_at(1), median_at(2), median_at(3))
+    else:
+        last_timing = None
     return {
         # The classical ESTIMATOR's SNR: sampled in an AI leg (`[depth3-measure] classic=`), and equal to what the
         # chain publishes in a classical leg, where the PHY line above carries it at full rate.
@@ -129,6 +140,8 @@ def main():
     arm_order = sorted({row["arm"] for row in rows})
     print(f"{'leg':>8} {'arm':>4} {'Mbit/s':>8} {'comparability':>13} {'basis':>14} {'plane est':>10} "
           f"{'published':>18} {'degr':>5} {'recv':>7} {'plane us':>9} {'fwd us':>7} {'deliv us':>9}")
+    print("    (timings and the published SINR are medians over EVERY [depth3-*] line in the leg: the pools run one arm"
+          " per thread, so a leg's log holds several series)")
     for row in rows:
         published = "-"
         if row["published"] is not None:
