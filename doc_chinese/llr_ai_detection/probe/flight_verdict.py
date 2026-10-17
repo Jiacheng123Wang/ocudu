@@ -187,9 +187,11 @@ def main():
             print(f"  arm {arm}: no throughput given")
 
     print()
-    print("  VERDICTS (pre-registered: A is the reference, B must not be worse, C is the classical chain)")
-    for candidate in ("B", "C"):
-        if candidate not in by_arm or "A" not in by_arm:
+    print("  VERDICTS (pre-registered: A is the reference, no arm may be worse than it)")
+    meanings = {"B": "the published-SINR calibration", "C": "the classical chain",
+                "D": "R6's delivery form (calibrated + net)"}
+    for candidate in [arm for arm in arm_order if arm != "A"]:
+        if "A" not in by_arm:
             continue
         reference = statistics.mean(by_arm["A"])
         value = statistics.mean(by_arm[candidate])
@@ -197,7 +199,7 @@ def main():
         verdict = "PASS" if value >= reference else "FAIL"
         comparability = "conditions matched" if classic_ok else "CONDITIONS NOT MATCHED, the verdict does not count"
         print(f"  {candidate} vs A: {value:.2f} vs {reference:.2f} Mbit/s = {change:+.1f}%  -> {verdict} "
-              f"({comparability})")
+              f"({comparability})   [{meanings.get(candidate, 'no pre-registered meaning')}]")
     if not args.iperf:
         return 0
     return 0
