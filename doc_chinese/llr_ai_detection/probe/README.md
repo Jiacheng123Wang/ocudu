@@ -1,6 +1,7 @@
 # 深度-3 的测量仪器（tracked）
 
-> **要飞效用那一轮？先读 [`FLIGHT_RUNBOOK_MANUAL.md`](FLIGHT_RUNBOOK_MANUAL.md)**（手动逐腿，含每条腿的完整命令、
+> **现场飞行看 [`FLIGHT_CHEATSHEET.md`](FLIGHT_CHEATSHEET.md)**（一页，12 条腿的命令按飞行顺序排好，
+> 已逐条核对过臂/模型/上报源）；**要理解为什么这么做再看 [`FLIGHT_RUNBOOK_MANUAL.md`](FLIGHT_RUNBOOK_MANUAL.md)**（手动逐腿，含每条腿的完整命令、
 > 该看到什么、故障排查）；[`FLIGHT_RUNBOOK.md`](FLIGHT_RUNBOOK.md) 是流程总览。
 > 半自动的逐腿飞行用 `fly_one_leg.sh <tag> <arm>`（**gNB 先起、等手机 ping 通、再起流量**）。
 >
