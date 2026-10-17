@@ -16,6 +16,7 @@ Usage:
     net_publication.py --tool <replay> --corpus <dir> --list <file> --model <bundle> [--work <dir>] [--limit N]
 """
 import argparse
+import csv
 import os
 import re
 import statistics
@@ -70,6 +71,8 @@ def main():
     parser.add_argument("--reporting", default="net")
     parser.add_argument("--work", default="")
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--csv", default="", help="also write the per-reception table, so a tail can be attributed "
+                                                 "instead of merely reported")
     args = parser.parse_args()
 
     work = args.work or tempfile.mkdtemp(prefix="net_pub_")
@@ -99,6 +102,12 @@ def main():
     print("  delta = published(net) - published(classical), on the same reception")
     for field, label in (("rsrp", "RSRP"), ("epre", "EPRE"), ("sinr", "SINR")):
         summarise(rows, field, label)
+    if args.csv:
+        with open(args.csv, "w") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+        print(f"  wrote {args.csv}")
     decoded = sum(1 for row in rows if row["crc"] == "OK")
     print(f"  {decoded}/{len(rows)} reception(s) decoded with the AI arm")
     return 0
