@@ -88,4 +88,5 @@ doc_chinese/llr_ai_detection/probe/flight_verdict.py --legs doc_chinese/llr_ai_d
 
 - `net` 在**旧配置**下慢 12.6% 的原因**仍未知** —— 已证明与公布 SINR 无关（两种模式相同 + MCS 被钉死），
   候选是接收/授权量与飞行间条件。
-- QPSK 的 RSRP/EPRE 有约 **1.4 dB** 的尾巴（约一成接收），见 §19.178。
+- QPSK 的 RSRP/EPRE 有约 **1.4 dB** 的尾巴（11/60 条），已刻画为 **head 3 的公共尺度误差、只在高 SNR 侧**，
+  SINR 不受影响（§19.181）。它只在 `net` 之下才会到达调度器，所以不影响 A/B/C 三条腿的吞吐判读。
