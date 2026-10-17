@@ -109,6 +109,8 @@ doc_chinese/llr_ai_detection/probe/flight_verdict.py --legs doc_chinese/llr_ai_d
 - **预期 B ≈ A**：OLLA 会吸收**恒定**偏差（+0.001 dB/ACK、cap ±5 dB、≈2 900 ACK ≈ 11 s）。
   所以 **B ≈ A 是预期之内**，不是"标定无效"；**大的** B−A 才是新信息（说明瞬态权重更大）。
 - 若干条腿的经典 SNR 相邻差 **> 1.5 dB** ⇒ **那一轮不算数**（脚本会标 `NOT COMPARABLE`）。
+- **等效带 ±5%**：差值小于 5% 时脚本打印 **"NO MEASURABLE DIFFERENCE"**，既不判通过也不判失败 ——
+  依据是同一臂两条腿自己就差了 4.4%–5.5%（r8 批量），更小的差在这套设置里不可分辨。
 
 ## 6. 状态记录表（每飞一次填一行，贴进 `work_tmp/tmp/evidence/`）
 

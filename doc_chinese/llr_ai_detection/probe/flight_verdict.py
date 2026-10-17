@@ -111,6 +111,11 @@ def main():
                              "one available at all: the PHY's per-reception `PUSCH: ... sinr=` line is not in every "
                              "build, and a classical leg has no `[depth3-measure]` line.")
     parser.add_argument("--batch", default="", help="only legs whose tag starts with this")
+    parser.add_argument("--equivalence-pct", type=float, default=5.0,
+                        help="a difference smaller than this is NOT read as a result. Pre-registered from the "
+                             "leg-to-leg spread inside one arm in the r8 batch (A 10.9 vs 11.5 = 5.5%%, "
+                             "B 9.58 vs 10.0 = 4.4%%): below that, two legs of the SAME arm already differ, so a "
+                             "difference of that size between arms is not measurable with this setup.")
     parser.add_argument("--tolerance-rtt-pct", type=float, default=10.0,
                         help="maximum relative ping-RTT difference between adjacent legs for the comparability check, "
                              "used when the SNR bases cannot be compared")
@@ -230,6 +235,11 @@ def main():
         value = statistics.mean(by_arm[candidate])
         change = 100.0 * (value - reference) / reference
         comparability = "conditions matched" if classic_ok else "CONDITIONS NOT MATCHED, the verdict does not count"
+        if abs(change) < args.equivalence_pct:
+            print(f"  {candidate} vs A: {value:.2f} vs {reference:.2f} Mbit/s = {change:+.1f}%  -> "
+                  f"NO MEASURABLE DIFFERENCE (inside the +-{args.equivalence_pct:g}% band the same arm's own legs span) "
+                  f"({comparability})   [{meanings.get(candidate, 'no pre-registered meaning')}]")
+            continue
         if candidate == "C":
             # The classical chain is not a candidate to adopt, it is the REFERENCE POINT for "is the AI receiver
             # worth it". A classical leg BELOW the AI arm is the good outcome, so a PASS/FAIL word would read
