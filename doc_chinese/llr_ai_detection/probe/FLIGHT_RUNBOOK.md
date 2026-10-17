@@ -118,7 +118,15 @@ doc_chinese/llr_ai_detection/probe/flight_verdict.py --legs doc_chinese/llr_ai_d
 
 它给出每腿：经典 SNR（可比性依据）、公布 SINR（原始 vs 校准）、时延、退化，以及预登记裁决
 （**B ≥ A**、**B ≥ C**）。语料不在时自检脚本会跳过；改过脚本的话先跑
-`probe/selftest_flight_verdict.sh`。
+`probe/selftest_flight_verdict.sh`（15 项）。
+
+★ **它会先从每条腿自己的日志核对臂身份**（`AI ARM ACTIVE` / `CALIBRATED by the bundle` /
+`gNB options :` 行里的 `pusch_reporting_source=classic|net`）：腿名与日志不符 ⇒ **拒读整批**并指名哪条腿、哪个标记不对。
+原因见 `FLIGHT_RUNBOOK_MANUAL.md` §5.1 与设计记录 §19.193 —— 臂 a 与臂 b 的命令行**只差三个字符**，跑错了吞吐数字照样正常。
+
+★ **臂字母的含义按批次不同**：`r9r`/`r9c` 用默认的 `r9` 方案（a/b = bundle，`net` 在 d）；
+r6/r7/r8 那几批的 a/b 是**上报来源**（b = `net`）⇒ **回读老批次必须加 `--arm-scheme legacy`**，
+否则会按新语义判"标签与实际不符"而拒读（那是正确但没用的拒绝）。
 
 ## 5. 判据与预期（**飞行前写下，不许事后改**）
 

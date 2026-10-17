@@ -217,8 +217,14 @@ def main():
               "the criteria are about:", file=sys.stderr)
         for line in mislabelled:
             print(f"  {line}", file=sys.stderr)
-        print("Re-fly the leg with the right bundle (a: d3_modcond_ft, b/d: d3_modcond_cal; d also needs "
-              "--pusch_reporting_source=net).", file=sys.stderr)
+        # THE REMEDY IS SCHEME-SPECIFIC TOO: under `r9` a wrong bundle is the likely cause, but under `legacy` there was
+        # one bundle and the letter that can be wrong is the reporting source.
+        if args.arm_scheme == "legacy":
+            print("Re-fly the leg with the right reporting source (a: --pusch_reporting_source classic, the default; "
+                  "b: --pusch_reporting_source net).", file=sys.stderr)
+        else:
+            print("Re-fly the leg with the right bundle (a: d3_modcond_ft, b/d: d3_modcond_cal; d also needs "
+                  "--pusch_reporting_source=net).", file=sys.stderr)
         return 2
 
     # A TAG THAT APPEARS TWICE IS TWO SESSIONS IN ONE DIRECTORY. The runner stamps every log with a new timestamp, so
