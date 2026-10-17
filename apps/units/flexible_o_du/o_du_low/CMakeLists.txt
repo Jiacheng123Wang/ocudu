@@ -21,8 +21,12 @@ target_include_directories(ocudu_o_du_low_unit_helpers PRIVATE ${CMAKE_SOURCE_DI
 # (256QAM, 64QAM, 16QAM and QPSK) with one set of weights; the per-modulation models stay selectable by path. A
 # deployment overrides this cache variable; a build whose file does not exist refuses every "ai" request that does not
 # name one, with the path in the message.
+# The default is the VERSIONED artefact, not a working copy: it used to point into doc_chinese/.../work_tmp, which is
+# git-ignored, so a fresh clone had no default model and an `ai` request that named none failed where the tree already
+# contained a perfectly good bundle. The conditioned bundle is the right default because one set of weights covers all
+# four modulations (design section 19.162, verified at 1200/1200 decisions against the four specialists).
 set(OCUDU_DEPTH3_DEFAULT_MODEL
-    "${CMAKE_SOURCE_DIR}/doc_chinese/llr_ai_detection/work_tmp/probe/d3_256qam.mlmodelc"
+    "${CMAKE_SOURCE_DIR}/lib/phy/upper/signal_processors/channel_estimator/metal/ai_assets/depth3_modcond_ft/d3_modcond_ft.mlmodelc"
     CACHE FILEPATH "Model the PUSCH ai receiver binds when --pusch_receiver_model is not given")
 
 target_compile_definitions(ocudu_o_du_low_unit_helpers PRIVATE
