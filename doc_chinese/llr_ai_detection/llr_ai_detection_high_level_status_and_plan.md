@@ -912,3 +912,101 @@ SDK 的 `extension_model.md` 把 Receiver 的可替换核心直接写成
 
 ★ **功课没做完就开工，等于把"值不值得做"这个问题推迟到已经投入之后才回答**——
 而这正是上一个工作流用几个月换来的教训。
+
+---
+
+## 8. ★★★★ 里程碑 M-3.0：深度-3 接入 PHY 流水线并空口跑通（2026-10-17）
+
+> **一句话**：深度-3 网络已经是 PHY 接收链的**正式一员** —— 一份**调制条件化**模型替掉四套按调制模型，
+> 在**真实空口**上跑通 LLR 与上报量，手机附着、`ping` 与 `iperf3 -R` 流量全部跑通；
+> ★ **限制与未达标项写在 §8.5，一律不隐藏**。
+
+### 8.1 交付物（已入库，git 跟踪）
+
+| 路径 | 内容 | 大小 |
+|---|---|---|
+| `lib/phy/upper/signal_processors/channel_estimator/metal/ai_assets/depth3_modcond_ft/` | 编译产物 `.mlmodelc` + `.mlpackage` + 训练好的 `.keras` + `history.json` + **README**（契约声明 / 训练配置 / 验证结果 / 重建命令） | **1.2 MB** |
+| 同上（构建默认） | `OCUDU_DEPTH3_DEFAULT_MODEL` 指向此产物 ⇒ **干净克隆里 `--pusch_receiver_backend ai` 不给模型也能跑** | — |
+
+模型是 **N78 / 20 MHz / TDD / 30 kHz / 51 PRB**：输入平面 `[1, 612, 14, 16]`（12 契约通道 + 4 个 Qm one-hot），
+四个头（`llr` / `post_eq_noise` / `ch_est` / `dmrs_noise`），**产物内自声明**五项：
+`depth3_layout=modcond`、`depth3_qm_set=2,4,6,8`、`depth3_head_stride=8`、`depth3_snr_range=12.00,48.00`、
+`depth3_nsc=612`。★ 五项都由引擎与臂**读取并核对**，不是装饰。
+
+### 8.2 编译开关与运行配置
+
+```bash
+# 构建（必须开 Metal/CoreML 栈；关掉时是 identity 臂 + 报错，不会假装在算）
+cmake -S . -B build -DENABLE_METAL_CHEST=ON
+# 若沿用旧构建树，缓存变量要显式更新（它是 CACHE 变量，源码默认不会覆盖旧值）
+cmake -B build -DOCUDU_DEPTH3_DEFAULT_MODEL=$PWD/lib/phy/upper/signal_processors/channel_estimator/metal/ai_assets/depth3_modcond_ft/d3_modcond_ft.mlmodelc
+
+# 运行（gNB）：三件事选上 AI 后端
+--expert_phy.phy_pipeline gpu \
+--expert_phy.pusch_receiver_backend ai \
+[--expert_phy.pusch_receiver_model <bundle.mlmodelc>]     # 省略 ⇒ 用构建默认（即 8.1 的产物）
+[--expert_phy.pusch_reporting_source classic|net]          # 默认 classic
+```
+
+**平台**：仅 **macOS / Apple Silicon**（引擎是 Objective-C++ + CoreML；Linux 上无此路径）。
+**几何**：平面固定 612 子载波（51 PRB）⇒ 其它带宽（如 N1 5 MHz = 300 子载波）在**绑定期被拒绝并具名**，
+而不是每次接收静默回落。
+
+**飞行（A/B 对比用）**：
+
+```bash
+sudo -E LEG_CONFIG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml \
+        LEG_LOGDIR=$PWD/doc_chinese/llr_ai_detection/work_tmp/legs/<批次> \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu <腿名> \
+    --expert_phy.pusch_receiver_backend=ai \
+    --expert_phy.pusch_receiver_model=<bundle> [--expert_phy.pusch_reporting_source=net]
+```
+
+★ **`LEG_CONFIG` 必须显式给**：`run_leg.sh` 的默认小区是 `gnb_rf_b200_fdd_n1_5mhz_bridge.yml`
+（**N1 / 5 MHz / FDD**），与训练语料的小区不同 —— 我们损失过一条腿才发现（§19.156）。
+
+### 8.3 已验证（有数字，细节见设计文档）
+
+| 判据 | 结果 |
+|---|---|
+| 一份模型替代四套 | 四调制 × 300 捕获，与各专用模型**判决级 100% 相同**（1200/1200），零退化 |
+| 逐调制旧通路不回归 | 每次改动都重跑：`crc`/`exact_pct`/`sign_agreement`/`mean|LLR|` **逐列**等于基线 |
+| 共享上报头（跨四调制） | head 3 NMSE **−25~−27 dB**、功率比 **±0.1 dB**；head 4 在 **12~30 dB 误差 +0.26~+1.22 dB** |
+| 域行为（指定 SNR 真值） | 域外**整次回落经典**，公布值与经典**逐位相同**；域内算网络 |
+| R6 工程件 | 六个旋钮 + 启动日志 + 定义域门 + 运行时一致计数 + **调度器可见字段替换**；配置矩阵 **21/21** |
+| 空口 | 手机附着、`ping` **0% 丢包**、`iperf3 -R` 上行 **10~19 Mbit/s**（限速与否两种设定）跑通 |
+
+### 8.4 限制与未达标项（★ **不隐藏**）
+
+1. ★★ **`net`（上报源换成网络）目前不予采纳** ✗：活网实测臂公布 SINR **系统性低 −2.5 dB**
+   ⇒ 调度器 MCS 更保守 ⇒ **吞吐低 12.6%**（ABBA、去限速、条件匹配的那一轮，§19.161）。
+   ⇒ ★ **默认仍是 `classic`**，这是**被数据支持的**决定，不是"未测"。
+2. ★★ **经典估计器仍在跑** ✓：它供给链条的测量与 `est_results`（定义域门、并排比较都用它）。
+   去掉它是"最大的一笔性能"（设计 §19.98），前提是先有一个**独立**的尺子（残差法已做到与指定 SNR
+   差 ±0.4 dB 的量级，但活网口径仍需标定，§19.127–19.146）。
+3. ★★ **几何固定 612**（51 PRB）：N1 / 5 MHz / FDD **不能直接使用** —— 会被绑定期拒绝；
+   要支持需"**平面宽度参数化 + 重训**"（§19.162、§8.6）。
+4. ★★ **定义域 12~48 dB**：域外整次回落经典并计数；10 dB 以下 head 4 明显不准（+15.4 / +6.7 dB），
+   所以声明的下限**不应再往下放**。
+5. ★★ **仪器缺口**（已知、待修）：活网上经典侧 `epre/rsrp` 在抽样时刻尚不可用（延迟估计器）
+   ⇒ "与独立估计器一致率"计数在活网**恒为 0/0**（§19.157）；引擎的诊断走 PHY logger，回放里看不见
+   （§19.113）；运行器里"did not load, so it declares no modulation"的措辞是**猜测**且未定位到（§19.162）。
+
+### 8.5 下一步（按代价排序）
+
+1. **修仪器**（小改、不需手机）：把估计器通知器的值**锁存**，让测量行与一致计数从锁存读 ⇒ 下次飞行自动报出
+   `net − classic` 偏差。
+2. **标定 head 4 的绝对电平**：用经典估值（已验到 0.4 dB）做参考，取实飞样本的偏差分布给 noise 头加**常数校正**
+   （本轮 −2.5 dB ⇒ 因子 ≈1.78），或按 16~18 dB 工作点做分层微调；**校正前后都打印**，让下次飞行能直接判对错。
+3. **然后重飞 ABBA、去限速、同一手机位置**，判据不变（§19.159）：**B ≥ A** 才谈采纳 `net`。
+4. **若确有 N1 需求**：先采一小批 N1 抓包（同流程只换 `LEG_CONFIG`），再把平面宽度从编译期常量改为运行期属性，
+   然后重训 —— 五旋钮的覆盖/降级机制与几何无关，**不用改**。
+5. （可选）**去掉经典估计器**（设计 §19.98 的最大性能项），前提是第 1、2 步完成。
+
+### 8.6 详细情况去哪看
+
+设计文档 `llr_ai_detection_design_and_implementation.md`：**§19.112–19.113**（条件化契约在臂上跑通、两处只在产物层面
+现形的缺陷）、**§19.114–19.120**（上报头真值、head 4 压缩与损失权重）、**§19.121–19.124**（独立 DM-RS 域真值、
+RSRP 3 dB、调度器读标量）、**§19.125/19.141**（采纳清单）、**§19.126/19.151**（一致计数与字段替换缺陷的定位与修复）、
+**§19.127–19.146**（独立尺子的阶梯实验）、**§19.148/19.154**（采纳门：1200/1200）、**§19.149**（微调）、
+**§19.156/19.157–19.161**（飞行：配置坑、限制、四次飞行的数据与结论）、**§19.162**（几何声明、模型入库、文档）。
