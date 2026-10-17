@@ -149,6 +149,13 @@ public:
   /// working, which is exactly the kind of half-configured state that must not pass unread.
   virtual std::vector<std::string> binding_notes() const { return {}; }
 
+  /// \brief The plane width (subcarriers) the bound bundle was exported for; 0 when nothing declared it.
+  ///
+  /// It exists so that the startup line can say which cell geometry the model in use was trained for: this arm
+  /// assembles a fixed-width plane, and a bundle from another geometry is refused at bind time rather than left to
+  /// fail on every reception (design section 19.162).
+  virtual unsigned bound_nsc() const { return 0; }
+
   /// \brief Whether the bound bundle computes every modulation it declares from ONE set of weights, conditioned
   /// on the modulation order (design section 19.102) instead of specialised per modulation.
   ///

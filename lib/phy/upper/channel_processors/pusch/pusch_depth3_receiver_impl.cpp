@@ -216,6 +216,29 @@ public:
       const bool loaded = engine->init_depth3(path.c_str());
       const unsigned declared_qm = loaded ? engine->depth3_bits_per_symbol() : 0;
 
+      // THE GEOMETRY. This arm assembles a FIXED-WIDTH plane, so a bundle exported for another cell's bandwidth
+      // cannot serve it: the runtime rejects an input whose width differs from the graph's, and that shows up as a
+      // refusal on every single reception -- an operator reads a broken model rather than a model for another cell.
+      // Only binding can see the declaration, so the refusal is here, with both numbers named, and the undeclared
+      // case is said out loud rather than passed over (design section 19.162).
+      if (loaded && (engine->depth3_nsc() != 0) &&
+          (engine->depth3_nsc() != pusch_depth3_input_plane::NOF_SUBCARRIERS)) {
+        notes.push_back(fmt::format("model '{}' NOT bound: exported for {} subcarrier(s) and this build assembles "
+                                    "{}; the plane width is fixed, so every reception would be refused",
+                                    path, engine->depth3_nsc(), pusch_depth3_input_plane::NOF_SUBCARRIERS));
+        return;
+      }
+      if (loaded && (engine->depth3_nsc() == 0)) {
+        notes.push_back(fmt::format("model '{}' declares no geometry (depth3_nsc); binding it, but a width mismatch "
+                                    "would surface only as a refused input on every reception",
+                                    path));
+      }
+      // WHAT THE BUNDLE WAS TRAINED FOR, kept for the startup line: the plane width, so an operator can see that
+      // the model in use matches the cell it is in.
+      if (loaded && (bound_nsc_ == 0)) {
+        bound_nsc_ = engine->depth3_nsc();
+      }
+
       // THE MODULATION-CONDITIONED CONTRACT (design section 19.102): one bundle, every modulation it declares,
       // with the Qm as four extra input channels and a main head whose stride is the widest modulation. It cannot
       // be told apart from a per-modulation bundle by shape -- both carry 14 * 8 = 112 main-head channels -- so
@@ -370,6 +393,9 @@ public:
 
   /// True when the fallback bound here came from the build rather than from the command line.
   bool fallback_is_the_build_default() const override { return fallback_is_build_default; }
+
+  /// The plane width the first bound model declared; 0 when nothing is bound or nothing declared it.
+  unsigned bound_nsc() const override { return bound_nsc_; }
 
   /// The conditioned contract is bound: one bundle, one set of weights, the plane carries the one-hot channels and
   /// the LLR head is read with a stride. What a reader must do with it, and the startup line the factory prints
@@ -917,6 +943,8 @@ private:
   std::string                                       reporting_source = "classic";
   /// Whether the one-time note about an undeclared measurement domain has been printed for this arm.
   bool                                              warned_unverified_domain = false;
+  /// The plane width the first bound model declared (for the startup line); 0 when undeclared or nothing bound.
+  unsigned                                          bound_nsc_ = 0;
   /// Receptions whose RSRP and EPRE were published from the network's heads (R6's switch, `net` only).
   unsigned                                          published_measurements = 0;
   /// Sampled receptions whose network RSRP and EPRE agreed with the independent estimator's within

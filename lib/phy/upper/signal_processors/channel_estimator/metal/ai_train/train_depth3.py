@@ -626,8 +626,15 @@ def export_deployment(model, qm, path, cond=False, snr_range=None):
     # channels), so a shape-based check cannot tell them apart -- and they are not interchangeable: one serves
     # every modulation, the other one. The bundle therefore SAYS which contract it follows (written above, through
     # the spec), and the engine reads the declaration rather than inferring a layout from a shared width.
+    # THE GEOMETRY, declared by the bundle for the same reason the layout is: this arm assembles a FIXED-WIDTH plane
+    # (612 subcarriers), so a bundle exported for another width cannot serve this build -- the runtime would reject
+    # its input on every single reception, which reads as "the model is broken" rather than "the model is for another
+    # cell". Declared FROM the exported shape, so the declaration cannot drift from the graph (design section 19.162).
+    spec = converted.get_spec()
+    spec.description.metadata.userDefined["depth3_nsc"] = str(shape[0])
+    converted = ct.models.MLModel(spec, weights_dir=converted.weights_dir)
     converted.save(path)
-    print(f"wrote the fp16 deployment graph to {path} (input {[1, *shape]})")
+    print(f"wrote the fp16 deployment graph to {path} (input {[1, *shape]}, depth3_nsc={shape[0]})")
 
 
 def cli_snr_range(args):

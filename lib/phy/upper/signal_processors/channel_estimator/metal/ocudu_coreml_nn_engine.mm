@@ -63,6 +63,8 @@ struct coreml_nn_engine_impl {
   /// (`depth3_snr_range`). False in `model3_has_snr_range` means the bundle declares none, which is not the same
   /// as "any range": a measurement the model extrapolated cannot be told from one it was entitled to make, and the
   /// arm says so rather than pretending (design sections 19.115, 19.117).
+  /// The plane width the bundle was exported for, as it declares it (`depth3_nsc`); 0 when it declares none.
+  unsigned  model3_nsc          = 0;
   bool      model3_has_snr_range = false;
   float     model3_snr_min_db    = 0.0F;
   float     model3_snr_max_db    = 0.0F;
@@ -475,6 +477,13 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
   // THE MEASUREMENT DOMAIN, declared by the bundle for the same reason the layout is: nothing about the graph
   // says what it was trained on, and a reporting head asked about a reception it never saw answers anyway.
   // Measured 2026-10-16: a model trained on 20-32 dB reported 26.4 dB at 0 dB, 6 dB and 24 dB alike.
+  // THE GEOMETRY: read with the other declarations, and checked against the graph below so a bundle whose
+  // declaration and whose graph disagree is refused at load rather than at the first reception.
+  NSString* nsc_decl = creator_meta[@"depth3_nsc"];
+  if (nsc_decl != nil) {
+    e->model3_nsc = (unsigned)[nsc_decl intValue];
+  }
+
   NSString* snr_range = creator_meta[@"depth3_snr_range"];
   if (snr_range != nil) {
     NSArray<NSString*>* bounds = [snr_range componentsSeparatedByString:@","];
@@ -489,6 +498,16 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
           "measurement domain stays undeclared",
           snr_range.UTF8String);
     }
+  }
+
+  // A DECLARATION THAT DISAGREES WITH THE GRAPH IS REFUSED HERE. The two state the same fact, so a bundle that
+  // declares one width and carries another would otherwise fail at the first reception; at load time the mismatch
+  // names itself (design section 19.162).
+  if ((e->model3_nsc != 0) && (in_shape.count == 4) && (e->model3_nsc != in_shape[1].unsignedIntValue)) {
+    ocudulog::fetch_basic_logger("PHY").error(
+        "AI depth-3: the bundle declares depth3_nsc={} but its input is {} subcarrier(s) wide",
+        e->model3_nsc, in_shape[1].unsignedIntValue);
+    return false;
   }
 
   e->model3_in_channels = DEPTH3_IN_CHANNELS + (e->model3_conditioned ? DEPTH3_COND_CHANNELS : 0);
@@ -561,6 +580,12 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
   // The worker thread may not have been started yet when only a depth-3 model is configured.
   start_worker(e);
   return true;
+}
+
+unsigned coreml_nn_engine::depth3_nsc() const
+{
+  auto* e = static_cast<coreml_nn_engine_impl*>(impl);
+  return (e == nullptr) ? 0U : e->model3_nsc;
 }
 
 bool coreml_nn_engine::depth3_has_snr_range() const

@@ -116,6 +116,14 @@ public:
   /// The \p index -th declared modulation, as bits per symbol, ascending; 0 when out of range.
   unsigned depth3_declared_qm(unsigned index) const;
 
+  /// \brief The plane WIDTH (subcarriers) the bound bundle was exported for; 0 when it declares none.
+  ///
+  /// This arm assembles a fixed-width plane, and the runtime rejects an input whose width differs from the graph's,
+  /// so a bundle exported for another cell's bandwidth would fail on every reception -- a degradation an operator
+  /// reads as a broken model rather than as a model for another cell. The declaration is checked against the graph
+  /// at load time and against the arm's plane width at bind time (design section 19.162).
+  unsigned depth3_nsc() const;
+
   /// \brief Whether the bound bundle declares the SNR range its REPORTING heads were trained on.
   ///
   /// False means the bundle declares no domain, which is not the same as "every domain": the arm then cannot tell

@@ -238,6 +238,12 @@ public:
                          "the bundle's own declaration"
                        : "the classical estimator, except the post-equalisation noise, which the arm measures "
                          "itself in either mode (--pusch_reporting_source classic, the default)");
+        // THE GEOMETRY, likewise from the bundle: the plane width it was exported for. A model in a cell it was not
+        // trained for is the failure this line makes visible at startup instead of per reception (19.162).
+        if (arm.bound_nsc() != 0) {
+          fmt::print(stderr, "[pusch_receiver]   geometry: {} subcarrier(s) -- what the bound model was exported for\n",
+                     arm.bound_nsc());
+        }
         // THE CONTRACT, printed from the bundle's own declaration rather than from the command line. It is the
         // only way to see the declaration in the artifact that actually loaded: a conditioned bundle and a
         // per-modulation 256QAM bundle have the same 112-channel main head and the same file name shape, and
