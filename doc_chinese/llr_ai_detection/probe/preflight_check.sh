@@ -103,18 +103,30 @@ done
 [ -n "$leaked" ] && warn "these are set in this shell and will be STRIPPED by the flight script:$leaked" \
                  || ok "no capture / heavy-probe variables in this shell"
 
-echo "== the batch directories"
+echo "== the batch directory"
 # The runner stamps every log with a new timestamp, so re-flying into a directory that already holds a batch leaves both
 # copies and the verdict would average over four legs of an arm the operator believes has two. It refuses now, but the
 # cheapest place to catch it is here.
-for batch in r9r r9c; do
-  dir=$W/legs/$batch
-  if [ -d "$dir" ] && [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
-    bad "$dir already holds a batch ($(ls -1 "$dir"/*.log.stderr 2>/dev/null | wc -l | tr -d ' ') leg log(s)): fly the re-run into a NEW name (r10)"
+#
+# WHICH directory is checked is the one about to be flown into, not a fixed list: the first version hardcoded the two
+# batches of that day (`r9r`/`r9c`), so every later flight reported NO-GO for the crime of having finished them --
+# measured 2026-10-18, when a fresh batch was refused because the PREVIOUS ones still existed. `BATCH` (or the runner's
+# own `LEG_LOGDIR`) names the batch; with neither, the check is informational and says so.
+BATCH=${BATCH:-}
+TARGET=${LEG_LOGDIR:-${BATCH:+$W/legs/$BATCH}}
+if [ -n "$TARGET" ]; then
+  if [ -d "$TARGET" ] && [ -n "$(ls -A "$TARGET" 2>/dev/null)" ]; then
+    bad "$TARGET already holds a batch ($(ls -1 "$TARGET"/*.log.stderr 2>/dev/null | wc -l | tr -d ' ') leg log(s)): fly into a NEW name"
   else
-    ok "$dir is empty (a fresh batch)"
+    ok "$TARGET is empty (a fresh batch)"
   fi
-done
+else
+  ok "no batch named (set BATCH=<name> or LEG_LOGDIR=<dir> to have this check the target)"
+fi
+# The finished batches are listed rather than failed: they are the record, and their presence says nothing about the
+# batch about to fly.
+done_batches=$(ls -d "$W"/legs/*/ 2>/dev/null | wc -l | tr -d ' ')
+[ "$done_batches" != 0 ] && ok "$done_batches earlier batch director(ies) on disk, left as the record"
 
 echo "== the radio and the peer"
 [ "$(pgrep -x gnb | wc -l | tr -d ' ')" = 0 ] && ok "no gNB running" || bad "a gNB is already running: stop it first"
