@@ -81,9 +81,19 @@ iperf3 -c <手机IP> -R -t 120          # ★ 绝对不要加 -b
 ## 4. 回来后怎么出裁决
 
 ```bash
-doc_chinese/llr_ai_detection/probe/flight_verdict.py --legs doc_chinese/llr_ai_detection/work_tmp/legs/r9 \
-  --iperf "r9a1=?,r9b1=?,r9c1=?,r9c2=?,r9b2=?,r9a2=?" --batch r9
+# r9r（接收机对照）：把 ping RTT 一起给 —— 经典腿没有 [depth3-measure] 行，RTT 是唯一与接收机无关的可比性依据
+doc_chinese/llr_ai_detection/probe/flight_verdict.py --legs doc_chinese/llr_ai_detection/work_tmp/legs/r9r \
+  --iperf "r9ra1=?,r9rc1=?,r9rc2=?,r9ra2=?" --ping "r9ra1=?,r9rc1=?,r9rc2=?,r9ra2=?" --batch r9r
+
+# r9c（标定/R6）
+doc_chinese/llr_ai_detection/probe/flight_verdict.py --legs doc_chinese/llr_ai_detection/work_tmp/legs/r9c \
+  --iperf "r9ca1=?,r9cb1=?,r9cc1=?,r9cc2=?,r9cb2=?,r9ca2=?" --batch r9c
 ```
+
+★ **c 腿的读法**：它不是"候选方案"，而是"AI 接收机值不值得"的参照 ⇒ 裁决会写成
+**"AI arm is BETTER by X%"** 或 **"AI arm is NOT better"**，不写 PASS/FAIL（那会读反）。
+★ 若两腿的 SNR 依据不同、或某腿根本没有 SNR（经典腿就是这种），**可比性会自动改用 ping RTT**
+（容差 10%），并在输出里写明用的是什么口径。
 
 它给出每腿：经典 SNR（可比性依据）、公布 SINR（原始 vs 校准）、时延、退化，以及预登记裁决
 （**B ≥ A**、**B ≥ C**）。语料不在时自检脚本会跳过；改过脚本的话先跑

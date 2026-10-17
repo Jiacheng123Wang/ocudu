@@ -105,12 +105,21 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--legs", required=True)
     parser.add_argument("--iperf", required=True, help="throughput per leg, Mbit/s, as tag=value,...")
+    parser.add_argument("--ping", default="",
+                        help="mean ping RTT per leg, ms, as tag=value,... . It is the ONLY comparability basis that "
+                             "does not come from the receiver under test, and for a classical leg it can be the only "
+                             "one available at all: the PHY's per-reception `PUSCH: ... sinr=` line is not in every "
+                             "build, and a classical leg has no `[depth3-measure]` line.")
     parser.add_argument("--batch", default="", help="only legs whose tag starts with this")
+    parser.add_argument("--tolerance-rtt-pct", type=float, default=10.0,
+                        help="maximum relative ping-RTT difference between adjacent legs for the comparability check, "
+                             "used when the SNR bases cannot be compared")
     parser.add_argument("--tolerance-db", type=float, default=1.5,
                         help="maximum adjacent classical-SNR difference for the legs to count as comparable")
     args = parser.parse_args()
 
     throughput = parse_iperf(args.iperf)
+    rtt = parse_iperf(args.ping) if args.ping else {}
     rows = []
     # BY TIME, not by name: the ABBA order is the criterion's whole point, and an alphabetical sort puts a1, a2, b1,
     # b2 -- i.e. two legs of the same arm adjacent and the two A legs compared against each other. The leg's stamp is
@@ -130,7 +139,7 @@ def main():
             continue
         arm = LEG.match(tag).group(2).upper()
         row = read_leg(path)
-        row.update({"tag": tag, "arm": arm, "mbit": throughput.get(tag)})
+        row.update({"tag": tag, "arm": arm, "mbit": throughput.get(tag), "rtt": rtt.get(tag)})
         rows.append(row)
 
     if not rows:
@@ -138,7 +147,7 @@ def main():
         return 1
 
     arm_order = sorted({row["arm"] for row in rows})
-    print(f"{'leg':>8} {'arm':>4} {'Mbit/s':>8} {'comparability':>13} {'basis':>14} {'plane est':>10} "
+    print(f"{'leg':>8} {'arm':>4} {'Mbit/s':>8} {'rtt ms':>7} {'comparability':>13} {'basis':>14} {'plane est':>10} "
           f"{'published':>18} {'degr':>5} {'recv':>7} {'plane us':>9} {'fwd us':>7} {'deliv us':>9}")
     print("    (timings and the published SINR are medians over EVERY [depth3-*] line in the leg: the pools run one arm"
           " per thread, so a leg's log holds several series)")
@@ -148,6 +157,7 @@ def main():
             raw, cal = row["published"]
             published = f"{raw:.2f} -> {cal:.2f} ({row['calibration']})"
         print(f"{row['tag']:>8} {row['arm']:>4} {row['mbit'] if row['mbit'] is not None else float('nan'):>8.2f} "
+              f"{row['rtt'] if row.get('rtt') is not None else float('nan'):>7.1f} "
               f"{row['classic_snr'] if row['classic_snr'] is not None else float('nan'):>13.2f} "
               f"{row['classic_source']:>14} "
               f"{row['plane_estimate'] if row['plane_estimate'] is not None else float('nan'):>10.2f} "
@@ -156,22 +166,41 @@ def main():
               f"{row['forward'] if row['forward'] else 0:>7} {row['deliver'] if row['deliver'] else 0:>9}")
 
     print()
-    # COMPARABILITY: the classical estimator's SNR, which neither reporting source changes.
-    classic_ok = True
+    # COMPARABILITY, and which metric it uses is decided by what the legs actually carry:
+    #   * every leg has an estimator SNR of the SAME kind  -> use it (dB, the tolerance is in dB);
+    #   * otherwise every leg has a ping RTT               -> use it (ms, the tolerance is a ratio);
+    #   * otherwise                                        -> say the batch cannot be certified.
+    # A classical leg can fall in the second case on its own: it has no `[depth3-measure]` line, and the PHY's
+    # per-reception `PUSCH: ... sinr=` line is not present in every build.
+    sources = {row["classic_source"] for row in rows}
+    have_rtt = all(row["rtt"] is not None for row in rows)
+    use_metric = None
+    if len(sources) == 1 and "none" not in sources:
+        use_metric = "snr"
+    elif have_rtt:
+        use_metric = "rtt"
+    print(f"  comparability metric: {use_metric or 'NONE AVAILABLE'}  "
+          f"(leg sources: {', '.join(sorted(sources))}; ping RTT for every leg: {'yes' if have_rtt else 'no'})")
+    classic_ok = use_metric is not None
     for before, after in zip(rows, rows[1:]):
-        if before["classic_snr"] is None or after["classic_snr"] is None:
+        if use_metric == "snr":
+            first, second = before["classic_snr"], after["classic_snr"]
+            delta = abs(first - second)
+            limit, unit = args.tolerance_db, "dB"
+        elif use_metric == "rtt":
+            first, second = before["rtt"], after["rtt"]
+            delta = abs(first - second) / max(min(first, second), 1e-9) * 100.0
+            limit, unit = args.tolerance_rtt_pct, "%"
+        else:
+            print(f"  comparability {before['tag']:>6} vs {after['tag']:<6}: no metric available")
             continue
-        delta = abs(before["classic_snr"] - after["classic_snr"])
         flags = []
-        if delta > args.tolerance_db:
+        if delta > limit:
             flags.append("NOT COMPARABLE")
             classic_ok = False
-        # A basis that differs between the two legs is the circularity this script exists to avoid: the AI legs'
-        # basis is the estimator's PRE-equalisation SNR (sampled), while a classical leg publishes a POST-equalisation
-        # value. They are close but not the same quantity, so the reading is labelled rather than trusted.
-        if before["classic_source"] != after["classic_source"]:
+        if use_metric == "snr" and before["classic_source"] != after["classic_source"]:
             flags.append("different basis: " + before["classic_source"] + " vs " + after["classic_source"])
-        print(f"  comparability {before['tag']:>6} vs {after['tag']:<6} differs {delta:5.2f} dB  "
+        print(f"  comparability {before['tag']:>6} vs {after['tag']:<6} differs {delta:5.2f} {unit}  "
               f"{'ok' if not flags else '; '.join(flags)}")
     by_arm = collections.defaultdict(list)
     for row in rows:
@@ -196,10 +225,19 @@ def main():
         reference = statistics.mean(by_arm["A"])
         value = statistics.mean(by_arm[candidate])
         change = 100.0 * (value - reference) / reference
-        verdict = "PASS" if value >= reference else "FAIL"
         comparability = "conditions matched" if classic_ok else "CONDITIONS NOT MATCHED, the verdict does not count"
-        print(f"  {candidate} vs A: {value:.2f} vs {reference:.2f} Mbit/s = {change:+.1f}%  -> {verdict} "
-              f"({comparability})   [{meanings.get(candidate, 'no pre-registered meaning')}]")
+        if candidate == "C":
+            # The classical chain is not a candidate to adopt, it is the REFERENCE POINT for "is the AI receiver
+            # worth it". A classical leg BELOW the AI arm is the good outcome, so a PASS/FAIL word would read
+            # backwards; what the reader needs is which side is better and by how much.
+            reading = ("AI arm is BETTER by " if change < 0 else "AI arm is NOT better (classical is above by ") + \
+                      f"{abs(change):.1f}%" + ("" if change < 0 else ")")
+            print(f"  {candidate} vs A: {value:.2f} vs {reference:.2f} Mbit/s = {change:+.1f}%  -> {reading} "
+                  f"({comparability})")
+        else:
+            verdict = "PASS" if value >= reference else "FAIL"
+            print(f"  {candidate} vs A: {value:.2f} vs {reference:.2f} Mbit/s = {change:+.1f}%  -> {verdict} "
+                  f"({comparability})   [{meanings.get(candidate, 'no pre-registered meaning')}]")
     if not args.iperf:
         return 0
     return 0

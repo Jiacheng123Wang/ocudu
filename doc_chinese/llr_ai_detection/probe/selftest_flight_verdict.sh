@@ -52,5 +52,20 @@ check_in "23.08 -> 26.31 (APPLIED)" "$fixture_out" "publication column: raw 23.0
 check_in "26.00" "$fixture_out" "comparability from the measure line"
 check_in "1079" "$fixture_out" "forward p50 parsed from the timing line"
 
+# A THIRD fixture: the receiver-contrast batch -- an AI leg and a CLASSICAL leg, which has no `[depth3-measure]` line
+# at all and, in a build without the PHY's per-reception `PUSCH: ... sinr=` line, no SNR basis either. The comparability
+# then has to fall back to ping RTT, and the classical arm has to be READ rather than PASS/FAILed.
+MIXED=$(mktemp -d -t verdict_mixed_XXXXXX)
+mkdir -p "$MIXED/legs"
+printf '%s\n' '[depth3-measure] reception 1 (Qm=8 256QAM) over 612 pilot RE(s): epre net=-2.58 classic=-2.58 dB | rsrp net=-2.55 classic=-2.61 dB | snr net=21.92 classic=26.00 dB | noise net=8.9879e-04 classic=6.9088e-04 residual=4.0276e-03 plane_units=2.0198e-03 (570 residual(s)) | snr plane-only=23.95 dB' > "$MIXED/legs/gnb_gpu_r9a1_1017_1200.log.stderr"
+: > "$MIXED/legs/gnb_gpu_r9a1_1017_1200.log"
+: > "$MIXED/legs/gnb_gpu_r9c1_1017_1205.log.stderr"
+: > "$MIXED/legs/gnb_gpu_r9c1_1017_1205.log"
+mixed_out=$($PY "$HERE/flight_verdict.py" --legs "$MIXED/legs" --iperf "r9a1=10.9,r9c1=6.2" \
+              --ping "r9a1=34.6,r9c1=35.1" --batch r9 2>&1)
+rm -rf "$MIXED"
+check_in "comparability metric: rtt" "$mixed_out" "mixed batch falls back to the ping RTT basis"
+check_in "AI arm is BETTER by 43.1%" "$mixed_out" "the classical arm is READ as a reference, not PASS/FAILed"
+
 [ "$fail" = 0 ] && echo "SELFTEST PASS" || echo "SELFTEST FAIL ($fail)"
 exit "$fail"
