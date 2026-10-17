@@ -32,7 +32,7 @@ import sys
 MEASURE = re.compile(r"\[depth3-measure\] reception \d+ \(Qm=(\d+).*?snr net=(-?[\d.]+) classic=(-?[\d.]+) dB")
 PUBLISHED = re.compile(r"\[depth3-sinr\] (\d+) reception\(s\): PUBLISHED SINR raw p10 (-?[\d.]+) p50 (-?[\d.]+) "
                        r"p90 (-?[\d.]+) dB \| calibrated p10 (-?[\d.]+) p50 (-?[\d.]+) p90 (-?[\d.]+) dB \| "
-                       r"calibration (\w+)")
+                       r"calibration (not declared|APPLIED)")
 TIMING = re.compile(r"\[depth3-timing\] (\d+) forward\(s\).*?plane p50 (\d+).*?forward p50 (\d+).*?deliver p50 (\d+)")
 LEG = re.compile(r"([a-z0-9]*?)([a-c])(\d+)$")
 # The PHY logs every reception at INFO with the value the chain published, so a CLASSICAL leg -- which has no

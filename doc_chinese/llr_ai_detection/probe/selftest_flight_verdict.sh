@@ -32,5 +32,25 @@ check "arm A: 2 leg(s), mean 11.20 Mbit/s" "arm A mean = 11.20 Mbit/s"
 check "arm B: 2 leg(s), mean 9.79 Mbit/s" "arm B mean = 9.79 Mbit/s"
 check "-12.6%" "verdict = -12.6%"
 check "FAIL" "verdict = FAIL"
+# A SECOND fixture, synthetic and committed in the script itself: the real leg logs on disk predate the
+# `[depth3-sinr]` instrument, so without this the publication column -- the one number the flight exists to compare --
+# would be untested. The lines below are the arm's exact formats (taken from a 2100-reception soak), and the fixture
+# is rebuilt in a temp dir on every run so it cannot rot.
+FIXTURE=$(mktemp -d -t verdict_fixture_XXXXXX)
+mkdir -p "$FIXTURE/legs"
+cat > "$FIXTURE/legs/gnb_gpu_r9b1_1017_1200.log.stderr" <<'FIXTURE_EOF'
+[depth3-measure] reception 1 (Qm=8 256QAM) over 612 pilot RE(s): epre net=-2.58 classic=-2.58 dB | rsrp net=-2.55 classic=-2.61 dB | snr net=21.92 classic=26.00 dB | noise net=8.9879e-04 classic=6.9088e-04 residual=4.0276e-03 plane_units=2.0198e-03 (570 residual(s)) | snr plane-only=23.95 dB
+[depth3-sinr] 2000 reception(s): PUBLISHED SINR raw p10 23.08 p50 23.08 p90 23.08 dB | calibrated p10 26.31 p50 26.31 p90 26.31 dB | calibration APPLIED (this is the number the scheduler acts on)
+[depth3-timing] 2000 forward(s), microseconds: plane p50 39 p99 50 max 60 | forward p50 1079 p99 1200 max 1300 | deliver p50 112 p99 150 max 200 | predict p50 1050 p99 1150 max 1250 |
+FIXTURE_EOF
+fixture_out=$($PY "$HERE/flight_verdict.py" --legs "$FIXTURE/legs" --iperf "r9b1=9.6" --batch r9 2>&1)
+rm -rf "$FIXTURE"
+check_in() {
+  if echo "$2" | grep -qF -e "$1"; then printf '  PASS  %s\n' "$3"; else printf '  FAIL  %s (wanted "%s")\n' "$3" "$1"; fail=$((fail + 1)); fi
+}
+check_in "23.08 -> 26.31 (APPLIED)" "$fixture_out" "publication column: raw 23.08 -> calibrated 26.31 (APPLIED)"
+check_in "26.00" "$fixture_out" "comparability from the measure line"
+check_in "1079" "$fixture_out" "forward p50 parsed from the timing line"
+
 [ "$fail" = 0 ] && echo "SELFTEST PASS" || echo "SELFTEST FAIL ($fail)"
 exit "$fail"
