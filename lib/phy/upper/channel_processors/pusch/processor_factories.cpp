@@ -172,6 +172,7 @@ public:
                   .fallback_is_build_default  = config.pusch_receiver_model_is_build_default,
                   .slots                      = config.pusch_receiver_model_slots},
     reporting_source(config.pusch_reporting_source),
+    startup_grace_s(config.depth3_startup_grace_s),
     csi_sinr_calc_method(config.csi_sinr_calc_method)
   {
     if (depth3_kind == pusch_depth3_kind::ai_identity && depth3_models.fallback.empty()) {
@@ -205,7 +206,7 @@ public:
 
       dependencies->set_depth3(create_pusch_depth3_receiver(depth3_kind, dependencies->get_estimator(),
                                                             dependencies->get_demodulator(), depth3_models,
-                                                            reporting_source));
+                                                            reporting_source, startup_grace_s));
       return dependencies;
     });
 
@@ -345,6 +346,10 @@ private:
   pusch_depth3_model_paths                                                 depth3_models;
   /// R6's knob, carried to the arm unchanged: `classic` (the default) or `net`.
   std::string                                                             reporting_source = "classic";
+  /// Seconds after bind during which the depth-3 arm degrades every reception (see `du_low_config.h`). Held here as
+  /// well as in the arm because this is the layer that hands it over: a value parsed, translated and then dropped at
+  /// this seam is silent in every other way (measured 2026-10-18).
+  unsigned                                                                startup_grace_s = 0;
   channel_state_information::sinr_type                                     csi_sinr_calc_method;
 };
 

@@ -217,6 +217,7 @@ public:
     noise_head(pusch_depth3_input_plane::NOF_SUBCARRIERS * pusch_depth3_input_plane::NOF_SYMBOLS),
     channel_head(pusch_depth3_input_plane::NOF_SUBCARRIERS * 2 * pusch_depth3_input_plane::NOF_SYMBOLS)
   {
+    fmt::print(stderr, "[pusch_receiver] AI depth-3: startup grace = {} s (0 = disabled)\n", startup_grace.count());
     if (startup_grace.count() > 0) {
       fmt::print(stderr,
                  "[pusch_receiver] AI depth-3: startup grace {} s: every reception degrades to the classical chain "
