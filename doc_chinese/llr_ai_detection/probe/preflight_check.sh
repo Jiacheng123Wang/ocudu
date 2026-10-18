@@ -115,8 +115,20 @@ echo "== the batch directory"
 BATCH=${BATCH:-}
 TARGET=${LEG_LOGDIR:-${BATCH:+$W/legs/$BATCH}}
 if [ -n "$TARGET" ]; then
-  if [ -d "$TARGET" ] && [ -n "$(ls -A "$TARGET" 2>/dev/null)" ]; then
-    bad "$TARGET already holds a batch ($(ls -1 "$TARGET"/*.log.stderr 2>/dev/null | wc -l | tr -d ' ') leg log(s)): fly into a NEW name"
+  # A BATCH IS A DIRECTORY AND A LEG IS A LABEL, so "the directory is not empty" only matters when the LEDGER for
+  # this very leg already exists. The first version demanded an empty directory, which refused the second leg of a
+  # batch that was being built leg by leg (measured 2026-10-18, flying o2b after o2a). With LEG_LABEL set the check
+  # is a duplicate-label test; without it the empty-directory rule still applies, because a new batch must start
+  # clean.
+  if [ -n "${LEG_LABEL:-}" ]; then
+    dup=$(ls -1 "$TARGET" 2>/dev/null | grep -c "_${LEG_LABEL}_" || true)
+    if [ "${dup:-0}" != 0 ]; then
+      bad "$TARGET already holds $dup log(s) for leg $LEG_LABEL: pick a new label"
+    else
+      ok "no leg named $LEG_LABEL in $TARGET ($(ls -1 "$TARGET"/*.log.stderr 2>/dev/null | wc -l | tr -d ' ') other leg(s) there, which is how a batch is built)"
+    fi
+  elif [ -d "$TARGET" ] && [ -n "$(ls -A "$TARGET" 2>/dev/null)" ]; then
+    bad "$TARGET already holds a batch ($(ls -1 "$TARGET"/*.log.stderr 2>/dev/null | wc -l | tr -d ' ') leg log(s)): fly into a NEW name, or set LEG_LABEL to add a leg to this batch"
   else
     ok "$TARGET is empty (a fresh batch)"
   fi
