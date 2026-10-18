@@ -31,9 +31,31 @@ CORPUS=$ROOT/doc_chinese/llr_ai_detection/work_tmp/corpus/attach
 
 LABEL=${1:-}
 if [ -z "$LABEL" ]; then
-  echo "usage: sudo -E bash $0 <leg-label>   (env: CAPTURE_DIR LEG_LOGDIR CONFIG BUDGET TAIL_S TIMEOUT_S)" >&2
+  echo "usage: sudo -E bash $0 <leg-label> [KEY=VALUE ...]" >&2
+  echo "  env or KEY=VALUE: CAPTURE_DIR LEG_LOGDIR CONFIG BUDGET TAIL_S TIMEOUT_S ARM MODEL" >&2
+  echo "  ARM=ai needs MODEL=<bundle.mlmodelc>; ARM defaults to classic" >&2
   exit 2
 fi
+shift
+# KEY=VALUE tail arguments, the same form run_leg.sh accepts. WITHOUT this, a command written as
+#   capture_attach.sh mylabel ARM=ai MODEL=x
+# sets NO variable at all -- the two words are POSITIONAL arguments and were silently discarded, so the
+# leg ran CLASSIC under a label that promised `ai` (measured 2026-10-18 18:42, leg attach-ai-c32w: the
+# phone attached three times and every counter looked healthy, because it WAS the classical chain).
+while [ $# -gt 0 ]; do
+  case "$1" in
+    ARM=*)         ARM=${1#*=} ;;
+    MODEL=*)       MODEL=${1#*=} ;;
+    CONFIG=*)      CONFIG=${1#*=} ;;
+    CAPTURE_DIR=*) CAPTURE_DIR=${1#*=} ;;
+    LEG_LOGDIR=*)  LEG_LOGDIR=${1#*=} ;;
+    BUDGET=*)      BUDGET=${1#*=} ;;
+    TAIL_S=*)      TAIL_S=${1#*=} ;;
+    TIMEOUT_S=*)   TIMEOUT_S=${1#*=} ;;
+    *) echo "$0: unknown argument '$1' (KEY=VALUE or a flag run_leg.sh takes)" >&2; exit 2 ;;
+  esac
+  shift
+done
 if [ "$(id -u)" != 0 ]; then
   echo "run me as root: sudo -E bash $0 $LABEL   (this script signals the gNB run_leg.sh starts)" >&2
   exit 2
@@ -66,6 +88,20 @@ if [ "$ARM" = "ai" ] && [ ! -d "$MODEL" ]; then
 fi
 ARM_ARGS=(--expert_phy.pusch_receiver_backend="$ARM")
 [ "$ARM" = "ai" ] && ARM_ARGS+=(--expert_phy.pusch_receiver_model="$MODEL")
+# A label is not a declaration (the same lesson the arm itself learned in 2026-10-16): a leg named
+# `attach-ai-...` that runs the classical chain is indistinguishable from a working AI capture in every
+# counter, and its healthy attach reads as "the AI mode is fine after all". Refuse the combination.
+case "$LABEL" in
+  *ai*) if [ "$ARM" != "ai" ]; then
+          echo "REFUSING: the label '$LABEL' promises an AI leg but ARM=$ARM - the leg would run the" >&2
+          echo "          classical chain and every counter would look healthy. Pass ARM=ai MODEL=<bundle>," >&2
+          echo "          or use a label without 'ai' in it." >&2
+          exit 2
+        fi ;;
+esac
+if [ "$ARM" = "classic" ] && [ -n "$MODEL" ]; then
+  echo "note: MODEL=$MODEL is ignored because ARM=classic" >&2
+fi
 
 if [ ! -f "$RUN_LEG" ]; then echo "missing $RUN_LEG" >&2; exit 2; fi
 if [ ! -f "$CONFIG" ]; then echo "CONFIG=$CONFIG is not a file" >&2; exit 2; fi
