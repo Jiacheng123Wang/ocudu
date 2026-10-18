@@ -67,15 +67,28 @@ fi
 mkdir -p "$CORPUS" 2>/dev/null || true
 
 LEG_PID=""
-STDOUT_LOG=""
 LOG=""
+# Send the leg ONE SIGINT and wait for it to go. If it does not, say so WITH the command that will,
+# because a silent 60 s wait is indistinguishable from a hang: measured 2026-10-18, the first attach
+# capture sat here while run_leg.sh (reparented to init) and the gNB kept running, and the operator had
+# no way to tell whether the Ctrl-C had done anything.
 stop_leg() {
   [ -n "$LEG_PID" ] || return 0
   kill -INT "$LEG_PID" 2>/dev/null || true
-  for _ in $(seq 1 600); do
-    kill -0 "$LEG_PID" 2>/dev/null || break
+  local waited=0
+  while kill -0 "$LEG_PID" 2>/dev/null && [ "$waited" -lt 600 ]; do
     sleep 0.1
+    waited=$((waited + 1))
   done
+  if kill -0 "$LEG_PID" 2>/dev/null; then
+    local gnb_pid
+    gnb_pid=$(pgrep -f -- "log.filename $LOG" 2>/dev/null | head -1)
+    echo >&2
+    echo "!! $((waited / 10))s after the SIGINT the leg is STILL RUNNING, so the capture is still filling." >&2
+    echo "   Stop it directly (ONE signal, the gNB's own handler):" >&2
+    echo "     sudo kill -INT ${gnb_pid:-<gnb pid>}" >&2
+    echo "   Then, if run_leg.sh itself lingers:  sudo kill -TERM $LEG_PID" >&2
+  fi
   LEG_PID=""
 }
 trap 'echo; echo "stopping the leg (Ctrl-C once, as the runbook says)..."; stop_leg; exit 130' INT TERM
@@ -97,11 +110,15 @@ env "LEG_CONFIG=$CONFIG" "LEG_LOGDIR=$LEG_LOGDIR" \
 LEG_PID=$!
 
 # ---- wait for the gNB, then for the phone ---------------------------------------------------------
+# The marker comes from the LOGGER file, not from `.log.stdout`: the gNB's stdout is a PIPE into the
+# leg's tee, so it is BLOCK-buffered and stays empty for minutes (measured 2026-10-18: the first attach
+# capture's `.log.stdout` was 0 bytes the whole leg, so a watcher bound to it never left this loop). The
+# logger writes through its own sink and flushes, and it carries the same line --
+# `[GNB     ] [I] ==== gNB started ===` (four '='; the pattern is a substring of it on purpose).
 printf 'waiting for the gNB to start'
 for _ in $(seq 1 600); do
-  STDOUT_LOG=$(ls -t "$LEG_LOGDIR"/gnb_gpu_"$LABEL"_*.log.stdout 2>/dev/null | head -1)
-  LOG=$(ls -t "$LEG_LOGDIR"/gnb_gpu_"$LABEL"_*.log 2>/dev/null | head -1)
-  if [ -n "$STDOUT_LOG" ] && grep -aq '=== gNB started ===' "$STDOUT_LOG" 2>/dev/null; then
+  LOG=$(ls -t "$LEG_LOGDIR"/gnb_gpu_"$LABEL"_*.log 2>/dev/null | grep -v '\.stdout$' | grep -v '\.stderr$' | head -1)
+  if [ -n "$LOG" ] && grep -aq 'gNB started ===' "$LOG" 2>/dev/null; then
     break
   fi
   kill -0 "$LEG_PID" 2>/dev/null || { echo; echo "the leg exited before the gNB started - see the log above." >&2; wait; exit 1; }
