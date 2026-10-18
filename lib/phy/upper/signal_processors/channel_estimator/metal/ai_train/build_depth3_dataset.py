@@ -202,7 +202,7 @@ def synthetic_channel(prefix, cfg, alloc, sub, grid):
 
 
 def candidate_units(index_path, tb_dir, corpus_dir, modulation, min_prb, min_slot,
-                    require_off_prb0, max_prb=0):
+                    require_off_prb0, max_prb=0, need_tb=True):
     """Select units that can be re-encoded.
 
     `build_synth_dataset` also rejected allocations starting at PRB 0 and early slots, because
@@ -219,13 +219,24 @@ def candidate_units(index_path, tb_dir, corpus_dir, modulation, min_prb, min_slo
         next(handle)
         for line in handle:
             fields = line.strip().split(",")
-            if len(fields) < 6 or fields[2] != "OK":
+            if len(fields) < 6:
+                continue
+            # The CRC column decides whether a REAL sample can be built (the payload is the dump).
+            # A synthetic sample brings its own payload, so a capture the reference chain could not
+            # decode is still a perfectly good CHANNEL -- and those are exactly the captures a
+            # failing cell is made of.
+            if need_tb and fields[2] != "OK":
                 continue
             name = fields[0]
             tb_path = os.path.join(tb_dir, name + ".bits")
             prefix = os.path.join(corpus_dir, name)
-            if not (os.path.exists(tb_path) and os.path.exists(prefix + ".bin")
-                    and os.path.exists(prefix + "_h.bin")):
+            if not (os.path.exists(prefix + ".bin") and os.path.exists(prefix + "_h.bin")):
+                continue
+            # A synthetic sample's payload is OUR choice, sized from the target code rate, so the
+            # dumped transport block is not needed at all -- and requiring it silently threw away
+            # every capture the reference chain could not decode, which is exactly the material
+            # that teaches a cell the reference chain fails in (design section 19.209(e)).
+            if need_tb and not os.path.exists(tb_path):
                 continue
             cfg = read_config(prefix)
             if cfg.get("modulation") != modulation:
@@ -305,7 +316,8 @@ def load_transport_block(tb_path, source):
     return bits
 
 
-def build_sample(name, prefix, cfg, alloc, tb_path, source, snr_db, seed, payload="capture"):
+def build_sample(name, prefix, cfg, alloc, tb_path, source, snr_db, seed, payload="capture",
+                 synth_rate=None):
     """Build one dataset sample, or raise ValueError with the reason it cannot be built."""
     modulation = cfg["modulation"]
     qm = MODULATION_BITS[modulation]
@@ -324,8 +336,19 @@ def build_sample(name, prefix, cfg, alloc, tb_path, source, snr_db, seed, payloa
     # coded-BLER criterion is meaningless on a block that cannot be decoded alone.
     rv = 0 if source == "synthetic" else int(cfg["rv"])
 
-    tb_bits = load_transport_block(tb_path, source)
-    if payload == "random":
+    if synth_rate is not None:
+        # THE POINT OF THIS MODE (design section 19.209(e)): the payload size -- hence the code
+        # rate -- is chosen by us, so the label does not depend on the reference chain having
+        # decoded this cell. The number of coded bits a window carries does not depend on the
+        # payload, so one probe with a tiny block measures it.
+        _, _, probe = SN.encode_symbols(np.zeros(8, dtype=np.uint8), len(alloc), NOF_SYMBOLS, qm,
+                                        dmrs_mask, int(cfg["n_id"]), int(cfg["rnti"]), rv,
+                                        return_bits=True)
+        nof_tb_bits = max(8, int(round(float(synth_rate) * probe.size)) // 8 * 8)
+        tb_bits = np.random.default_rng(seed).integers(0, 2, size=nof_tb_bits).astype(np.uint8)
+    else:
+        tb_bits = load_transport_block(tb_path, source)
+    if payload == "random" and synth_rate is None:
         # The synthetic route chooses its own payload, so the dump only supplies the size. The
         # bits are then exact by construction, which is the whole point of building the pair.
         tb_bits = np.random.default_rng(seed).integers(0, 2, size=tb_bits.size).astype(np.uint8)
@@ -611,6 +634,21 @@ def main():
     parser.add_argument("--require-off-prb0", action="store_true",
                         help="reject allocations starting at PRB 0. Costs five sixths of the "
                              "CRC-OK units; kept so the old selection can be reproduced.")
+    parser.add_argument("--synth-prb", type=int, default=0,
+                        help="SYNTHETIC only: build every sample on a window THIS many PRBs wide, "
+                             "instead of the capture's own allocation. The window is taken inside "
+                             "the capture's allocation, so the channel it is fitted from is really "
+                             "there. This is how a cell the corpus has none of -- a narrow, "
+                             "high-rate grant -- is manufactured from captures that have the "
+                             "channel but not the cell")
+    parser.add_argument("--synth-start-prb", type=int, default=-1,
+                        help="SYNTHETIC only: first PRB of the window (default: the capture's own "
+                             "first PRB, clamped so the window fits)")
+    parser.add_argument("--synth-rate", type=float, default=0.0,
+                        help="SYNTHETIC only: target code rate (0 = take the dumped block's size). "
+                             "The payload is then sized from the window's own coded-bit count, so "
+                             "the label is exact by construction and no transport-block dump, and "
+                             "no decodable reference reception, is needed")
     parser.add_argument("--max-units", type=int, default=0)
     parser.add_argument("--seed", type=int, default=20261013)
     parser.add_argument("--selfcheck", action="store_true")
@@ -622,8 +660,28 @@ def main():
     if missing:
         parser.error("missing required arguments: " + ", ".join("--" + m for m in missing))
 
-    units = candidate_units(args.units, args.tb, args.corpus, args.modulation, args.min_prb,
-                            args.min_slot, args.require_off_prb0, args.max_prb)
+    retarget = args.source == "synthetic" and args.synth_prb > 0
+    if (args.synth_prb or args.synth_start_prb >= 0 or args.synth_rate) and args.source != "synthetic":
+        parser.error("--synth-prb/--synth-start-prb/--synth-rate are SYNTHETIC only: the real "
+                     "source is the capture's own transmission")
+    if retarget and args.synth_rate <= 0.0:
+        parser.error("--synth-prb needs --synth-rate: a window on its own does not name a cell")
+    units = candidate_units(args.units, args.tb, args.corpus, args.modulation,
+                            1 if retarget else args.min_prb,
+                            args.min_slot, args.require_off_prb0,
+                            0 if retarget else args.max_prb,
+                            need_tb=not retarget)
+    if retarget:
+        # Keep only the captures whose own allocation can host the window: outside it there are no
+        # pilots to fit the channel from, so a sample built there would carry a channel nobody
+        # measured -- the failure mode this whole file exists to avoid.
+        kept = []
+        for unit in units:
+            alloc = unit[3]
+            if len(alloc) < args.synth_prb:
+                continue
+            kept.append(unit)
+        units = kept
     if args.max_units:
         units = units[:args.max_units]
     print(f"{len(units)} candidate units (CRC OK, {args.modulation}, contiguous allocation, "
@@ -638,13 +696,18 @@ def main():
         made = 0
         # One seed per unit, not per point: the synthetic payload then depends on the unit alone,
         # so re-encoding a large transport block is paid once instead of once per SNR.
+        if retarget:
+            start = alloc[0] if args.synth_start_prb < 0 else args.synth_start_prb
+            start = max(alloc[0], min(start, alloc[-1] - args.synth_prb + 1))
+            alloc = list(range(start, start + args.synth_prb))
         for point_index, snr in enumerate(points):
             try:
                 sample, _, _, _, _, _ = build_sample(name, prefix, cfg, alloc, tb_path,
                                                      args.source, snr,
                                                      args.seed + index * 17,
                                                      payload="random" if args.source == "synthetic"
-                                                     else "capture")
+                                                     else "capture",
+                                                     synth_rate=args.synth_rate if retarget else None)
             except (AssertionError, ValueError, np.linalg.LinAlgError) as error:
                 if snr is None or args.source == "synthetic":
                     skipped.append((name, str(error).split("\n")[0][:100]))
