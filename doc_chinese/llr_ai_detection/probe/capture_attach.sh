@@ -87,10 +87,13 @@ echo "   logs     : $LEG_LOGDIR/gnb_gpu_${LABEL}_*.log"
 echo "   receiver : classic (the arm this capture is recorded in)"
 echo
 
-sudo -E env "LEG_CONFIG=$CONFIG" "LEG_LOGDIR=$LEG_LOGDIR" \
-     "OCUDU_UL_DUMP=$CAPTURE_DIR/C" "OCUDU_UL_DUMP_COUNT=$BUDGET" \
-     bash "$RUN_LEG" gpu "$LABEL" \
-       --expert_phy.pusch_receiver_backend=classic &
+# No nested sudo: this script already IS root, and every process between it and run_leg.sh's INT trap is
+# one more thing a signal has to survive. run_leg.sh keeps SUDO_USER from the outer sudo, so its pre-flight
+# build still runs as the invoking user and cannot leave root-owned objects in build/.
+env "LEG_CONFIG=$CONFIG" "LEG_LOGDIR=$LEG_LOGDIR" \
+    "OCUDU_UL_DUMP=$CAPTURE_DIR/C" "OCUDU_UL_DUMP_COUNT=$BUDGET" \
+    bash "$RUN_LEG" gpu "$LABEL" \
+      --expert_phy.pusch_receiver_backend=classic &
 LEG_PID=$!
 
 # ---- wait for the gNB, then for the phone ---------------------------------------------------------
