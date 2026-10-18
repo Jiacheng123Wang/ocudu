@@ -52,7 +52,11 @@ xcrun coremlcompiler compile "$RUN/$LABEL.mlpackage" "$RUN" >/dev/null || {
 [ -d "$BUNDLE" ] || { echo "expected $BUNDLE after compilation" >&2; exit 1; }
 echo "  bundle: $BUNDLE"
 
-for pair in "attach-1019a:a1019a" "attach-ai2-c32w:ai22"; do
+# The THIRD set is the part of the failing leg that was NOT used to manufacture training data
+# (its first two thirds supplied the 2,7,11 synthetic samples). Without it, that leg's replay would
+# be in-sample -- see design section 19.211(e), which records the deviation from the pre-registered
+# sample set and why it was forced.
+for pair in "attach-1019a:a1019a" "attach-ai2-c32w:ai22" "../data/holdout/ai22:ai22h"; do
   dir=${pair%%:*}; tag=${pair##*:}
   echo "== replay $dir through $LABEL (serial)"
   "$PY" "$PROBE/attach_ab.py" --captures "$W/corpus/attach/$dir" --model "$BUNDLE" \
@@ -64,7 +68,16 @@ done
 echo
 echo "== criterion 1/3: decode per cell, regressions named"
 "$PY" "$PROBE/cell_report.py" \
-  --ab "$W/cmp/ab_a1019a_${LABEL}.csv" --ab "$W/cmp/ab_ai22_${LABEL}.csv" --label "$LABEL"
+  --ab "$W/cmp/ab_a1019a_${LABEL}.csv" --ab "$W/cmp/ab_ai22_${LABEL}.csv" \
+  --ab "$W/cmp/ab_ai22h_${LABEL}.csv" --label "$LABEL"
+
+echo
+echo "== the deployed bundle on the HELD-OUT slice, for a like-for-like comparison"
+"$PY" "$PROBE/attach_ab.py" --captures "$W/data/holdout/ai22" \
+  --model "$W/data/models/d3_modcond_ft.mlmodelc" --out "$W/cmp/ab_ai22h_ft.csv" \
+  > "$W/cmp/ab_ai22h_ft.txt" 2>&1 || echo "ft holdout replay failed" >&2
+"$PY" "$PROBE/cell_report.py" --ab "$W/cmp/ab_ai22h_ft.csv" --label "ft (held-out)" \
+  --min-n 1000 2>&1 | head -12
 
 echo
 echo "== criterion 2: bit agreement in the failing cell (fixed population: every reception of that cell"
