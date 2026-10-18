@@ -356,7 +356,16 @@ if [ ${#CLI_ARGS[@]} -ne 0 ]; then
   if ! "$ROOT/build/apps/gnb/gnb" -c "$CONFIG" "${CLI_ARGS[@]}" "${MODE_ARGS[@]+"${MODE_ARGS[@]}"}" \
         --expert_phy.phy_pipeline "$MODE" --dryrun >"$dryrun_log" 2>&1; then
     echo "REFUSING to run: the gNB rejected this argument set (dry run):" >&2
-    grep -E "not expected|Requires|error|Error" "$dryrun_log" | head -5 | sed 's/^/  /' >&2
+    # THE GREP IS A CONVENIENCE, NOT THE EVIDENCE: when it matches nothing the operator is left with a refusal
+    # and no reason at all, which is what happened on 2026-10-18 (the gNB failed without printing any of these
+    # words, and the only copy was a mktemp path that did not survive). So the tail of the log is ALWAYS shown.
+    hits=$(grep -E "not expected|Requires|error|Error|assert|Assert|terminate|what\(\)" "$dryrun_log" | head -5)
+    if [ -n "$hits" ]; then
+      printf '%s\n' "$hits" | sed 's/^/  /' >&2
+    else
+      echo "  (no diagnostic line matched; last 6 lines of the log follow)" >&2
+      tail -6 "$dryrun_log" | sed 's/^/  /' >&2
+    fi
     echo "  (dry run log: $dryrun_log)" >&2
     exit 2
   fi
