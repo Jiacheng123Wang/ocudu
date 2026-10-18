@@ -133,6 +133,8 @@ struct pusch_processor_factory_sw_configuration {
   /// reception, which is also what makes the two comparable. A value other than \c net leaves every published
   /// measurement exactly as it was.
   std::string pusch_reporting_source = "classic";
+  /// Seconds after bind during which the depth-3 arm does not compute (see du_low_config.h). 0 disables it.
+  unsigned depth3_startup_grace_s = 0;
 };
 
 std::shared_ptr<pusch_processor_factory>

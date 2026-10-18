@@ -152,11 +152,17 @@ struct pusch_depth3_model_paths {
 /// \param[in] reporting_source Which measurements the arm publishes: `classic` (the estimator's, the default)
 ///                        or `net` (the arm's reporting heads). R6; only the AI arm consults it, and only the
 ///                        `net` value changes what reaches the scheduler.
+/// \param[in] startup_grace_s Seconds after bind during which the arm does NOT compute and every reception
+///                        degrades to the classical chain. 0 disables it. It exists for ATTACH: the phone's
+///                        request/response exchange over SRB1 competes with the arm's occupancy of the lane
+///                        (measured 2026-10-18), and the bundle stays loaded and warm during the grace, so the
+///                        arm takes over without a cold start when it ends.
 std::unique_ptr<pusch_depth3_receiver> create_pusch_depth3_receiver(
     pusch_depth3_kind                  kind,
     dmrs_pusch_estimator&              estimator,
     pusch_demodulator&                 demodulator,
-    const pusch_depth3_model_paths&    models = {},
-    const std::string&                 reporting_source = "classic");
+    const pusch_depth3_model_paths&    models          = {},
+    const std::string&                 reporting_source = "classic",
+    unsigned                           startup_grace_s  = 0);
 
 } // namespace ocudu

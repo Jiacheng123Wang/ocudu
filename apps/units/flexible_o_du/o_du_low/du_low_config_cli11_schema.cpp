@@ -331,6 +331,19 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
       ->capture_default_str()
       ->check(CLI::IsMember({"classic", "net"}));
   add_option(app,
+             "--depth3_startup_grace_s",
+             expert_phy_params.depth3_startup_grace_s,
+             "Seconds after bind during which the AI depth-3 arm does NOT compute: every reception degrades to the "
+             "classical chain and is counted. 0 (the default) disables it.\n"
+             "WHY IT EXISTS: attach is a tight request/response exchange over SRB1, and the arm's occupancy of the "
+             "lane competes with the phone's ACK path. Measured 2026-10-18, a leg whose attach kept failing "
+             "retransmitted the 15-byte SRB1 packet 2841 times while PUCCH format-1 was detected in 15.7% of the "
+             "attach window, against 45.9% in a classical leg. The bundle is still loaded and kept warm during the "
+             "grace (the engine warms up at construction and runs a keep-alive prediction every two seconds), so "
+             "the arm takes over without a cold start when the grace ends.")
+      ->capture_default_str()
+      ->check(CLI::Range(0u, 3600u));
+  add_option(app,
              "--max_proc_delay",
              expert_phy_params.max_processing_delay_slots,
              "Maximum allowed DL processing delay in slots.")

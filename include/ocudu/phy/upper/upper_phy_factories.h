@@ -391,6 +391,8 @@ struct upper_phy_factory_configuration {
   /// R6. It is carried to the depth-3 arm unchanged; see the expert-phy knob of the same name for what `net`
   /// refuses to do (publish a measurement outside the SNR range the bound model declares).
   std::string pusch_reporting_source = "classic";
+  /// See du_low_config.h: seconds after bind during which the depth-3 arm degrades every reception.
+  unsigned depth3_startup_grace_s = 0;
   /// \brief MMSE estimator: fixed RMS delay spread (in microseconds) - v1 constant.
   /// \remark The estimation-backed provider arrives with the v2 statistics module.
   float pusch_channel_estimator_mmse_tau_rms_us = 0.37F;

@@ -88,6 +88,11 @@ struct du_low_unit_expert_upper_phy_config {
   ///       not have its measurements published there; the arm declines those receptions, counts them, and says so
   ///       (the domain guard, `design` section 19.115).
   std::string pusch_reporting_source = "classic";
+  /// Seconds after bind during which the depth-3 arm does NOT compute: every reception degrades to the classical
+  /// chain. It exists because attach is a tight request/response exchange over SRB1 and the arm's occupancy of the
+  /// lane competes with it (measured 2026-10-18: the failing leg retransmitted the 15-byte SRB1 packet 2841 times
+  /// with PUCCH format-1 detected in 15.7% of the attach window, against 45.9% in a classical leg). 0 disables it.
+  unsigned depth3_startup_grace_s = 0;
   /// \brief Sets the maximum allowed downlink processing delay in slots.
   ///
   /// Higher values increase the downlink processing pipeline length, which improves performance and stability for

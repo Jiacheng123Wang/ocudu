@@ -128,7 +128,11 @@ enum class depth3_degradation {
   /// scheduler (design sections 19.115, 19.117).
   measurement_outside_domain,
   forward_failed,
-  no_data_resource_elements
+  no_data_resource_elements,
+  /// The arm is inside its startup grace: it does not compute so that ATTACH (a tight request/response exchange
+  /// over SRB1) is not competing with the arm's occupancy of the lane. The bundle is loaded and warm throughout,
+  /// so this costs one timer comparison per reception and no cold start at the end of it.
+  startup_grace
 };
 
 const char* to_string(depth3_degradation value)
@@ -144,6 +148,8 @@ const char* to_string(depth3_degradation value)
       return "the reception is outside the SNR range the bound model's reporting heads were trained on";
     case depth3_degradation::forward_failed:
       return "the Core ML forward pass failed";
+    case depth3_degradation::startup_grace:
+      return "the arm is inside its startup grace window";
     case depth3_degradation::no_data_resource_elements:
       return "the allocation carries no data resource element";
   }
@@ -195,12 +201,15 @@ public:
                                         const std::string&                     fallback_path_,
                                         const std::array<std::string, 4>&      slot_paths_,
                                         bool                                   fallback_is_build_default_,
-                                        const std::string&                     reporting_source_) :
+                                        const std::string&                     reporting_source_,
+                                        unsigned                               startup_grace_s_) :
     estimator(estimator_),
     demodulator(demodulator_),
     fallback_path(fallback_path_),
     fallback_is_build_default(fallback_is_build_default_),
     reporting_source(reporting_source_),
+    startup_grace(std::chrono::seconds(startup_grace_s_)),
+    bound_at(std::chrono::steady_clock::now()),
     descrambler(create_pseudo_random_generator_sw_factory()->create()),
     input_plane(pusch_depth3_input_plane::NOF_SUBCARRIERS * pusch_depth3_input_plane::NOF_SYMBOLS *
                 pusch_depth3_input_plane::NOF_CHANNELS),
@@ -208,6 +217,14 @@ public:
     noise_head(pusch_depth3_input_plane::NOF_SUBCARRIERS * pusch_depth3_input_plane::NOF_SYMBOLS),
     channel_head(pusch_depth3_input_plane::NOF_SUBCARRIERS * 2 * pusch_depth3_input_plane::NOF_SYMBOLS)
   {
+    if (startup_grace.count() > 0) {
+      fmt::print(stderr,
+                 "[pusch_receiver] AI depth-3: startup grace {} s: every reception degrades to the classical chain "
+                 "until {} s after bind, then the arm takes over. The bundle is bound and kept warm meanwhile, so "
+                 "this is not a cold start; it is here because attach competes with the arm for the lane "
+                 "(--depth3_startup_grace_s, 0 disables)\n",
+                 startup_grace.count(), startup_grace.count());
+    }
     // EVERY MODEL IS BOUND HERE, at construction, and every outcome is kept and printed: an arm that was
     // SELECTED but cannot compute must never be reported as an AI result, and with more than one model the
     // question becomes per-modulation -- "which modulations does this run actually compute" is answered below
@@ -490,6 +507,25 @@ public:
                   const pusch_demodulator::configuration& config) override
   {
     last_forward_ok = false;
+    // THE STARTUP GRACE, checked before anything else and costing one comparison: attach is a tight
+    // request/response exchange over SRB1 and the arm's occupancy of the lane competes with the phone's ACK path
+    // (measured 2026-10-18: the failing leg retransmitted the 15-byte SRB1 packet 2841 times with PUCCH format-1
+    // detected in 15.7% of the attach window, against 45.9% in a classical leg). The bundle stays loaded and warm
+    // throughout -- the engine warms up at construction and runs a keep-alive prediction every two seconds -- so
+    // the arm starts computing, warm, the moment the window closes.
+    if (startup_grace.count() > 0) {
+      if ((std::chrono::steady_clock::now() - bound_at) < startup_grace) {
+        degrade(depth3_degradation::startup_grace, codeword_buffer, notifier, grid, est_results, config);
+        return;
+      }
+      if (!grace_ended_reported) {
+        grace_ended_reported = true;
+        fmt::print(stderr,
+                   "[pusch_receiver] AI depth-3: the {} s startup grace is over; the arm takes over from the "
+                   "classical chain from here (the bundle stayed loaded and warm throughout)\n",
+                   startup_grace.count());
+      }
+    }
     if (!any_model_bound) {
       degrade(depth3_degradation::forward_failed, codeword_buffer, notifier, grid, est_results, config);
       return;
@@ -1093,6 +1129,11 @@ private:
   /// `net` (this arm's reporting heads). It is a string here for the same reason it is one at the command line:
   /// the value is meant to be read back in a log.
   std::string                                       reporting_source = "classic";
+  /// How long after bind the arm refuses to compute (0 = never refuse). See `du_low_config.h` for the measurement
+  /// that motivated it: attach is where the arm's occupancy was observed to cost the phone its ACK path.
+  std::chrono::seconds                              startup_grace{};
+  std::chrono::steady_clock::time_point             bound_at{};
+  bool                                              grace_ended_reported = false;
   /// Whether the one-time note about an undeclared measurement domain has been printed for this arm.
   bool                                              warned_unverified_domain = false;
   /// The plane width the first bound model declared (for the startup line); 0 when undeclared or nothing bound.
@@ -1163,7 +1204,8 @@ std::unique_ptr<pusch_depth3_receiver> ocudu::create_pusch_depth3_receiver(
     dmrs_pusch_estimator&           estimator,
     pusch_demodulator&              demodulator,
     const pusch_depth3_model_paths& models,
-    const std::string&              reporting_source)
+    const std::string&              reporting_source,
+    unsigned                        startup_grace_s)
 {
   switch (kind) {
     case pusch_depth3_kind::classic:
@@ -1176,7 +1218,7 @@ std::unique_ptr<pusch_depth3_receiver> ocudu::create_pusch_depth3_receiver(
 #if defined(OCUDU_HAVE_DEPTH3_ENGINE)
       return std::make_unique<pusch_depth3_receiver_ai_network_impl>(
           estimator, demodulator, models.fallback, models.slots, models.fallback_is_build_default,
-          reporting_source);
+          reporting_source, startup_grace_s);
 #else
       // Built without the Core ML engine: the arm is selected and cannot run, which is exactly what the
       // identity arm exists to represent -- and it says so rather than pretending.

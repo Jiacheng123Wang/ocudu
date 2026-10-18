@@ -203,6 +203,7 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
   // network's heads when it says `net` -- and declines, counted and named, the receptions whose SNR lies outside
   // what the bound model's reporting heads were trained on (the domain guard; design section 19.115).
   upper_phy_factory_config.pusch_reporting_source = du_low.expert_phy_cfg.pusch_reporting_source;
+  upper_phy_factory_config.depth3_startup_grace_s  = du_low.expert_phy_cfg.depth3_startup_grace_s;
   if (du_low.expert_phy_cfg.pusch_reporting_source == "net") {
     // A startup line, because this is the knob that decides whether the scheduler acts on the network's numbers:
     // a leg log has to say which source produced them without the reader inferring it from a flag.

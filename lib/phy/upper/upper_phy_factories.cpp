@@ -980,6 +980,7 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
   // R6's reporting source, carried to the arm through the PUSCH factory. It is a pass-through like the four above:
   // the flexible O-DU has already refused `net` where no arm computes.
   pusch_config.pusch_reporting_source = config.pusch_reporting_source;
+  pusch_config.depth3_startup_grace_s = config.depth3_startup_grace_s;
 
   // :TODO: check these values in the future. Extract them to more public config.
   pusch_config.ch_estimate_dimensions.nof_symbols        = MAX_NSYMB_PER_SLOT;
