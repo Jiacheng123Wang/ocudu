@@ -49,6 +49,23 @@ LEG_LOGDIR=${LEG_LOGDIR:-$ROOT/doc_chinese/llr_ai_detection/work_tmp/legs/attach
 BUDGET=${BUDGET:-1500}
 TAIL_S=${TAIL_S:-5}
 TIMEOUT_S=${TIMEOUT_S:-240}
+# WHICH RECEIVER the leg runs. The capture is taken UPSTREAM of the depth-3 arm (pusch_processor_impl
+# records the grid before the arm is chosen), so the recorded grids are the same whichever arm ran --
+# but WHICH RECEPTIONS land in the file is not: a leg that cannot decode transmits again, and the
+# retransmissions are part of the picture. ARM=ai captures the attach THAT FAILS, which is the one whose
+# receptions the offline A/B needs. MODEL is the bundle that arm runs.
+ARM=${ARM:-classic}
+MODEL=${MODEL:-}
+if [ "$ARM" != "classic" ] && [ "$ARM" != "ai" ]; then
+  echo "ARM=$ARM is not classic|ai" >&2
+  exit 2
+fi
+if [ "$ARM" = "ai" ] && [ ! -d "$MODEL" ]; then
+  echo "ARM=ai needs MODEL=<bundle.mlmodelc> (a directory); MODEL='$MODEL' is not one." >&2
+  exit 2
+fi
+ARM_ARGS=(--expert_phy.pusch_receiver_backend="$ARM")
+[ "$ARM" = "ai" ] && ARM_ARGS+=(--expert_phy.pusch_receiver_model="$MODEL")
 
 if [ ! -f "$RUN_LEG" ]; then echo "missing $RUN_LEG" >&2; exit 2; fi
 if [ ! -f "$CONFIG" ]; then echo "CONFIG=$CONFIG is not a file" >&2; exit 2; fi
@@ -97,7 +114,7 @@ echo "== attach capture: label=$LABEL"
 echo "   config   : $CONFIG"
 echo "   capture  : $CAPTURE_DIR/C_<slot>_<rnti>{.txt,.bin}  (budget $BUDGET receptions)"
 echo "   logs     : $LEG_LOGDIR/gnb_gpu_${LABEL}_*.log"
-echo "   receiver : classic (the arm this capture is recorded in)"
+echo "   receiver : $ARM${MODEL:+ ($MODEL)}   (the capture itself is taken upstream of the arm)"
 echo
 
 # No nested sudo: this script already IS root, and every process between it and run_leg.sh's INT trap is
@@ -105,8 +122,7 @@ echo
 # build still runs as the invoking user and cannot leave root-owned objects in build/.
 env "LEG_CONFIG=$CONFIG" "LEG_LOGDIR=$LEG_LOGDIR" \
     "OCUDU_UL_DUMP=$CAPTURE_DIR/C" "OCUDU_UL_DUMP_COUNT=$BUDGET" \
-    bash "$RUN_LEG" gpu "$LABEL" \
-      --expert_phy.pusch_receiver_backend=classic &
+    bash "$RUN_LEG" gpu "$LABEL" "${ARM_ARGS[@]}" &
 LEG_PID=$!
 
 # ---- wait for the gNB, then for the phone ---------------------------------------------------------
@@ -180,6 +196,15 @@ if [ "$state" = "pdu" ] && [ "$COUNT" -gt 0 ]; then
   echo "   python3 $ROOT/doc_chinese/llr_ai_detection/probe/attach_ab.py \\"
   echo "     --captures $CAPTURE_DIR \\"
   echo "     --model $ROOT/doc_chinese/llr_ai_detection/work_tmp/data/models/d3_modcond_ft.mlmodelc"
+elif [ "$ARM" = "ai" ] && [ "$COUNT" -gt 0 ]; then
+  # The point of an ARM=ai capture is the attach THAT FAILS: its receptions are the ones no corpus
+  # contains, and the capture is taken upstream of the arm, so they replay through either arm.
+  echo " VERDICT: the attach did NOT complete, and that is the capture this experiment needs."
+  echo "   $COUNT reception(s) recorded from the failing attempt. Replay them (serial):"
+  echo "   python3 $ROOT/doc_chinese/llr_ai_detection/probe/attach_ab.py \\"
+  echo "     --captures $CAPTURE_DIR \\"
+  echo "     --model $ROOT/doc_chinese/llr_ai_detection/work_tmp/data/models/d3_modcond_ft.mlmodelc"
+  echo "   (a second pass with --model $MODEL compares the arm that FAILED with the two reference runs)"
 else
   echo " VERDICT: NOT USABLE - move it aside and capture again:"
   echo "   mv $CAPTURE_DIR ${CAPTURE_DIR}_failed_\$(date +%H%M)"
