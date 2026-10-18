@@ -35,10 +35,18 @@ ARM_MODEL_HINT = {
 }
 
 
-def pattern_of_leg(batch, label):
-    """The DM-RS pattern a leg ran, from the PDU of its uplink captures (None if none recorded)."""
+def pattern_of_leg(batch, label, short=""):
+    """The DM-RS pattern a leg ran, from the PDU of its uplink captures (None if none recorded).
+
+    Both layouts are looked for: the captures sit under a directory named after the leg label in some
+    flights, and under `pat/<short>/` in the one this tool was written for (batch c32dmrs), where the
+    capture prefix is per-leg but the directory is `pat/a1` and so on.
+    """
     roots = glob.glob(os.path.join(batch, "**", f"{label}*"), recursive=True) + \
             glob.glob(os.path.join(batch, f"{label}*"))
+    if short:
+        roots += glob.glob(os.path.join(batch, "pat", short)) + \
+                 glob.glob(os.path.join(batch, "**", "pat", short), recursive=True)
     seen = collections.Counter()
     for root in roots:
         if not os.path.isdir(root):
@@ -98,14 +106,19 @@ def main():
     print(f"  {'#':>2} {'arm':>4} {'rate Mbit/s':>12} {'pattern':>10} {'arm active':>11} {'calibration':>22}")
     per_arm = collections.defaultdict(list)
     patterns = collections.defaultdict(set)
+    # The label's ordinal counts PER ARM (a1 b1 c1 c2 b2 a2), not the flight position: the legs are
+    # named after the arm they are the first/second instance of, and matching on the position would
+    # look for `c4` and find nothing.
+    ordinal = collections.Counter()
     for index, (spec, letter) in enumerate(zip(args.rate, args.mirror), start=1):
+        ordinal[letter] += 1
         arm, value = spec.split("=", 1)
         if arm != letter:
             print(f"  leg {index}: --rate names arm '{arm}' but the mirror says '{letter}'", file=sys.stderr)
             return 2
-        label = f"{os.path.basename(args.batch.rstrip('/'))}-{letter}{index}"
+        label = f"{os.path.basename(args.batch.rstrip('/'))}-{letter}{ordinal[letter]}"
         facts = leg_stderr_facts(args.batch, label)
-        pattern = pattern_of_leg(args.batch, label)
+        pattern = pattern_of_leg(args.batch, label, f"{letter}{ordinal[letter]}")
         rate = float(value)
         per_arm[letter].append(rate)
         if pattern:
