@@ -662,7 +662,23 @@ def cli_sinr_cal(args):
         qm = int(qm_text)
         if qm not in D3.COND_QM_ORDER:
             raise SystemExit(f"--sinr-cal: {qm} is not one of the declared modulations {D3.COND_QM_ORDER}")
-        out[qm] = (float(slope_text), float(offset_text))
+        slope, offset = float(slope_text), float(offset_text)
+        # A SANITY BAND, because this string is applied to the PUBLISHED SINR (a positive number in dB) and a
+        # coefficient pair fitted in the NOISE space (negative dB) has its offset negated on the way here. Measured
+        # 2026-10-18: declaring the noise-space offset as-is turned a reception published at 17.07 dB into 20.83
+        # where it belonged at 18.20; the scheduler believed it, granted 64QAM for the UE's signalling, and attach
+        # failed on every leg that carried the declaration. The band cannot tell right from wrong by itself, so the
+        # transform is also PRINTED example by example below.
+        if not (0.0 < slope <= 3.0):
+            raise SystemExit(f"--sinr-cal: slope {slope} for Qm={qm} is outside (0, 3]; a slope is a dB-for-dB "
+                             f"correction and cannot be zero, negative or large")
+        if abs(offset) > 20.0:
+            raise SystemExit(f"--sinr-cal: offset {offset:+.3f} dB for Qm={qm} is larger than 20 dB; the published "
+                             f"SINR would move into a range nothing validated")
+        out[qm] = (slope, offset)
+        print(f"sinr-cal: the published SINR is corrected as {slope:.4f}*x {offset:+.4f}, i.e. "
+              f"10 dB -> {slope * 10.0 + offset:.2f} dB, 20 dB -> {slope * 20.0 + offset:.2f} dB, "
+              f"25 dB -> {slope * 25.0 + offset:.2f} dB (Qm={qm}; it multiplies the SINR, not the noise)")
     return out
 
 
