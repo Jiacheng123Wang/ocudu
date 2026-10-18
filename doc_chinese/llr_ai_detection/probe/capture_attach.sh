@@ -127,15 +127,23 @@ LOG=""
 # no way to tell whether the Ctrl-C had done anything.
 stop_leg() {
   [ -n "$LEG_PID" ] || return 0
+  # SIGNAL THE gNB DIRECTLY, not only through run_leg.sh. run_leg.sh's `trap stop_gnb INT` is a hop
+  # between this script and the process that has to stop, and that hop has now failed to deliver twice
+  # (2026-10-18: leg attach-1019a and leg attach-ai2-c32w both outlived the script's SIGINT -- run_leg.sh
+  # stayed alive and the gNB kept running, so the operator had to kill the gNB by hand). The gNB's own
+  # handler is what the runbook asks for anyway ("one Ctrl-C"), so send that one FIRST, and keep the
+  # signal to the leg so it can print its shutdown report afterwards.
+  local gnb_pid
+  gnb_pid=$(pgrep -f -- "log.filename $LOG" 2>/dev/null | head -1)
+  if [ -n "$gnb_pid" ]; then kill -INT "$gnb_pid" 2>/dev/null || true; fi
   kill -INT "$LEG_PID" 2>/dev/null || true
   local waited=0
-  while kill -0 "$LEG_PID" 2>/dev/null && [ "$waited" -lt 600 ]; do
+  while { kill -0 "$LEG_PID" 2>/dev/null || { [ -n "$gnb_pid" ] && kill -0 "$gnb_pid" 2>/dev/null; }; } \
+        && [ "$waited" -lt 600 ]; do
     sleep 0.1
     waited=$((waited + 1))
   done
-  if kill -0 "$LEG_PID" 2>/dev/null; then
-    local gnb_pid
-    gnb_pid=$(pgrep -f -- "log.filename $LOG" 2>/dev/null | head -1)
+  if kill -0 "$LEG_PID" 2>/dev/null || { [ -n "$gnb_pid" ] && kill -0 "$gnb_pid" 2>/dev/null; }; then
     echo >&2
     echo "!! $((waited / 10))s after the SIGINT the leg is STILL RUNNING, so the capture is still filling." >&2
     echo "   Stop it directly (ONE signal, the gNB's own handler):" >&2
