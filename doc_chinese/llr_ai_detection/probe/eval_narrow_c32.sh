@@ -56,10 +56,13 @@ echo "  bundle: $BUNDLE"
 # (its first two thirds supplied the 2,7,11 synthetic samples). Without it, that leg's replay would
 # be in-sample -- see design section 19.211(e), which records the deviation from the pre-registered
 # sample set and why it was forced.
-for pair in "attach-1019a:a1019a" "attach-ai2-c32w:ai22" "../data/holdout/ai22:ai22h"; do
+for pair in "attach-1019a:a1019a" "attach-ai2-c32w:ai22" "HOLDOUT:ai22h"; do
   dir=${pair%%:*}; tag=${pair##*:}
+  [ "$dir" = "HOLDOUT" ] && dir=$W/data/holdout/ai22
   echo "== replay $dir through $LABEL (serial)"
-  "$PY" "$PROBE/attach_ab.py" --captures "$W/corpus/attach/$dir" --model "$BUNDLE" \
+  captures_dir=$W/corpus/attach/$dir
+  [ -d "$captures_dir" ] || captures_dir=$dir
+  "$PY" "$PROBE/attach_ab.py" --captures "$captures_dir" --model "$BUNDLE" \
     --out "$W/cmp/ab_${tag}_${LABEL}.csv" > "$W/cmp/ab_${tag}_${LABEL}.txt" 2>&1 || {
       echo "replay of $dir failed" >&2; tail -5 "$W/cmp/ab_${tag}_${LABEL}.txt" >&2; exit 1; }
   grep -E "^AI arm COMPUTED|published SINR against|verdict flips on computed" "$W/cmp/ab_${tag}_${LABEL}.txt"
