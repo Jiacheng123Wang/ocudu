@@ -13777,7 +13777,35 @@ nvidia-smi                            # 应列出 RTX 3060 Ti
 | ★ 迁移后的默认产物自检 | ★ 2,11 抓包 313 个接收 ✓：★ 臂算 **305/313** ✓、★ 公布值中位 **−0.65 dB** ✓（★ 与迁移前**完全一致** ✓）|
 | ★ 回滚产物 | ★ 新路径下 `depth3_modcond_ft.mlmodelc` 在位 ✓ |
 
-★ 状态：★ 迁移完成 ✓、★ 引用已同步 ✓、★ 两个产物在新位置都能绑上 ✓、★ 默认与回滚路径都已验证 ✓。
+**(c) ★★ 第二阶段 ✓：★ 训练代码 ＋ 测试 ＋ 文档一起搬 ✓（★ 2026-10-19 21:00–21:20 ✓）**
+
+★ 用户要求 ✓：★ **CE 的 `ai_train/` 留在原地** ✓（★ 那是 AI-CE/helena 的训练代码 ✓），
+★ 而 `ai_signal_processors/depth3/` 下要有自己的 **`ai_train/`**（★ 训练代码 ＋ 设计/采集/训练/测试的简要总结 ✓）
+★ 和 **`test/`**（★ 测试代码 ✓），★ 并且测试要**注册进项目单元测试** ✓。★ 另：★ **新位置的文档用英文** ✓
+★（★ 中文文档只放在 `doc_chinese/` ✓）。
+
+| ★ 项 | ★ 结果 |
+|---|---|
+| ★ 训练代码迁移 ✓ | ★ **9 个**脚本 → `ai_train/` ✓（`depth3.py`、`depth3_loss.py`、`train_depth3.py`、`build_depth3_dataset.py`、`augment_depth3_dataset.py`、`merge_depth3_datasets.py`、`calibrate_depth3.py`、`eval_depth3.py`、`check_reporting_heads.py` ✓）|
+| ★ 共享工具 ✓ | ★ `dmrs`/`synth`/`dd_label`/`ldpc_decode`/`nr_ldpc` **仍留在 CE 树** ✓ ⇒ ★ 新增 **`depth3_paths.py`** ✓：★ **唯一**知道它们位置的地方 ✓，★ 九个脚本各加两行调用 ✓ |
+| ★ 引用同步 ✓ | ★ `probe/{ber_by_snr,refit_heads,truncate_depth,heads_vs_prescribed}.py`、★ `probe/{scan_arch,eval_narrow_c32}.sh` ✓ |
+| ★ 测试 ✓ | ★ `test/` 下**三个契约测试** ✓：★ `test_plane_contract.py`（★ 打包/解包往返、两图案 ✓）、★ `test_label_plane.py`（★ 标签散布/逆/掩码、**2,7,11 的数据 RE 必须更少** ✓）、★ `test_shipped_bundle_contract.py`（★ 默认 bundle 的契约与**校准符号** ✓、★ 回滚 bundle 不带校准 ✓）|
+| ★ 注册进 CTest ✓ | ★ `tests/unittests/ai_signal_processors/depth3/CMakeLists.txt` ✓，★ `SKIP_RETURN_CODE 77` ✓、★ `LABELS ai_signal_processors;depth3;python` ✓ |
+| ★ 文档 ✓ | ★ `depth3/README.md`、★ `ai_train/README.md`（★ 网络/数据/训练/导出校准/测试/fixtures 六个小节的简要总结 ✓）、★ `test/README.md`、★ 两个 bundle 的 README ✓ —— ★ **全部英文 ✓**（★ 实测 CJK 计数为 0 ✓）|
+
+**(d) ★★ 验证 ✓**
+
+| ★ 检查 | ★ 结果 |
+|---|---|
+| ★ 迁移后能否导入 ✓ | ★ 从**任意工作目录** `import depth3` 成功 ✓（★ `depth3_paths` 把 CE 树放上 `sys.path` ✓）|
+| ★ 迁移后能否训练 ✓ | ★ 从新路径跑 smoke ✓：★ 32 样本、★ **26 284 参数** ✓、★ 1 epoch 6 s、★ 无异常 ✓ |
+| ★ 契约测试 ✓ | ★ `ctest -R ai_signal_processors_depth3` ⇒ **3/3 通过** ✓（★ 0.16 s ✓；★ 2,11 864 个数据 RE ✓ vs 2,7,11 **792** ✓）|
+
+★★ **⇒ 现在的结构 ✓**：★ 产物 ＋ 训练代码 ＋ 契约测试 ＋ 文档都在 `lib/phy/upper/ai_signal_processors/depth3/` ✓；
+★ CE 的训练树与共享工具**原地未动** ✓；★ 重的活网工具仍在 `doc_chinese/llr_ai_detection/probe/` ✓（★ `test/README.md` 写明为什么 ✓）。
+
+★ 状态：★ 迁移完成 ✓、★ 引用已同步 ✓、★ 两个产物在新位置都能绑上 ✓、★ 默认与回滚路径都已验证 ✓、
+★ 契约测试已进 CTest ✓、★ 新位置文档全英文 ✓。
 ## 20. ★★★ R7 执行计划：**把经典估计器从 AI 路径里去掉**（★ 2026-10-17 冻结动机、方案、步骤、判据）
 
 > ★ 本节为**计划**，与 §19.194–§19.201 的测量记录分开：§19.x 记“发生了什么”，本节记“接下来怎么做、怎么判”。

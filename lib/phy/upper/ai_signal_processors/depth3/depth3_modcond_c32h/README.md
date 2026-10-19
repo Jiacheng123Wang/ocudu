@@ -1,46 +1,54 @@
-# d3_modcond_c32h — 调制条件化深度-3 接收机模型（N78 / 20 MHz / TDD / 30 kHz / 51 PRB）
+# d3_modcond_c32h — modulation-conditioned depth-3 receiver (N78 / 20 MHz / TDD / 30 kHz / 51 PRB)
 
-**本目录自 2026-10-19 起是默认模型**（`OCUDU_DEPTH3_DEFAULT_MODEL`）。它是 c32 宽度的重训版本，
-一次补上三个缺口：DM-RS 2,7,11 的覆盖、64QAM 上报头的动态范围、以及声明的 SINR 校准。
+**This is the default model since 2026-10-19** (`OCUDU_DEPTH3_DEFAULT_MODEL`). It is a c32-width retrain
+that closed three gaps at once: DM-RS 2,7,11 coverage, the 64QAM reporting head's dynamic range, and a
+declared SINR calibration.
 
-## 契约（产物内自声明，臂与引擎都会读）
+## Contract (declared inside the artefact; both the arm and the engine read it)
 
-| 键 | 值 | 含义 |
+| Key | Value | Meaning |
 |---|---|---|
-| `depth3_layout` | `modcond` | 调制条件化契约（Qm 作为 4 个 one-hot 平面通道） |
-| `depth3_qm_set` | `2,4,6,8` | 一个 bundle 服务四种调制 |
-| `depth3_head_stride` | `8` | 主头每符号 8 个通道 |
-| `depth3_snr_range` | `12.00,48.00` | 上报头训练区间（dB）；区间外整次回落经典并计数 |
-| `depth3_nsc` | `612` | 平面宽度 |
-| `depth3_sinr_cal` | `2:1.2678,-3.8298;4:1.0911,-1.3579;6:1.1251,-1.6222;8:1.2822,-4.0420` | 按 Qm 的公布 SINR 仿射校准 |
+| `depth3_layout` | `modcond` | Modulation-conditioned contract (Qm as 4 one-hot plane channels) |
+| `depth3_qm_set` | `2,4,6,8` | One bundle serves four modulations |
+| `depth3_head_stride` | `8` | 8 channels per symbol in the main head |
+| `depth3_snr_range` | `12.00,48.00` | Range the reporting heads were trained on (dB); outside it a reception falls back to the classical chain and is counted |
+| `depth3_nsc` | `612` | Plane width |
+| `depth3_sinr_cal` | `2:1.2678,-3.8298;4:1.0911,-1.3579;6:1.1251,-1.6222;8:1.2822,-4.0420` | Per-modulation affine calibration of the published SINR |
 
-输入 `[1, 612, 14, 16]`（12 契约通道 + 4 个 Qm one-hot），输出四个头（llr / post_eq_noise / ch_est / dmrs_noise）。
+Input `[1, 612, 14, 16]` (12 contract channels plus 4 Qm one-hot), four heads
+(`llr`, `post_eq_noise`, `ch_est`, `dmrs_noise`).
 
-## 训练
+## Training
 
-- 架构：`--modcond --layout spatial --blocks 18 --c-hid 32 --in-channels 12`，**26 284 参数**。
-- 数据：`d3_dmrs2711h_train.npz`，**30 777 样本**，包含
-  - 四种调制 × **两种 DM-RS 图案**（2,11 与 2,7,11）：2,7,11 上 64QAM 3 667、256QAM 1 680、16QAM 160、QPSK 144；
-  - **高 SNR 补充**（26/30/34 dB）：64QAM 2 700、16QAM 900 —— 上一版 64QAM 只到 24 dB，上报头因此在
-    24.4 dB 饱和（设计 §19.220(e)）。
-- 40 epoch、`--w-noise 0.3`、best val loss **0.11016**。
-- 校准：按 Qm 对**真值**拟合（合成样本自带 `snr_nominal` 与 `sigma2_over_r2`），残差 64QAM **1.89 dB**、
-  16QAM 1.30 dB（上一版 4.24 dB，斜率 1.27 ⇒ 压缩而非偏置）。
+- Architecture: `--modcond --layout spatial --blocks 18 --c-hid 32 --in-channels 12`, **26 284 parameters**.
+- Data: `d3_dmrs2711h_train.npz`, **30 777 samples**, containing
+  - four modulations × **two DM-RS patterns** (2,11 and 2,7,11): on 2,7,11 there are 3 667 64QAM, 1 680
+    256QAM, 160 16QAM and 144 QPSK samples;
+  - **high-SNR additions** (26/30/34 dB): 2 700 64QAM and 900 16QAM. The previous version's 64QAM data
+    stopped at 24 dB, which is why its reporting head saturated at 24.4 dB (§19.220(e)).
+- 40 epochs, `--w-noise 0.3`, best val loss **0.11016**.
+- Calibration fitted per modulation **against truth** (the synthetic units carry the SNR and the noise they
+  were built with): worst 64QAM residual **1.89 dB**, 16QAM 1.30 dB (the previous version: 4.24 dB with a
+  1.27 slope, i.e. compression rather than bias).
 
-## 验证（详见 `doc_chinese/llr_ai_detection/llr_ai_detection_design_and_implementation.md` §19.220–19.225）
+## Verification (sections 19.220–19.225 of the design document)
 
-- **格子**：630 条首传，经典链 81.4% → 臂 **91.0%**；目标格 64QAM 5–8 PRB 87.4% → **96.4%（+28）**；
-  **没有格子相对经典链回退**（代价记在 256QAM ≤4：81.0% → 73.8%）。
-- **比特一致性**：99.88%（最差 99.58%，门限 99.5）；留出切片（80 条从未训练）**98.8%** vs 经典 91.2%。
-- **上报量程**（对经典链，同接收）：64QAM sd 比 **0.95**、r **+0.92**；16QAM 1.02/+0.98；256QAM 0.78/+0.92。
-- **校准后公布值**：64QAM 29.06 vs 经典 29.20 dB；256QAM 30.44 vs 30.96；16QAM 19.11 vs 19.66。
-- **校准不动解出**：550 个接收、8 个格子，未校准与校准逐格相同。
-- **活网 A/B**（六对相邻）：五对为正，均值 +27.8%；12 条腿逐腿重放，臂解出更好 11 条、公布值差
-  ≤1.2 dB。
-- **时延**：`forward` p50 **436–786 µs**（c64 是 1 764–1 931）；ANE 上 441–448 µs（c64 926–942）。
+- **Cells**: 630 first transmissions, classical chain 81.4% → arm **91.0%**; target cell 64QAM 5–8 PRB
+  87.4% → **96.4% (+28)**; **no cell regresses against the classical chain** (the cost is recorded on 256QAM
+  at ≤4 PRB: 81.0% → 73.8%).
+- **Bit agreement**: 99.88% (worst 99.58%, floor 99.5); held-out slice (80 never-trained first
+  transmissions) **98.8%** against classical 91.2%.
+- **Publication range** against the classical chain on the same receptions: 64QAM sd ratio **0.95**, r
+  **+0.92**; 16QAM 1.02/+0.98; 256QAM 0.78/+0.92.
+- **Calibrated publication**: 64QAM 29.06 against classical 29.20 dB; 256QAM 30.44 against 30.96; 16QAM
+  19.11 against 19.66.
+- **The calibration does not move decoding**: 550 receptions, 8 cells, identical with and without it.
+- **Live A/B** (six adjacent pairs): five positive, mean +27.8%; over 12 legs' own captures replayed
+  through both arms, the arm decodes better on 11 and publishes within 1.2 dB of the classical chain.
+- **Latency**: `forward` p50 **436–786 µs** (c64: 1 764–1 931); on the ANE 441–448 µs (c64: 926–942).
 
-## 回滚
+## Rollback
 
-`../depth3_modcond_ft/` 仍在树里。回滚只需把 `apps/units/flexible_o_du/o_du_low/CMakeLists.txt` 的
-`OCUDU_DEPTH3_DEFAULT_MODEL` 指回它并重新配置——注意它是 **CACHE** 变量，已有 build 目录需要
-`cmake -U OCUDU_DEPTH3_DEFAULT_MODEL -S . -B build` 才会重新取默认值。
+`../depth3_modcond_ft/` is still in the tree. To roll back, point `OCUDU_DEPTH3_DEFAULT_MODEL` at it in
+`apps/units/flexible_o_du/o_du_low/CMakeLists.txt` and reconfigure — note it is a **cache** variable, so an
+existing build directory needs `cmake -U OCUDU_DEPTH3_DEFAULT_MODEL -S . -B build` to drop the old value.

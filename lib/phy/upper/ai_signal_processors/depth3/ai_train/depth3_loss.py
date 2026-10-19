@@ -25,6 +25,10 @@ criterion for them: the main head's coded BLER must not get worse with the auxil
 attached, which is an ablation for the training stage (R2.4), not something this module can check.
 """
 
+# The shared DSP utilities (dmrs, synth, labels, LDPC) still live in the AI-CE training tree; this is
+# the single place that knows where, so the import below is not a hidden path dependency.
+import depth3_paths
+depth3_paths.add_ce_shared()
 import argparse
 
 import numpy as np

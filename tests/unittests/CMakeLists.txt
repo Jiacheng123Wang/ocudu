@@ -6,6 +6,7 @@
 ADD_CXX_COMPILER_FLAG_IF_AVAILABLE(-Wno-deprecated HAVE_NO_DEPRECATED)
 
 add_subdirectory(adt)
+add_subdirectory(ai_signal_processors)
 add_subdirectory(apps)
 add_subdirectory(asn1)
 add_subdirectory(cu_cp)

@@ -1,16 +1,25 @@
-# depth3 — 深度-3 接收机的模型产物
+# depth3 — models and training code for the depth-3 receiver
 
-深度-3 接收机把**信道估计（CE）、均衡（EQ）、解映射（DEMOD）作为一个整体**处理，所以它的模型产物
-放在这里，而不是放在 `signal_processors/channel_estimator/metal/ai_assets/` 下面 —— 后者是**经典**
-信道估计器的产物目录（`helena_*`），二者不是同一条链。
+The depth-3 receiver treats **channel estimation, equalisation and demapping as one unit**, so its models
+and training code live here rather than under the classical channel estimator's tree. The neighbouring
+`signal_processors/channel_estimator/metal/ai_assets/` directory belongs to the *classical* estimator and
+holds its `helena_*` models; the two chains are not the same thing.
 
-（2026-10-19 由 `signal_processors/channel_estimator/metal/ai_assets/depth3_*` 迁移至此，路径引用同步更新。）
+(Moved here on 2026-10-19 from `signal_processors/channel_estimator/metal/ai_assets/depth3_*`, with every
+path reference updated. Chinese design records stay in `doc_chinese/llr_ai_detection/`; this tree's
+documentation is English.)
 
-| 目录 | 角色 | 契约要点 |
-|---|---|---|
-| `depth3_modcond_c32h/` | **默认模型**（2026-10-19 起，`OCUDU_DEPTH3_DEFAULT_MODEL`）| 26 284 参数、c32、16 通道输入、含声明的 SINR 校准 |
-| `depth3_modcond_ft/` | 上一代默认（c64，89 420 参数），保留用于回滚与 A/B | 无校准声明 |
+| Path | Role |
+|---|---|
+| `depth3_modcond_c32h/` | **Default model** since 2026-10-19 (`OCUDU_DEPTH3_DEFAULT_MODEL`): 26 284 parameters, c32 width, 16 input channels, declared SINR calibration |
+| `depth3_modcond_ft/` | Previous default (c64, 89 420 parameters), kept for rollback and A/B |
+| `ai_train/` | The training, data and calibration code, plus a design/data/training/testing summary |
+| `test/` | The contract tests, registered in the project's unit-test suite via CTest |
 
-默认值在 `apps/units/flexible_o_du/o_du_low/CMakeLists.txt` 的 `OCUDU_DEPTH3_DEFAULT_MODEL` 里；
-它是 **CACHE** 变量，切换后已有的 build 目录需要 `cmake -U OCUDU_DEPTH3_DEFAULT_MODEL -S . -B build`
-才会重新取值。两个 bundle 都能用 `--expert_phy.pusch_receiver_model=<路径>` 直接指定，无需改默认。
+The default is set in `apps/units/flexible_o_du/o_du_low/CMakeLists.txt`
+(`OCUDU_DEPTH3_DEFAULT_MODEL`). It is a **cache variable**: an existing build directory keeps the old
+path until it is reconfigured with `cmake -U OCUDU_DEPTH3_DEFAULT_MODEL -S . -B build`. Either bundle can
+be selected per run with `--expert_phy.pusch_receiver_model=<path>` without touching the default.
+
+Authoritative design record: `doc_chinese/llr_ai_detection/llr_ai_detection_design_and_implementation.md`
+(the §19.2xx series) and `doc_chinese/llr_ai_detection/model_network_design.md`.

@@ -45,6 +45,10 @@ Two conventions are silent failure modes, so they are stated here and asserted i
   data the DM-RS is 3 dB above the data, so the scaling is 1.413 and the raw `y/x` is 3 dB high.
 """
 
+# The shared DSP utilities (dmrs, synth, labels, LDPC) still live in the AI-CE training tree; this is
+# the single place that knows where, so the import below is not a hidden path dependency.
+import depth3_paths
+depth3_paths.add_ce_shared()
 import argparse
 
 import numpy as np

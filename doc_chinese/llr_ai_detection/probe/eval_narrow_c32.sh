@@ -21,7 +21,10 @@ set -u -o pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 PY=~/ai_ce_work/venv/bin/python
-TRAIN=$ROOT/lib/phy/upper/signal_processors/channel_estimator/metal/ai_train/train_depth3.py
+# The depth-3 training tree moved to ai_signal_processors/depth3/ai_train on 2026-10-19 (design section
+# 19.226): the arm is CE+EQ+DEMOD in one unit, so its training code and bundles are not the channel
+# estimator's. The AI-CE tree keeps its own ai_train for the helena work.
+TRAIN=$ROOT/lib/phy/upper/ai_signal_processors/depth3/ai_train/train_depth3.py
 PROBE=$ROOT/doc_chinese/llr_ai_detection/probe
 W=$ROOT/doc_chinese/llr_ai_detection/work_tmp
 

@@ -10,7 +10,7 @@
 # Usage: scan_arch.sh "<c_hid> <blocks>" ...      e.g.  scan_arch.sh "64 18" "48 18" "64 0"
 set -u
 W=/Users/jiachengwang/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp
-P=/Users/jiachengwang/dev/ocudu/lib/phy/upper/signal_processors/channel_estimator/metal/ai_train
+P=/Users/jiachengwang/dev/ocudu/lib/phy/upper/ai_signal_processors/depth3/ai_train
 PY=$HOME/ai_ce_work/venv/bin/python
 G=$W/data/probe_graphs
 CAP=$W/corpus/aillr_256qam_ai_s1/C_7_17925
