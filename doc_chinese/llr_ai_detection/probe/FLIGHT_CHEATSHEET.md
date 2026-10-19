@@ -253,3 +253,19 @@ grep "reception DEGRADED" <leg>.log.stderr | wc -l
 Verdict rule, registered before the flight: three adjacent pairs, all positive => the earlier criterion
 is confirmed with six pairs in total; any pair negative => record it and do not adopt. The drift-agnostic
 conservative rule is expected to fail again on a drifting batch and is not the criterion.
+
+After the batch, the channel is divided out per leg (this is the part that answers the last batch's
+objection, and it is already validated on `d1`/`c5`):
+
+```bash
+bash doc_chinese/llr_ai_detection/probe/leg_replay.sh <batch> \
+  doc_chinese/llr_ai_detection/work_tmp/data/runs/d3_dmrs2711h_c32/d3_dmrs2711h_c32_cal.mlmodelc \
+  d1 c5 d2 c6 d3 c7 d4 c8 d5 c9 d6 c10
+```
+
+Each leg's own 60 captures are replayed through BOTH arms, so the classical publication median becomes a
+channel measure that does not depend on what ran live, and each arm's decode is measured on identical
+signals. On the last batch this immediately showed what the live numbers could not: `d1` ran on a channel
+6.2 dB better than `c5` (classical publication 33.73 against 27.50 dB), so that pair's +63% was mostly
+channel; and on both legs' own captures the calibrated arm published within 0.1 dB of the classical chain
+(+0.08 / -0.06 dB), while decoding 68.8% against 56.2% and 50.0% against 44.7%.
