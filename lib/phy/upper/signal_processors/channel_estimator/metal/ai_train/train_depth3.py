@@ -741,6 +741,10 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--max-train", type=int, default=0, help="cap the training samples")
     parser.add_argument("--max-val", type=int, default=64)
+    parser.add_argument("--jit", action="store_true",
+                        help="compile the training step with XLA. TRAINING ONLY -- the bundle is exported "
+                             "from the Keras layers and the weights, so this cannot change what the ANE "
+                             "runs (design section 19.218)")
     parser.add_argument("--target", choices=("coded", "genie"), default="coded",
                         help="'coded' is the contract's task. 'genie' replaces the label with the "
                              "hard decisions a receiver with the true channel would make, which "
@@ -888,7 +892,11 @@ def main():
     weights = {"llr": args.w_llr, "ch_est": args.w_ch, "post_eq_noise": args.w_noise,
                "dmrs_noise": args.w_noise}
 
-    @tf.function
+    # XLA is a TRAINING choice and cannot reach the deployed graph: the bundle is exported from the Keras
+    # layer structure and the trained weights, so compiling the step changes nothing about what the ANE
+    # runs (design section 19.218). It is here because the step is latency-bound on small ops, which is
+    # exactly what a fused compilation can cut.
+    @tf.function(jit_compile=bool(args.jit))
     def step(x, targets, training):
         with tf.GradientTape() as tape:
             outputs = model(x, training=training)
