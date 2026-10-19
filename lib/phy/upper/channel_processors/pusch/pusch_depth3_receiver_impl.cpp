@@ -653,9 +653,14 @@ public:
                                                              0.0F,
                                                              0.0F,
                                                              0.0F);
-      const float plane_snr_db = (plane_only.residual_snr_lin > 0.0F)
+      gate_history.note(plane_only);
+      // The FILTERED value is what the gate decides on once it has warmed up; before that it accepts, so the
+      // first receptions of a leg are never refused on an estimate that has not seen enough pilots (19.237).
+      const bool  warm         = gate_history.warm();
+      const float instant_db   = (plane_only.residual_snr_lin > 0.0F)
                                      ? convert_power_to_dB(plane_only.residual_snr_lin)
                                      : -std::numeric_limits<float>::infinity();
+      const float plane_snr_db = warm ? gate_history.snr_db() : instant_db;
       // THE OFFSET BETWEEN THE TWO MEASURES, printed on the same sampled cadence as the other instruments.
       // The declared range was fitted against the estimator's SNR, so if the plane's residual sits at a
       // different level, the same numbers mean different things and the gate's boundary moves with it. S2
@@ -665,17 +670,18 @@ public:
         const unsigned port    = config.rx_ports.empty() ? 0 : config.rx_ports.front();
         const float    est_db  = convert_power_to_dB(est_results.get_snr(port));
         fmt::print(stderr,
-                   "[depth3-gate] {} reception(s): plane residual {:.2f} dB, estimator {:.2f} dB, "
-                   "offset {:+.2f} dB, declared {:.2f} to {:.2f} dB\n",
+                   "[depth3-gate] {} reception(s): plane residual {:.2f} dB (filtered {:.2f} dB over {:.0f} "
+                   "pilot(s), {}), estimator {:.2f} dB, declared {:.2f} to {:.2f} dB\n",
                    gate_samples,
-                   plane_snr_db,
+                   instant_db,
+                   warm ? gate_history.snr_db() : instant_db,
+                   gate_history.weight_sum,
+                   warm ? "warm" : "cold: accepted",
                    est_db,
-                   plane_snr_db - est_db,
                    domain_by_qm[qm].min_db,
                    domain_by_qm[qm].max_db);
       }
-      if ((plane_only.nof_pilot_re == 0) || (plane_snr_db < domain_by_qm[qm].min_db) ||
-          (plane_snr_db > domain_by_qm[qm].max_db)) {
+      if (warm && ((plane_snr_db < domain_by_qm[qm].min_db) || (plane_snr_db > domain_by_qm[qm].max_db))) {
         char detail[224];
         std::snprintf(detail, sizeof(detail),
                       "the plane's own residual measures %.2f dB and the bundle declares %.2f to %.2f dB "
@@ -1215,6 +1221,42 @@ private:
   std::string                                       domain_gate = "estimator";
   /// Receptions the plane-based gate has measured, for its sampled report.
   unsigned                                          gate_samples = 0;
+  /// \brief The gate's time filter: the reported quantity is a SLOW variable, so a narrow allocation is judged
+  /// on the pilots the arm has seen over the recent past rather than on its own few resource elements.
+  ///
+  /// WHY IT EXISTS (design section 19.237). The plane residual needs enough pilots to be trustworthy: with three
+  /// or four PRBs it read 29.45 dB where two independent classical measures agreed on about 8 dB, because a
+  /// second-order frequency difference over a flat channel finds no noise. Falling back to the classical
+  /// estimator there would defeat R7, and the reported quantity does not change much between slots -- so the
+  /// arm averages the residual and the pilot power over time instead, which is exactly the timescale on which
+  /// the number it is deciding about is defined.
+  ///
+  /// Weighted by pilot count, so a narrow reception contributes what it measured and no more. THE COLD-START
+  /// RULE is deliberate: until enough pilots have been seen the gate ACCEPTS, because the alternative is to
+  /// refuse the first receptions of every leg on an estimate that has not warmed up -- and an operating point
+  /// that is out of range persists over many slots, which is the same argument the filter rests on.
+  struct gate_history {
+    static constexpr double  DECAY          = 0.98;   // per reception: ~50 receptions of memory
+    static constexpr double  MIN_PILOTS     = 200.0;  // below this the filter is not trusted yet
+    double                   signal_sum     = 0.0;
+    double                   noise_sum      = 0.0;
+    double                   weight_sum     = 0.0;
+
+    void note(const depth3_measurements& plane_only)
+    {
+      // The two sums are kept apart, not averaged as SNRs: averaging SNR linearly overweights the loud slots.
+      const double weight = static_cast<double>(plane_only.nof_pilot_re);
+      const double signal = static_cast<double>(plane_only.residual_snr_lin) *
+                            static_cast<double>(plane_only.residual_plane_units_lin);
+      signal_sum = DECAY * signal_sum + weight * signal;
+      noise_sum  = DECAY * noise_sum + weight * static_cast<double>(plane_only.residual_plane_units_lin);
+      weight_sum = DECAY * weight_sum + weight;
+    }
+
+    bool warm() const { return (weight_sum >= MIN_PILOTS) && (noise_sum > 0.0) && (signal_sum > 0.0); }
+    float snr_db() const { return convert_power_to_dB(static_cast<float>(signal_sum / noise_sum)); }
+  };
+  gate_history                                      gate_history;
   /// Report EVERY reception instead of the sampled cadence. For the offline measurement of the offset between
   /// the plane's residual and the estimator's SNR (design section 19.236); off unless asked for.
   bool                                              gate_report = false;
