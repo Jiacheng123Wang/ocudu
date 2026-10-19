@@ -317,11 +317,19 @@ def load_transport_block(tb_path, source):
 
 
 def build_sample(name, prefix, cfg, alloc, tb_path, source, snr_db, seed, payload="capture",
-                 synth_rate=None):
-    """Build one dataset sample, or raise ValueError with the reason it cannot be built."""
+                 synth_rate=None, target_dmrs=None):
+    """Build one dataset sample, or raise ValueError with the reason it cannot be built.
+
+    `target_dmrs` (synthetic only) puts the DM-RS at a chosen set of symbols instead of the capture's.
+    The CHANNEL is still fitted from the capture's own pilots -- `synthetic_channel` reads those from
+    `cfg`, which is why the two lists have to be separate: the pilots exist where the capture put
+    them, while the sample we build may place them elsewhere. This is what lets a pattern the corpus
+    has no transmission of (256QAM at 2,7,11, whose captures all used 2,11) be manufactured from the
+    captures that do have the channel, instead of needing a new radio session first.
+    """
     modulation = cfg["modulation"]
     qm = MODULATION_BITS[modulation]
-    dmrs_symbols = [int(x) for x in cfg["dmrs_symbols"].split(",")]
+    dmrs_symbols = list(target_dmrs) if target_dmrs else [int(x) for x in cfg["dmrs_symbols"].split(",")]
     dmrs_mask = sum(1 << s for s in dmrs_symbols)
     bwp = int(cfg["bwp_size_rb"])
     grid_file = np.fromfile(prefix + ".bin", dtype=np.complex64)
@@ -649,6 +657,11 @@ def main():
                              "The payload is then sized from the window's own coded-bit count, so "
                              "the label is exact by construction and no transport-block dump, and "
                              "no decodable reference reception, is needed")
+    parser.add_argument("--synth-dmrs-symbols", default="",
+                        help="SYNTHETIC only: place the DM-RS at these symbol indices (e.g. \"2,7,11\") "
+                             "instead of the capture's. The channel still comes from the capture's own "
+                             "pilots; what changes is where the sample transmits its DM-RS. Used to "
+                             "manufacture a modulation x pattern cell the corpus has no transmission of")
     parser.add_argument("--max-units", type=int, default=0)
     parser.add_argument("--seed", type=int, default=20261013)
     parser.add_argument("--selfcheck", action="store_true")
@@ -666,6 +679,13 @@ def main():
                      "source is the capture's own transmission")
     if retarget and args.synth_rate <= 0.0:
         parser.error("--synth-prb needs --synth-rate: a window on its own does not name a cell")
+    target_dmrs = None
+    if args.synth_dmrs_symbols:
+        if args.source != "synthetic":
+            parser.error("--synth-dmrs-symbols is SYNTHETIC only")
+        target_dmrs = [int(x) for x in args.synth_dmrs_symbols.split(",") if x]
+        if not target_dmrs or min(target_dmrs) < 0 or max(target_dmrs) >= NOF_SYMBOLS:
+            parser.error(f"--synth-dmrs-symbols must name symbols in 0..{NOF_SYMBOLS - 1}")
     units = candidate_units(args.units, args.tb, args.corpus, args.modulation,
                             1 if retarget else args.min_prb,
                             args.min_slot, args.require_off_prb0,
@@ -707,7 +727,8 @@ def main():
                                                      args.seed + index * 17,
                                                      payload="random" if args.source == "synthetic"
                                                      else "capture",
-                                                     synth_rate=args.synth_rate if retarget else None)
+                                                     synth_rate=args.synth_rate if retarget else None,
+                                                     target_dmrs=target_dmrs)
             except (AssertionError, ValueError, np.linalg.LinAlgError) as error:
                 if snr is None or args.source == "synthetic":
                     skipped.append((name, str(error).split("\n")[0][:100]))
