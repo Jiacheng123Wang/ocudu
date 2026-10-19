@@ -41,6 +41,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# The DECLARED SNR range, which is metadata and a gate, not a property of the weights: R7/S1 trains and
+# declares a wider one (design sections 20.4 and 19.230), so it must be an argument rather than a constant.
+SNR_RANGE=${SNR_RANGE:-12,48}
+
 KERAS=$RUN/depth3_best.keras
 BUNDLE=$RUN/$LABEL.mlmodelc
 [ -f "$KERAS" ] || { echo "missing $KERAS - the run has not finished" >&2; exit 2; }
@@ -48,7 +52,7 @@ BUNDLE=$RUN/$LABEL.mlmodelc
 
 echo "== export $KERAS -> $RUN/$LABEL.mlpackage"
 "$PY" "$TRAIN" --export-only "$KERAS" --export-probe "$RUN/$LABEL.mlpackage" \
-  --modcond --layout spatial --in-channels 12 --blocks 18 --c-hid "$C_HID" --snr-range 12,48 || {
+  --modcond --layout spatial --in-channels 12 --blocks 18 --c-hid "$C_HID" --snr-range "$SNR_RANGE" || {
     echo "export failed" >&2; exit 1; }
 xcrun coremlcompiler compile "$RUN/$LABEL.mlpackage" "$RUN" >/dev/null || {
   echo "coremlcompiler failed" >&2; exit 1; }
