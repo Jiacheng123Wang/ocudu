@@ -1,0 +1,102 @@
+[
+  {
+    "metadataOutputVersion" : "3.0",
+    "storagePrecision" : "Float16",
+    "outputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 612 × 28)",
+        "shortDescription" : "",
+        "shape" : "[1, 612, 28]",
+        "name" : "ch_est",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 1 × 1 × 1)",
+        "shortDescription" : "",
+        "shape" : "[1, 1, 1, 1]",
+        "name" : "dmrs_noise",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 612 × 112)",
+        "shortDescription" : "",
+        "shape" : "[1, 612, 112]",
+        "name" : "llr",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 612 × 14)",
+        "shortDescription" : "",
+        "shape" : "[1, 612, 14]",
+        "name" : "post_eq_noise",
+        "type" : "MultiArray"
+      }
+    ],
+    "modelParameters" : [
+
+    ],
+    "specificationVersion" : 8,
+    "mlProgramOperationTypeHistogram" : {
+      "Ios17.reshape" : 3,
+      "Ios17.conv" : 41,
+      "Ios16.relu" : 37,
+      "Ios17.tanh" : 3,
+      "Ios17.transpose" : 5,
+      "Ios17.add" : 18,
+      "Ios16.reduceMean" : 1
+    },
+    "computePrecision" : "Mixed (Float16, Int32)",
+    "isUpdatable" : "0",
+    "stateSchema" : [
+
+    ],
+    "availability" : {
+      "macOS" : "14.0",
+      "tvOS" : "17.0",
+      "visionOS" : "1.0",
+      "watchOS" : "10.0",
+      "iOS" : "17.0",
+      "macCatalyst" : "17.0"
+    },
+    "modelType" : {
+      "name" : "MLModelType_mlProgram"
+    },
+    "userDefinedMetadata" : {
+      "com.github.apple.coremltools.source" : "tensorflow==2.21.0",
+      "depth3_head_stride" : "8",
+      "com.github.apple.coremltools.conversion_date" : "2026-10-19",
+      "depth3_sinr_cal" : "2:1.2678,-3.8298;4:1.0911,-1.3579;6:1.1251,-1.6222;8:1.2822,-4.0420",
+      "depth3_nsc" : "612",
+      "com.github.apple.coremltools.version" : "9.0",
+      "depth3_layout" : "modcond",
+      "depth3_snr_range" : "12.00,48.00",
+      "depth3_qm_set" : "2,4,6,8"
+    },
+    "inputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 612 × 14 × 16)",
+        "shortDescription" : "",
+        "shape" : "[1, 612, 14, 16]",
+        "name" : "x",
+        "type" : "MultiArray"
+      }
+    ],
+    "generatedClassName" : "d3_dmrs2711h_c32_cal",
+    "method" : "predict"
+  }
+]

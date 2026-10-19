@@ -25,8 +25,18 @@ target_include_directories(ocudu_o_du_low_unit_helpers PRIVATE ${CMAKE_SOURCE_DI
 # git-ignored, so a fresh clone had no default model and an `ai` request that named none failed where the tree already
 # contained a perfectly good bundle. The conditioned bundle is the right default because one set of weights covers all
 # four modulations (design section 19.162, verified at 1200/1200 decisions against the four specialists).
+# 2026-10-19: the default moved from the c64 conditional bundle (depth3_modcond_ft) to the retrained c32 with the
+# high-SNR reporting heads and the declared SINR calibration (depth3_modcond_c32h). Three things were bought at once:
+# DM-RS 2,7,11 coverage in all four modulations (the deployment's attach failures were a pattern blindness, design
+# section 19.211), a 64QAM publication that carries the channel (sd ratio 0.44 -> 0.95 of the classical chain's spread,
+# section 19.222), and a declared calibration that puts the published SINR within 0.6 dB of the classical chain on all
+# four modulations. It is also 2.3x to 4.0x faster per reception than the c64 bundle (forward p50 436-786 us against
+# 1764-1931, section 19.217) and 2.1x faster on the ANE (441-448 us against 926-942, model_network_design section 0.4).
+# The live A/B that this rests on: six adjacent pairs against the classical chain, five of them positive, mean +27.8%,
+# with the network decoding better on 11 of 12 legs' own captures replayed through both arms (section 19.224).
+# The c64 bundle remains in the tree as depth3_modcond_ft and is one `--pusch_receiver_model` away.
 set(OCUDU_DEPTH3_DEFAULT_MODEL
-    "${CMAKE_SOURCE_DIR}/lib/phy/upper/signal_processors/channel_estimator/metal/ai_assets/depth3_modcond_ft/d3_modcond_ft.mlmodelc"
+    "${CMAKE_SOURCE_DIR}/lib/phy/upper/signal_processors/channel_estimator/metal/ai_assets/depth3_modcond_c32h/d3_modcond_c32h.mlmodelc"
     CACHE FILEPATH "Model the PUSCH ai receiver binds when --pusch_receiver_model is not given")
 
 target_compile_definitions(ocudu_o_du_low_unit_helpers PRIVATE
