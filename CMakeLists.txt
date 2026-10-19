@@ -919,6 +919,17 @@ if (BUILD_TESTING)
             add_subdirectory(tests/utils/gdb/pretty_printers)
         endif (TEST_GDB_PRINTERS)
     endif ()
+
+    # The Apple Silicon test binaries live under lib/, and lib/ is EXCLUDE_FROM_ALL by upstream's design, so a
+    # plain `cmake --build build` never produced them: `--target test` then reported their registered ctest
+    # entries as "Not Run" (a test that is listed and has no binary, found on macOS 2026-10-20). They register
+    # themselves in OCUDU_METAL_TEST_TARGETS as they are defined, and this pulls them into ALL -- on Apple builds
+    # only, where those directories exist at all, so a Linux configure is untouched.
+    get_property(OCUDU_METAL_TEST_TARGETS GLOBAL PROPERTY OCUDU_METAL_TEST_TARGETS)
+    if (OCUDU_METAL_TEST_TARGETS)
+        add_custom_target(ocudu_metal_tests ALL DEPENDS ${OCUDU_METAL_TEST_TARGETS})
+        message(STATUS "Metal test binaries built by default: ${OCUDU_METAL_TEST_TARGETS}")
+    endif ()
 endif (BUILD_TESTING)
 
 if (ENABLE_FUZZTESTS)

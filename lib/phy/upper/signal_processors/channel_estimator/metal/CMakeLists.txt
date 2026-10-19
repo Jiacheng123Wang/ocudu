@@ -95,6 +95,12 @@ add_test(port_channel_estimator_metal_mmse_unit_test port_channel_estimator_meta
 add_test(port_channel_estimator_metal_mmse_unit_test_ta_chain port_channel_estimator_metal_mmse_unit_test)
 set_tests_properties(port_channel_estimator_metal_mmse_unit_test_ta_chain PROPERTIES
     ENVIRONMENT "OCUDU_CE_TA_CHAIN=1")
+
+# Apple-only test binaries live under lib/, and lib/ is EXCLUDE_FROM_ALL by upstream's design ("do not build by
+# default"), so `cmake --build build` never produced them and `--target test` reported them as "Not Run" -- a
+# registered test with no binary (found on macOS 2026-10-20). Each one registers itself here, and the aggregate
+# target in the top-level CMakeLists pulls them into ALL on Apple builds only, so Ubuntu is untouched.
+set_property(GLOBAL APPEND PROPERTY OCUDU_METAL_TEST_TARGETS port_channel_estimator_metal_mmse_unit_test)
 add_executable(port_channel_estimator_metal_mmse_unit_test test/port_channel_estimator_metal_mmse_unit_test.cpp)
 target_link_libraries(port_channel_estimator_metal_mmse_unit_test PRIVATE ocudu_channel_estimator_metal ocudu_channel_estimator ocudu_phy_support ocuduvec ocudu_dft)
 

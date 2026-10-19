@@ -37,6 +37,12 @@ target_link_libraries(ocudu_channel_modulation_metal
 set_directory_properties(PROPERTIES LABELS "phy")
 
 add_test(demodulation_mapper_metal_unit_test demodulation_mapper_metal_unit_test)
+
+# Apple-only test binaries live under lib/, and lib/ is EXCLUDE_FROM_ALL by upstream's design ("do not build by
+# default"), so `cmake --build build` never produced them and `--target test` reported them as "Not Run" -- a
+# registered test with no binary (found on macOS 2026-10-20). Each one registers itself here, and the aggregate
+# target in the top-level CMakeLists pulls them into ALL on Apple builds only, so Ubuntu is untouched.
+set_property(GLOBAL APPEND PROPERTY OCUDU_METAL_TEST_TARGETS demodulation_mapper_metal_unit_test)
 add_executable(demodulation_mapper_metal_unit_test test/demodulation_mapper_metal_unit_test.cpp)
 target_include_directories(demodulation_mapper_metal_unit_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..)

@@ -34,6 +34,12 @@ target_link_libraries(ocudu_dft_metal PUBLIC ocudulog ocudu_macos_compat ocudu_m
 target_link_libraries(ocudu_dft_metal PRIVATE "-framework Metal" "-framework Foundation")
 
 # ---- Unit-level validation: random-IQ A/B vs the CPU reference (NMSE gate) ----
+
+# Apple-only test binaries live under lib/, and lib/ is EXCLUDE_FROM_ALL by upstream's design ("do not build by
+# default"), so `cmake --build build` never produced them and `--target test` reported them as "Not Run" -- a
+# registered test with no binary (found on macOS 2026-10-20). Each one registers itself here, and the aggregate
+# target in the top-level CMakeLists pulls them into ALL on Apple builds only, so Ubuntu is untouched.
+set_property(GLOBAL APPEND PROPERTY OCUDU_METAL_TEST_TARGETS dft_processor_metal_unit_test)
 add_executable(dft_processor_metal_unit_test test/dft_processor_metal_unit_test.cpp)
 target_link_libraries(dft_processor_metal_unit_test PRIVATE
     ocudu_dft ocudu_dft_metal ocudu_support ocudu_phy_support ocuduvec)
@@ -51,6 +57,12 @@ set_directory_properties(PROPERTIES LABELS "phy")
 
 add_test(dft_processor_metal_unit_test dft_processor_metal_unit_test)
 add_test(ofdm_demodulator_metal_batch_test ofdm_demodulator_metal_batch_test)
+
+# Apple-only test binaries live under lib/, and lib/ is EXCLUDE_FROM_ALL by upstream's design ("do not build by
+# default"), so `cmake --build build` never produced them and `--target test` reported them as "Not Run" -- a
+# registered test with no binary (found on macOS 2026-10-20). Each one registers itself here, and the aggregate
+# target in the top-level CMakeLists pulls them into ALL on Apple builds only, so Ubuntu is untouched.
+set_property(GLOBAL APPEND PROPERTY OCUDU_METAL_TEST_TARGETS ofdm_demodulator_metal_batch_test)
 add_executable(ofdm_demodulator_metal_batch_test test/ofdm_demodulator_metal_batch_test.cpp)
 target_link_libraries(ofdm_demodulator_metal_batch_test PRIVATE
     ocudu_dft ocudu_dft_metal ocudu_lower_phy_modulation ocudu_phy_support ocudu_support)
@@ -59,6 +71,12 @@ target_link_libraries(ofdm_demodulator_metal_batch_test PRIVATE
 # Objective-C++ because the mechanism IS the Metal command buffer handover: the test takes what
 # release_block() returns and hands it to shared_burst::adopt(), which no C++ translation unit can name.
 # Named "*_metal_test" like every other Metal test, so that the routine gate - ctest -R metal - covers it.
+
+# Apple-only test binaries live under lib/, and lib/ is EXCLUDE_FROM_ALL by upstream's design ("do not build by
+# default"), so `cmake --build build` never produced them and `--target test` reported them as "Not Run" -- a
+# registered test with no binary (found on macOS 2026-10-20). Each one registers itself here, and the aggregate
+# target in the top-level CMakeLists pulls them into ALL on Apple builds only, so Ubuntu is untouched.
+set_property(GLOBAL APPEND PROPERTY OCUDU_METAL_TEST_TARGETS dft_release_adopt_metal_test)
 add_executable(dft_release_adopt_metal_test test/dft_release_adopt_metal_test.mm)
 set_source_files_properties(test/dft_release_adopt_metal_test.mm PROPERTIES LANGUAGE OBJCXX COMPILE_OPTIONS "-fobjc-arc")
 set_property(TARGET dft_release_adopt_metal_test PROPERTY OBJCXX_STANDARD 17)

@@ -69,6 +69,12 @@ add_test(channel_equalizer_metal_unit_test channel_equalizer_metal_unit_test)
 add_test(channel_equalizer_metal_unit_test_defer_encode channel_equalizer_metal_unit_test)
 set_tests_properties(channel_equalizer_metal_unit_test_defer_encode PROPERTIES
     ENVIRONMENT "OCUDU_EQ_DEFER_ENCODE=1")
+
+# Apple-only test binaries live under lib/, and lib/ is EXCLUDE_FROM_ALL by upstream's design ("do not build by
+# default"), so `cmake --build build` never produced them and `--target test` reported them as "Not Run" -- a
+# registered test with no binary (found on macOS 2026-10-20). Each one registers itself here, and the aggregate
+# target in the top-level CMakeLists pulls them into ALL on Apple builds only, so Ubuntu is untouched.
+set_property(GLOBAL APPEND PROPERTY OCUDU_METAL_TEST_TARGETS channel_equalizer_metal_unit_test)
 add_executable(channel_equalizer_metal_unit_test test/channel_equalizer_metal_unit_test.cpp)
 target_include_directories(channel_equalizer_metal_unit_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../equalization)
