@@ -143,7 +143,11 @@ pusch_depth3_input_plane::assemble(span<depth3_half>                           p
   // Every allocated resource block must lie inside the contract's window. This is the check that makes "the
   // window is the bandwidth part" a fact rather than an assumption: an allocation that reaches past subcarrier
   // 612 belongs to a bandwidth part that does not start where the window does.
-  if (config.rb_mask.find_highest() >= NOF_SUBCARRIERS / NOF_SUBCARRIERS_PER_RB) {
+  // `find_highest()` answers in a signed type and -1 for an empty mask, so the negative case is checked
+  // first: casting -1 to unsigned would wrap and report a window violation for a mask that simply has no
+  // bits set (GCC builds with -Werror=sign-compare, which is what surfaced this on 2026-10-19).
+  const int highest_rb = config.rb_mask.find_highest();
+  if ((highest_rb < 0) || (static_cast<unsigned>(highest_rb) >= NOF_SUBCARRIERS / NOF_SUBCARRIERS_PER_RB)) {
     return status::allocation_outside_window;
   }
   // And it must be wide enough for the model to have seen anything like it: MIN_PRB is the
