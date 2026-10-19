@@ -228,6 +228,18 @@ public:
     noise_head(pusch_depth3_input_plane::NOF_SUBCARRIERS * pusch_depth3_input_plane::NOF_SYMBOLS),
     channel_head(pusch_depth3_input_plane::NOF_SUBCARRIERS * 2 * pusch_depth3_input_plane::NOF_SYMBOLS)
   {
+  // The gate switch is read ONCE, like the reporting source: a run either gates on the estimator throughout or
+  // on the plane's own residual throughout, and which one it was is visible in the first degradation line.
+  if (const char* env = std::getenv("OCUDU_DEPTH3_DOMAIN_GATE")) {
+    domain_gate = (env[0] == 'n') ? "net" : "estimator";
+  }
+  if (const char* env = std::getenv("OCUDU_DEPTH3_GATE_REPORT")) {
+    gate_report = (env[0] != '0');
+  }
+  // Said once, at construction: which measurement gates this run, so a log never has to be guessed at.
+  fmt::print(stderr, "[pusch_receiver] AI depth-3: domain gate on the {}\n",
+             (domain_gate == "net") ? "arm's own plane residual (R7/S2)" : "classical estimator's SNR");
+
     fmt::print(stderr, "[pusch_receiver] AI depth-3: startup grace = {} s (0 = disabled)\n", startup_grace.count());
     if (startup_grace.count() > 0) {
       fmt::print(stderr,
@@ -592,7 +604,7 @@ public:
     // IT APPLIES IN EITHER MODE, because the published post-equalisation SINR is this arm's own in either mode
     // (see the note where it is published): a knob position may not decide whether an extrapolated measurement
     // reaches the scheduler, and the `classic` position is the DEFAULT.
-    if (domain_by_qm[qm].has) {
+    if (domain_by_qm[qm].has && (domain_gate == "estimator")) {
       const unsigned port   = config.rx_ports.empty() ? 0 : config.rx_ports.front();
       // The estimator reports a linear power (`report_measurements` prints it through `convert_power_to_dB`), so
       // it is converted once and the comparison is in the same units the declaration uses.
@@ -623,6 +635,60 @@ public:
     float reference_amplitude = 0.0F;
     const pusch_depth3_input_plane::status status =
         assembler.assemble(span<__fp16>(input_plane), reference_amplitude, grid, config, dmrs_context);
+    // ---- R7/S2: the gate on the PLANE's own residual, before any forward pass ------------------------
+    // The estimator-based gate above needs the classical estimator to have run, which is the 516-766 us per
+    // reception R7 exists to remove. This one reads the residual noise of the pilot LS that the assembler has
+    // just written, which is INDEPENDENT of the network (design section 19.128 measured it at +0.999 log-domain
+    // correlation against the datasets' true noise, p10/p90 spread 0.23 dB) and costs one pass over the pilots.
+    // It runs here, after the assembly and before the forward, so an out-of-domain reception still costs no
+    // inference.
+    if ((status == pusch_depth3_input_plane::status::ok) && domain_by_qm[qm].has && (domain_gate == "net")) {
+      // `reference_amplitude` MUST be the real one: the EPRE and the residual are built from the plane's LS,
+      // which is stored divided by `r`, so passing zero here zeroes the signal and the residual with it -- the
+      // gate then reads -inf on every reception and refuses the whole leg (measured, first version, 2026-10-20).
+      const depth3_measurements plane_only = measure_depth3(span<const __fp16>(input_plane),
+                                                             plane_channels,
+                                                             span<const __fp16>(),
+                                                             reference_amplitude,
+                                                             0.0F,
+                                                             0.0F,
+                                                             0.0F);
+      const float plane_snr_db = (plane_only.residual_snr_lin > 0.0F)
+                                     ? convert_power_to_dB(plane_only.residual_snr_lin)
+                                     : -std::numeric_limits<float>::infinity();
+      // THE OFFSET BETWEEN THE TWO MEASURES, printed on the same sampled cadence as the other instruments.
+      // The declared range was fitted against the estimator's SNR, so if the plane's residual sits at a
+      // different level, the same numbers mean different things and the gate's boundary moves with it. S2
+      // cannot choose a threshold until this is measured on the captures (design section 19.236).
+      ++gate_samples;
+      if ((gate_samples == 1) || ((gate_samples % 1000) == 0) || gate_report) {
+        const unsigned port    = config.rx_ports.empty() ? 0 : config.rx_ports.front();
+        const float    est_db  = convert_power_to_dB(est_results.get_snr(port));
+        fmt::print(stderr,
+                   "[depth3-gate] {} reception(s): plane residual {:.2f} dB, estimator {:.2f} dB, "
+                   "offset {:+.2f} dB, declared {:.2f} to {:.2f} dB\n",
+                   gate_samples,
+                   plane_snr_db,
+                   est_db,
+                   plane_snr_db - est_db,
+                   domain_by_qm[qm].min_db,
+                   domain_by_qm[qm].max_db);
+      }
+      if ((plane_only.nof_pilot_re == 0) || (plane_snr_db < domain_by_qm[qm].min_db) ||
+          (plane_snr_db > domain_by_qm[qm].max_db)) {
+        char detail[224];
+        std::snprintf(detail, sizeof(detail),
+                      "the plane's own residual measures %.2f dB and the bundle declares %.2f to %.2f dB "
+                      "(%s pilot RE)",
+                      plane_snr_db,
+                      domain_by_qm[qm].min_db,
+                      domain_by_qm[qm].max_db,
+                      (plane_only.nof_pilot_re == 0) ? "no" : "with");
+        degrade(depth3_degradation::measurement_outside_domain, codeword_buffer, notifier, grid, est_results,
+                config, detail);
+        return;
+      }
+    }
     if (conditioned) {
       // The Qm as the contract wants it: four constant channels per (subcarrier, symbol), all zero but the
       // reception's own. Written HERE, once per reception, because the assembler describes the grid and this
@@ -1141,6 +1207,17 @@ private:
   /// `net` (this arm's reporting heads). It is a string here for the same reason it is one at the command line:
   /// the value is meant to be read back in a log.
   std::string                                       reporting_source = "classic";
+  /// Which measurement decides the domain gate, read once from the environment at construction:
+  ///   "estimator" -- the classical estimator's SNR, the behaviour before R7/S2 (the default, so this change
+  ///                  is inert until a flight asks for it);
+  ///   "net"       -- the arm's own plane-only residual SNR, which needs neither the estimator nor a forward
+  ///                  pass. That is the measurement S2 replaces the gate with (design sections 19.234, 20.4).
+  std::string                                       domain_gate = "estimator";
+  /// Receptions the plane-based gate has measured, for its sampled report.
+  unsigned                                          gate_samples = 0;
+  /// Report EVERY reception instead of the sampled cadence. For the offline measurement of the offset between
+  /// the plane's residual and the estimator's SNR (design section 19.236); off unless asked for.
+  bool                                              gate_report = false;
   /// How long after bind the arm refuses to compute (0 = never refuse). See `du_low_config.h` for the measurement
   /// that motivated it: attach is where the arm's occupancy was observed to cost the phone its ACK path.
   std::chrono::seconds                              startup_grace{};

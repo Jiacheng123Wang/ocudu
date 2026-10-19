@@ -32,15 +32,21 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
   const size_t plane_size =
       static_cast<size_t>(plane::NOF_SUBCARRIERS) * plane::NOF_SYMBOLS * plane_channels;
   const size_t head_size = static_cast<size_t>(plane::NOF_SUBCARRIERS) * plane::NOF_SYMBOLS * 2;
-  if ((plane_values.size() != plane_size) || (channel_head.size() != head_size)) {
+  // AN EMPTY HEAD IS A LEGAL CALL: the plane-only part of this measurement (EPRE, the residual and the
+  // residual SNR) is what the DOMAIN GATE needs, and R7/S2 evaluates it BEFORE the forward pass -- precisely so
+  // that an out-of-domain reception costs no inference (design section 20.4, S2). The head-derived fields are
+  // left at zero in that mode, which is why the finiteness check below treats them as optional.
+  const bool has_head = !channel_head.empty();
+  if ((plane_values.size() != plane_size) || (has_head && (channel_head.size() != head_size))) {
     return measurements;
   }
 
   // The contract's model-external noise map, section 0.2(e) head 4. The map is the trainer's
   // (`depth3_loss.noise_from_shape`), and the pair comes from the sidecar so that the two sides cannot
   // disagree: `noise_shape` is bounded by the head's tanh, so this is always finite and positive.
+  // Skipped entirely when there is no head to read, i.e. on the pre-forward gate path.
   const float noise_plane_units =
-      std::pow(10.0F, noise_scale_decades * noise_shape + noise_scale_center);
+      has_head ? std::pow(10.0F, noise_scale_decades * noise_shape + noise_scale_center) : 0.0F;
   measurements.noise_variance_lin =
       reference_amplitude * reference_amplitude * noise_plane_units;
 
@@ -109,11 +115,13 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
 
       // RSRP: head 3 carries `H/r` (contract section 0.2(d)), and this multiplication is the whole of the
       // "multiply back by r" the design asks for.
-      const __fp16* estimate = channel_head.data() +
-                               (static_cast<size_t>(k) * plane::NOF_SYMBOLS + t) * 2;
-      const float h_re = static_cast<float>(estimate[0]) * reference_amplitude;
-      const float h_im = static_cast<float>(estimate[1]) * reference_amplitude;
-      rsrp_sum += static_cast<double>(h_re) * h_re + static_cast<double>(h_im) * h_im;
+      if (has_head) {
+        const __fp16* estimate = channel_head.data() +
+                                 (static_cast<size_t>(k) * plane::NOF_SYMBOLS + t) * 2;
+        const float h_re = static_cast<float>(estimate[0]) * reference_amplitude;
+        const float h_im = static_cast<float>(estimate[1]) * reference_amplitude;
+        rsrp_sum += static_cast<double>(h_re) * h_re + static_cast<double>(h_im) * h_im;
+      }
 
       // The independent estimate, from the same LS the EPRE above uses. `ls_re`/`ls_im` here carry `r` and
       // `scaling`; the SNR wants the plane's own units, so the power is accumulated from the plane values.
