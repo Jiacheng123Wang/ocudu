@@ -202,3 +202,54 @@ python3 doc_chinese/llr_ai_detection/probe/arms_summary.py --batch $B \
 
 它会**先从每条腿的采集里读出 DM-RS 图案**：若同一臂的两条腿图案不同（或各臂图案不齐），它会**拒绝出裁决**——
 因为那时比的不是臂，而是图案。
+
+## 6. Batch `dc6` — three more adjacent pairs, to tighten the effect size (2026-10-19)
+
+WHY. Batch `c32dmrs` met the registered criterion (three adjacent pairs, all positive: +63.1%, +3.0%,
++45.4%) but the batch drifted -62% from its first leg to its last, and two of the three pairs had the
+classical leg carrying far more QPSK than its neighbour. The honest effect size is somewhere in the
++3 to +30% band; three more pairs narrow it without touching the criterion.
+
+WHAT IS NEW IN THE ANALYSIS, not in the flight: every leg now yields a channel measure that is the
+SAME quantity for both arms -- the classical estimator's SNR. On a classical leg it is the published
+`sinr=` median; on an AI leg it is the `[depth3-measure] ... classic=Y` field, which the arm prints
+from the classical estimator on the same reception. Comparing throughput at matched classical-estimator
+SNR is what removes the "his session had a worse channel" objection.
+
+The bundles:
+  d = data/runs/d3_dmrs2711h_c32/d3_dmrs2711h_c32_cal.mlmodelc   (calibrated, "calibration APPLIED")
+  c = the classical chain
+
+Order (six legs, alternating, each ~5 min):
+
+```bash
+cd ~/dev/ocudu
+sudo -E bash doc_chinese/llr_ai_detection/probe/fly_arm.sh d c32dmrs-d4
+sudo -E bash doc_chinese/llr_ai_detection/probe/fly_arm.sh c c32dmrs-c8
+sudo -E bash doc_chinese/llr_ai_detection/probe/fly_arm.sh d c32dmrs-d5
+sudo -E bash doc_chinese/llr_ai_detection/probe/fly_arm.sh c c32dmrs-c9
+sudo -E bash doc_chinese/llr_ai_detection/probe/fly_arm.sh d c32dmrs-d6
+sudo -E bash doc_chinese/llr_ai_detection/probe/fly_arm.sh c c32dmrs-c10
+```
+
+Traffic, once per leg, from jwang-dn RIGHT AFTER the leg's gNB is up (the attach has completed):
+
+```bash
+ssh jwang@jwang-dn "ping -i 0.2 -c 200 $UE; echo '--- iperf3 ---'; iperf3 -c $UE -R -t 120"
+```
+
+`$UE` is whatever address the CN handed this session (10.45.0.x); it changes per leg, so take it from
+the CN's session dump before each run. No `-b`, always `-R`.
+
+Per-leg checks when it ends (all three legs of an arm must look the same or the pair is confounded):
+
+```bash
+grep -c "AI ARM ACTIVE" <leg>.log.stderr          # 4 model(s) on d legs, absent on c legs
+grep -c "calibration APPLIED" <leg>.log.stderr    # must be > 0 on every d leg
+grep -h '^dmrs_symbols=' <batch>/pat/<leg>/C_*.txt | sort | uniq -c   # the pattern this leg drew
+grep "reception DEGRADED" <leg>.log.stderr | wc -l
+```
+
+Verdict rule, registered before the flight: three adjacent pairs, all positive => the earlier criterion
+is confirmed with six pairs in total; any pair negative => record it and do not adopt. The drift-agnostic
+conservative rule is expected to fail again on a drifting batch and is not the criterion.
