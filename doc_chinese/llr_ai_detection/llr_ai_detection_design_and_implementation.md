@@ -13280,8 +13280,8 @@ nvidia-smi                            # 应列出 RTX 3060 Ti
 
 **(o) ★★ 用户问：★ 机械盘会不会拖慢 ✓ —— **那台机器没有机械盘** ✓，★ 而且盘不参与训练热路径 ✓（★ 2026-10-19 10:40 ✓）**
 
-| ★ 检查 | ★ 结果 |
-|---|---|
+| ★ 磁盘数量（★ 用户问 ✓）| ★ **恰好 2 块** ✓：★ `sda` **931.5 GB** = CT1000MX500SSD1（★ 1 TB SATA SSD ✓、★ 序列 2035E4AB8725 ✓）；★ `nvme0n1` **476.9 GB** = INTEL SSDPEKNW512G8（★ 512 GB NVMe ✓、★ 序列 BTNH04660U2G512A ✓）★ ⇒ ★ 与用户记忆一致 ✓ |
+| ★ 分区/挂载 | ★ `sda1` 513 MB → `/boot/efi` ✓、★ `sda2` 588.2 GB → `/media/jwang/sda2`（★ 已用 237 G ✓）、★ `sda3` 342.8 GB → **`/`**（★ 已用 48 G ✓）；★ `nvme0n1p1` 476.9 GB → `/media/jwang/nvme0n1p1`（★ 已用 **407 G** ✓、★ 剩 39 G ✓）|
 | ★ `lsblk -d -o NAME,ROTA` | ★ `sda` **ROTA=0** ✓ = **CT1000MX500SSD1**（★ Crucial MX500 **SATA SSD** ✓）；★ `nvme0n1` ROTA=0 ✓ = **INTEL SSDPEKNW512G8**（★ NVMe SSD ✓）★ ⇒ ★ **没有机械盘** ✓ |
 | ★ `/` 直写（★ `dd oflag=direct` ✓）| ★ **424 MB/s** ✓（★ 机械盘约 100–150 ✓ ⇒ ★ 这就是 SSD ✓）|
 | ★ 数据集**放在 RAM**（★ `/dev/shm` ✓）再跑同一基准 ✓ | ★ epoch **38 s / 75 s** ✓ —— ★ 与放在 `/` 上（★ 38 s / 75 s ✓）**逐秒相同** ✓ |
