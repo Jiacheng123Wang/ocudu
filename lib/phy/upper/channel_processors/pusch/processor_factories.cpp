@@ -200,14 +200,16 @@ public:
       // OWNERSHIP: the dependencies own the two units and the arm merely REFERENCES them. That is what makes
       // the strict policy ask about the very modules the unit runs -- an arm owning its own copies would leave
       // the policy interrogating instances nothing ever executes, silently.
-      auto dependencies = std::make_unique<pusch_processor_impl::concurrent_dependencies>(
+      // Named `unit` rather than `dependencies`: the enclosing scope already has a `dependencies`, and GCC
+      // builds here with -Werror=shadow, so the Apple build's tolerance is not a licence to shadow
+      // (the Ubuntu CI build caught it on 2026-10-19).
+      auto unit = std::make_unique<pusch_processor_impl::concurrent_dependencies>(
           estimator_factory->create(), demodulator_factory->create(), demux_factory->create(),
           uci_dec_factory->create(), ch_estimate_dimensions);
 
-      dependencies->set_depth3(create_pusch_depth3_receiver(depth3_kind, dependencies->get_estimator(),
-                                                            dependencies->get_demodulator(), depth3_models,
-                                                            reporting_source, startup_grace_s));
-      return dependencies;
+      unit->set_depth3(create_pusch_depth3_receiver(depth3_kind, unit->get_estimator(), unit->get_demodulator(),
+                                                    depth3_models, reporting_source, startup_grace_s));
+      return unit;
     });
 
     // The binding's OUTCOME, reported once for the whole pool. The arm decides, the estimator refines, and this

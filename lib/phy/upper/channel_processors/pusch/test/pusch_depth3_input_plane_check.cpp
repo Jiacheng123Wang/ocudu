@@ -16,6 +16,7 @@
 ///
 /// Usage: pusch_depth3_input_plane_check <fixture.bin> [tolerance]
 
+#include "pusch_depth3_half.h"
 #include "ocudu/phy/support/resource_grid.h"
 #include "ocudu/phy/support/support_factories.h"
 #include "pusch_depth3_input_plane.h"
@@ -218,7 +219,7 @@ int main(int argc, char** argv)
               data.header.nof_symbols);
 
   pusch_depth3_input_plane        assembler;
-  std::vector<__fp16>             plane(data.expected.size());
+  std::vector<depth3_half>             plane(data.expected.size());
   const pusch_demodulator::configuration config = configuration_of(data.header);
   const pusch_depth3_dmrs_context context       = context_of(data.header);
 
@@ -249,7 +250,7 @@ int main(int argc, char** argv)
   size_t  worst_index  = 0;
   for (size_t index = 0; index != plane.size(); ++index) {
     const float actual   = static_cast<float>(plane[index]);
-    const float expected = static_cast<float>(*reinterpret_cast<const __fp16*>(&data.expected[index]));
+    const float expected = static_cast<float>(*reinterpret_cast<const depth3_half*>(&data.expected[index]));
     const float error    = std::abs(actual - expected);
     if (error > max_error) {
       max_error   = error;
@@ -277,7 +278,7 @@ int main(int argc, char** argv)
     std::vector<std::pair<float, size_t>> worst;
     for (size_t index = 0; index != plane.size(); ++index) {
       const float actual   = static_cast<float>(plane[index]);
-      const float expected = static_cast<float>(*reinterpret_cast<const __fp16*>(&data.expected[index]));
+      const float expected = static_cast<float>(*reinterpret_cast<const depth3_half*>(&data.expected[index]));
       worst.emplace_back(std::abs(actual - expected), index);
     }
     std::partial_sort(worst.begin(), worst.begin() + 5, worst.end(),
@@ -290,7 +291,7 @@ int main(int argc, char** argv)
                   rank, channel, position / pusch_depth3_input_plane::NOF_SYMBOLS,
                   position % pusch_depth3_input_plane::NOF_SYMBOLS,
                   static_cast<float>(plane[index]),
-                  static_cast<float>(*reinterpret_cast<const __fp16*>(&data.expected[index])));
+                  static_cast<float>(*reinterpret_cast<const depth3_half*>(&data.expected[index])));
     }
   }
 

@@ -18,6 +18,7 @@
 /// `pusch_depth3_input_plane_check` compares the two point by point.
 #pragma once
 
+#include "pusch_depth3_half.h"
 #include "ocudu/adt/complex.h"
 #include "ocudu/adt/span.h"
 #include "ocudu/phy/support/resource_grid_reader.h"
@@ -153,7 +154,7 @@ public:
   /// \param[in]  config                The demodulator's configuration.
   /// \param[in]  dmrs                  The sequence context the estimator's configuration carried.
   /// \return \c status::ok, or the first reason the reception is outside the contract.
-  status assemble(span<__fp16>                           plane,
+  status assemble(span<depth3_half>                           plane,
                   float&                                 reference_amplitude,
                   const resource_grid_reader&            grid,
                   const pusch_demodulator::configuration& config,

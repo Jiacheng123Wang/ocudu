@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (C) 2026 Jiacheng Wang
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
+#include "pusch_depth3_half.h"
 #include "pusch_depth3_input_plane.h"
 #include "../../signal_processors/dmrs_helper.h"
 #include "ocudu/adt/bounded_bitset.h"
@@ -99,7 +100,7 @@ const char* pusch_depth3_input_plane::to_string(status value)
 }
 
 pusch_depth3_input_plane::status
-pusch_depth3_input_plane::assemble(span<__fp16>                           plane,
+pusch_depth3_input_plane::assemble(span<depth3_half>                           plane,
                                    float&                                 reference_amplitude,
                                    const resource_grid_reader&            grid,
                                    const pusch_demodulator::configuration& config,
@@ -290,23 +291,23 @@ pusch_depth3_input_plane::assemble(span<__fp16>                           plane,
       const bool is_allocated = allocated.test(k);
       const bool is_pilot = is_allocated && (ls_index >= 0) && pilot_offsets.test(k % NOF_SUBCARRIERS_PER_RB);
 
-      __fp16* destination =
+      depth3_half* destination =
           plane.data() + (static_cast<size_t>(k) * NOF_SYMBOLS + symbol) * plane_channels;
-      destination[CH_GRID_RE]   = static_cast<__fp16>(row[k].real() * inverse_r);
-      destination[CH_GRID_IM]   = static_cast<__fp16>(row[k].imag() * inverse_r);
-      destination[CH_DMRS_MASK] = static_cast<__fp16>(is_pilot ? 1.0F : 0.0F);
-      destination[CH_ALLOCATION] = static_cast<__fp16>(is_allocated ? 1.0F : 0.0F);
-      destination[CH_DC] = static_cast<__fp16>((static_cast<int>(k) == dc_position) ? 1.0F : 0.0F);
+      destination[CH_GRID_RE]   = static_cast<depth3_half>(row[k].real() * inverse_r);
+      destination[CH_GRID_IM]   = static_cast<depth3_half>(row[k].imag() * inverse_r);
+      destination[CH_DMRS_MASK] = static_cast<depth3_half>(is_pilot ? 1.0F : 0.0F);
+      destination[CH_ALLOCATION] = static_cast<depth3_half>(is_allocated ? 1.0F : 0.0F);
+      destination[CH_DC] = static_cast<depth3_half>((static_cast<int>(k) == dc_position) ? 1.0F : 0.0F);
       destination[CH_LS_RE] =
-          static_cast<__fp16>((ls_index >= 0) ? ls[ls_index][k].real() * inverse_r : 0.0F);
+          static_cast<depth3_half>((ls_index >= 0) ? ls[ls_index][k].real() * inverse_r : 0.0F);
       destination[CH_LS_IM] =
-          static_cast<__fp16>((ls_index >= 0) ? ls[ls_index][k].imag() * inverse_r : 0.0F);
-      destination[CH_NOF_TX_LAYERS] = static_cast<__fp16>(static_cast<float>(config.nof_tx_layers));
+          static_cast<depth3_half>((ls_index >= 0) ? ls[ls_index][k].imag() * inverse_r : 0.0F);
+      destination[CH_NOF_TX_LAYERS] = static_cast<depth3_half>(static_cast<float>(config.nof_tx_layers));
       destination[CH_NOF_CDM_GROUPS] =
-          static_cast<__fp16>(static_cast<float>(config.nof_cdm_groups_without_data));
-      destination[CH_DMRS_TYPE] = static_cast<__fp16>(static_cast<float>(config.dmrs_type));
-      destination[CH_NOF_DMRS_SYMBOLS] = static_cast<__fp16>(static_cast<float>(nof_dmrs_symbols));
-      destination[CH_SCALING]          = static_cast<__fp16>(scaling);
+          static_cast<depth3_half>(static_cast<float>(config.nof_cdm_groups_without_data));
+      destination[CH_DMRS_TYPE] = static_cast<depth3_half>(static_cast<float>(config.dmrs_type));
+      destination[CH_NOF_DMRS_SYMBOLS] = static_cast<depth3_half>(static_cast<float>(nof_dmrs_symbols));
+      destination[CH_SCALING]          = static_cast<depth3_half>(scaling);
     }
   }
   return status::ok;

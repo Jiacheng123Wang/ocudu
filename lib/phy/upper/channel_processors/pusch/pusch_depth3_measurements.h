@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "pusch_depth3_half.h"
 #include "ocudu/adt/span.h"
 #include <cstdint>
 
@@ -97,9 +98,9 @@ struct depth3_measurements {
 /// \note Time alignment has no head. The contract lists TA among the consumers of head 3, but a network
 /// that estimates a channel per resource element has no time-domain observable to report it from, so TA
 /// keeps coming from the classical estimator and this unit deliberately does not invent one.
-depth3_measurements measure_depth3(span<const __fp16> plane,
+depth3_measurements measure_depth3(span<const depth3_half> plane,
                                    unsigned            plane_channels,
-                                   span<const __fp16> channel_head,
+                                   span<const depth3_half> channel_head,
                                    float               reference_amplitude,
                                    float               noise_shape,
                                    float               noise_scale_decades,
