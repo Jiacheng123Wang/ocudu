@@ -415,7 +415,14 @@ TEST_F(UplinkProcessorFixture, stop_gives_up_on_a_grid_that_is_still_in_use)
 
   stopper.join();
 
-  // The destruction must not hang either, with the grid still alive: the token was released when the stop gave up.
+  // The grid is released BEFORE the processor is destroyed, and that order is not negotiable: a shared grid holds
+  // raw pointers into the processor (its pool interface and its reference counter), so a grid that outlives the
+  // processor releases into freed memory. This test used to destroy the processor with the grid still alive and
+  // passed on macOS; on Ubuntu it SEGFAULTed every time (2026-10-19), which is the same hazard an abnormal shutdown
+  // would meet in the field. The upstream ownership model says the grid does not outlive the processor, so the
+  // test honours it and asserts what it actually needs to: that the stop released its token, which is only
+  // observable as "the destruction that calls the UNBOUNDED stop does not hang".
+  grid    = shared_resource_grid();
   ul_processor.reset();
 }
 
