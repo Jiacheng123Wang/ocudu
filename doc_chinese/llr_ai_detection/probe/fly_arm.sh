@@ -51,6 +51,11 @@ CAND=${CAND:-$W/data/runs/d3_dmrs2711h_c32/d3_dmrs2711h_c32_cal.mlmodelc}
 FT=$W/data/models/d3_modcond_ft.mlmodelc
 CAPTURES=${CAPTURES:-60}
 PIPELINE=${PIPELINE:-gpu}
+# The tree already carries the instrument a cpu/gpu/ai latency comparison needs: OCUDU_RECEIVER_PROBE
+# brackets the two depth-3 entry points and prints, at exit, the cost of each and of the pair per
+# reception ("[receiver_seam] ... unit=...ms over N reception(s), X ms each"). It is off by default and
+# costs one predictable branch per call when on. Set PROBE=0 to disable.
+PROBE=${PROBE:-1}
 
 ARM=${1:-}
 LABEL=${2:-}
@@ -96,6 +101,7 @@ if [ "$DRY" = "--dry-run" ]; then
   echo
   echo "would run:"
   echo "  LEG_CONFIG=$CONFIG LEG_LOGDIR=$BATCH OCUDU_UL_DUMP=$PATTERN_DIR/C OCUDU_UL_DUMP_COUNT=$CAPTURES \\"
+  echo "  OCUDU_RECEIVER_PROBE=$PROBE \\"
   echo "    bash $RUNNER $PIPELINE $LABEL ${FLAGS[*]}"
   exit 0
 fi
@@ -109,4 +115,5 @@ LEG_CONFIG=$CONFIG \
 LEG_LOGDIR=$BATCH \
 OCUDU_UL_DUMP=$PATTERN_DIR/C \
 OCUDU_UL_DUMP_COUNT=$CAPTURES \
+OCUDU_RECEIVER_PROBE=$PROBE \
   bash "$RUNNER" "$PIPELINE" "$LABEL" "${FLAGS[@]}"

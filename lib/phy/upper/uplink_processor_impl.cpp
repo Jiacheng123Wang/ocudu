@@ -14,71 +14,10 @@
 #include "ocudu/phy/upper/unique_rx_buffer.h"
 #include "ocudu/phy/upper/upper_phy_rx_results_notifier.h"
 #include "ocudu/ran/sch/sch_segmentation.h"
-#include <algorithm>
-#include <array>
 #include <chrono>
-#include <limits>
 #include "ocudu/support/rtsan.h"
 
 using namespace ocudu;
-
-namespace {
-
-/// One number per reception: how long the PUSCH processor call itself took, on the thread that ran it.
-///
-/// WHY IT EXISTS. The three pipeline variants -- every module on the CPU, the fused Metal lane, and the
-/// depth-3 arm -- are compared on throughput and on latency. The only latency instrument in the tree was
-/// the arm's own `[depth3-timing]`, which by construction cannot measure the two classical variants, so a
-/// comparison across them had no common yardstick. This timer sits OUTSIDE the receiver: it times the whole
-/// `pusch_processor::process` call, which for the fused lane and for the arm includes whatever device work
-/// they do inside it, and it prints the same summary whatever the mode.
-///
-/// It keeps the last 4096 samples and prints on the first reception and every 500th -- the same ring
-/// discipline as the arm's instruments, because the first sample is the cold one (model load, first
-/// inference) and must not be read as a steady state. Kept per thread: the executor decides which thread
-/// runs a reception, and mixing threads into one ring would report a number nobody can attribute.
-class pusch_call_timer
-{
-  static constexpr size_t RING = 4096;
-
-public:
-  void note(std::chrono::nanoseconds elapsed)
-  {
-    ++count;
-    const auto micros = static_cast<uint32_t>(
-        std::min<int64_t>(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count(),
-                          static_cast<int64_t>(std::numeric_limits<uint32_t>::max())));
-    samples[count % RING] = micros;
-    if ((count == 1) || ((count % 500) == 0)) {
-      print();
-    }
-  }
-
-private:
-  void print()
-  {
-    std::array<uint32_t, RING> sorted = samples;
-    const size_t               n      = static_cast<size_t>(std::min<uint64_t>(count, RING));
-    std::sort(sorted.begin(), sorted.begin() + n);
-    const auto at = [&](double quantile) {
-      return sorted[static_cast<size_t>(std::min<double>(quantile * (n - 1) + 0.5, static_cast<double>(n - 1)))];
-    };
-    fmt::print(stderr,
-               "[pusch-timing] {} reception(s), microseconds: p10 {} p50 {} p90 {} max {}\n",
-               count,
-               at(0.1),
-               at(0.5),
-               at(0.9),
-               sorted[n - 1]);
-  }
-
-  std::array<uint32_t, RING> samples{};
-  uint64_t                   count = 0;
-};
-
-thread_local pusch_call_timer the_pusch_call_timer;
-
-} // namespace
 
 /// \brief Returns a PRACH detector slot configuration using the given PRACH buffer context.
 static prach_detector::configuration get_prach_dectector_config_from_prach_context(const prach_buffer_context& context)
@@ -437,11 +376,7 @@ void uplink_processor_impl::process_pusch(const uplink_pdu_slot_repository::pusc
 
         trace_point tp = l1_ul_tracer.now();
 
-        // Timed here rather than inside the receiver so the three pipeline variants share one yardstick
-        // (see pusch_call_timer above).
-        const auto call_begin = std::chrono::steady_clock::now();
         pusch_proc->process(data, std::move(rm_buffer2), processor_notifier, grid->get_reader(), pdu.pdu);
-        the_pusch_call_timer.note(std::chrono::steady_clock::now() - call_begin);
 
         l1_ul_tracer << trace_event("process_pusch", tp);
       });
