@@ -84,7 +84,7 @@ void uplink_processor_impl::stop()
   //
   // MEASURED 2026-10-16, from a flown leg: the gNB could not be stopped. Ctrl+C entered the shutdown, printed the
   // reports and then sat in `o_du stop: lower_phy` for the entire 30-second termination timeout, after which the
-  // process was SIGKILLed; the operator's report was "只能 kill". The token this wait is about is transferred to the
+  // process was SIGKILLed; the operator's report was (translated) "kill is the only way out". The token this wait is about is transferred to the
   // slot's PDU repository (see get_pdu_slot_repository), so a repository that is never destroyed holds it for good -
   // and the same condition is visible DURING the run as "UL processor is busy for slot ...", of which that leg logged
   // 6553. An unbounded wait here converts one leaked slot into a gNB that cannot be stopped and whose shutdown log is

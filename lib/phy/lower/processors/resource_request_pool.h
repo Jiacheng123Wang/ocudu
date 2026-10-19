@@ -60,7 +60,7 @@ public:
   /// upper PHY's stop token on the grid. Stop only set a flag, so every shutdown after uplink traffic left the last
   /// requests (a full ring of them) holding their grids until the processor was DESTROYED, i.e. after the upper PHY
   /// had already waited for those very tokens: measured 2026-10-16, "o_du stop: lower_phy" never returned, the
-  /// 30-second termination alarm fired and the gNB was SIGKILLed (the operator's report was "只能 kill"). Releasing
+  /// 30-second termination alarm fired and the gNB was SIGKILLed (the operator's report was, translated, "kill is the only way out"). Releasing
   /// them at stop breaks that cycle.
   ///
   /// \note Best effort by construction: a slot whose wrapper is held by a concurrent producer is left alone rather

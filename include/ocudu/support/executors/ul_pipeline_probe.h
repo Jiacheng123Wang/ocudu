@@ -1082,7 +1082,7 @@ public:
     int64_t  air_us     = 0;  ///< the block's air time, receive events only (0 = not reported)
     int64_t  due_ts     = 0;  ///< the radio's due timestamp, hand-over events only
     int64_t  load1_x100 = -1; ///< getloadavg(1) at that instant, x100 (-1 = the caller had none)
-    /// WHICH THREAD recorded the event (dev doc P1, "可归因"). The name is a bounded COPY, not a pointer: the
+    /// WHICH THREAD recorded the event (dev doc P1, "attributable"). The name is a bounded COPY, not a pointer: the
     /// probe keeps events for the whole run and hands them out at report time, so a pointer into the recording
     /// thread's storage would dangle (or, worse, name the reporting thread).
     uint64_t thread_id       = 0;

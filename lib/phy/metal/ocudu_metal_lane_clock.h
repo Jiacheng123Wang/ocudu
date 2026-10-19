@@ -82,8 +82,9 @@ struct lane_host_clock {
   /// the host RUNNING". Those are different quantities with different fixes, and until now this probe could not
   /// tell them apart:
   ///
-  ///   * the CPU side is the WORK - the bounded slice the user's framework calls "申请一个 CPU 时间片段，完成
-  ///     commit", and the only thing a Mach time constraint's `computation` can legitimately cover. GPU kernel
+  ///   * the CPU side is the WORK - the bounded slice the operator's framework calls (translated) "ask for a CPU
+  ///     time slice, complete the commit", and the only thing a Mach time constraint's `computation` can
+  ///     legitimately cover. GPU kernel
   ///     time is NOT charged to it: the CPU stands aside at the commit and the device runs on its own;
   ///   * `wall - cpu` is the thread being OFF-CPU inside its own activation - preemption at the ~100 us scale,
   ///     which the 1 ms watchdog CANNOT see (it samples once per millisecond and calls a thread frozen only if it

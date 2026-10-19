@@ -57,7 +57,7 @@ kernel void mmse_weights(device const float*  r_hp [[buffer(0)]],  // [nof_syste
 //
 // WHY. `mmse_weights` above reads A^-1 through `ap[k * p.L]` - a COLUMN walk with a row-sized stride -
 // so every one of the (nout x L) threads misses the cache on most of its L loads, and the kernel's
-// 13.18us/派发 (the largest single CE site, dev doc 6.65) is almost all memory stall: each output
+// 13.18us/dispatch (the largest single CE site, dev doc 6.65) is almost all memory stall: each output
 // element costs just two FLOPs. The matrix is small and CONSTANT across the whole grid, which is
 // exactly the shape threadgroup memory exists for.
 //

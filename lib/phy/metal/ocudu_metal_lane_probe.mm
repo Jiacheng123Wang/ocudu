@@ -126,8 +126,9 @@ struct lane_stats_t {
   std::vector<double> entry_to_lane_commit_us;
   /// \brief The SAME span in THREAD CPU, published next to its wall twin on purpose.
   ///
-  /// The user's accounting (2026-10-03): the CPU's job in a hop is a bounded slice - "申请一个 CPU 时间片段，
-  /// 完成 commit" - and the GPU kernel's execution is NOT part of it. `entry_to_lane_commit_us` cannot say how
+  /// The user's accounting (2026-10-03): the CPU's job in a hop is a bounded slice - in the operator's
+  /// words (translated) "ask for a CPU time slice, complete the commit" - and the GPU kernel's execution is
+  /// NOT part of it. `entry_to_lane_commit_us` cannot say how
   /// much of the span the CPU was actually running, and that difference is what a Mach time constraint could
   /// recover: it is preemption inside the activation, at a scale the 1 ms watchdog is blind to (it calls a
   /// thread frozen only if it gained <100 us of CPU in a whole millisecond). Read the two as a pair: the CPU
