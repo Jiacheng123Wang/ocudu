@@ -12,9 +12,13 @@
 # refuses when something is missing, and can print the exact command instead of running it.
 #
 # The bundles:
-#   a = the retrained c32 (data/runs/d3_dmrs2711_c32)   the candidate
+#   a = the retrained c32 (data/runs/d3_dmrs2711_c32)   the first candidate
+#   d = the high-SNR c32 (data/runs/d3_dmrs2711h_c32)   the candidate after the 64QAM head fix
 #   b = the deployed ft (data/models)                   the reference AI arm
 #   c = the classical chain                             the reference the scheduler has always used
+#
+# `d` is resolved through $CAND so a newer candidate does not need this file edited: CAND=<bundle>
+# overrides it. A bundle only becomes the default by a separate, deliberate change.
 #
 # Each leg records 60 uplink captures into <batch>/pat/<short>/ for one purpose: the DM-RS pattern a
 # leg ran is not in its log, and the arm's outcome on this cell is decided by that pattern (design
@@ -32,6 +36,7 @@ RUNNER=$ROOT/doc_chinese/phy_pipeline_gpu/wip/run_leg.sh
 CONFIG=${CFG:-$ROOT/configs/gnb_rf_b200_tdd_n78_20mhz.yml}
 BATCH=${B:-$W/legs/c32dmrs}
 NEW=$W/data/runs/d3_dmrs2711_c32/d3_dmrs2711_c32.mlmodelc
+CAND=${CAND:-$W/data/runs/d3_dmrs2711h_c32/d3_dmrs2711h_c32.mlmodelc}
 FT=$W/data/models/d3_modcond_ft.mlmodelc
 CAPTURES=${CAPTURES:-60}
 
@@ -39,22 +44,23 @@ ARM=${1:-}
 LABEL=${2:-}
 DRY=${3:-}
 if [ -z "$ARM" ] || [ -z "$LABEL" ]; then
-  echo "usage: sudo -E bash $0 <a|b|c> <label> [--dry-run]" >&2
+  echo "usage: sudo -E bash $0 <a|b|c|d> <label> [--dry-run]" >&2
   exit 2
 fi
 
 case "$ARM" in
   a) FLAGS=(--expert_phy.pusch_receiver_backend=ai --expert_phy.pusch_receiver_model="$NEW") ;;
+  d) FLAGS=(--expert_phy.pusch_receiver_backend=ai --expert_phy.pusch_receiver_model="$CAND") ;;
   b) FLAGS=(--expert_phy.pusch_receiver_backend=ai --expert_phy.pusch_receiver_model="$FT") ;;
   c) FLAGS=(--expert_phy.pusch_receiver_backend=classic) ;;
-  *) echo "arm '$ARM' is not a|b|c" >&2; exit 2 ;;
+  *) echo "arm '$ARM' is not a|b|c|d" >&2; exit 2 ;;
 esac
 
 missing=0
 for path in "$RUNNER" "$CONFIG"; do
   [ -f "$path" ] || { echo "MISSING: $path" >&2; missing=1; }
 done
-if [ "$ARM" = "a" ] || [ "$ARM" = "b" ]; then
+if [ "$ARM" = "a" ] || [ "$ARM" = "b" ] || [ "$ARM" = "d" ]; then
   bundle=${FLAGS[1]#--expert_phy.pusch_receiver_model=}
   [ -d "$bundle" ] || { echo "MISSING bundle: $bundle" >&2; missing=1; }
 fi
