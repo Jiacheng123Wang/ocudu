@@ -35,6 +35,10 @@ using namespace ocudu;
 
 namespace {
 
+#if defined(OCUDU_HAVE_DEPTH3_ENGINE)
+// The sidecar reader below serves only the engine path; on a build without the depth-3 engine (Linux) these
+// two functions have no caller, and GCC builds here with -Werror=unused-function (caught 2026-10-19).
+
 /// \brief The model-external constants of the contract, read from a sidecar next to the bundle.
 ///
 /// `model_network_design.md` section 0.2(f) puts them OUTSIDE the graph so that changing a scale does not
@@ -112,6 +116,8 @@ depth3_scales read_scales(const std::string& model_path, float range_limit)
       "AI depth-3: scales from {}: S_llr={} A_n={} B_n={}", path, scales.s_llr, scales.a_noise, scales.b_noise);
   return scales;
 }
+
+#endif // OCUDU_HAVE_DEPTH3_ENGINE
 
 #if defined(OCUDU_HAVE_DEPTH3_ENGINE)
 
