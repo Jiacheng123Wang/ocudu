@@ -925,7 +925,7 @@ SDK 的 `extension_model.md` 把 Receiver 的可替换核心直接写成
 
 | 路径 | 内容 | 大小 |
 |---|---|---|
-| `lib/phy/upper/signal_processors/channel_estimator/metal/ai_assets/depth3_modcond_ft/` | 编译产物 `.mlmodelc` + `.mlpackage` + 训练好的 `.keras` + `history.json` + **README**（契约声明 / 训练配置 / 验证结果 / 重建命令） | **1.2 MB** |
+| `lib/phy/upper/ai_signal_processors/depth3/depth3_modcond_ft/` | 编译产物 `.mlmodelc` + `.mlpackage` + 训练好的 `.keras` + `history.json` + **README**（契约声明 / 训练配置 / 验证结果 / 重建命令） | **1.2 MB** |
 | 同上（构建默认） | `OCUDU_DEPTH3_DEFAULT_MODEL` 指向此产物 ⇒ **干净克隆里 `--pusch_receiver_backend ai` 不给模型也能跑** | — |
 
 模型是 **N78 / 20 MHz / TDD / 30 kHz / 51 PRB**：输入平面 `[1, 612, 14, 16]`（12 契约通道 + 4 个 Qm one-hot），
@@ -939,7 +939,7 @@ SDK 的 `extension_model.md` 把 Receiver 的可替换核心直接写成
 # 构建（必须开 Metal/CoreML 栈；关掉时是 identity 臂 + 报错，不会假装在算）
 cmake -S . -B build -DENABLE_METAL_CHEST=ON
 # 若沿用旧构建树，缓存变量要显式更新（它是 CACHE 变量，源码默认不会覆盖旧值）
-cmake -B build -DOCUDU_DEPTH3_DEFAULT_MODEL=$PWD/lib/phy/upper/signal_processors/channel_estimator/metal/ai_assets/depth3_modcond_ft/d3_modcond_ft.mlmodelc
+cmake -B build -DOCUDU_DEPTH3_DEFAULT_MODEL=$PWD/lib/phy/upper/ai_signal_processors/depth3/depth3_modcond_ft/d3_modcond_ft.mlmodelc
 
 # 运行（gNB）：三件事选上 AI 后端
 --expert_phy.phy_pipeline gpu \

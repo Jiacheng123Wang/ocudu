@@ -10036,6 +10036,7 @@ reception 1 (Qm=8 256QAM) over 552 pilot RE(s): ... noise net=6.1434e-04 classic
 ★ 想改但**没定位到那句字符串** ✗（★ grep 无匹配 ✓）⇒ ★ 列为待办 ✓，★ 不假装已改 ✓。
 
 ★★ **② 模型入库** ✓：★ `lib/phy/upper/signal_processors/channel_estimator/metal/ai_assets/depth3_modcond_ft/` ✓
+★ 后来修正（★ 2026-10-19 20:50 ✓）：★ **该路径已迁移** ✓，★ 现为 `lib/phy/upper/ai_signal_processors/depth3/depth3_modcond_ft/` ✓（★ 见 §19.226 ✓）；★ 本节及 §19.162 一带写的旧路径是**当时**的事实 ✓，★ 不再改 ✓。
 ★ —— ★ 编译产物 ✓、★ `.mlpackage` ✓、★ 训练好的 `.keras` ✓、★ `history.json` ✓、★ **README** ✓（★ 契约声明 ✓、
 ★ 训练配置 ✓、★ 验证结果 ✓、★ 重建命令 ✓），★ 共 **1.2 MB** ✓。
 ★ **数据集不入库** ✗（★ 688 MB / 69 MB ✓），★ README 写明如何重建 ✓。
@@ -13723,7 +13724,7 @@ nvidia-smi                            # 应列出 RTX 3060 Ti
 
 **(b) ★★ 落地改了什么 ✓**
 
-1. ★ **新资产** ✓：★ `lib/phy/upper/signal_processors/channel_estimator/metal/ai_assets/depth3_modcond_c32h/` ✓
+1. ★ **新资产** ✓：★ `lib/phy/upper/ai_signal_processors/depth3/depth3_modcond_c32h/` ✓（★ 2026-10-19 迁移 ✓，★ 见 §19.226 ✓）
    （★ 164 KB ✓，★ 含 `README.md` 记录契约/训练/验证/回滚 ✓）；
 2. ★ **默认切换** ✓：★ `OCUDU_DEPTH3_DEFAULT_MODEL` 指向它 ✓（★ `apps/units/flexible_o_du/o_du_low/CMakeLists.txt` ✓，
    ★ 注释里写明为什么换、★ 依据哪几条 ✓）；
@@ -13748,7 +13749,36 @@ nvidia-smi                            # 应列出 RTX 3060 Ti
 （★ 预期 stderr 出现 `AI ARM ACTIVE over 4 model(s)` ＋ `calibration APPLIED` ✓、★ 且路径是 `c32h` ✓）。
 
 ★ 状态：★ **默认已切换 ✓**（★ 用户指示 ✓）；★ 旧产物保留可回滚 ✓；★ 飞行脚本 `fly_arm.sh` 仍显式带路径 ✓
-⇒ ★ 飞行行为不受本次切换影响 ✓。## 20. ★★★ R7 执行计划：**把经典估计器从 AI 路径里去掉**（★ 2026-10-17 冻结动机、方案、步骤、判据）
+⇒ ★ 飞行行为不受本次切换影响 ✓。### 19.226 ★★★ 目录迁移 ✓：★ 深度-3 的产物移出"经典信道估计器"目录 ✓（★ 2026-10-19 20:45–21:00 ✓）
+
+★ 用户指出 ✓：★ 深度-3 接收机**本身就是 CE ＋ EQ ＋ DEMOD 三合一的整体** ✓ ⇒
+★ 它的模型产物放在 `signal_processors/channel_estimator/metal/ai_assets/` 下面**语义不对** ✓ ——
+★ 那个目录属于**经典**信道估计器（★ `helena_*` ✓）。
+
+**(a) ★ 做了什么 ✓**
+
+| ★ 项 | ★ 前 | ★ 后 |
+|---|---|---|
+| ★ 默认产物 | ★ `…/channel_estimator/metal/ai_assets/depth3_modcond_c32h/` | ★ **`lib/phy/upper/ai_signal_processors/depth3/depth3_modcond_c32h/`** ✓ |
+| ★ 回滚产物 | ★ `…/metal/ai_assets/depth3_modcond_ft/` | ★ **`…/ai_signal_processors/depth3/depth3_modcond_ft/`** ✓ |
+| ★ 目录说明 | ★ 无 | ★ `ai_signal_processors/depth3/README.md`（★ 写明为什么在这里 ＋ 两个产物的角色 ✓）|
+| ★ `ai_assets/` 剩下 | ★ 两个 depth3 ＋ 八个 helena | ★ **只有八个 `helena_*`** ✓（★ 经典估计器专用 ✓）|
+
+★ 引用同步 ✓：★ `apps/units/flexible_o_du/o_du_low/CMakeLists.txt` 的 `OCUDU_DEPTH3_DEFAULT_MODEL` ✓、
+★ 状态计划文档 ✓、★ 环境变量清单 ✓、★ 新产物的 `README`（★ 回滚段 ✓）✓。
+★ **历史章节不改** ✓（★ 按惯例只加"★ 后来修正"标注 ✓）；★ `session_handoff_*` **不动** ✓（★ 快照不可变 ✓）。
+
+**(b) ★★ 验证 ✓**
+
+| ★ 检查 | ★ 结果 |
+|---|---|
+| ★ 重新配置 ＋ 重链 | ★ `cmake -U OCUDU_DEPTH3_DEFAULT_MODEL -S . -B build` ＋ `--target gnb` ✓（★ 它是 CACHE 变量 ✓，★ 不 `-U` 不生效 ✓）|
+| ★ 编进去的路径 | ★ `flags.make` 与 `strings build/apps/gnb` **都指向新路径** ✓ |
+| ★ 迁移后的默认产物自检 | ★ 2,11 抓包 313 个接收 ✓：★ 臂算 **305/313** ✓、★ 公布值中位 **−0.65 dB** ✓（★ 与迁移前**完全一致** ✓）|
+| ★ 回滚产物 | ★ 新路径下 `depth3_modcond_ft.mlmodelc` 在位 ✓ |
+
+★ 状态：★ 迁移完成 ✓、★ 引用已同步 ✓、★ 两个产物在新位置都能绑上 ✓、★ 默认与回滚路径都已验证 ✓。
+## 20. ★★★ R7 执行计划：**把经典估计器从 AI 路径里去掉**（★ 2026-10-17 冻结动机、方案、步骤、判据）
 
 > ★ 本节为**计划**，与 §19.194–§19.201 的测量记录分开：§19.x 记“发生了什么”，本节记“接下来怎么做、怎么判”。
 > ★ 所有数字来自 §19.200 的实测，所有结构事实来自代码（`pusch_depth3_receiver_impl.cpp`）。

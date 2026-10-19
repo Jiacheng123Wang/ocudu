@@ -35,8 +35,11 @@ target_include_directories(ocudu_o_du_low_unit_helpers PRIVATE ${CMAKE_SOURCE_DI
 # The live A/B that this rests on: six adjacent pairs against the classical chain, five of them positive, mean +27.8%,
 # with the network decoding better on 11 of 12 legs' own captures replayed through both arms (section 19.224).
 # The c64 bundle remains in the tree as depth3_modcond_ft and is one `--pusch_receiver_model` away.
+# Both bundles live under lib/phy/upper/ai_signal_processors/depth3/: the depth-3 receiver IS the estimator,
+# the equaliser and the demapper in one unit, so its artefacts do not belong under the channel estimator's
+# metal directory (moved 2026-10-19).
 set(OCUDU_DEPTH3_DEFAULT_MODEL
-    "${CMAKE_SOURCE_DIR}/lib/phy/upper/signal_processors/channel_estimator/metal/ai_assets/depth3_modcond_c32h/d3_modcond_c32h.mlmodelc"
+    "${CMAKE_SOURCE_DIR}/lib/phy/upper/ai_signal_processors/depth3/depth3_modcond_c32h/d3_modcond_c32h.mlmodelc"
     CACHE FILEPATH "Model the PUSCH ai receiver binds when --pusch_receiver_model is not given")
 
 target_compile_definitions(ocudu_o_du_low_unit_helpers PRIVATE

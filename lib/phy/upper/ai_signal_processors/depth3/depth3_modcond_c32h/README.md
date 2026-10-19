@@ -41,6 +41,6 @@
 
 ## 回滚
 
-`depth3_modcond_ft` 仍在树里。回滚只需把 `apps/units/flexible_o_du/o_du_low/CMakeLists.txt` 的
+`../depth3_modcond_ft/` 仍在树里。回滚只需把 `apps/units/flexible_o_du/o_du_low/CMakeLists.txt` 的
 `OCUDU_DEPTH3_DEFAULT_MODEL` 指回它并重新配置——注意它是 **CACHE** 变量，已有 build 目录需要
 `cmake -U OCUDU_DEPTH3_DEFAULT_MODEL -S . -B build` 才会重新取默认值。
