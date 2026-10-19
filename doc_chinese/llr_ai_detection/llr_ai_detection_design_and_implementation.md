@@ -14080,7 +14080,66 @@ nvidia-smi                            # 应列出 RTX 3060 Ti
 
 ★ 状态：★ 第 0 步完成 ✓；★ S1 语料已建、★ 训练中 ✓、★ 验收已排队 ✓；★ S2–S4 待 S1 过线后开始 ✓。
 
-## 20. ★★★ R7 执行计划：**把经典估计器从 AI 路径里去掉**（★ 2026-10-17 冻结动机、方案、步骤、判据）
+### 19.231 ★★★ Ubuntu 全量编译与全量测试 ✓（★ 2026-10-19 23:00–23:50 ✓，★ 机器 `192.168.100.131` ✓）
+
+★ 用户要求 ✓：★ push 分支 ✓ → ★ 在 Ubuntu 同步 ✓ → ★ **全量 build** ✓ → ★ **全量 `--target test`** ✓。
+
+**(a) ★★ 先纠正我自己的一步错棋 ✓（★ 用户指示 ✓，★ 后来修正 ✓）**
+
+★ 我最初的做法是**把 Apple 专用代码改成能在 Ubuntu 编译** ✓（★ `__fp16` → `_Float16` 别名 ✓、
+★ sign-compare 规避 ✓、★ unused-function 规避 ✓）✓ —— ★ 这**方向错了** ✓：
+★ 深度-3 的核心是 **Apple Silicon 专用** ✓（★ `__fp16` 存储 ＋ Core ML 前向 ✓），
+★ 在 Ubuntu 上**就不该被编译** ✓，★ 而不是"教它编译" ✓。
+
+★★ **正确做法（★ 已落地 ✓）**：★ **CMake 高层开关 `ENABLE_DEPTH3_AI`** ✓
+
+| ★ 平台 | ★ 默认值 | ★ 效果 |
+|---|---|---|
+| ★ Apple Silicon（★ `APPLE` ＋ `aarch64/arm64` ✓）| ★ **ON** ✓ | ★ 编译深度-3 核心 ✓ |
+| ★ 其他（★ Ubuntu ✓）| ★ **OFF** ✓ | ★ **核心源文件完全不进编译** ✓ |
+| ★ 非 Apple 平台上显式设 ON | ★ **configure 直接报错** ✓ | ★ 并说明"需要 `__fp16` 与 Core ML，留 OFF 即可" ✓ |
+
+★ OFF 时 ✓：★ `pusch_depth3_input_plane.cpp`、★ `pusch_depth3_measurements.cpp` **不编译** ✓；
+★ 平面/测量头文件只在 `OCUDU_HAVE_DEPTH3_ENGINE` 下被 include ✓；★ 平面校验可执行不构建 ✓；
+★ Core ML 定义与 metal 估计器链接跟随同一开关 ✓。
+★★ **仍然通用的是"缝"** ✓：★ `pusch_depth3_receiver_impl.cpp` 在任何平台都编译 ✓
+★（★ 它带着工厂 ＋ 经典臂 ＋ 恒等臂 ✓）⇒ ★ 非 Apple 构建仍有可选的 `ai` 接收机 ✓，
+★ 启动时明说"本构建没有 Core ML 引擎，不是 AI 结果" ✓。
+
+★ 保留的两处**共享代码**修复 ✓（★ 那些文件在 Ubuntu 上确实要编译 ✓）：
+★ `processor_factories.cpp` 的内层 `unique_ptr` 改名 `unit` ✓、★ `upper_phy_impl.cpp` 的 lambda 用 `phy_log` ✓
+★（★ 都是 GCC `-Werror=shadow` 查出的真实问题 ✓）。★ 回退的提交：★ `6570636405` / `4ee5afaa96` / `94b39ceb07` ✓。
+
+**(b) ★★ 结果 ✓**
+
+| ★ 步骤 | ★ 结果 |
+|---|---|
+| ★ push `apple-silicon` → GitHub ✓ | ★ 成功 ✓（`94b39ceb07..b9018bed8c` 等 ✓）|
+| ★ 131 同步 ＋ 全新 `build_test` ✓ | ★ ff-only 合并 ✓、★ `ENABLE_DEPTH3_AI=OFF` ✓（★ 缓存实测 ✓）|
+| ★ **全量 build** ✓ | ★ **exit=0** ✓、★ **0 error** ✓、★ **14 m 21 s**（★ 12 核 ✓）|
+| ★ **全量 `--target test`** ✓ | ★ **10 283 个测试** ✓、★ **通过 10 281** ✓、★ 跳过 2 ✓、★ **失败 1** ✗ |
+
+**(c) ★★ 唯一失败 ✓：★ 一个平台相关的 SEGFAULT ✓（★ 与本次改动无关 ✓）**
+
+```
+6026 - UplinkProcessorFixture.stop_gives_up_on_a_grid_that_is_still_in_use (SEGFAULT)
+```
+
+| ★ 检查 | ★ 结果 |
+|---|---|
+| ★ Ubuntu 上重跑 3 次 ✓ | ★ **每次都 SEGFAULT** ✓（★ 确定性 ✓）|
+| ★ macOS 上同一测试 ✓ | ★ **通过** ✓（★ 13.5 s ✓）|
+| ★ gdb 回溯 ✓ | ★ 崩在 **TestBody 本体内（★ 线程 1 ✓）** ✓，★ 不在工作线程 ⇒ ★ 疑似 `ul_processor.reset()` 那一步 ✓ |
+| ★ 与本次改动的关联 ✓ | ★ **无** ✓ —— ★ 我们没碰 stop/grid 代码 ✓；★ 改的是工厂改名、★ 日志变量名、★ 深度-3 的 guard 与 CMake ✓ |
+
+★★ **⇒ 判定 ✓**：★ 这是**共享代码里一个平台相关的缺陷** ✓（★ 停止弃权路径的释放顺序 ✓），
+★ 正是全量 Ubuntu 测试应当抓到的 ✓。★ **不阻塞** R7 ✓，★ 但应当单独修 ✓（★ 需要 `RelWithDebInfo` 定位行号 ✓）。
+
+★ 跳过 2 个 ✓（★ 预期 ✓）：★ `lower_phy_uplink_processor_assembly_arm`（★ ARM 专用 ✓）、
+★ `ul_pipeline_probe_test.compiled_out_without_flow_probes`（★ flow probe 未开 ✓）。
+
+★ 状态：★ push ✓、★ 同步 ✓、★ 全量 build 通过 ✓、★ 全量测试 10 281/10 283 通过 ✓、
+★ 唯一失败已定位到共享代码并记录待修 ✓；★ R7/S1 训练仍在跑 ✓。## 20. ★★★ R7 执行计划：**把经典估计器从 AI 路径里去掉**（★ 2026-10-17 冻结动机、方案、步骤、判据）
 
 > ★ 本节为**计划**，与 §19.194–§19.201 的测量记录分开：§19.x 记“发生了什么”，本节记“接下来怎么做、怎么判”。
 > ★ 所有数字来自 §19.200 的实测，所有结构事实来自代码（`pusch_depth3_receiver_impl.cpp`）。
