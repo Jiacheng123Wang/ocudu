@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (C) 2026 Jiacheng Wang
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
-#include "pusch_depth3_half.h"
 #include "pusch_depth3_input_plane.h"
 #include "../../signal_processors/dmrs_helper.h"
 #include "ocudu/adt/bounded_bitset.h"
@@ -100,7 +99,7 @@ const char* pusch_depth3_input_plane::to_string(status value)
 }
 
 pusch_depth3_input_plane::status
-pusch_depth3_input_plane::assemble(span<depth3_half>                           plane,
+pusch_depth3_input_plane::assemble(span<__fp16>                           plane,
                                    float&                                 reference_amplitude,
                                    const resource_grid_reader&            grid,
                                    const pusch_demodulator::configuration& config,
@@ -143,11 +142,7 @@ pusch_depth3_input_plane::assemble(span<depth3_half>                           p
   // Every allocated resource block must lie inside the contract's window. This is the check that makes "the
   // window is the bandwidth part" a fact rather than an assumption: an allocation that reaches past subcarrier
   // 612 belongs to a bandwidth part that does not start where the window does.
-  // `find_highest()` answers in a signed type and -1 for an empty mask, so the negative case is checked
-  // first: casting -1 to unsigned would wrap and report a window violation for a mask that simply has no
-  // bits set (GCC builds with -Werror=sign-compare, which is what surfaced this on 2026-10-19).
-  const int highest_rb = config.rb_mask.find_highest();
-  if ((highest_rb < 0) || (static_cast<unsigned>(highest_rb) >= NOF_SUBCARRIERS / NOF_SUBCARRIERS_PER_RB)) {
+  if (config.rb_mask.find_highest() >= NOF_SUBCARRIERS / NOF_SUBCARRIERS_PER_RB) {
     return status::allocation_outside_window;
   }
   // And it must be wide enough for the model to have seen anything like it: MIN_PRB is the
@@ -295,23 +290,23 @@ pusch_depth3_input_plane::assemble(span<depth3_half>                           p
       const bool is_allocated = allocated.test(k);
       const bool is_pilot = is_allocated && (ls_index >= 0) && pilot_offsets.test(k % NOF_SUBCARRIERS_PER_RB);
 
-      depth3_half* destination =
+      __fp16* destination =
           plane.data() + (static_cast<size_t>(k) * NOF_SYMBOLS + symbol) * plane_channels;
-      destination[CH_GRID_RE]   = static_cast<depth3_half>(row[k].real() * inverse_r);
-      destination[CH_GRID_IM]   = static_cast<depth3_half>(row[k].imag() * inverse_r);
-      destination[CH_DMRS_MASK] = static_cast<depth3_half>(is_pilot ? 1.0F : 0.0F);
-      destination[CH_ALLOCATION] = static_cast<depth3_half>(is_allocated ? 1.0F : 0.0F);
-      destination[CH_DC] = static_cast<depth3_half>((static_cast<int>(k) == dc_position) ? 1.0F : 0.0F);
+      destination[CH_GRID_RE]   = static_cast<__fp16>(row[k].real() * inverse_r);
+      destination[CH_GRID_IM]   = static_cast<__fp16>(row[k].imag() * inverse_r);
+      destination[CH_DMRS_MASK] = static_cast<__fp16>(is_pilot ? 1.0F : 0.0F);
+      destination[CH_ALLOCATION] = static_cast<__fp16>(is_allocated ? 1.0F : 0.0F);
+      destination[CH_DC] = static_cast<__fp16>((static_cast<int>(k) == dc_position) ? 1.0F : 0.0F);
       destination[CH_LS_RE] =
-          static_cast<depth3_half>((ls_index >= 0) ? ls[ls_index][k].real() * inverse_r : 0.0F);
+          static_cast<__fp16>((ls_index >= 0) ? ls[ls_index][k].real() * inverse_r : 0.0F);
       destination[CH_LS_IM] =
-          static_cast<depth3_half>((ls_index >= 0) ? ls[ls_index][k].imag() * inverse_r : 0.0F);
-      destination[CH_NOF_TX_LAYERS] = static_cast<depth3_half>(static_cast<float>(config.nof_tx_layers));
+          static_cast<__fp16>((ls_index >= 0) ? ls[ls_index][k].imag() * inverse_r : 0.0F);
+      destination[CH_NOF_TX_LAYERS] = static_cast<__fp16>(static_cast<float>(config.nof_tx_layers));
       destination[CH_NOF_CDM_GROUPS] =
-          static_cast<depth3_half>(static_cast<float>(config.nof_cdm_groups_without_data));
-      destination[CH_DMRS_TYPE] = static_cast<depth3_half>(static_cast<float>(config.dmrs_type));
-      destination[CH_NOF_DMRS_SYMBOLS] = static_cast<depth3_half>(static_cast<float>(nof_dmrs_symbols));
-      destination[CH_SCALING]          = static_cast<depth3_half>(scaling);
+          static_cast<__fp16>(static_cast<float>(config.nof_cdm_groups_without_data));
+      destination[CH_DMRS_TYPE] = static_cast<__fp16>(static_cast<float>(config.dmrs_type));
+      destination[CH_NOF_DMRS_SYMBOLS] = static_cast<__fp16>(static_cast<float>(nof_dmrs_symbols));
+      destination[CH_SCALING]          = static_cast<__fp16>(scaling);
     }
   }
   return status::ok;

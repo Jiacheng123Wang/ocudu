@@ -8,7 +8,11 @@
 #include "pusch_decoder_hw_impl.h"
 #include "pusch_decoder_impl.h"
 #include "pusch_depth3_model_map.h"
+#if defined(OCUDU_HAVE_DEPTH3_ENGINE)
+// Apple-only: the plane header carries __fp16. Without the depth-3 core the arm is never a network arm, so
+// nothing below this include is reachable -- but the file still has to compile on Ubuntu.
 #include "pusch_depth3_input_plane.h"
+#endif
 #include "pusch_depth3_receiver_impl.h"
 #include "pusch_processor_impl.h"
 #include "pusch_processor_pool.h"
@@ -201,8 +205,7 @@ public:
       // the strict policy ask about the very modules the unit runs -- an arm owning its own copies would leave
       // the policy interrogating instances nothing ever executes, silently.
       // Named `unit` rather than `dependencies`: the enclosing scope already has a `dependencies`, and GCC
-      // builds here with -Werror=shadow, so the Apple build's tolerance is not a licence to shadow
-      // (the Ubuntu CI build caught it on 2026-10-19).
+      // builds here with -Werror=shadow (the Ubuntu CI build caught it on 2026-10-19).
       auto unit = std::make_unique<pusch_processor_impl::concurrent_dependencies>(
           estimator_factory->create(), demodulator_factory->create(), demux_factory->create(),
           uci_dec_factory->create(), ch_estimate_dimensions);
@@ -257,10 +260,21 @@ public:
           for (const pusch_depth3_bound_model& model : arm.bound_models()) {
             declared += fmt::format("{}{}", declared.empty() ? "" : ",", model.qm);
           }
+          // The channel count comes from the bundle at run time (`bound_plane_channels()`); the contract's
+          // constant is only needed to explain it, and it lives in the Apple-only plane header. Where the
+          // depth-3 core is not built the arm cannot be a network arm at all, so this line is unreachable --
+          // but it still has to compile, hence the guard rather than the constant on every platform.
+#if defined(OCUDU_HAVE_DEPTH3_ENGINE)
           fmt::print(stderr,
                      "[pusch_receiver]   contract=modcond: ONE bundle computes Qm={{{}}} (plane {} channels = {} + "
                      "the one-hot ones, LLR head read with a stride); the bundle declares this itself.\n",
                      declared, arm.bound_plane_channels(), pusch_depth3_input_plane::NOF_CHANNELS);
+#else
+          fmt::print(stderr,
+                     "[pusch_receiver]   contract=modcond: ONE bundle computes Qm={{{}}} (plane {} channels, LLR "
+                     "head read with a stride); the bundle declares this itself.\n",
+                     declared, arm.bound_plane_channels());
+#endif
         }
         for (const pusch_depth3_bound_model& model : arm.bound_models()) {
           fmt::print(stderr, "[pusch_receiver]   computes Qm={} {:<6s} <- '{}' [{}]\n", model.qm,

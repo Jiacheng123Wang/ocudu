@@ -28,12 +28,20 @@ add_library(ocudu_pusch_processor STATIC
         pusch_decoder_empty_impl.cpp
         pusch_decoder_hw_impl.cpp
         pusch_decoder_impl.cpp
-        pusch_depth3_input_plane.cpp
-        pusch_depth3_measurements.cpp
         pusch_depth3_receiver_impl.cpp
         pusch_processor_impl.cpp
         pusch_processor_validator_impl.cpp
         ulsch_demultiplex_impl.cpp)
+
+# The depth-3 CORE -- the input-plane assembler and the measurement planes -- is Apple Silicon code: it stores
+# half floats with __fp16. It is compiled only where the arm can actually compute (ENABLE_DEPTH3_AI), so an
+# Ubuntu build never touches it (user direction, 2026-10-19). The receiver's implementation file above stays
+# universal: it carries the factory plus the classical and identity arms, which is what a non-Apple build uses.
+if(ENABLE_DEPTH3_AI)
+    target_sources(ocudu_pusch_processor PRIVATE
+            pusch_depth3_input_plane.cpp
+            pusch_depth3_measurements.cpp)
+endif()
 # ocudu_dmrs_helper generates the DM-RS reference symbols the depth-3 arm's pilot LS is
 # measured against; the classical demodulator never needs them because it reads the
 # estimator's interpolated result instead of a grid.
@@ -50,7 +58,7 @@ target_link_libraries(ocudu_pusch_processor ${OCUDU_PUSCH_LIBS})
 # built. The dependency is a LINK dependency and a compile definition rather than an include in the seam's
 # header: nothing above the arm knows which engine computes it, and a build without Core ML gets the identity
 # arm, which says so at startup instead of silently forwarding.
-if(ENABLE_METAL_CHEST)
+if(ENABLE_DEPTH3_AI AND ENABLE_METAL_CHEST)
     target_link_libraries(ocudu_pusch_processor ocudu_channel_estimator_metal)
     # The engine's header is private to the metal estimator's directory (its PUBLIC include is its parent,
     # for the average estimator's header), and widening that would put a Metal path in front of every
@@ -61,7 +69,9 @@ if(ENABLE_METAL_CHEST)
 endif()
 
 # ---- Depth-3 input plane check: compares the assembler against the Python packer's fixture ----
+if(ENABLE_DEPTH3_AI)
 add_executable(pusch_depth3_input_plane_check test/pusch_depth3_input_plane_check.cpp)
 target_include_directories(pusch_depth3_input_plane_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pusch_depth3_input_plane_check PRIVATE ocudu_pusch_processor ocudu_phy_support
         ocudu_support)
+endif() # ENABLE_DEPTH3_AI

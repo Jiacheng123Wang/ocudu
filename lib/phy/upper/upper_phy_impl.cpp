@@ -143,11 +143,13 @@ void upper_phy_impl::stop()
   // process takes its log with it, so the cheapest possible fix for that class of outage is to have the log say
   // what it was waiting for before it is killed.
   auto stop_step = [](const char* what, auto&& step) {
-    ocudulog::basic_logger& logger = ocudulog::fetch_basic_logger("PHY", true);
-    logger.info("upper PHY stop: {} ...", what);
+    // `phy_log` rather than `logger`: the class already has a `logger` member, and GCC builds with
+    // -Werror=shadow (the Ubuntu CI build caught it on 2026-10-19).
+    ocudulog::basic_logger& phy_log = ocudulog::fetch_basic_logger("PHY", true);
+    phy_log.info("upper PHY stop: {} ...", what);
     const auto t0 = std::chrono::steady_clock::now();
     step();
-    logger.info("upper PHY stop: {} took {} ms",
+    phy_log.info("upper PHY stop: {} took {} ms",
                 what,
                 std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
   };

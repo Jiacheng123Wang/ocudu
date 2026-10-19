@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (C) 2026 Jiacheng Wang
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
-#include "pusch_depth3_half.h"
 #include "pusch_depth3_measurements.h"
 
 #include <array>
@@ -16,9 +15,9 @@ using plane = pusch_depth3_input_plane;
 
 } // namespace
 
-depth3_measurements ocudu::measure_depth3(span<const depth3_half> plane_values,
+depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
                                           unsigned            plane_channels,
-                                          span<const depth3_half> channel_head,
+                                          span<const __fp16> channel_head,
                                           float               reference_amplitude,
                                           float               noise_shape,
                                           float               noise_scale_decades,
@@ -89,13 +88,13 @@ depth3_measurements ocudu::measure_depth3(span<const depth3_half> plane_values,
       // The plane's block width, not the contract's constant: a conditioned plane is wider, and walking it with
       // 12 reads the mask channel out of a neighbouring resource element -- which reports "no pilot" rather than
       // a wrong number, so the failure looks like a capture without DM-RS (measured 2026-10-16).
-      const depth3_half* re =
+      const __fp16* re =
           plane_values.data() + (static_cast<size_t>(k) * plane::NOF_SYMBOLS + t) * plane_channels;
       // The plane's mask channel is set exactly at the allocated pilot resource elements of this port,
       // which is where both averages are defined. Everywhere else the LS channels are zero and head 3 is
       // unconstrained (training only constrains it inside the allocation), so walking the window instead
       // of the mask would average in values that mean nothing.
-      if (re[plane::CH_DMRS_MASK] == static_cast<depth3_half>(0.0F)) {
+      if (re[plane::CH_DMRS_MASK] == static_cast<__fp16>(0.0F)) {
         continue;
       }
       scaling    = static_cast<float>(re[plane::CH_SCALING]);
@@ -110,7 +109,7 @@ depth3_measurements ocudu::measure_depth3(span<const depth3_half> plane_values,
 
       // RSRP: head 3 carries `H/r` (contract section 0.2(d)), and this multiplication is the whole of the
       // "multiply back by r" the design asks for.
-      const depth3_half* estimate = channel_head.data() +
+      const __fp16* estimate = channel_head.data() +
                                (static_cast<size_t>(k) * plane::NOF_SYMBOLS + t) * 2;
       const float h_re = static_cast<float>(estimate[0]) * reference_amplitude;
       const float h_im = static_cast<float>(estimate[1]) * reference_amplitude;

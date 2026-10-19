@@ -82,6 +82,24 @@ endif()
 option(ENABLE_METAL_DEMODULATION "Enable the Metal GPU soft demapper (Apple Silicon only)" ${METAL_DEMODULATION_DEFAULT})
 # Note: OCUDU_METAL_DEMODULATION is defined per-target (see channel_modulation/CMakeLists.txt).
 
+# The DEPTH-3 receiver's core -- its input-plane assembler, its measurements and the Core ML network arm --
+# is Apple Silicon code: it stores half floats with __fp16 and runs the forward pass through Core ML. On any
+# other platform the build must not touch it at all, rather than be taught to compile it (user direction,
+# 2026-10-19). What stays universal is the SEAM: the factory, the classical arm and the identity arm, so a
+# non-Apple build still has a selectable "ai" receiver that says it cannot compute.
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    set(DEPTH3_AI_DEFAULT ON)
+else()
+    set(DEPTH3_AI_DEFAULT OFF)
+endif()
+option(ENABLE_DEPTH3_AI "Compile the depth-3 receiver's Core ML network arm (Apple Silicon only)" ${DEPTH3_AI_DEFAULT})
+if(ENABLE_DEPTH3_AI AND NOT (APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64"))
+    message(FATAL_ERROR
+            "ENABLE_DEPTH3_AI=ON was requested on a non-Apple-Silicon target, where the depth-3 core is not "
+            "buildable and not meaningful: it needs __fp16 storage and the Core ML engine. Leave it OFF "
+            "(the default here) and the seam still builds -- the ai receiver is then the identity arm.")
+endif()
+
 
 # The Metal offloads only build on Apple Silicon (they need Metal/Objective-C++). Enabling one
 # anywhere else used to be accepted silently and then ignored by the code that reads the option, so

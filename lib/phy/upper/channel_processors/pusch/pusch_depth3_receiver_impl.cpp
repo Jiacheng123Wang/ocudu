@@ -3,8 +3,6 @@
 
 #include "pusch_depth3_receiver_impl.h"
 #include "pusch_depth3_model_map.h"
-#include "pusch_depth3_input_plane.h"
-#include "pusch_depth3_measurements.h"
 #include "ul_capture.h"
 #include "ocudu/phy/phy_pipeline_crossings.h"
 #include "ocudu/ocudulog/ocudulog.h"
@@ -16,7 +14,12 @@
 #include "ocudu/ran/sch/sch_dmrs_power.h"
 #include "ocudu/support/math/math_utils.h"
 
+// The plane and measurement headers are Apple Silicon code (they store __fp16) and are only
+// compiled when the depth-3 core is (ENABLE_DEPTH3_AI), so they are included under the same
+// guard as the implementation that uses them.
 #if defined(OCUDU_HAVE_DEPTH3_ENGINE)
+#include "pusch_depth3_input_plane.h"
+#include "pusch_depth3_measurements.h"
 #include "ocudu_coreml_nn_engine.h"
 #endif
 
@@ -34,10 +37,6 @@
 using namespace ocudu;
 
 namespace {
-
-#if defined(OCUDU_HAVE_DEPTH3_ENGINE)
-// The sidecar reader below serves only the engine path; on a build without the depth-3 engine (Linux) these
-// two functions have no caller, and GCC builds here with -Werror=unused-function (caught 2026-10-19).
 
 /// \brief The model-external constants of the contract, read from a sidecar next to the bundle.
 ///
@@ -116,8 +115,6 @@ depth3_scales read_scales(const std::string& model_path, float range_limit)
       "AI depth-3: scales from {}: S_llr={} A_n={} B_n={}", path, scales.s_llr, scales.a_noise, scales.b_noise);
   return scales;
 }
-
-#endif // OCUDU_HAVE_DEPTH3_ENGINE
 
 #if defined(OCUDU_HAVE_DEPTH3_ENGINE)
 
@@ -617,7 +614,7 @@ public:
     const auto segment_start = std::chrono::steady_clock::now();
     float reference_amplitude = 0.0F;
     const pusch_depth3_input_plane::status status =
-        assembler.assemble(span<depth3_half>(input_plane), reference_amplitude, grid, config, dmrs_context);
+        assembler.assemble(span<__fp16>(input_plane), reference_amplitude, grid, config, dmrs_context);
     if (conditioned) {
       // The Qm as the contract wants it: four constant channels per (subcarrier, symbol), all zero but the
       // reception's own. Written HERE, once per reception, because the assembler describes the grid and this
@@ -632,14 +629,14 @@ public:
         return D3_COND_QM_ORDER_SIZE;
       }();
       if (qm_index != D3_COND_QM_ORDER_SIZE) {
-        const depth3_half one_hot[D3_COND_QM_ORDER_SIZE] = {qm_index == 0 ? depth3_half(1) : depth3_half(0),
-                                                       qm_index == 1 ? depth3_half(1) : depth3_half(0),
-                                                       qm_index == 2 ? depth3_half(1) : depth3_half(0),
-                                                       qm_index == 3 ? depth3_half(1) : depth3_half(0)};
+        const __fp16 one_hot[D3_COND_QM_ORDER_SIZE] = {qm_index == 0 ? __fp16(1) : __fp16(0),
+                                                       qm_index == 1 ? __fp16(1) : __fp16(0),
+                                                       qm_index == 2 ? __fp16(1) : __fp16(0),
+                                                       qm_index == 3 ? __fp16(1) : __fp16(0)};
         for (unsigned k = 0; k != pusch_depth3_input_plane::NOF_SUBCARRIERS; ++k) {
           for (unsigned symbol_index = 0; symbol_index != pusch_depth3_input_plane::NOF_SYMBOLS;
                ++symbol_index) {
-            depth3_half* block = input_plane.data() +
+            __fp16* block = input_plane.data() +
                             (static_cast<size_t>(k) * pusch_depth3_input_plane::NOF_SYMBOLS + symbol_index) *
                                 plane_channels +
                             pusch_depth3_input_plane::NOF_CHANNELS;
@@ -830,9 +827,9 @@ private:
     if ((forwarded_receptions != 1) && ((forwarded_receptions % 1000) != 0)) {
       return;
     }
-    const depth3_measurements net = measure_depth3(span<const depth3_half>(input_plane),
+    const depth3_measurements net = measure_depth3(span<const __fp16>(input_plane),
                                                    plane_channels,
-                                                   span<const depth3_half>(channel_head),
+                                                   span<const __fp16>(channel_head),
                                                    reference_amplitude,
                                                    static_cast<float>(dmrs_noise_head),
                                                    scales.a_noise,
@@ -973,7 +970,7 @@ private:
       for (unsigned index = 0; index != allocated.size(); ++index) {
         const unsigned k = allocated[index];
         const float    noise_shape = static_cast<float>(
-            reinterpret_cast<const depth3_half*>(noise_head.data())[static_cast<size_t>(k) * pusch_depth3_input_plane::NOF_SYMBOLS + symbol]);
+            reinterpret_cast<const __fp16*>(noise_head.data())[static_cast<size_t>(k) * pusch_depth3_input_plane::NOF_SYMBOLS + symbol]);
         // The contract's model-external map, section 0.2(e) head 2. A non-finite value is the seam's marker for
         // a resource element the chain must skip, exactly as the classical path writes +inf on DC.
         // `10^y` as `exp2(y * log2(10))`: the same function, but `std::pow` is the general routine and costs about
@@ -990,7 +987,7 @@ private:
 
         for (unsigned bit = 0; bit != qm; ++bit) {
           const float logit = static_cast<float>(
-              reinterpret_cast<const depth3_half*>(llr_head.data())[(static_cast<size_t>(k) * pusch_depth3_input_plane::NOF_SYMBOLS + symbol) * llr_stride_by_qm[qm] +
+              reinterpret_cast<const __fp16*>(llr_head.data())[(static_cast<size_t>(k) * pusch_depth3_input_plane::NOF_SYMBOLS + symbol) * llr_stride_by_qm[qm] +
                                                                                   bit]);
           // The contract's model-external map for the main head: the graph's tanh shape times S_llr, then the
           // chain's own quantiser. `quantize` clips to +-LLR_MAX and can never produce -128 or the reserved
@@ -1073,8 +1070,8 @@ private:
       // 19.123; the SINR is a separate case, because an arm that does not run the classical equalizer has no
       // other post-equalisation noise to publish -- section 19.116).
       if (reporting_source == "net") {
-        const depth3_measurements net = measure_depth3(span<const depth3_half>(input_plane), plane_channels,
-                                                      span<const depth3_half>(channel_head), reference_amplitude,
+        const depth3_measurements net = measure_depth3(span<const __fp16>(input_plane), plane_channels,
+                                                      span<const __fp16>(channel_head), reference_amplitude,
                                                       static_cast<float>(dmrs_noise_head), scales.a_noise,
                                                       scales.b_noise);
         if (net.nof_pilot_re != 0) {
@@ -1193,11 +1190,11 @@ private:
   /// sampled on: a degradation has no head output to measure.
   unsigned                                        forwarded_receptions = 0;
 
-  std::vector<depth3_half>          input_plane;
-  std::vector<depth3_half>          llr_head;
-  std::vector<depth3_half>          noise_head;
-  std::vector<depth3_half>          channel_head;
-  depth3_half                       dmrs_noise_head = 0;
+  std::vector<__fp16>          input_plane;
+  std::vector<__fp16>          llr_head;
+  std::vector<__fp16>          noise_head;
+  std::vector<__fp16>          channel_head;
+  __fp16                       dmrs_noise_head = 0;
   std::vector<unsigned>        allocated;
   std::array<unsigned, 9>      degradations{};
 };
