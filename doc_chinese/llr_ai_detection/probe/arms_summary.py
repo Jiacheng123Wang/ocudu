@@ -75,9 +75,19 @@ def leg_stderr_facts(batch, label):
         except OSError:
             continue
         m = re.search(r"AI ARM ACTIVE over (\d+) model", text)
-        facts["arm_active"] = int(m.group(1)) if m else ("classical" if "receiver=classic" in text else None)
+        m = re.search(r"AI ARM ACTIVE over (\d+) model", text)
+        facts["arm_active"] = int(m.group(1)) if m else (
+            "classical" if "pusch_receiver_backend=classic" in text else None)
+        # The engine reports the declaration two ways across versions: the older arm printed the fitted
+        # slope and offset, the current one prints "calibration APPLIED" and the raw/calibrated pair on the
+        # [depth3-sinr] line. Reading only the first form reported a calibrated bundle as "not declared".
         m = re.search(r"slope ([0-9.]+) offset ([-+0-9.]+)", text)
-        facts["calibrated"] = f"slope {m.group(1)} offset {m.group(2)}" if m else "not declared"
+        if m:
+            facts["calibrated"] = f"slope {m.group(1)} offset {m.group(2)}"
+        elif "calibration APPLIED" in text:
+            facts["calibrated"] = "declared (applied)"
+        else:
+            facts["calibrated"] = "not declared"
         m = re.search(r"reception DEGRADED to the classical chain", text)
         facts["degraded"] = bool(m)
     return facts
@@ -117,6 +127,13 @@ def main():
             print(f"  leg {index}: --rate names arm '{arm}' but the mirror says '{letter}'", file=sys.stderr)
             return 2
         label = f"{os.path.basename(args.batch.rstrip('/'))}-{letter}{ordinal[letter]}"
+        # A rate with no leg behind it is the one mistake this tool can make silently: the label is
+        # composed from the letter, so flying `d` while passing `a` happily reads last week's `a1`.
+        # Refuse rather than report a number against the wrong leg.
+        if not glob.glob(os.path.join(args.batch, "**", f"*{label}*.log.stderr"), recursive=True):
+            print(f"MISSING leg {label} in {args.batch}: the rates must be passed with the letter the "
+                  f"legs were actually labelled with", file=sys.stderr)
+            return 2
         facts = leg_stderr_facts(args.batch, label)
         pattern = pattern_of_leg(args.batch, label, f"{letter}{ordinal[letter]}")
         rate = float(value)
@@ -160,10 +177,14 @@ def main():
                    "WORSE" if change <= -args.slack else "NO MEASURABLE DIFFERENCE")
         print(f"  {challenger} vs {reference}: mean {change:+.1f}%  conservative (worst {challenger} "
               f"against best {reference}) {worst:+.1f}%  -> {verdict}")
+    # Compare whatever arms this batch actually carried, named by --arms, with the LAST one treated as the
+    # reference (the convention every flight here uses: the candidate first, the baseline last). Hardcoding
+    # a/b/c silently printed no verdict at all for a d-versus-c flight.
     print()
-    compare("a", "c")
-    compare("b", "c")
-    compare("a", "b")
+    letters = [spec.split(":")[0] for spec in args.arms if spec.split(":")[0] in per_arm]
+    reference = letters[-1] if letters else "c"
+    for letter in letters[:-1]:
+        compare(letter, reference)
     return 0
 
 
