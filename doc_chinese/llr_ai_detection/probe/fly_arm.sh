@@ -13,7 +13,7 @@
 #
 # The bundles:
 #   a = the retrained c32 (data/runs/d3_dmrs2711_c32)   the first candidate
-#   d = the high-SNR c32 (data/runs/d3_dmrs2711h_c32)   the candidate after the 64QAM head fix
+#   d = the high-SNR c32 WITH the calibration declared (data/runs/d3_dmrs2711h_c32, *_cal)
 #   b = the deployed ft (data/models)                   the reference AI arm
 #   c = the classical chain                             the reference the scheduler has always used
 #
@@ -36,7 +36,7 @@ RUNNER=$ROOT/doc_chinese/phy_pipeline_gpu/wip/run_leg.sh
 CONFIG=${CFG:-$ROOT/configs/gnb_rf_b200_tdd_n78_20mhz.yml}
 BATCH=${B:-$W/legs/c32dmrs}
 NEW=$W/data/runs/d3_dmrs2711_c32/d3_dmrs2711_c32.mlmodelc
-CAND=${CAND:-$W/data/runs/d3_dmrs2711h_c32/d3_dmrs2711h_c32.mlmodelc}
+CAND=${CAND:-$W/data/runs/d3_dmrs2711h_c32/d3_dmrs2711h_c32_cal.mlmodelc}
 FT=$W/data/models/d3_modcond_ft.mlmodelc
 CAPTURES=${CAPTURES:-60}
 
