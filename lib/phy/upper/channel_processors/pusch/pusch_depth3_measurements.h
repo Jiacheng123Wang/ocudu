@@ -54,6 +54,51 @@ struct depth3_measurements {
   unsigned nof_residuals = 0;
 };
 
+/// \brief The PLANE half of the measurement: everything that needs no head.
+///
+/// WHY IT IS SEPARATE (design section 19.263). Two callers want these numbers at different times and for
+/// different reasons: the domain gate wants them BEFORE the forward pass (so an out-of-domain reception costs no
+/// inference), and the publication wants them AFTER it (so the scheduler gets RSRP/EPRE beside the SINR). The
+/// arithmetic is the same and the inputs are the same, so computing them twice is both a waste and a chance for
+/// the two numbers to drift apart -- the gate and the scheduler must judge on the same measurement.
+struct depth3_plane_measurements {
+  /// Average received power at the DM-RS resource elements, linear, in the GRID's units.
+  float epre_lin = 0.0F;
+  /// Noise variance from the plane's own pilot LS, linear, grid units.
+  float noise_lin = 0.0F;
+  /// SNR built entirely from the plane: the pilot LS for the signal, the residual for the noise.
+  float snr_lin = 0.0F;
+  /// Carrier frequency offset, cycles per symbol, or NaN when the plane carries fewer than two DM-RS symbols.
+  float cfo_cycles = std::numeric_limits<float>::quiet_NaN();
+  /// Pilots the averages were taken over; zero means nothing was measured.
+  unsigned nof_pilot_re = 0;
+  /// Residuals the noise estimate was taken over; zero means the noise is not defined.
+  unsigned nof_residuals = 0;
+  /// The plane's own DM-RS to data ratio and layer count, read from the first pilot.
+  float scaling = 1.0F;
+  float nof_layers = 1.0F;
+};
+
+/// \brief Measures the plane half: EPRE, the residual noise, the residual SNR and the CFO. No head is read.
+depth3_plane_measurements measure_depth3_plane(span<const __fp16>   plane,
+                                               unsigned             plane_channels,
+                                               float                reference_amplitude,
+                                               span<ul_pilot_sample> scratch);
+
+/// \brief Completes a plane measurement with what the heads add: RSRP (head 3), the noise variance (head 4) and
+/// the estimator-convention SNR.
+///
+/// \param[in] plane_half What \ref measure_depth3_plane returned for this very reception -- reused rather than
+///                       recomputed, so the gate and the publication cannot disagree.
+depth3_measurements measure_depth3_heads(const depth3_plane_measurements& plane_half,
+                                         span<const __fp16>               plane,
+                                         unsigned                         plane_channels,
+                                         span<const __fp16>               channel_head,
+                                         float                            reference_amplitude,
+                                         float                            noise_shape,
+                                         float                            noise_scale_decades,
+                                         float                            noise_scale_center);
+
 /// \brief Turns heads 3 and 4 into the quantities `dmrs_pusch_estimator_results` publishes.
 ///
 /// ---- Why this is a unit of its own ----

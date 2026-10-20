@@ -16,127 +16,121 @@ using plane = pusch_depth3_input_plane;
 
 } // namespace
 
-depth3_measurements ocudu::measure_depth3(span<const __fp16>       plane_values,
-                                          unsigned                  plane_channels,
-                                          span<const __fp16>        channel_head,
-                                          float                     reference_amplitude,
-                                          float                     noise_shape,
-                                          float                     noise_scale_decades,
-                                          float                     noise_scale_center,
-                                          span<ul_pilot_sample>     scratch)
+depth3_plane_measurements ocudu::measure_depth3_plane(span<const __fp16>   plane_values,
+                                                       unsigned             plane_channels,
+                                                       float                reference_amplitude,
+                                                       span<ul_pilot_sample> scratch)
 {
-  depth3_measurements measurements;
+  depth3_plane_measurements out;
 
-  // The plane's own width, not the contract's constant. This guard is the one that actually bit: a conditioned
-  // plane is 612*14*16 and the check demanded 612*14*12, so the measurement returned "no pilot" before reading
-  // anything -- a message that says the CAPTURE has no DM-RS when the truth was that the reader was looking for
-  // the wrong shape (measured 2026-10-16, on the conditioned contract).
   const size_t plane_size =
       static_cast<size_t>(plane::NOF_SUBCARRIERS) * plane::NOF_SYMBOLS * plane_channels;
-  const size_t head_size = static_cast<size_t>(plane::NOF_SUBCARRIERS) * plane::NOF_SYMBOLS * 2;
-  // AN EMPTY HEAD IS A LEGAL CALL: the plane-only part of this measurement is what the DOMAIN GATE needs, and
-  // R7/S2 evaluates it BEFORE the forward pass, precisely so that an out-of-domain reception costs no inference
-  // (design section 20.4). The head-derived fields are left at zero in that mode, which is why the finiteness
-  // check below treats them as optional.
-  const bool has_head = !channel_head.empty();
-  if ((plane_values.size() != plane_size) || (has_head && (channel_head.size() != head_size))) {
-    return measurements;
+  if (plane_values.size() != plane_size) {
+    return out;
   }
 
-  // The contract's model-external noise map, section 0.2(e) head 4. The map is the trainer's
-  // (`depth3_loss.noise_from_shape`), and the pair comes from the sidecar so that the two sides cannot
-  // disagree: `noise_shape` is bounded by the head's tanh, so this is always finite and positive.
-  // Skipped entirely when there is no head to read, i.e. on the pre-forward gate path.
-  const float noise_plane_units =
-      has_head ? std::pow(10.0F, noise_scale_decades * noise_shape + noise_scale_center) : 0.0F;
-  measurements.noise_variance_lin = reference_amplitude * reference_amplitude * noise_plane_units;
-
-  // ---- what the NETWORK's heads and the plane's geometry are needed for: EPRE, RSRP, and the pilot stream ----
-  // The residual, the noise and the CFO are NOT computed here: they come from `measure_ul_slow`, the one
-  // implementation of that arithmetic, the one a network with a different plane contract calls, and the one
-  // depth3_slow_measurements_test checks against a flat channel's closed form (design section 19.246).
+  // EPRE accumulates over the pilot REs; the pilot stream is what the shared layer consumes.
   double   epre_sum     = 0.0;
-  double   rsrp_sum     = 0.0;
   unsigned nof_pilot_re = 0;
   unsigned pilot_count  = 0;
-  // The plane's copies of the DM-RS to data ratio and of the layer count. They are plane-wide constants written
-  // into the scalar channels of every RE, so one read is enough; they are taken from the first pilot.
-  float    scaling      = 1.0F;
-  float    nof_layers   = 1.0F;
   bool     have_scalars = false;
 
   for (unsigned t = 0; t != plane::NOF_SYMBOLS; ++t) {
     for (unsigned k = 0; k != plane::NOF_SUBCARRIERS; ++k) {
       const __fp16* re = plane_values.data() + (static_cast<size_t>(k) * plane::NOF_SYMBOLS + t) * plane_channels;
 
-      // Only pilot resource elements are measured; the mask is per RE, not per symbol.
       if (re[plane::CH_DMRS_MASK] <= static_cast<__fp16>(0.0F)) {
         continue;
       }
       if (!have_scalars) {
-        scaling      = static_cast<float>(re[plane::CH_SCALING]);
-        nof_layers   = static_cast<float>(re[plane::CH_NOF_TX_LAYERS]);
-        have_scalars = true;
+        out.scaling    = static_cast<float>(re[plane::CH_SCALING]);
+        out.nof_layers = static_cast<float>(re[plane::CH_NOF_TX_LAYERS]);
+        have_scalars   = true;
       }
 
-      // EPRE: the received pilot is `LS * sequence * scaling`, and the sequence has unit power, so the power is
-      // `|LS * scaling|^2` -- with the reference amplitude put back, because the plane's LS is divided by it.
-      const float ls_re = static_cast<float>(re[plane::CH_LS_RE]) * reference_amplitude * scaling;
-      const float ls_im = static_cast<float>(re[plane::CH_LS_IM]) * reference_amplitude * scaling;
+      const float ls_re = static_cast<float>(re[plane::CH_LS_RE]) * reference_amplitude * out.scaling;
+      const float ls_im = static_cast<float>(re[plane::CH_LS_IM]) * reference_amplitude * out.scaling;
       epre_sum += static_cast<double>(ls_re) * ls_re + static_cast<double>(ls_im) * ls_im;
 
-      // The shared layer's input: the same pilot in the GRID's units (the plane stores `LS/r`, so `r` puts it
-      // back) and tagged with its symbol.
       if (pilot_count < scratch.size()) {
         scratch[pilot_count] = {.symbol = t,
                                 .ls_re  = static_cast<float>(re[plane::CH_LS_RE]) * reference_amplitude,
                                 .ls_im  = static_cast<float>(re[plane::CH_LS_IM]) * reference_amplitude};
         ++pilot_count;
       }
-
-      // RSRP: head 3 carries `H/r` (contract section 0.2(d)), and this multiplication is the whole of the
-      // "multiply back by r" the design asks for.
-      if (has_head) {
-        const __fp16* estimate = channel_head.data() + (static_cast<size_t>(k) * plane::NOF_SYMBOLS + t) * 2;
-        const float   h_re     = static_cast<float>(estimate[0]) * reference_amplitude;
-        const float   h_im     = static_cast<float>(estimate[1]) * reference_amplitude;
-        rsrp_sum += static_cast<double>(h_re) * h_re + static_cast<double>(h_im) * h_im;
-      }
-
       ++nof_pilot_re;
     }
   }
 
-  measurements.nof_pilot_re = nof_pilot_re;
+  out.nof_pilot_re = nof_pilot_re;
   if (nof_pilot_re == 0) {
-    // No pilot means the quantities are not defined, and a zero that says "not measured" must not be confusable
-    // with a zero that says "measured as zero". The count is the caller's way to tell.
-    measurements.noise_variance_lin = 0.0F;
+    return out;
+  }
+  out.epre_lin = static_cast<float>(epre_sum / static_cast<double>(nof_pilot_re));
+
+  const ul_slow_measurements shared =
+      measure_ul_slow(span<const ul_pilot_sample>(scratch.first(pilot_count)), out.scaling, out.nof_layers);
+  out.noise_lin      = shared.noise_lin;
+  out.snr_lin        = shared.snr_lin;
+  out.nof_residuals  = shared.nof_residuals;
+  out.cfo_cycles     = estimate_cfo_from_plane(plane_values, plane_channels);
+  return out;
+}
+
+depth3_measurements ocudu::measure_depth3_heads(const depth3_plane_measurements& plane_half,
+                                                span<const __fp16>               plane_values,
+                                                unsigned                         plane_channels,
+                                                span<const __fp16>               channel_head,
+                                                float                            reference_amplitude,
+                                                float                            noise_shape,
+                                                float                            noise_scale_decades,
+                                                float                            noise_scale_center)
+{
+  depth3_measurements measurements;
+
+  const size_t plane_size =
+      static_cast<size_t>(plane::NOF_SUBCARRIERS) * plane::NOF_SYMBOLS * plane_channels;
+  const size_t head_size = static_cast<size_t>(plane::NOF_SUBCARRIERS) * plane::NOF_SYMBOLS * 2;
+  if ((plane_values.size() != plane_size) || (channel_head.size() != head_size)) {
+    return measurements;
+  }
+  if (plane_half.nof_pilot_re == 0) {
     return measurements;
   }
 
-  measurements.epre_lin = static_cast<float>(epre_sum / static_cast<double>(nof_pilot_re));
+  // The plane half, carried over: the publication must judge on the number the gate judged on (19.263).
+  measurements.nof_pilot_re               = plane_half.nof_pilot_re;
+  measurements.epre_lin                   = plane_half.epre_lin;
+  measurements.residual_plane_units_lin   = plane_half.noise_lin;
+  measurements.residual_noise_variance_lin = plane_half.noise_lin;
+  measurements.residual_snr_lin           = plane_half.snr_lin;
+  measurements.nof_residuals              = plane_half.nof_residuals;
 
-  // THE RESIDUAL, THE SNR AND THE CFO, from the shared layer.
-  const ul_slow_measurements shared =
-      measure_ul_slow(span<const ul_pilot_sample>(scratch.first(pilot_count)), scaling, nof_layers);
-  measurements.residual_plane_units_lin    = shared.noise_lin;
-  measurements.residual_noise_variance_lin = shared.noise_lin;
-  measurements.residual_snr_lin            = shared.snr_lin;
+  // The contract's model-external noise map, section 0.2(e) head 4.
+  const float noise_plane_units =
+      std::pow(10.0F, noise_scale_decades * noise_shape + noise_scale_center);
+  measurements.noise_variance_lin = reference_amplitude * reference_amplitude * noise_plane_units;
 
-  // THE DM-RS-TO-DATA RATIO BELONGS IN THE PUBLISHED RSRP, and it was missing: head 3 estimates the channel GAIN
-  // (`H/r` times `r`), while RSRP is defined on the DM-RS RESOURCE ELEMENTS, whose transmit power is `scaling^2`
-  // above the data REs'. Measured 2026-10-17 against the classical estimator on two independent receptions, the
-  // published value was 3.11 and 2.96 dB low -- a factor of two, i.e. exactly this -- while EPRE, which already
-  // multiplied by `scaling`, agreed to 0.01 dB. RSRP is one of the three quantities R6 hands the scheduler, so it
-  // is published in the estimator's convention.
-  const float rsrp_gain_lin = static_cast<float>(rsrp_sum / static_cast<double>(nof_pilot_re));
+  // RSRP: head 3 carries `H/r` (contract section 0.2(d)).
+  double rsrp_sum = 0.0;
+  for (unsigned t = 0; t != plane::NOF_SYMBOLS; ++t) {
+    for (unsigned k = 0; k != plane::NOF_SUBCARRIERS; ++k) {
+      const __fp16* re = plane_values.data() + (static_cast<size_t>(k) * plane::NOF_SYMBOLS + t) * plane_channels;
+      if (re[plane::CH_DMRS_MASK] <= static_cast<__fp16>(0.0F)) {
+        continue;
+      }
+      const __fp16* estimate = channel_head.data() + (static_cast<size_t>(k) * plane::NOF_SYMBOLS + t) * 2;
+      const float   h_re     = static_cast<float>(estimate[0]) * reference_amplitude;
+      const float   h_im     = static_cast<float>(estimate[1]) * reference_amplitude;
+      rsrp_sum += static_cast<double>(h_re) * h_re + static_cast<double>(h_im) * h_im;
+    }
+  }
+
+  const float scaling    = plane_half.scaling;
+  const float nof_layers = plane_half.nof_layers;
+  const float rsrp_gain_lin = static_cast<float>(rsrp_sum / static_cast<double>(plane_half.nof_pilot_re));
   measurements.rsrp_lin     = rsrp_gain_lin * scaling * scaling;
 
-  // The estimator's own formula (`port_channel_estimator_average_impl.cpp:289`): the data RE power is the RSRP
-  // scaled by the number of layers and by the INVERSE of the DM-RS-to-data amplitude ratio squared, and the SNR
-  // is that over the noise variance. It is fed the GAIN, not the published value above, because `rsrp_gain_lin`
-  // is already in the units this formula expects (it divides by `scaling^2` itself).
   const float data_rsrp = rsrp_gain_lin * nof_layers / (scaling * scaling);
   measurements.snr_lin  = (measurements.noise_variance_lin > 0.0F)
                               ? (data_rsrp / measurements.noise_variance_lin)
@@ -147,6 +141,49 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16>       plane_values,
     measurements = depth3_measurements{};
   }
   return measurements;
+}
+
+depth3_measurements ocudu::measure_depth3(span<const __fp16>   plane_values,
+                                          unsigned             plane_channels,
+                                          span<const __fp16>   channel_head,
+                                          float                reference_amplitude,
+                                          float                noise_shape,
+                                          float                noise_scale_decades,
+                                          float                noise_scale_center,
+                                          span<ul_pilot_sample> scratch)
+{
+  // The composition, kept so existing callers and tests keep their one call: the plane half first, then the
+  // heads on top of it (design section 19.263).
+  depth3_measurements measurements;
+
+  const size_t plane_size =
+      static_cast<size_t>(plane::NOF_SUBCARRIERS) * plane::NOF_SYMBOLS * plane_channels;
+  const size_t head_size = static_cast<size_t>(plane::NOF_SUBCARRIERS) * plane::NOF_SYMBOLS * 2;
+  const bool   has_head  = !channel_head.empty();
+  if ((plane_values.size() != plane_size) || (has_head && (channel_head.size() != head_size))) {
+    return measurements;
+  }
+
+  const depth3_plane_measurements plane_half =
+      measure_depth3_plane(plane_values, plane_channels, reference_amplitude, scratch);
+  if (!has_head) {
+    // The pre-forward gate path: the plane half is the whole answer.
+    measurements.nof_pilot_re                = plane_half.nof_pilot_re;
+    measurements.epre_lin                    = plane_half.epre_lin;
+    measurements.residual_plane_units_lin    = plane_half.noise_lin;
+    measurements.residual_noise_variance_lin = plane_half.noise_lin;
+    measurements.residual_snr_lin            = plane_half.snr_lin;
+    measurements.nof_residuals               = plane_half.nof_residuals;
+    return measurements;
+  }
+  return measure_depth3_heads(plane_half,
+                              plane_values,
+                              plane_channels,
+                              channel_head,
+                              reference_amplitude,
+                              noise_shape,
+                              noise_scale_decades,
+                              noise_scale_center);
 }
 
 float ocudu::estimate_cfo_from_plane(span<const __fp16> plane_values, unsigned plane_channels)

@@ -645,7 +645,8 @@ public:
                   const dmrs_pusch_estimator_results&    est_results,
                   const pusch_demodulator::configuration& config) override
   {
-    last_forward_ok = false;
+    last_forward_ok          = false;
+    plane_measurement_valid  = false;
     // THE STARTUP GRACE, checked before anything else and costing one comparison: attach is a tight
     // request/response exchange over SRB1 and the arm's occupancy of the lane competes with the phone's ACK path
     // (measured 2026-10-18: the failing leg retransmitted the 15-byte SRB1 packet 2841 times with PUCCH format-1
@@ -766,23 +767,31 @@ public:
       // the whole point of the early hook, and taking the number from the same shared layer means the two cannot
       // differ (design section 19.241).
       const std::optional<slot_measurement> prepared = prepared_measurement(dmrs_context.slot);
-      const depth3_measurements             plane_only =
+      // The plane half is measured HERE, once, and kept: the publication after the forward pass reuses it instead
+      // of walking the plane again, so the gate and the scheduler judge on the same number (design section 19.263).
+      if (!prepared.has_value()) {
+        plane_measurement       = measure_depth3_plane(span<const __fp16>(input_plane),
+                                                       plane_channels,
+                                                       reference_amplitude,
+                                                       span<ul_pilot_sample>(pilot_scratch));
+        plane_measurement_valid = (plane_measurement.nof_pilot_re != 0);
+      }
+      const depth3_measurements plane_only =
           prepared.has_value()
               ? [&]() {
                   depth3_measurements from_prepare;
-                  from_prepare.residual_snr_lin            = prepared->residual_snr_lin;
-                  from_prepare.residual_plane_units_lin    = 0.0F;
-                  from_prepare.nof_pilot_re                = prepared->nof_pilot_re;
+                  from_prepare.residual_snr_lin         = prepared->residual_snr_lin;
+                  from_prepare.residual_plane_units_lin = 0.0F;
+                  from_prepare.nof_pilot_re             = prepared->nof_pilot_re;
                   return from_prepare;
                 }()
-              : measure_depth3(span<const __fp16>(input_plane),
-                               plane_channels,
-                               span<const __fp16>(),
-                               reference_amplitude,
-                               0.0F,
-                               0.0F,
-                               0.0F,
-                               span<ul_pilot_sample>(pilot_scratch));
+              : [&]() {
+                  depth3_measurements from_plane;
+                  from_plane.residual_snr_lin         = plane_measurement.snr_lin;
+                  from_plane.residual_plane_units_lin = plane_measurement.noise_lin;
+                  from_plane.nof_pilot_re             = plane_measurement.nof_pilot_re;
+                  return from_plane;
+                }();
       if (prepared.has_value()) {
         ++gate_from_prepare;
       }
@@ -805,9 +814,7 @@ public:
         // The arm's own CFO, next to the classical estimator's, so the two can be compared on the same
         // reception before anything depends on the arm's value (design section 19.239). Cycles per symbol:
         // the plane does not carry the subcarrier spacing, so the comparison converts it outside.
-        const float cfo_cycles = prepared.has_value() ? prepared->cfo_cycles
-                                                      : estimate_cfo_from_plane(span<const __fp16>(input_plane),
-                                                                               plane_channels);
+        const float cfo_cycles = prepared.has_value() ? prepared->cfo_cycles : plane_measurement.cfo_cycles;
         const std::optional<float> cfo_classic = est_results.get_cfo_Hz(port);
         fmt::print(stderr,
                    "[depth3-gate] {} reception(s): plane residual {:.2f} dB (filtered {:.2f} dB over {:.0f} "
@@ -1102,8 +1109,12 @@ private:
     // (measured 2026-10-17: the conditioned bundle agrees to 0.10 dB and one superseded per-modulation bundle is
     // 2.5 dB out, which is exactly the state a declaration would have hidden). A reception counts as agreeing
     // when both RSRP and EPRE are within R6_AGREEMENT_DB of the estimator's values.
-    const float classic_rsrp = est_results.get_rsrp(port, 0);
-    const float classic_epre = est_results.get_epre(port);
+    // A PURE RUN HAS NO INDEPENDENT ESTIMATOR TO COMPARE AGAINST (design section 19.263): its results object is the
+    // arm's own empty one, so "the network agrees with the estimator" would be comparing the arm with nothing. The
+    // line is kept -- the other numbers in it are the arm's own and worth printing -- but the count is not taken,
+    // and the summary says why instead of reporting a run of agreements that never happened.
+    const float classic_rsrp = fallback_enabled ? est_results.get_rsrp(port, 0) : 0.0F;
+    const float classic_epre = fallback_enabled ? est_results.get_epre(port) : 0.0F;
     if ((classic_rsrp > 0.0F) && (classic_epre > 0.0F)) {
       const float rsrp_delta = std::abs(convert_power_to_dB(net.rsrp_lin) - convert_power_to_dB(classic_rsrp));
       const float epre_delta = std::abs(convert_power_to_dB(net.epre_lin) - convert_power_to_dB(classic_epre));
@@ -1138,10 +1149,17 @@ private:
     // The two counts travel with every sampled line, so a run's own log says whether its network measurements are
     // inside the tolerance the adoption checklist asks for -- and a run that never agrees cannot be read as one
     // that did.
-    fmt::print(stderr,
-               "[depth3-measure]   RSRP/EPRE against the independent estimator: {} within {} dB, {} outside "
-               "(since the run started)\n",
-               measurements_agreeing, R6_AGREEMENT_DB, measurements_disagreeing);
+    if (fallback_enabled) {
+      fmt::print(stderr,
+                 "[depth3-measure]   RSRP/EPRE against the independent estimator: {} within {} dB, {} outside "
+                 "(since the run started)\n",
+                 measurements_agreeing, R6_AGREEMENT_DB, measurements_disagreeing);
+    }
+    else {
+      fmt::print(stderr,
+                 "[depth3-measure]   RSRP/EPRE against the independent estimator: n/a -- this is a PURE run, the "
+                 "classical estimator is not called, so there is nothing to compare against\n");
+    }
   }
 
   /// \brief What a reception does when the arm cannot compute it: fall back, or fail.
@@ -1420,14 +1438,24 @@ private:
       // 19.123; the SINR is a separate case, because an arm that does not run the classical equalizer has no
       // other post-equalisation noise to publish -- section 19.116).
       if (reporting_source == "net") {
-        const depth3_measurements net = measure_depth3(span<const __fp16>(input_plane),
-                                                        plane_channels,
-                                                        span<const __fp16>(channel_head),
-                                                        reference_amplitude,
-                                                        static_cast<float>(dmrs_noise_head),
-                                                        scales.a_noise,
-                                                        scales.b_noise,
-                                                        span<ul_pilot_sample>(pilot_scratch));
+        // THE HEADS ONLY. The plane half was measured by the gate, before the forward pass, and is reused here:
+        // recomputing it would walk the plane a second time and, worse, let the two numbers drift (19.263). When
+        // the gate did not run (no declared range, or the estimator gate) it is measured now, exactly as before.
+        const depth3_plane_measurements& plane_half =
+            plane_measurement_valid
+                ? plane_measurement
+                : (plane_measurement = measure_depth3_plane(span<const __fp16>(input_plane),
+                                                            plane_channels,
+                                                            reference_amplitude,
+                                                            span<ul_pilot_sample>(pilot_scratch)));
+        const depth3_measurements net = measure_depth3_heads(plane_half,
+                                                             span<const __fp16>(input_plane),
+                                                             plane_channels,
+                                                             span<const __fp16>(channel_head),
+                                                             reference_amplitude,
+                                                             static_cast<float>(dmrs_noise_head),
+                                                             scales.a_noise,
+                                                             scales.b_noise);
         if (net.nof_pilot_re != 0) {
           stats.rsrp_dB.emplace(convert_power_to_dB(net.rsrp_lin));
           stats.epre_dB.emplace(convert_power_to_dB(net.epre_lin));
@@ -1498,6 +1526,13 @@ private:
   unsigned                                          prepare_refused     = 0;
   /// Receptions whose gate took its measurement from prepare()'s cache instead of measuring the plane again.
   unsigned                                          gate_from_prepare   = 0;
+  /// \brief The plane half of this reception's measurement, taken by the gate and REUSED by the publication.
+  ///
+  /// The gate measures before the forward pass (that is the point of having the shared layer ahead of the network)
+  /// and the publication needs the same numbers afterwards. Measuring twice was both a waste and a chance for the
+  /// two to drift: the scheduler must judge on the number the gate judged on (design section 19.263).
+  depth3_plane_measurements                         plane_measurement;
+  bool                                              plane_measurement_valid = false;
   /// True when this run never calls the classical estimator at all (the pure configuration).
   bool                                              estimate_skipped    = false;
   /// The empty results a pure run hands the chain as its completion signal.
