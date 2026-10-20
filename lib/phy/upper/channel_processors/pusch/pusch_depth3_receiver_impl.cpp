@@ -204,6 +204,39 @@ static constexpr unsigned COND_STRIDE = 8;
 /// decibels away -- the difference this count exists to make visible on a live run.
 static constexpr float R6_AGREEMENT_DB = 0.5F;
 
+/// \brief The estimator results a PURE run passes to the chain: empty, and never read.
+///
+/// WHY IT IS NEEDED (found on the first pure leg, 2026-10-20). The PUSCH chain continues when the estimator calls
+/// `on_estimation_complete` -- that call IS the trigger for estimation to hand over to demodulation. A pure run
+/// does not call the classical estimator at all, so without this the reception never proceeds and the leg hangs
+/// instead of failing. The notifier ignores the contents (it only uses the call as a signal), and the arm itself
+/// never reads them in pure mode, so an empty implementation is exactly right: not a placeholder, the correct
+/// answer for a run that measured nothing.
+class depth3_empty_estimator_results : public dmrs_pusch_estimator_results
+{
+public:
+  float get_noise_variance(unsigned) const override { return 0.0F; }
+  float get_rsrp(unsigned, unsigned) const override { return 0.0F; }
+  static_vector<float, MAX_PORTS> get_rsrp_all_ports(unsigned) const override { return {}; }
+  float get_epre(unsigned) const override { return 0.0F; }
+  float get_snr(unsigned) const override { return 0.0F; }
+  float get_layer_average_snr(unsigned) const override { return 0.0F; }
+  phy_time_unit get_time_alignment(unsigned) const override { return phy_time_unit(); }
+  std::optional<float> get_cfo_Hz(unsigned) const override { return std::nullopt; }
+  void get_symbol_ch_estimate(span<cbf16_t>, unsigned, unsigned, unsigned) const override {}
+  void get_symbol_ch_estimate(span<cbf16_t>,
+                              unsigned,
+                              unsigned,
+                              unsigned,
+                              const bounded_bitset<MAX_NOF_SUBCARRIERS>&) const override
+  {
+  }
+  bool sync_device_estimates() const override { return true; }
+  // The chain also asks for the channel state information it would have reported; a pure run reports nothing here,
+  // because its numbers come from the arm's own measurement layer and are published by the arm.
+  void get_channel_state_information(channel_state_information&) const override {}
+};
+
 class pusch_depth3_receiver_ai_network_impl : public pusch_depth3_receiver
 {
 public:
@@ -239,6 +272,21 @@ public:
   // The fallback switch: `none` is the pure configuration the final comparison runs (design section 19.245).
   if (const char* env = std::getenv("OCUDU_DEPTH3_FALLBACK")) {
     fallback_enabled = !((env[0] == 'n') || (env[0] == 'N') || (env[0] == '0'));
+  }
+  // A PURE RUN HAS NO ESTIMATOR TO ASK (design section 19.245): the gate cannot read a number the classical chain
+  // produced, and the published measurement cannot be the classical one. Both are forced onto the arm's own shared
+  // measurement layer here, once, and said out loud -- a silent substitution would be the worst of both.
+  if (!fallback_enabled) {
+    if (domain_gate != "net") {
+      domain_gate = "net";
+    }
+    if (reporting_source != "net") {
+      reporting_source = "net";
+    }
+    fmt::print(stderr,
+               "[pusch_receiver] AI depth-3: PURE mode (OCUDU_DEPTH3_FALLBACK=none): the classical estimator is not "
+               "called, the gate judges on the arm's own plane residual and the published measurement is the arm's "
+               "own. A reception that cannot be computed is erased and counted, not handed over.\n");
   }
   // Said once, at construction: which measurement gates this run, so a log never has to be guessed at.
   fmt::print(stderr, "[pusch_receiver] AI depth-3: domain gate on the {}\n",
@@ -515,6 +563,18 @@ public:
     // reads as the three path segments and the estimator's share is invisible (asked 2026-10-17: what does the
     // classical measurement chain cost the AI path in total). The segment is appended LAST in the report line so
     // that every reader of the existing four keeps working.
+    // IN THE PURE CONFIGURATION THE CLASSICAL ESTIMATOR IS NOT CALLED AT ALL (design section 19.245, S3): there is
+    // no fallback to feed, so its 700-800 us per reception -- the largest single item on the arm's path, and the
+    // thing R7 exists to remove -- simply does not happen. Everything the arm still needs comes from the shared
+    // measurement layer, which runs on the DM-RS alone. The two knobs it depends on are forced in the constructor,
+    // because a run without an estimator cannot gate on the estimator or publish its numbers.
+    if (!fallback_enabled) {
+      estimate_skipped = true;
+      // THE CHAIN CONTINUES THROUGH THIS CALL, not through the estimator's work: `on_estimation_complete` is what
+      // hands estimation over to demodulation. Skipping both the work and the call hung the first pure leg.
+      notifier.on_estimation_complete(empty_est_results);
+      return;
+    }
     estimate_started = std::chrono::steady_clock::now();
     estimator.estimate(notifier, grid, config);
     const auto estimate_submitted = std::chrono::steady_clock::now();
@@ -1405,6 +1465,10 @@ private:
   unsigned                                          prepare_refused     = 0;
   /// Receptions whose gate took its measurement from prepare()'s cache instead of measuring the plane again.
   unsigned                                          gate_from_prepare   = 0;
+  /// True when this run never calls the classical estimator at all (the pure configuration).
+  bool                                              estimate_skipped    = false;
+  /// The empty results a pure run hands the chain as its completion signal.
+  depth3_empty_estimator_results                    empty_est_results;
   /// Which measurement decides the domain gate, read once from the environment at construction:
   ///   "estimator" -- the classical estimator's SNR, the behaviour before R7/S2 (the default, so this change
   ///                  is inert until a flight asks for it);
