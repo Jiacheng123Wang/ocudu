@@ -280,6 +280,17 @@ public:
   if (const char* env = std::getenv("OCUDU_DEPTH3_GATE_REPORT")) {
     gate_report = (env[0] != '0');
   }
+  // THE A/B SWITCH for the early measurement's assembly scope (design section 19.275): set it and prepare() assembles
+  // the whole plane, as it did before the DM-RS-only change. It exists so the two modes can be compared inside ONE
+  // environment -- two flights on different days cannot separate a twenty-microsecond effect from batch scatter.
+  if (const char* env = std::getenv("OCUDU_DEPTH3_PREPARE_FULL_PLANE")) {
+    prepare_full_plane = (env[0] != '0');
+    fmt::print(stderr,
+               "[pusch_receiver] AI depth-3: the early measurement assembles the {} plane ({}), so an A/B against the "
+               "DM-RS-only default can be flown inside one environment\n",
+               prepare_full_plane ? "WHOLE" : "DM-RS-only",
+               prepare_full_plane ? "OCUDU_DEPTH3_PREPARE_FULL_PLANE=1" : "OCUDU_DEPTH3_PREPARE_FULL_PLANE=0");
+  }
   // The fallback switch: `none` is the pure configuration the final comparison runs (design section 19.245).
   if (const char* env = std::getenv("OCUDU_DEPTH3_FALLBACK")) {
     fallback_enabled = !((env[0] == 'n') || (env[0] == 'N') || (env[0] == '0'));
@@ -623,7 +634,8 @@ public:
     // network, and the measurement reads pilots -- which live on those two symbols. Assembling all fourteen cost
     // the receive thread twelve symbols of work nobody would look at.
     const pusch_depth3_input_plane::status status = prepare_assembler->assemble(
-        span<__fp16>(prepare_plane).first(plane_samples), reference_amplitude, grid, config, context, true);
+        span<__fp16>(prepare_plane).first(plane_samples), reference_amplitude, grid, config, context,
+        !prepare_full_plane);
     if (status != pusch_depth3_input_plane::status::ok) {
       ++prepare_refused;
       return;
@@ -1596,6 +1608,13 @@ private:
   bool                                              publish_suppressed = false;
   /// Receptions whose measurement was withheld for being outside the declared range.
   static std::atomic<unsigned>                      measurements_suppressed;
+  /// \brief True when the early measurement must assemble the WHOLE plane, as it did before section 19.275.
+  ///
+  /// It exists for one purpose: an A/B inside a SINGLE environment. Comparing two flights that measured the same
+  /// quantity on different days cannot separate a 20 us effect from the scatter between batches, which is exactly the
+  /// mistake this project made once already (19.276). With this switch a leg toggles the two modes and the difference
+  /// is the effect.
+  bool                                              prepare_full_plane = false;
   /// \brief What the hint costs the receive thread, in microseconds (design section 19.275).
   ///
   /// Recorded so the cost of running the measurement three symbols early is MEASURED on every leg instead of inferred
