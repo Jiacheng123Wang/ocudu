@@ -14873,7 +14873,42 @@ pusch_processor::prepare(grid, pdu)          ← 默认空实现（不破坏任�
 ★ 事件在 `puxch_processor_impl::process_symbol` ✓，★ PUSCH 处理在另一线程的 slot 边界 ✓
 ★ ⇒ ★ 需要一条**跨模块通知**（★ 只传 slot ＋ 符号索引 ✓，★ "是不是最后一个 DM-RS 符号"由臂判断 ✓，★ 不写死 ✓）。
 
-★ 状态：★ 共用层 ✓、★ `fail()`/纯模式 ✓、★ `prepare()` 贯通并验证 ✓；★ 触发点＝下一步 ✓。## 20. ★★★ R7 执行计划：**把经典估计器从 AI 路径里去掉**（★ 2026-10-17 冻结动机、方案、步骤、判据）
+★ 状态：★ 共用层 ✓、★ `fail()`/纯模式 ✓、★ `prepare()` 贯通并验证 ✓；★ 触发点＝下一步 ✓。### 19.250 ★★ 触发点找到了 ✓：★ **不需要新接口** ✓（★ 2026-10-20 10:55 ✓）
+
+★ 顺着链路查了一遍 ✓：★ **逐符号通知已经存在** ✓，★ 只是没人用它做测量 ✓。
+
+```
+puxch_processor_impl::process_symbol（接收线程）
+  └─ notifier->on_rx_symbol(grid, context, true)         ← 每符号，已有 ✓
+       └─ processor_notifier_adaptor::puxch_adaptor::on_rx_symbol
+            └─ ru_lower_phy_rx_symbol_adapter::on_rx_symbol
+                 └─ ru_adapters::on_new_uplink_symbol
+                      └─ upper_phy_rx_symbol_handler_impl::handle_rx_symbol   ← grid 在这里 ✓
+                           └─ uplink_processor_impl::handle_rx_symbol(symbol, is_valid)   ← 每符号 ✓
+```
+
+★★ **⇒ 结论 ✓**：★ 消费端就是 `uplink_processor_impl::handle_rx_symbol` ✓ —— ★ 它**持有** `pusch_proc` ✓ 与
+★ `pdu_repository` ✓（★ 本 slot 的授权 ✓）⇒ ★ **不需要新的跨模块接口** ✓，★ 也不用新线程 ✓。
+
+**(a) ★ 还差的四处小改 ✓**
+
+| ★ # | ★ 改动 | ★ 说明 |
+|---|---|---|
+| ★ ① | ★ `uplink_slot_processor::handle_rx_symbol(symbol, grid, is_valid)` ✓ | ★ **把 grid 传下来** ✓（★ 现在只有 symbol/is_valid ✓，★ 而上层 `handle_rx_symbol` **手里就有 grid** ✓）|
+| ★ ② | ★ `uplink_processor_impl::handle_rx_symbol` ✓ | ★ 遍历本 slot 的 PUSCH PDU ✓，★ 只对"**最后一个 DM-RS 符号 == symbol**"的那些调用 `prepare` ✓（★ 从 PDU 的 `dmrs_symbol_mask` 判 ✓，★ **不写死** ✓）|
+| ★ ③ | ★ `pusch_proc->prepare(grid, pdu)` ✓ | ★ 已实现且已验证行为不变 ✓（★ §19.249 ✓）|
+| ★ ④ | ★ 开关 ✓ | ★ `OCUDU_DEPTH3_PREPARE_ON_SYMBOL=1` ✓ 才启用 ⇒ ★ 默认**字节级不变** ✓，★ 一条腿验过再谈默认 ✓ |
+
+**(b) ★ 为什么这样做是安全的 ✓**
+
+| ★ 关注点 | ★ 结论 |
+|---|---|
+| ★ 线程 ✓ | ★ 在**接收线程**上执行 ✓ ⇒ ★ 必须**非阻塞、微秒级** ✓（★ 只读 DM-RS ＋ 一次小锁 ✓）|
+| ★ 数据完整性 ✓ | ★ 触发发生在该符号**写入之后** ✓（★ `on_rx_symbol` 是写入后的通知 ✓）|
+| ★ 提前的代价 ✓ | ★ 每个符号最多一次"PDU 掩码检查" ✓（★ 几纳秒 ✓）|
+| ★ 失败时 ✓ | ★ `prepare` 失败只计数 ✓，★ 不影响接收 ✓（★ §19.249(b) ✓）|
+
+★ 状态：★ 触发点已定位且**无需新接口** ✓；★ 四处小改未做 ✓（★ 下一提交 ✓，★ 默认关闭 ✓）。## 20. ★★★ R7 执行计划：**把经典估计器从 AI 路径里去掉**（★ 2026-10-17 冻结动机、方案、步骤、判据）
 
 > ★ 本节为**计划**，与 §19.194–§19.201 的测量记录分开：§19.x 记“发生了什么”，本节记“接下来怎么做、怎么判”。
 > ★ 所有数字来自 §19.200 的实测，所有结构事实来自代码（`pusch_depth3_receiver_impl.cpp`）。
