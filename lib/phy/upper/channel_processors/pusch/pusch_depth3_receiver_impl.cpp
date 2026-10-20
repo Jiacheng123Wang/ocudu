@@ -375,6 +375,11 @@ public:
         // whatever the reception's own Qm is.
         conditioned        = true;
         plane_channels     = engine->depth3_input_channels();
+        // prepare() assembles into its own plane with the same width as the reception (19.273).
+        prepare_assembler  = std::make_unique<pusch_depth3_input_plane>(plane_channels);
+        prepare_plane.assign(static_cast<size_t>(pusch_depth3_input_plane::NOF_SUBCARRIERS) *
+                                 pusch_depth3_input_plane::NOF_SYMBOLS * plane_channels,
+                             static_cast<__fp16>(0.0F));
         input_plane.assign(static_cast<size_t>(pusch_depth3_input_plane::NOF_SUBCARRIERS) *
                                pusch_depth3_input_plane::NOF_SYMBOLS * plane_channels,
                            0.0F);
@@ -610,25 +615,36 @@ public:
   {
     const pusch_depth3_dmrs_context context = make_pusch_depth3_dmrs_context(est_config);
     float                           reference_amplitude = 0.0F;
-    const pusch_depth3_input_plane::status status          = prepare_assembler.assemble(
-        span<__fp16>(prepare_plane), reference_amplitude, grid, config, context);
+    const size_t plane_samples =
+        static_cast<size_t>(pusch_depth3_input_plane::NOF_SUBCARRIERS) *
+        pusch_depth3_input_plane::NOF_SYMBOLS * plane_channels;
+    const pusch_depth3_input_plane::status status          = prepare_assembler->assemble(
+        span<__fp16>(prepare_plane).first(plane_samples), reference_amplitude, grid, config, context);
     if (status != pusch_depth3_input_plane::status::ok) {
       ++prepare_refused;
       return;
     }
-    const depth3_measurements plane_only = measure_depth3(span<const __fp16>(prepare_plane),
-                                                          prepare_assembler.get_plane_channels(),
+    const depth3_measurements plane_only = measure_depth3(span<const __fp16>(prepare_plane).first(plane_samples),
+                                                          plane_channels,
                                                           span<const __fp16>(),
                                                           reference_amplitude,
                                                           0.0F,
                                                           0.0F,
                                                           0.0F,
                                                           span<ul_pilot_sample>(prepare_scratch));
+    // DIAGNOSTIC (design section 19.273): the hint stores a slot and the gate never finds it, so the two sides have
+    // to say what they think the slot is. Three lines each, then silent.
+    static std::atomic<unsigned> store_diagnostics{0};
+    if (store_diagnostics.fetch_add(1, std::memory_order_relaxed) < 3) {
+      fmt::print(stderr, "[depth3-cache] store  slot={} pilots={} snr={:.2f} dB\n",
+                 est_config.slot.count(), plane_only.nof_pilot_re,
+                 (plane_only.residual_snr_lin > 0.0F) ? convert_power_to_dB(plane_only.residual_snr_lin) : -99.0F);
+    }
     slot_measurement entry;
     entry.slot             = est_config.slot;
     entry.residual_snr_lin = plane_only.residual_snr_lin;
-    entry.cfo_cycles       = estimate_cfo_from_plane(span<const __fp16>(prepare_plane),
-                                                     prepare_assembler.get_plane_channels());
+    entry.cfo_cycles       = estimate_cfo_from_plane(span<const __fp16>(prepare_plane).first(plane_samples),
+                                                     plane_channels);
     entry.nof_pilot_re     = plane_only.nof_pilot_re;
     entry.valid            = (plane_only.nof_pilot_re != 0);
     {
@@ -1599,7 +1615,11 @@ private:
   /// uses, because the two run on different threads and neither may read the other's buffer.
   std::vector<__fp16>                             prepare_plane = std::vector<__fp16>(
       static_cast<size_t>(pusch_depth3_input_plane::NOF_SUBCARRIERS) * pusch_depth3_input_plane::NOF_SYMBOLS * 16U);
-  pusch_depth3_input_plane                        prepare_assembler;
+  /// \brief The assembler prepare() fills its own plane with. Built when the bundle is bound, with the BUNDLE's plane
+  /// width: a conditioned bundle writes 16 channels, and an assembler left at the contract's 12 would fill a narrower
+  /// plane than the one the measurement then walks -- which read as "no pilot" on every hinted reception (design
+  /// section 19.273).
+  std::unique_ptr<pusch_depth3_input_plane>       prepare_assembler;
   /// The shared measurement layer's scratch for prepare(), for the same reason.
   std::vector<ul_pilot_sample>                    prepare_scratch = std::vector<ul_pilot_sample>(
       static_cast<size_t>(pusch_depth3_input_plane::NOF_SUBCARRIERS) * pusch_depth3_input_plane::NOF_SYMBOLS);
@@ -1647,6 +1667,22 @@ private:
   /// The measurements prepare() took for this slot, if it took any.
   std::optional<slot_measurement> prepared_measurement(slot_point slot)
   {
+    static std::atomic<unsigned> lookup_diagnostics{0};
+    if (lookup_diagnostics.fetch_add(1, std::memory_order_relaxed) < 3) {
+      unsigned valid = 0;
+      unsigned long long nearest = 0;
+      {
+        std::lock_guard<std::mutex> lock(measured_mutex);
+        for (const slot_measurement& entry : measured) {
+          if (entry.valid) {
+            ++valid;
+            nearest = entry.slot.count();
+          }
+        }
+      }
+      fmt::print(stderr, "[depth3-cache] lookup slot={} (valid entries={}, last stored={})\n",
+                 slot.count(), valid, nearest);
+    }
     std::lock_guard<std::mutex> lock(measured_mutex);
     for (const slot_measurement& entry : measured) {
       if (entry.valid && (entry.slot == slot)) {

@@ -15706,7 +15706,48 @@ grep -a "\[depth3-timing\] early measurement" $S | tail -2
 ★（★ 7–8 dB 档位 2/15 vs 经典 3/15 ✓）⇒ ★ **把"上报不可信"当成"接收不可用"是错的** ✓。
 
 ★ 状态：★ 已实现 ✓、★ 全量构建通过 ✓；★ 重飞应看到：★ `[depth3-gate] measurement SUPPRESSED ...` ✓、
-★ **上行不再归零** ✓、★ `[depth3-gate]` 的 filtered 值继续在 12 以下但**不阻断** ✓。## 20. ★★★ R7 执行计划：**把经典估计器从 AI 路径里去掉**（★ 2026-10-17 冻结动机、方案、步骤、判据）
+★ **上行不再归零** ✓、★ `[depth3-gate]` 的 filtered 值继续在 12 以下但**不阻断** ✓。### 19.273 ★★★ 早测**第一次被消费** ✓：★ 装配器的平面宽度用错了 ✓（★ 2026-10-21 01:15 ✓）
+
+**(a) ★★ 现象 ✓**
+
+★ 干净的腿（★ 无归零 ✓）里 ✓：★ `23 695 reception(s) measured ahead, 0 refused, **0 gate(s) took the cached number**` ✓
+★ ⇒ ★ 提示算了 2.3 万次 ✓，★ **一次也没被用** ✓。
+
+**(b) ★★★ 定位 ✓（★ 两条诊断 ＋ 回放复现 ✓）**
+
+★ 回放里打印两侧的 slot ✓：
+```
+[depth3-cache] store  slot=10147 pilots=0 snr=-99.00 dB     ← 存进去了，但【没有导频】
+[depth3-cache] lookup slot=10147 (valid entries=0, ...)     ← 所以缓存里没有"有效"条目
+```
+★★ **⇒ slot 完全对得上 ✓，★ 问题是 `pilots=0`** ✓ ⇒ ★ 测量本身是空的 ✓ ⇒ ★ `entry.valid=false` ✓ ⇒ 永不可用 ✓。
+
+**(c) ★★★ 根因 ✓：★ `prepare_assembler` 用契约默认的 **12** 通道，★ 而条件化产物写 **16** ✓**
+
+★ 调用点 ✓：★ `measure_depth3(span<const __fp16>(prepare_plane), prepare_assembler.get_plane_channels(), …)` ✓
+★ ⇒ ★ **span 是整块 16 宽缓冲（137 088）✓、★ 而 `plane_channels` 报 12（102 816）✓ ⇒ 尺寸不符 ⇒ 函数直接返回空** ✓。
+
+★ 修复 ✓：
+1. `prepare_assembler` 改成 **`unique_ptr`** ✓，★ 在**绑定产物时**用 `plane_channels` 创建 ✓；
+2. `prepare_plane` 按同一宽度 `assign` ✓；
+3. 三处调用都传 **`.first(plane_samples)`** ✓（★ 装配 ✓、★ 测量 ✓、★ CFO ✓）。
+
+**(d) ★★★ 结果 ✓（★ 回放同一捕获 ✓）**
+
+```
+[depth3-cache] store  slot=10147 pilots=48 snr=29.70 dB
+[depth3-cache] lookup slot=10147 (valid entries=1, last stored=10147)
+[depth3-gate] early measurement: 1 reception(s) measured ahead, 0 refused, 1 gate(s) took the cached number
+```
+★★ **⇒ 提前测量 → ★ 缓存 ✓ → ★ 门控消费 ✓，★ 全链第一次闭合 ✓**（★ 且 SNR 29.70 dB 与门控自己测的**完全一致** ✓
+★ —— ★ 这就是"门控与发布用同一个数"的证据 ✓，★ §19.263 ✓）。
+
+**(e) ★ 顺带 ✓：★ 上一腿的正常流量 ✓ 证明 §19.272 的压制策略有效 ✓**
+
+★ `t3s-ai-early3` ✓：★ **无归零 ✓、★ iperf3 自己退出 ✓、★ 0 失败 ✓**，★ `[ul_pipeline]` p50 **1 292 µs** ✓
+★（★ 比早测关的 1 250 µs 只多 **42 µs ✓，★ 3.4%** ✓）⇒ ★ 接收线程上那次装配**代价可接受** ✓。
+
+★ 状态：★ 已修 ✓、★ 全量构建通过 ✓；★ 待一条满流量腿确认 `M ≈ N` ✓。## 20. ★★★ R7 执行计划：**把经典估计器从 AI 路径里去掉**（★ 2026-10-17 冻结动机、方案、步骤、判据）
 
 > ★ 本节为**计划**，与 §19.194–§19.201 的测量记录分开：§19.x 记“发生了什么”，本节记“接下来怎么做、怎么判”。
 > ★ 所有数字来自 §19.200 的实测，所有结构事实来自代码（`pusch_depth3_receiver_impl.cpp`）。
