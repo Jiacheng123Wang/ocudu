@@ -39,7 +39,7 @@ target_include_directories(ocudu_o_du_low_unit_helpers PRIVATE ${CMAKE_SOURCE_DI
 # the equaliser and the demapper in one unit, so its artefacts do not belong under the channel estimator's
 # metal directory (moved 2026-10-19).
 set(OCUDU_DEPTH3_DEFAULT_MODEL
-    "${CMAKE_SOURCE_DIR}/lib/phy/upper/ai_signal_processors/depth3/depth3_modcond_c32h/d3_modcond_c32h.mlmodelc"
+    "${CMAKE_SOURCE_DIR}/lib/phy/upper/ai_signal_processors/depth3/depth3_modcond_r7/d3_modcond_r7.mlmodelc"
     CACHE FILEPATH "Model the PUSCH ai receiver binds when --pusch_receiver_model is not given")
 
 target_compile_definitions(ocudu_o_du_low_unit_helpers PRIVATE

@@ -11,8 +11,9 @@ documentation is English.)
 
 | Path | Role |
 |---|---|
-| `depth3_modcond_c32h/` | **Default model** since 2026-10-19 (`OCUDU_DEPTH3_DEFAULT_MODEL`): 26 284 parameters, c32 width, 16 input channels, declared SINR calibration |
-| `depth3_modcond_ft/` | Previous default (c64, 89 420 parameters), kept for rollback and A/B |
+| `depth3_modcond_r7/` | **Default model** since 2026-10-20 (`OCUDU_DEPTH3_DEFAULT_MODEL`): the same 26 284 parameters and c32 width, retrained with data from 0 dB and therefore declaring **0 to 48 dB** instead of 12 to 48 -- its reporting heads are six to ten times more accurate at and below 10 dB, which is what makes the lower floor defensible |
+| `depth3_modcond_c32h/` | Previous default (2026-10-19), kept for rollback and A/B: identical shape, trained from 12 dB |
+| `depth3_modcond_ft/` | The default before that (c64, 89 420 parameters), kept for the same reason |
 | `ai_train/` | The training, data and calibration code, plus a design/data/training/testing summary |
 | `test/` | The contract tests, registered in the project's unit-test suite via CTest |
 
