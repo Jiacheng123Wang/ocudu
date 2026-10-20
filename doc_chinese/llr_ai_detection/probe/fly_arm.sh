@@ -111,9 +111,11 @@ if [ "$(id -u)" != 0 ]; then
   exit 2
 fi
 
+# EXTRA_FLAGS appends expert-PHY flags this file does not know about, so a one-off arm does not need the script
+# edited (added 2026-10-20 for --expert_phy.device_resource_grid, which the pure configuration needs).
 LEG_CONFIG=$CONFIG \
 LEG_LOGDIR=$BATCH \
 OCUDU_UL_DUMP=$PATTERN_DIR/C \
 OCUDU_UL_DUMP_COUNT=$CAPTURES \
 OCUDU_RECEIVER_PROBE=$PROBE \
-  bash "$RUNNER" "$PIPELINE" "$LABEL" "${FLAGS[@]}"
+  bash "$RUNNER" "$PIPELINE" "$LABEL" "${FLAGS[@]}" ${EXTRA_FLAGS:-}
