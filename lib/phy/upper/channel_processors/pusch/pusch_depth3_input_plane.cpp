@@ -30,6 +30,27 @@ constexpr unsigned DMRS_REF_POINT_K_TO_POINT_A = 0;
 /// QPSK-like with unit total power, so each component carries 1/sqrt(2).
 constexpr float DMRS_SEQUENCE_AMPLITUDE = 0.70710678118654752440F;
 
+/// \brief The narrowest allocation the arm will compute, in PRBs: the bundle's trained envelope unless a leg
+/// lowers it (OCUDU_DEPTH3_MIN_PRB).
+///
+/// WHY IT IS A SWITCH AND NOT A CONSTANT. The floor keeps the arm from computing outside what it was trained on,
+/// which is the right default. But it is a statement about the TRAINING DATA, not about the plane or the network,
+/// and on 2026-10-20 it made a pure run impossible to attach: the UE's small grants are 1 to 3 PRB, every one was
+/// refused, every reception was erased, and no SRB1 decoded. A leg that wants to find out what the arm does below
+/// the envelope says so, and the answer is measured rather than assumed.
+unsigned minimum_prb()
+{
+  static const unsigned value = [] {
+    const char* env = std::getenv("OCUDU_DEPTH3_MIN_PRB");
+    if (env == nullptr) {
+      return pusch_depth3_input_plane::MIN_PRB;
+    }
+    const unsigned requested = static_cast<unsigned>(std::strtoul(env, nullptr, 10));
+    return (requested == 0) ? pusch_depth3_input_plane::MIN_PRB : requested;
+  }();
+  return value;
+}
+
 } // namespace
 
 // Qualified, not left to the using-directive: a free function DEFINED unqualified at global scope
@@ -147,7 +168,7 @@ pusch_depth3_input_plane::assemble(span<__fp16>                           plane,
   }
   // And it must be wide enough for the model to have seen anything like it: MIN_PRB is the
   // precision envelope of section 0.2(h), and the measurement behind it is in the design document.
-  if (config.rb_mask.count() < MIN_PRB) {
+  if (config.rb_mask.count() < minimum_prb()) {
     return status::allocation_too_narrow;
   }
 
