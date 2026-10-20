@@ -96,6 +96,27 @@ public:
   /// and report the substitution instead.
   bool is_identity() const { return kind() == pusch_depth3_kind::ai_identity; }
 
+  /// \brief Prepares the measurements this reception can produce BEFORE the network runs.
+  ///
+  /// WHY THE SEAM HAS THIS (design section 19.241). The slow measurements -- the pilot least-squares values, the
+  /// residual noise, the CFO -- need only the DM-RS symbols, which arrive before the slot ends, while the network
+  /// needs the data resource elements and cannot start until it has. A caller that can see the DM-RS arrive (the
+  /// lower PHY knows when the last DM-RS symbol of a slot has been written) calls this then, and demodulate()
+  /// finds the answer already computed. It is a HINT, not a contract: an arm that cannot prepare anything leaves
+  /// the default empty body, and a reception whose prepare() never happened still works.
+  ///
+  /// \param[in] grid       The slot's resource grid, which at this point may still be missing its later symbols.
+  /// \param[in] est_config The DM-RS configuration: symbol positions, sequence, CDM groups, ports.
+  /// \param[in] config     The demodulator's configuration: allocation, modulation.
+  virtual void prepare(const resource_grid_reader&               grid,
+                       const dmrs_pusch_estimator::configuration& est_config,
+                       const pusch_demodulator::configuration&    config)
+  {
+    (void)grid;
+    (void)est_config;
+    (void)config;
+  }
+
   /// \brief Whether this arm will actually COMPUTE the unit itself rather than forward it.
   ///
   /// \ref is_identity answers "which arm is this"; this answers "did anything compute", and the two differ

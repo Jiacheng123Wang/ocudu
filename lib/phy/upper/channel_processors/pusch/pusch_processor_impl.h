@@ -142,6 +142,13 @@ public:
                const resource_grid_reader&      grid,
                const pdu_t&                     pdu) override;
 
+  /// \brief Measures the reception from its DM-RS alone, before the estimator or the network runs.
+  ///
+  /// The two configurations are built exactly as process() builds them -- from the same PDU, by the same rules --
+  /// because a hint measured against a different configuration would be a second, disagreeing implementation of
+  /// the reception's geometry (design section 19.241).
+  void prepare(const resource_grid_reader& grid, const pdu_t& pdu) override;
+
 private:
   /// \brief Notifier for the PUSCH channel estimator.
   ///

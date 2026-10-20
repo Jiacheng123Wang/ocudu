@@ -528,6 +528,46 @@ public:
     pending_estimate_open = true;
   }
 
+  /// \brief Measures this reception from its DM-RS alone, before the network runs.
+  ///
+  /// Everything it needs is in the grid by the time the last DM-RS symbol has been written: the pilot least-squares
+  /// values, the residual noise and the CFO all come from `measure_ul_slow`, the same shared layer demodulate()
+  /// uses, so the two cannot disagree about the number the gate acts on. The result is kept per slot.
+  void prepare(const resource_grid_reader&               grid,
+               const dmrs_pusch_estimator::configuration& est_config,
+               const pusch_demodulator::configuration&    config) override
+  {
+    const pusch_depth3_dmrs_context context = make_pusch_depth3_dmrs_context(est_config);
+    float                           reference_amplitude = 0.0F;
+    const pusch_depth3_input_plane::status status          = prepare_assembler.assemble(
+        span<__fp16>(prepare_plane), reference_amplitude, grid, config, context);
+    if (status != pusch_depth3_input_plane::status::ok) {
+      ++prepare_refused;
+      return;
+    }
+    const depth3_measurements plane_only = measure_depth3(span<const __fp16>(prepare_plane),
+                                                          prepare_assembler.get_plane_channels(),
+                                                          span<const __fp16>(),
+                                                          reference_amplitude,
+                                                          0.0F,
+                                                          0.0F,
+                                                          0.0F,
+                                                          span<ul_pilot_sample>(prepare_scratch));
+    slot_measurement entry;
+    entry.slot             = est_config.slot;
+    entry.residual_snr_lin = plane_only.residual_snr_lin;
+    entry.cfo_cycles       = estimate_cfo_from_plane(span<const __fp16>(prepare_plane),
+                                                     prepare_assembler.get_plane_channels());
+    entry.nof_pilot_re     = plane_only.nof_pilot_re;
+    entry.valid            = (plane_only.nof_pilot_re != 0);
+    {
+      std::lock_guard<std::mutex> lock(measured_mutex);
+      measured[measured_next] = entry;
+      measured_next           = (measured_next + 1) % MEASURE_RING;
+    }
+    ++prepared_receptions;
+  }
+
   void demodulate(pusch_codeword_buffer&                 codeword_buffer,
                   pusch_demodulator_notifier&            notifier,
                   const resource_grid_reader&            grid,
@@ -650,14 +690,31 @@ public:
       // `reference_amplitude` MUST be the real one: the EPRE and the residual are built from the plane's LS,
       // which is stored divided by `r`, so passing zero here zeroes the signal and the residual with it -- the
       // gate then reads -inf on every reception and refuses the whole leg (measured, first version, 2026-10-20).
-      const depth3_measurements plane_only = measure_depth3(span<const __fp16>(input_plane),
-                                                             plane_channels,
-                                                             span<const __fp16>(),
-                                                             reference_amplitude,
-                                                             0.0F,
-                                                             0.0F,
-                                                             0.0F,
-                                                             span<ul_pilot_sample>(pilot_scratch));
+      //
+      // IF prepare() ALREADY MEASURED THIS SLOT, its answer is used and the plane is not measured again: that is
+      // the whole point of the early hook, and taking the number from the same shared layer means the two cannot
+      // differ (design section 19.241).
+      const std::optional<slot_measurement> prepared = prepared_measurement(dmrs_context.slot);
+      const depth3_measurements             plane_only =
+          prepared.has_value()
+              ? [&]() {
+                  depth3_measurements from_prepare;
+                  from_prepare.residual_snr_lin            = prepared->residual_snr_lin;
+                  from_prepare.residual_plane_units_lin    = 0.0F;
+                  from_prepare.nof_pilot_re                = prepared->nof_pilot_re;
+                  return from_prepare;
+                }()
+              : measure_depth3(span<const __fp16>(input_plane),
+                               plane_channels,
+                               span<const __fp16>(),
+                               reference_amplitude,
+                               0.0F,
+                               0.0F,
+                               0.0F,
+                               span<ul_pilot_sample>(pilot_scratch));
+      if (prepared.has_value()) {
+        ++gate_from_prepare;
+      }
       gate_history.note(plane_only);
       // The FILTERED value is what the gate decides on once it has warmed up; before that it accepts, so the
       // first receptions of a leg are never refused on an estimate that has not seen enough pilots (19.237).
@@ -677,7 +734,9 @@ public:
         // The arm's own CFO, next to the classical estimator's, so the two can be compared on the same
         // reception before anything depends on the arm's value (design section 19.239). Cycles per symbol:
         // the plane does not carry the subcarrier spacing, so the comparison converts it outside.
-        const float cfo_cycles = estimate_cfo_from_plane(span<const __fp16>(input_plane), plane_channels);
+        const float cfo_cycles = prepared.has_value() ? prepared->cfo_cycles
+                                                      : estimate_cfo_from_plane(span<const __fp16>(input_plane),
+                                                                               plane_channels);
         const std::optional<float> cfo_classic = est_results.get_cfo_Hz(port);
         fmt::print(stderr,
                    "[depth3-gate] {} reception(s): plane residual {:.2f} dB (filtered {:.2f} dB over {:.0f} "
@@ -1324,6 +1383,11 @@ private:
   bool                                              fallback_enabled = true;
   /// Receptions that failed for want of a fallback, i.e. that the arm could not compute and did not hand over.
   unsigned                                          failed_receptions = 0;
+  /// Receptions prepare() measured ahead of the forward pass, and those it could not measure.
+  unsigned                                          prepared_receptions = 0;
+  unsigned                                          prepare_refused     = 0;
+  /// Receptions whose gate took its measurement from prepare()'s cache instead of measuring the plane again.
+  unsigned                                          gate_from_prepare   = 0;
   /// Which measurement decides the domain gate, read once from the environment at construction:
   ///   "estimator" -- the classical estimator's SNR, the behaviour before R7/S2 (the default, so this change
   ///                  is inert until a flight asks for it);
@@ -1332,6 +1396,31 @@ private:
   std::string                                       domain_gate = "estimator";
   /// Receptions the plane-based gate has measured, for its sampled report.
   unsigned                                          gate_samples = 0;
+  /// \brief What prepare() measured for a slot, before the network ran.
+  ///
+  /// The measurements need the DM-RS symbols only, so a caller that sees them arrive can have the gate's answer
+  /// ready before the slot ends (design section 19.241). Written by prepare(), read by demodulate(), hence the
+  /// mutex: the two happen on different threads. A slot that is not in the ring is simply measured in
+  /// demodulate() as before, so the cache is a hint and never a requirement.
+  struct slot_measurement {
+    slot_point slot;
+    float      residual_snr_lin = 0.0F;
+    float      cfo_cycles       = 0.0F;
+    unsigned   nof_pilot_re     = 0;
+    bool       valid            = false;
+  };
+  static constexpr unsigned                       MEASURE_RING = 8;
+  std::array<slot_measurement, MEASURE_RING>      measured{};
+  unsigned                                        measured_next = 0;
+  std::mutex                                      measured_mutex;
+  /// The plane prepare() assembles into, and the assembler that fills it: both separate from the ones demodulate()
+  /// uses, because the two run on different threads and neither may read the other's buffer.
+  std::vector<__fp16>                             prepare_plane = std::vector<__fp16>(
+      static_cast<size_t>(pusch_depth3_input_plane::NOF_SUBCARRIERS) * pusch_depth3_input_plane::NOF_SYMBOLS * 16U);
+  pusch_depth3_input_plane                        prepare_assembler;
+  /// The shared measurement layer's scratch for prepare(), for the same reason.
+  std::vector<ul_pilot_sample>                    prepare_scratch = std::vector<ul_pilot_sample>(
+      static_cast<size_t>(pusch_depth3_input_plane::NOF_SUBCARRIERS) * pusch_depth3_input_plane::NOF_SYMBOLS);
   /// Room for one pilot sample per resource element, so measuring a reception allocates nothing. The shared
   /// measurement layer fills it from the plane; a bigger plane than this is measured up to this many pilots.
   std::vector<ul_pilot_sample>                      pilot_scratch = std::vector<ul_pilot_sample>(
@@ -1372,6 +1461,18 @@ private:
     float snr_db() const { return convert_power_to_dB(static_cast<float>(signal_sum / noise_sum)); }
   };
   gate_history                                      gate_history;
+
+  /// The measurements prepare() took for this slot, if it took any.
+  std::optional<slot_measurement> prepared_measurement(slot_point slot)
+  {
+    std::lock_guard<std::mutex> lock(measured_mutex);
+    for (const slot_measurement& entry : measured) {
+      if (entry.valid && (entry.slot == slot)) {
+        return entry;
+      }
+    }
+    return std::nullopt;
+  }
   /// Report EVERY reception instead of the sampled cadence. For the offline measurement of the offset between
   /// the plane's residual and the estimator's SNR (design section 19.236); off unless asked for.
   bool                                              gate_report = false;

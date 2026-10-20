@@ -298,6 +298,72 @@ namespace {
 
 } // namespace
 
+void pusch_processor_impl::prepare(const resource_grid_reader& grid, const pdu_t& pdu)
+{
+  // Configure the channel estimator, by the same rules process() follows: a hint measured against a different
+  // geometry would be a second implementation of the reception, and the two would disagree exactly where it
+  // matters (design section 19.241).
+  const crb_bitmap rb_mask = pdu.freq_alloc.get_crb_mask(pdu.bwp_start_rb, pdu.bwp_size_rb);
+
+  bool             enable_transform_precoding  = false;
+  unsigned         scrambling_id               = 0;
+  unsigned         n_rs_id                     = 0;
+  bool             n_scid                      = false;
+  unsigned         nof_cdm_groups_without_data = 2;
+  dmrs_config_type dmrs_type                   = dmrs_config_type::type1;
+  if (std::holds_alternative<ocudu::pusch_processor::dmrs_configuration>(pdu.dmrs)) {
+    const auto& dmrs_config     = std::get<ocudu::pusch_processor::dmrs_configuration>(pdu.dmrs);
+    scrambling_id               = dmrs_config.scrambling_id;
+    n_scid                      = dmrs_config.n_scid;
+    nof_cdm_groups_without_data = dmrs_config.nof_cdm_groups_without_data;
+    dmrs_type                   = dmrs_config.dmrs;
+  } else {
+    const auto& dmrs_config    = std::get<ocudu::pusch_processor::dmrs_transform_precoding_configuration>(pdu.dmrs);
+    enable_transform_precoding = true;
+    n_rs_id                    = dmrs_config.n_rs_id;
+  }
+
+  dmrs_pusch_estimator::configuration ch_est_config;
+  ch_est_config.slot = pdu.slot - pdu.slot_offset;
+  if (enable_transform_precoding) {
+    ch_est_config.sequence_config = dmrs_pusch_estimator::low_papr_sequence_configuration{.n_rs_id = n_rs_id};
+  } else {
+    ch_est_config.sequence_config = dmrs_pusch_estimator::pseudo_random_sequence_configuration{
+        .type = dmrs_type, .nof_tx_layers = pdu.nof_tx_layers, .scrambling_id = scrambling_id, .n_scid = n_scid};
+  }
+  ch_est_config.scaling      = convert_dB_to_amplitude(-get_sch_to_dmrs_ratio_dB(nof_cdm_groups_without_data));
+  ch_est_config.c_prefix     = pdu.cp;
+  ch_est_config.symbols_mask = pdu.dmrs_symbol_mask;
+  ch_est_config.rb_mask      = rb_mask;
+  ch_est_config.first_symbol = pdu.start_symbol_index;
+  ch_est_config.nof_symbols  = pdu.nof_symbols;
+  ch_est_config.rx_ports.assign(pdu.rx_ports.begin(), pdu.rx_ports.end());
+  ch_est_config.dc_position = pdu.dc_position;
+
+  pusch_demodulator::configuration demod_config;
+  demod_config.rnti                        = pdu.rnti;
+  demod_config.rb_mask                     = rb_mask;
+  demod_config.modulation                  = pdu.mcs_descr.modulation;
+  demod_config.start_symbol_index          = pdu.start_symbol_index;
+  demod_config.nof_symbols                 = pdu.nof_symbols;
+  demod_config.dmrs_symb_pos               = pdu.dmrs_symbol_mask;
+  demod_config.dmrs_type                   = dmrs_type;
+  demod_config.nof_cdm_groups_without_data = nof_cdm_groups_without_data;
+  demod_config.n_id                        = pdu.n_id;
+  demod_config.nof_tx_layers               = pdu.nof_tx_layers;
+  demod_config.dc_position                 = pdu.dc_position;
+  demod_config.enable_transform_precoding  = enable_transform_precoding;
+  demod_config.rx_ports                    = pdu.rx_ports;
+  demod_config.n_rapid                     = pdu.n_rapid;
+
+  // The unit lives in the dependencies, and taking one out and putting it back is what process() does too.
+  concurrent_dependencies_pool_type::ptr dependencies = dependencies_pool->get();
+  if (!dependencies) {
+    return;
+  }
+  dependencies->get_depth3().prepare(grid, ch_est_config, demod_config);
+}
+
 void pusch_processor_impl::process(span<uint8_t>                    data,
                                    unique_rx_buffer                 rm_buffer,
                                    pusch_processor_result_notifier& notifier,

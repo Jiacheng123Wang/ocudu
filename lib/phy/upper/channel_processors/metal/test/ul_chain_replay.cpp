@@ -1541,6 +1541,11 @@ int main(int argc, char** argv)
         check(owned_receiver, "pusch processor");
         receiver = owned_receiver.get();
       }
+      // The early measurement the symbol-11 hook will make on air, exercised here where the whole slot is
+      // already in the grid: the hint must change nothing except where the number comes from (19.241).
+      if (std::getenv("OCUDU_REPLAY_PREPARE") != nullptr) {
+        receiver->prepare(grid->get_reader(), hop_pdu.back());
+      }
       receiver->process(data, std::move(buffer), *spy, grid->get_reader(), hop_pdu.back());
       spies.push_back(std::move(spy));
       if (owned_receiver) {

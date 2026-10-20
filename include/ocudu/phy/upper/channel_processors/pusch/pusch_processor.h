@@ -199,6 +199,21 @@ public:
   /// \param[in]     notifier  Result notification interface.
   /// \param[in]     grid      Source resource grid.
   /// \param[in]     pdu       Necessary parameters to process the PUSCH transmission.
+  /// \brief Prepares the measurements a reception can produce before its network runs.
+  ///
+  /// A hint, not a contract (design section 19.241): the caller that can see the last DM-RS symbol of a slot
+  /// arrive calls this then, and the receiver's demodulate() finds the slow measurements -- pilot least squares,
+  /// residual noise, CFO -- already computed. An implementation that cannot prepare anything leaves this empty,
+  /// and a reception whose prepare() never happened behaves exactly as before.
+  ///
+  /// \param[in] grid The slot's resource grid, which may still be missing its later symbols.
+  /// \param[in] pdu  The PUSCH PDU of the reception.
+  virtual void prepare(const resource_grid_reader& grid, const pdu_t& pdu)
+  {
+    (void)grid;
+    (void)pdu;
+  }
+
   virtual void process(span<uint8_t>                    data,
                        unique_rx_buffer                 rm_buffer,
                        pusch_processor_result_notifier& notifier,
