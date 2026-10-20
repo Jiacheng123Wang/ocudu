@@ -70,6 +70,14 @@ public:
     ocudu_assert(processor, "Invalid processor.");
   }
 
+  // See pusch_processor interface for documentation.
+  void prepare(const resource_grid_reader& rx_grid, const pdu_t& rx_pdu) override
+  {
+    // Forwarded like every other call: a decorator that swallows one entry point turns a working path into a silent
+    // no-op, which is exactly what happened to the early measurement on 2026-10-20 (design section 19.262).
+    processor->prepare(rx_grid, rx_pdu);
+  }
+
   void process(span<uint8_t>                    data_,
                unique_rx_buffer                 rm_buffer,
                pusch_processor_result_notifier& notifier_,

@@ -98,6 +98,26 @@ public:
   }
 
   // See interface for documentation.
+  void prepare(const resource_grid_reader& grid, const pdu_t& pdu) override
+  {
+    // FORWARDED, and the omission cost a leg (2026-10-20): the early measurement reached this pool and stopped at
+    // the interface's empty default, so the arm never saw a single prepare() while the diagnostic showed the last
+    // DM-RS symbol arriving with a valid grid and a matching PDU.
+    //
+    // The processor is BORROWED the same way process() borrows one, and given back immediately: the hint runs
+    // ahead of the reception and must not leave a processor unavailable to the slot it is about to serve. When the
+    // pool is empty the hint is dropped, which is what a hint may do -- the reception then measures at the slot
+    // boundary exactly as it did before this path existed.
+    auto unique_processor = processors.get();
+    if (!unique_processor) {
+      return;
+    }
+    pusch_processor& processor = *unique_processor;
+    unique_processor->set_unique_ptr(std::move(unique_processor));
+    processor.prepare(grid, pdu);
+  }
+
+  // See interface for documentation.
   void process(span<uint8_t>                    data,
                unique_rx_buffer                 rm_buffer,
                pusch_processor_result_notifier& notifier,
