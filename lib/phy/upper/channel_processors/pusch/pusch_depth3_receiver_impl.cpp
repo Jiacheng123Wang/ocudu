@@ -834,7 +834,7 @@ public:
                    "the cached number instead of measuring again\n",
                    prepared_receptions.load(),
                    prepare_refused.load(),
-                   gate_from_prepare);
+                   gate_from_prepare.load());
         // One more line, only when every reception is being reported: the CFO comparison is an offline
         // measurement, not something a live leg needs in its log.
         if (gate_report) {
@@ -1025,7 +1025,7 @@ private:
                "cached number\n",
                prepared_receptions.load(),
                prepare_refused.load(),
-               gate_from_prepare);
+               gate_from_prepare.load());
   }
 
   /// The published SINR per reception: raw, and after the bundle's calibration. A ring, like the timing one, so a
@@ -1523,10 +1523,10 @@ private:
   unsigned                                          failed_receptions = 0;
   /// Receptions prepare() measured ahead of the forward pass, and those it could not measure. Atomic because the
   /// hint runs on the receive thread while the receptions run on the PUSCH executor (design section 19.268).
-  std::atomic<unsigned>                             prepared_receptions{0};
-  std::atomic<unsigned>                             prepare_refused{0};
+  static std::atomic<unsigned>                      prepared_receptions;
+  static std::atomic<unsigned>                      prepare_refused;
   /// Receptions whose gate took its measurement from prepare()'s cache instead of measuring the plane again.
-  unsigned                                          gate_from_prepare   = 0;
+  static std::atomic<unsigned>                      gate_from_prepare;
   /// \brief The plane half of this reception's measurement, taken by the gate and REUSED by the publication.
   ///
   /// The gate measures before the forward pass (that is the point of having the shared layer ahead of the network)
@@ -1559,10 +1559,17 @@ private:
     unsigned   nof_pilot_re     = 0;
     bool       valid            = false;
   };
-  static constexpr unsigned                       MEASURE_RING = 8;
-  std::array<slot_measurement, MEASURE_RING>      measured{};
-  unsigned                                        measured_next = 0;
-  std::mutex                                      measured_mutex;
+  static constexpr unsigned MEASURE_RING = 64;
+  /// \brief The early measurements, SHARED BY EVERY ARM INSTANCE (design section 19.270).
+  ///
+  /// WHY IT CANNOT BE A MEMBER. The PUSCH dependencies -- and with them the arms -- come from a pool, so the arm that
+  /// receives the hint and the arm that processes the reception are not necessarily the same object: a per-instance
+  /// cache is a cache nobody reads, which is what the first working hint measured (the forwarding line named the AI
+  /// arm, the ledger stayed at zero because the instance that processed the slot never saw the hint). The reported
+  /// quantity is a SLOW variable of the cell, not of an object, so the registry is process-wide and keyed by slot.
+  static std::array<slot_measurement, MEASURE_RING> measured;
+  static unsigned                                   measured_next;
+  static std::mutex                                 measured_mutex;
   /// The plane prepare() assembles into, and the assembler that fills it: both separate from the ones demodulate()
   /// uses, because the two run on different threads and neither may read the other's buffer.
   std::vector<__fp16>                             prepare_plane = std::vector<__fp16>(
@@ -1695,6 +1702,17 @@ private:
 #endif // OCUDU_HAVE_DEPTH3_ENGINE
 
 } // namespace
+
+// The process-wide early-measurement registry and its counters (design section 19.270): shared because the arm that
+// receives the hint and the arm that processes the reception both come from the dependencies pool.
+std::array<pusch_depth3_receiver_ai_network_impl::slot_measurement,
+           pusch_depth3_receiver_ai_network_impl::MEASURE_RING>
+    pusch_depth3_receiver_ai_network_impl::measured{};
+unsigned pusch_depth3_receiver_ai_network_impl::measured_next = 0;
+std::mutex pusch_depth3_receiver_ai_network_impl::measured_mutex;
+std::atomic<unsigned> pusch_depth3_receiver_ai_network_impl::prepared_receptions{0};
+std::atomic<unsigned> pusch_depth3_receiver_ai_network_impl::prepare_refused{0};
+std::atomic<unsigned> pusch_depth3_receiver_ai_network_impl::gate_from_prepare{0};
 
 std::unique_ptr<pusch_depth3_receiver> ocudu::create_pusch_depth3_receiver(
     pusch_depth3_kind               kind,

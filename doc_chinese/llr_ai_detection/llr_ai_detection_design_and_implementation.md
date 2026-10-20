@@ -15619,7 +15619,37 @@ if (!processors_.empty() && (processors_.front() != nullptr)) hint_target = proc
 ★★ **⇒ 共同点 ✓**：★ 它们都**不在数学里** ✓，★ 而在**所有权 / 生命周期 / 调用链**里 ✓；
 ★ 而且**日志一切正常** ✓（★ 除了今天这行专门为此加的诊断 ✓）。
 
-★ 状态：★ 已修 ✓、★ 全量构建通过 ✓；★ 再飞同一条短诊断腿即可确认 ✓（★ 期望看到 `forwarding … AI network` ＋ `N measured ahead > 0` ✓）。## 20. ★★★ R7 执行计划：**把经典估计器从 AI 路径里去掉**（★ 2026-10-17 冻结动机、方案、步骤、判据）
+★ 状态：★ 已修 ✓、★ 全量构建通过 ✓；★ 再飞同一条短诊断腿即可确认 ✓（★ 期望看到 `forwarding … AI network` ＋ `N measured ahead > 0` ✓）。### 19.270 ★★★ 提示已经到达 ✓，★ 但缓存是"**按实例**"的 ⇒ 收的人与算的人不是同一个对象 ✓（★ 2026-10-21 00:45 ✓）
+
+**(a) ★★ 诊断结果 ✓**
+
+```
+PUSCH prepare: forwarding the hint to the AI network arm for slot 956.17
+PUSCH prepare: forwarding the hint to the AI network arm for slot 961.7
+PUSCH prepare: forwarding the hint to the AI network arm for slot 971.7
+```
+★ ⇒ ★ **调用链已经通了 ✓**：★ 池 → ★ wrapper → ★ `pusch_processor_impl` → ★ **AI 臂** ✓。
+
+**(b) ★★★ 但"台账仍为 0" 有第二个原因 ✓：★ 依赖与臂都来自**池** ✓**
+
+★ `concurrent_dependencies` 是**池化的** ✓ ⇒ ★ **收到提示的臂实例** 与 **处理该 slot 的臂实例**
+★ **不保证是同一个** ✓ ⇒
+★ 我的缓存 `measured[]`、★ `prepared_receptions` 都是**成员** ✓ ⇒ ★ 提示写进实例 A ✓，★ 台账从实例 B 打印 ✓ ⇒ **永远是 0** ✓。
+
+★★ **⇒ 这不是实现 bug，★ 是**架构错位** ✓：★ 上报量是**小区的慢变量** ✓，★ 不是"某个对象的"状态 ✓
+★ ⇒ ★ **必须进程级共享** ✓。
+
+**(c) ★ 修复 ✓：★ 缓存与计数改为**进程级**（★ 按 slot 键 ✓，★ 有锁 ✓）**
+
+| ★ 项 | ★ 归属 |
+|---|---|
+| ★ `measured[]` / `measured_next` / `measured_mutex` ✓ | ★ **static（★ 进程级 ✓）** ✓，★ 环 8 → **64** 条 ✓（★ 一个池里多个实例 × 多 slot ✓）|
+| ★ `prepared_receptions` / `prepare_refused` / `gate_from_prepare` ✓ | ★ **static atomic** ✓ |
+| ★ `prepare_plane` / ★ `prepare_assembler` / ★ `prepare_scratch` ✓ | ★ 仍**每实例**（★ 纯 scratch ✓，★ 无跨实例含义 ✓）|
+
+★ 于是 ✓：★ **任何实例测量 ✓、★ 任何实例消费 ✓**；★ 台账从任何实例打印都能看到全局进度 ✓。
+
+★ 状态：★ 已修 ✓、★ 全量构建通过 ✓；★ 再飞同一条短诊断腿应看到 ★ `N measured ahead > 0` ✓ 与 ★ `M took the cached number` ✓。## 20. ★★★ R7 执行计划：**把经典估计器从 AI 路径里去掉**（★ 2026-10-17 冻结动机、方案、步骤、判据）
 
 > ★ 本节为**计划**，与 §19.194–§19.201 的测量记录分开：§19.x 记“发生了什么”，本节记“接下来怎么做、怎么判”。
 > ★ 所有数字来自 §19.200 的实测，所有结构事实来自代码（`pusch_depth3_receiver_impl.cpp`）。
