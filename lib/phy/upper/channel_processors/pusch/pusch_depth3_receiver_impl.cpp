@@ -1202,6 +1202,20 @@ private:
     }
     const unsigned qm = get_bits_per_symbol(config.modulation);
     if (!allocated.empty() && (qm != 0)) {
+      // THE BLOCKS HAVE TO BE HANDED OVER, NOT ONLY FILLED (found on the third pure leg, 2026-10-20): a view from
+      // get_next_block_view is storage, and on_new_block is what passes the block to the decoder. Writing zeros
+      // into the view and never handing it over left the decoder with nothing to decode, so it never reported --
+      // the reception kept its HARQ buffer and the uplink stalled within a couple of minutes, exactly as the
+      // missing on_end_codeword() had done before it.
+      //
+      // The scrambling sequence is the one the real path would have used, generated exactly as deliver() generates
+      // it: zeros survive the sign flips, but the block still has to carry the right sequence, because that is
+      // what the buffer forwards.
+      unsigned c_init = to_underlying(config.rnti) * pow2(15) + config.n_id;
+      if (config.n_rapid.has_value()) {
+        c_init = to_underlying(config.rnti) * pow2(16) + *config.n_rapid * pow2(10) + config.n_id;
+      }
+      descrambler->init(c_init);
       for (unsigned symbol = 0; symbol != pusch_depth3_input_plane::NOF_SYMBOLS; ++symbol) {
         if (config.dmrs_symb_pos.test(symbol)) {
           continue;
@@ -1213,6 +1227,9 @@ private:
         }
         // Zero is the erasure: no information, not a guess.
         std::fill(codeword.begin(), codeword.end(), log_likelihood_ratio{0});
+        static_bit_buffer<pusch_constants::MAX_NOF_BITS_PER_OFDM_SYMBOL> scrambling_seq(nof_softbits);
+        descrambler->generate(scrambling_seq);
+        codeword_buffer.on_new_block(codeword, scrambling_seq);
       }
     }
     // THE END OF THE CODEWORD IS WHAT RELEASES THE HARQ BUFFER (found on the pure leg, 2026-10-20): the decoder
