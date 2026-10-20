@@ -50,6 +50,9 @@ public:
   /// Sets the unique pointer that will be released upon the completion of the PUSCH processing.
   void set_unique_ptr(pool::ptr unique_token_) { unique_pool_ptr = std::move(unique_token_); }
 
+  // See pusch_processor interface for documentation.
+  void prepare(const resource_grid_reader& grid, const pdu_t& pdu) override { processor->prepare(grid, pdu); }
+
 private:
   // See pusch_processor_result_notifier for documentation.
   void on_uci(const pusch_processor_result_control& uci) override
@@ -95,26 +98,29 @@ public:
                        std::shared_ptr<uci_processor_pool>            uci_processors_) :
     logger(ocudulog::fetch_basic_logger("PHY")), processors(processors_), uci_processors(uci_processors_)
   {
+    // The processor a hint is given to, chosen ONCE at construction: hints are best-effort and one target is
+    // enough, while borrowing from the pool is what starved it (design section 19.268).
+    if (!processors_.empty() && (processors_.front() != nullptr)) {
+      hint_target = processors_.front().get();
+    }
   }
 
   // See interface for documentation.
   void prepare(const resource_grid_reader& grid, const pdu_t& pdu) override
   {
-    // FORWARDED, and the omission cost a leg (2026-10-20): the early measurement reached this pool and stopped at
-    // the interface's empty default, so the arm never saw a single prepare() while the diagnostic showed the last
-    // DM-RS symbol arriving with a valid grid and a matching PDU.
+    // FORWARDED WITHOUT TAKING A PROCESSOR OUT OF THE POOL (design section 19.268). The first version borrowed one
+    // exactly as process() does -- get() plus set_unique_ptr() -- and then returned without a reception, so the
+    // wrapper's pool token was never released: every hint permanently removed one processor from the pool, the
+    // pool starved, and the uplink delivered in bursts separated by seconds of nothing (measured on air the same
+    // day: iperf3 intervals of 0.00 bytes). A hint must not own anything.
     //
-    // The processor is BORROWED the same way process() borrows one, and given back immediately: the hint runs
-    // ahead of the reception and must not leave a processor unavailable to the slot it is about to serve. When the
-    // pool is empty the hint is dropped, which is what a hint may do -- the reception then measures at the slot
-    // boundary exactly as it did before this path existed.
-    auto unique_processor = processors.get();
-    if (!unique_processor) {
-      return;
+    // It goes to ONE designated processor, and only its prepare(), which reads the grid and writes nothing the
+    // reception owns. The instruction is safe to run beside a reception on the same object: prepare() uses its own
+    // plane, its own assembler and its own scratch, and the measurements it publishes to the gate go through a
+    // mutex.
+    if (hint_target != nullptr) {
+      hint_target->prepare(grid, pdu);
     }
-    pusch_processor& processor = *unique_processor;
-    unique_processor->set_unique_ptr(std::move(unique_processor));
-    processor.prepare(grid, pdu);
   }
 
   // See interface for documentation.
@@ -182,6 +188,10 @@ private:
   /// UCI processor pool, used only the normal processor pool runs out of processors or the PUSCH transmission only
   /// contains UCI.
   std::shared_ptr<uci_processor_pool> uci_processors;
+
+  /// The processor the early-measurement hint is delivered to. Raw and non-owning: the pool owns it, and the hint
+  /// must never take ownership (section 19.268).
+  pusch_processor_wrapper* hint_target = nullptr;
 };
 
 } // namespace ocudu

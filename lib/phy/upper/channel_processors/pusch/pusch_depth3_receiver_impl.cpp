@@ -832,8 +832,8 @@ public:
         fmt::print(stderr,
                    "[depth3-gate] early measurement: {} reception(s) measured ahead, {} refused, {} gate(s) took "
                    "the cached number instead of measuring again\n",
-                   prepared_receptions,
-                   prepare_refused,
+                   prepared_receptions.load(),
+                   prepare_refused.load(),
                    gate_from_prepare);
         // One more line, only when every reception is being reported: the CFO comparison is an offline
         // measurement, not something a live leg needs in its log.
@@ -1023,8 +1023,8 @@ private:
     fmt::print(stderr,
                "[depth3-timing] early measurement: {} reception(s) measured ahead, {} refused, {} gate(s) took the "
                "cached number\n",
-               prepared_receptions,
-               prepare_refused,
+               prepared_receptions.load(),
+               prepare_refused.load(),
                gate_from_prepare);
   }
 
@@ -1521,9 +1521,10 @@ private:
   bool                                              fallback_enabled = true;
   /// Receptions that failed for want of a fallback, i.e. that the arm could not compute and did not hand over.
   unsigned                                          failed_receptions = 0;
-  /// Receptions prepare() measured ahead of the forward pass, and those it could not measure.
-  unsigned                                          prepared_receptions = 0;
-  unsigned                                          prepare_refused     = 0;
+  /// Receptions prepare() measured ahead of the forward pass, and those it could not measure. Atomic because the
+  /// hint runs on the receive thread while the receptions run on the PUSCH executor (design section 19.268).
+  std::atomic<unsigned>                             prepared_receptions{0};
+  std::atomic<unsigned>                             prepare_refused{0};
   /// Receptions whose gate took its measurement from prepare()'s cache instead of measuring the plane again.
   unsigned                                          gate_from_prepare   = 0;
   /// \brief The plane half of this reception's measurement, taken by the gate and REUSED by the publication.
