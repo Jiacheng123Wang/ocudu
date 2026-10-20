@@ -176,6 +176,28 @@ void uplink_processor_impl::handle_rx_symbol(unsigned                    end_sym
   // 19.250). It runs on the receive thread, so it does one mask comparison per PDU and nothing else: whether a
   // PDU's last DM-RS symbol is the one that arrived is read from the PDU's own mask, never from a constant.
   if (early_measurement_enabled && is_valid && rx_grid.is_valid()) {
+    // ONE-SHOT DIAGNOSTIC (design section 19.255): a leg with the switch on reported "0 measured ahead", so
+    // something between this call and the PDUs is empty and the leg alone cannot say which. Three lines, on the
+    // first three symbols of the run, say whether the grid is valid and whether the slot has PUSCH PDUs at all.
+    if (early_diagnostics++ < 3) {
+      unsigned nof_pdus = 0;
+      unsigned last_dmrs_seen = 0;
+      for (unsigned end = 0; end != MAX_NSYMB_PER_SLOT; ++end) {
+        for (const uplink_pdu_slot_repository::pusch_pdu& pdu : pdu_repository.get_pusch_pdus(end)) {
+          ++nof_pdus;
+          for (unsigned symbol = 0, nof = pdu.pdu.dmrs_symbol_mask.size(); symbol != nof; ++symbol) {
+            if (pdu.pdu.dmrs_symbol_mask.test(symbol)) {
+              last_dmrs_seen = symbol;
+            }
+          }
+        }
+      }
+      logger.info("UL processor early measurement: symbol {} grid {} PUSCH PDU(s) {} last DM-RS {}",
+                  end_symbol_index,
+                  rx_grid.is_valid() ? "valid" : "INVALID",
+                  nof_pdus,
+                  last_dmrs_seen);
+    }
     for (unsigned end = 0; end != MAX_NSYMB_PER_SLOT; ++end) {
       for (const uplink_pdu_slot_repository::pusch_pdu& pdu : pdu_repository.get_pusch_pdus(end)) {
         // The last DM-RS symbol of this reception.

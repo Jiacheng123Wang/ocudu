@@ -262,6 +262,8 @@ private:
   bool early_measurement_enabled = false;
   /// Receptions for which the early measurement was handed to the receiver, for the leg's report.
   unsigned early_measurements = 0;
+  /// Symbols the early-measurement path has looked at, for its three-line one-shot diagnostic.
+  unsigned early_diagnostics = 0;
   /// Task executors.
   task_executor_collection task_executors;
   /// Receive buffer pool.
