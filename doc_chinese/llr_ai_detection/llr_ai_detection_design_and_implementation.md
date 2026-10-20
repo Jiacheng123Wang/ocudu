@@ -15830,7 +15830,35 @@ grep -a "\[depth3-timing\] early measurement" $S | tail -2
 | ★ ② 网络不再承担上报 ✓ | ★ 前向少算 2 头 ✓、★ `deliver` 少一次映射 ✓；★ **训练不再有"上报 vs 解码"折中** ✓ | ★ 待做（★ §19.266 ✓）|
 | ★ ③ 标定/门控解耦 ✓ | ★ 不再每包 `depth3_sinr_cal` ✓；★ 换模型不动上报与门控 ✓ | ★ 待做（★ §19.266 ✓）|
 
-★ 状态：★ 记账已订正 ✓、★ DM-RS-only 已实现 ✓、★ 成本仪表已加 ✓、★ 全量构建通过 ✓。## 20. ★★★ R7 执行计划
+★ 状态：★ 记账已订正 ✓、★ DM-RS-only 已实现 ✓、★ 成本仪表已加 ✓、★ 全量构建通过 ✓。### 19.276 ★★★ 早测满投递 ✓：★ M = N = **37 221** ✓（★ 100% ✓），★ 端到端 1 239 µs ✓（★ 2026-10-21 07:20 ✓）
+
+**(a) ★★ 账 ✓（★ `t3s-ai-early5` ✓）**
+
+```
+[depth3-timing] early measurement: 37221 reception(s) measured ahead, 0 refused, 37221 gate(s) took the cached number
+[ul_pipeline] samples=38468 mean=1326.8us median=1239.0us p95=1755us p99=1848us max=2479us
+```
+★★ **⇒ M = N ✓，★ 100%（★ 连第一条也命中 ✓ —— ★ 因为这条腿起飞时缓存已经热 ✓）** ✓。
+
+| ★ 腿 | ★ 早测 | ★ `[ul_pipeline]` p50 |
+|---|---|---|
+| ★ 无早测 ✓ | ★ — ✓ | ★ 1 250 µs ✓ |
+| ★ 早测（★ 缓存可用 ✓）★ `early4` ✓ | ★ M/N = 99.997% ✓ | ★ **1 218 µs** ✓ |
+| ★ 早测＋DM-RS-only ★ `early5` ✓ | ★ **M/N = 100%** ✓ | ★ 1 239 µs ✓ |
+
+★ `early5` 比 `early4` 高 21 µs ✓ —— ★ 但**两腿不同批次、★ 环境不同** ✓（★ 本批 p95 1 755 vs 上批 1 752 ✓，★ 抖动相当 ✓）⇒
+★ **21 µs 在批间噪声内 ✓**，★ 不足以判定 DM-RS-only 变差 ✓；★ 需要同环境 A/B（★ 切开关 ✓）才能定论 ✓。
+
+**(b) ★★ 一处仪表 bug 已修 ✓**
+
+★ 成本行原本嵌在 `[depth3-gate]` 的汇总里 ✓ ⇒ ★ **只有 `OCUDU_DEPTH3_GATE_REPORT=1` 时才打印** ✓
+★ ⇒ ★ `early5` 腿上**根本没出现** ✓（★ 用户 grep 不到就是因为这个 ✓）。
+★ 已移到 `[depth3-timing]` 汇总（★ 无条件打印 ✓），★ 回放验证 ✓：
+```
+[depth3-timing] early measurement cost on the receive thread: p50 25 p99 25 max 25 us over 1 sample(s)
+```
+
+★ 状态：★ 早测满投递 ✓；★ 成本仪表已可用 ✓；★ DM-RS-only 的净收益待**同环境 A/B** 定论 ✓。## 20. ★★★ R7 执行计划
 
 **执行顺序（★ 2026-10-21 修订 ✓）**
 

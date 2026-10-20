@@ -866,19 +866,6 @@ public:
                    prepared_receptions.load(),
                    prepare_refused.load(),
                    gate_from_prepare.load());
-    if (prepare_cost_count != 0) {
-      // Sort only the samples taken: the ring's untouched slots are zeros and would read as a p50 of zero.
-      std::array<unsigned, 512> sorted = prepare_cost_us;
-      const unsigned            n      = prepare_cost_count;
-      std::sort(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(n));
-      fmt::print(stderr,
-                 "[depth3-timing] early measurement cost on the receive thread: p50 {} p99 {} max {} us over {} "
-                 "sample(s)\n",
-                 sorted[n / 2],
-                 sorted[std::min((n * 99) / 100, n - 1)],
-                 sorted[n - 1],
-                 n);
-    }
         // One more line, only when every reception is being reported: the CFO comparison is an offline
         // measurement, not something a live leg needs in its log.
         if (gate_report) {
@@ -1082,6 +1069,20 @@ private:
                prepared_receptions.load(),
                prepare_refused.load(),
                gate_from_prepare.load());
+    if (prepare_cost_count != 0) {
+      // Sort only the samples taken: the ring's untouched slots are zeros and would read as a p50 of zero.
+      std::array<unsigned, 512> sorted = prepare_cost_us;
+      const unsigned            n      = prepare_cost_count;
+      std::sort(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(n));
+      fmt::print(stderr,
+                 "[depth3-timing] early measurement cost on the receive thread: p50 {} p99 {} max {} us over {} "
+                 "sample(s)\n",
+                 sorted[n / 2],
+                 sorted[std::min((n * 99) / 100, n - 1)],
+                 sorted[n - 1],
+                 n);
+    }
+
   }
 
   /// The published SINR per reception: raw, and after the bundle's calibration. A ring, like the timing one, so a
