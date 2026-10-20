@@ -14937,7 +14937,47 @@ puxch_processor_impl::process_symbol（接收线程）
 ★ 要证明"★ 符号 11 一到就测量、★ 到 slot 边界时直接命中缓存 ✓"，★ 需要**一条打开开关的腿** ✓，
 ★ 日志应出现 ★ `UL processor: the early measurement is ON ...` ✓ 与 `[depth3-gate]` 里的 `gate_from_prepare` 计数 ✓。
 
-★ 状态：★ 触发链路已完整落地 ✓、★ 默认关闭 ✓、★ 开关打开时既有测试全过 ✓；★ 真链验证＝一条腿 ✓。## 20. ★★★ R7 执行计划：**把经典估计器从 AI 路径里去掉**（★ 2026-10-17 冻结动机、方案、步骤、判据）
+★ 状态：★ 触发链路已完整落地 ✓、★ 默认关闭 ✓、★ 开关打开时既有测试全过 ✓；★ 真链验证＝一条腿 ✓。### 19.252 ★★★ 纯模式的两次实测失败与修复 ✓（★ 2026-10-20 11:10 ✓）
+
+**(a) ★★ 失败一 ✓：★ 纯模式**挂死** ✓（★ replay ✓，★ 20 分钟无输出 ✓）**
+
+★ 根因 ✓：★ PUSCH 链的推进靠 **`on_estimation_complete(...)` 这次调用本身** ✓（★ 它是"估计 → 解调"的交接信号 ✓），
+★ 而不是靠结果内容 ✓。★ 纯模式把估计器整个跳过 ⇒ ★ **交接信号也没了** ✓ ⇒ ★ 接收永不推进 ✓ ⇒ ★ 挂死 ✓。
+
+★ 修复 ✓：★ 纯模式显式传一个**空的估计结果实现** ✓ 作为交接信号 ✓
+★ —— ★ 通知器只用这次调用作信号 ✓、★ 臂在纯模式读自己的共用测量层 ✓ ⇒ ★ "没测到"就是正确答案 ✓，
+★ 不是占位符 ✓。★ 顺带补上接口最后两个纯虚 ✓（★ 设备同步 ✓、★ CSI ✓）。
+
+**(b) ★★ 失败二 ✓：★ 纯模式在融合腿里**手机接不进去** ✓（★ 空中实测 ✓）**
+
+★ 现象 ✓：★ `[phy_pipeline] strict: slot=... the device did not cover the hop (no stage reported a cause)
+- the PUSCH fails instead of being computed on the host` **刷屏** ✓ ⇒ ★ 每个 grant 都被**严格策略**判失败 ✓
+★ ⇒ ★ SRB1 永远重传 ✓ ⇒ ★ attach 不成功 ✓（★ 与 §19.231 那次"注册后被立即释放"是**不同**原因 ✓）。
+
+★ 根因 ✓：★ 严格策略问的是"**这一跳是不是设备做的**" ✓：
+```cpp
+const bool classic_device_receiver = !est_results.results_are_computed_on_host();
+if (strict && classic_device_receiver && !est_results.device_shortfall_is_knob_requested()) { ... fail ... }
+```
+★ 纯模式的空结果对象**默认回答"设备"** ✓（★ `results_are_computed_on_host() == false` ✓）⇒
+★ 策略以为"经典设备估计器本该覆盖这一跳却没覆盖" ✓ ⇒ ★ 全判失败 ✓。
+
+★ 修复 ✓：★ 空结果对象明确回答 ✓：★ `results_are_computed_on_host() = true` ✓、
+★ `device_shortfall_is_knob_requested() = true` ✓（★ 主机路线是**操作者开关**选的 ✓）。
+
+**(c) ★ 验证 ✓（★ 带 `OCUDU_GPU_STRICT=1` 的 replay ✓，★ 与空中同一条策略 ✓）**
+
+| ★ 模式 | ★ 修复前 ✓ | ★ 修复后 ✓ |
+|---|---|---|
+| ★ 纯（★ `FALLBACK=none` ✓）| ★ `strict ... did not cover the hop` ＋ ★ `crc=KO iterations=0` ✓ | ★ **无 strict 行** ✓、★ **`crc=OK iterations=3 sinr=30.17 dB`** ✓ |
+| ★ 有回退 ✓ | ★ 正常 ✓ | ★ 正常 ✓（★ `crc=OK` ✓）|
+
+★ 且纯模式 **`estimate p50 = 0 µs`** ✓ ⇒ ★ **766 µs 真的消失** ✓。
+
+★ 教训 ✓：★ replay **默认不开**严格策略 ✓（★ 它随 `phy_pipeline_mode::gpu` 走 ✓）⇒
+★ **纯模式的腿必须用 `OCUDU_GPU_STRICT=1` 的 replay 预演** ✓，★ 否则空中才发现 ✓。
+
+★ 状态：★ 两处已修 ✓、★ 全量构建通过 ✓；★ 腿 3 需重飞 ✓。## 20. ★★★ R7 执行计划：**把经典估计器从 AI 路径里去掉**（★ 2026-10-17 冻结动机、方案、步骤、判据）
 
 > ★ 本节为**计划**，与 §19.194–§19.201 的测量记录分开：§19.x 记“发生了什么”，本节记“接下来怎么做、怎么判”。
 > ★ 所有数字来自 §19.200 的实测，所有结构事实来自代码（`pusch_depth3_receiver_impl.cpp`）。

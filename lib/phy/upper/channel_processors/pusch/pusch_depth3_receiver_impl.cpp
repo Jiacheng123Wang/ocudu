@@ -232,6 +232,17 @@ public:
   {
   }
   bool sync_device_estimates() const override { return true; }
+  /// \brief This hop is computed on the HOST side, by the arm, so the strict policy must not ask the classic
+  /// device estimator whether it covered it.
+  ///
+  /// MEASURED ON THE FIRST PURE LEG (2026-10-20): the fused lane's strict policy failed EVERY grant with "the
+  /// device did not cover the hop (no stage reported a cause)", so the phone could not attach at all. The policy
+  /// asks this question precisely so that a receiver chosen by a knob and computing on the host is let through --
+  /// the default answer ("the device did") is the opposite of what a pure run means.
+  bool results_are_computed_on_host() const override { return true; }
+  /// The host route here is the OPERATOR's choice (OCUDU_DEPTH3_FALLBACK=none), which is what exempts a hop from
+  /// the strict policy rather than reporting it as a shortfall.
+  bool device_shortfall_is_knob_requested() const override { return true; }
   // The chain also asks for the channel state information it would have reported; a pure run reports nothing here,
   // because its numbers come from the arm's own measurement layer and are published by the arm.
   void get_channel_state_information(channel_state_information&) const override {}
