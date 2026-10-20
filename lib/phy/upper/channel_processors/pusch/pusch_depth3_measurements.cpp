@@ -67,7 +67,12 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
   // analytic factor is 1/6; the empirical correction still carries the value measured on the first version and the
   // sweep is what says whether this rung is an improvement.
   static constexpr unsigned RESIDUAL_WINDOW = 3;
-  static constexpr float    RESIDUAL_FACTOR = (1.0F / 6.0F) * 2.07F;
+  // 1/6 AND NOTHING ELSE (design section 19.246). The 2.07 this line used to carry was measured against the
+  // three-point mean this estimator used BEFORE the second difference replaced it; that mean under-estimated white
+  // noise by 3.15 dB, the second difference does not, and keeping the correction reported the noise 3.15 dB high
+  // -- i.e. the SNR 3.15 dB low, which is most of the offset this gate showed against the classical estimator.
+  // Proven by depth3_slow_measurements_test against a flat channel of known sigma^2, not by reading the formula.
+  static constexpr float    RESIDUAL_FACTOR = (1.0F / 6.0F);
   struct pilot_ring {
     float re[RESIDUAL_WINDOW] = {0.0F, 0.0F, 0.0F};
     float im[RESIDUAL_WINDOW] = {0.0F, 0.0F, 0.0F};

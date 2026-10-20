@@ -52,6 +52,15 @@ add_test(pusch_demodulator_deferred_chain_test pusch_demodulator_deferred_chain_
 add_test(pusch_demodulator_ce_contract_arm pusch_demodulator_deferred_chain_test
          --gtest_filter=*the_device_estimate_contract_arms*)
 
+# The shared slow measurements, against a flat channel whose answer is known in closed form: this is what
+# settles the unit bookkeeping and the residual's correction factor (design section 19.246).
+add_executable(depth3_slow_measurements_test depth3_slow_measurements_test.cpp
+        ${CMAKE_SOURCE_DIR}/lib/phy/upper/channel_processors/pusch/pusch_ul_slow_measurements.cpp)
+target_include_directories(depth3_slow_measurements_test PRIVATE ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/lib/phy/upper/channel_processors/pusch)
+target_link_libraries(depth3_slow_measurements_test PRIVATE ocudu_support GTest::gtest GTest::gtest_main)
+add_test(depth3_slow_measurements_test depth3_slow_measurements_test)
+
 # The arm's own CFO estimator: a known rotation must come back out, and a plane that cannot carry one must
 # say so instead of inventing a number (design section 19.239).
 # The measurement source is compiled into the test rather than linked through the processor library: the

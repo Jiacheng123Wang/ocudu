@@ -29,6 +29,7 @@ add_library(ocudu_pusch_processor STATIC
         pusch_decoder_hw_impl.cpp
         pusch_decoder_impl.cpp
         pusch_depth3_receiver_impl.cpp
+        pusch_ul_slow_measurements.cpp
         pusch_processor_impl.cpp
         pusch_processor_validator_impl.cpp
         ulsch_demultiplex_impl.cpp)
