@@ -97,6 +97,24 @@ struct depth3_measurements {
 /// \note Time alignment has no head. The contract lists TA among the consumers of head 3, but a network
 /// that estimates a channel per resource element has no time-domain observable to report it from, so TA
 /// keeps coming from the classical estimator and this unit deliberately does not invent one.
+/// \brief Carrier frequency offset from the PLANE's own DM-RS least-squares values, in CYCLES PER SYMBOL.
+///
+/// Why it exists (design section 19.239): the arm has no CFO compensation at all, while the classical chain
+/// estimates it from the pilots, rotates each symbol by it before combining, and even carries the previous
+/// slot's value forward. Anything that pools receivers across time -- and R7's gate does -- needs that phase
+/// removed first: DM-RS sequences differ per slot, LS removes them, but the channel's phase still drifts.
+///
+/// The estimator is the traditional one, and deliberately the same one the CPU chain uses
+/// (port_channel_estimator_average_impl::preprocess_pilots_and_estimate_cfo) so the two can be compared
+/// numerically: over the plane's pilot resource elements, `acc = sum ls[sym1] * conj(ls[sym0])` between the
+/// FIRST TWO DM-RS symbols, then `cfo = arg(acc) / (2*pi*(sym1 - sym0))`. The plane carries the LS at the pilot
+/// REs and the mask that says which symbols carry them, so this needs neither the grid nor the network.
+///
+/// \param[in] plane           The contract's plane, fp16, as `assemble()` wrote it.
+/// \param[in] plane_channels  The plane's block width (12, plus the one-hot channels of a conditioned bundle).
+/// \return The CFO in cycles per symbol, or NaN when the plane carries fewer than two DM-RS symbols.
+float estimate_cfo_from_plane(span<const __fp16> plane, unsigned plane_channels);
+
 depth3_measurements measure_depth3(span<const __fp16> plane,
                                    unsigned            plane_channels,
                                    span<const __fp16> channel_head,

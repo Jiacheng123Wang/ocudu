@@ -669,6 +669,11 @@ public:
       if ((gate_samples == 1) || ((gate_samples % 1000) == 0) || gate_report) {
         const unsigned port    = config.rx_ports.empty() ? 0 : config.rx_ports.front();
         const float    est_db  = convert_power_to_dB(est_results.get_snr(port));
+        // The arm's own CFO, next to the classical estimator's, so the two can be compared on the same
+        // reception before anything depends on the arm's value (design section 19.239). Cycles per symbol:
+        // the plane does not carry the subcarrier spacing, so the comparison converts it outside.
+        const float cfo_cycles = estimate_cfo_from_plane(span<const __fp16>(input_plane), plane_channels);
+        const std::optional<float> cfo_classic = est_results.get_cfo_Hz(port);
         fmt::print(stderr,
                    "[depth3-gate] {} reception(s): plane residual {:.2f} dB (filtered {:.2f} dB over {:.0f} "
                    "pilot(s), {}), estimator {:.2f} dB, declared {:.2f} to {:.2f} dB\n",
@@ -680,6 +685,21 @@ public:
                    est_db,
                    domain_by_qm[qm].min_db,
                    domain_by_qm[qm].max_db);
+        // One more line, only when every reception is being reported: the CFO comparison is an offline
+        // measurement, not something a live leg needs in its log.
+        if (gate_report) {
+          if (cfo_classic.has_value()) {
+            fmt::print(stderr,
+                       "[depth3-cfo] arm {:.4f} cycles/symbol, classical {:.1f} Hz (ratio {:.3f} at 15 kHz)\n",
+                       cfo_cycles,
+                       *cfo_classic,
+                       (cfo_classic.value() != 0.0F)
+                           ? (cfo_cycles * 15000.0F / *cfo_classic)
+                           : std::numeric_limits<float>::quiet_NaN());
+          } else {
+            fmt::print(stderr, "[depth3-cfo] arm {:.4f} cycles/symbol, classical n/a\n", cfo_cycles);
+          }
+        }
       }
       if (warm && ((plane_snr_db < domain_by_qm[qm].min_db) || (plane_snr_db > domain_by_qm[qm].max_db))) {
         char detail[224];

@@ -52,6 +52,17 @@ add_test(pusch_demodulator_deferred_chain_test pusch_demodulator_deferred_chain_
 add_test(pusch_demodulator_ce_contract_arm pusch_demodulator_deferred_chain_test
          --gtest_filter=*the_device_estimate_contract_arms*)
 
+# The arm's own CFO estimator: a known rotation must come back out, and a plane that cannot carry one must
+# say so instead of inventing a number (design section 19.239).
+# The measurement source is compiled into the test rather than linked through the processor library: the
+# library carries the whole receiver, and a test of one arithmetic function should not have to satisfy it.
+add_executable(depth3_cfo_test depth3_cfo_test.cpp
+        ${CMAKE_SOURCE_DIR}/lib/phy/upper/channel_processors/pusch/pusch_depth3_measurements.cpp)
+target_include_directories(depth3_cfo_test PRIVATE ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/lib/phy/upper/channel_processors/pusch)
+target_link_libraries(depth3_cfo_test PRIVATE ocudu_phy_support ocudu_support GTest::gtest GTest::gtest_main)
+add_test(depth3_cfo_test depth3_cfo_test)
+
 add_executable(depth3_model_map_test depth3_model_map_test.cpp)
 target_include_directories(depth3_model_map_test PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(depth3_model_map_test GTest::gtest GTest::gtest_main)

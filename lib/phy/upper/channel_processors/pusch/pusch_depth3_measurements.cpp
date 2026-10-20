@@ -6,6 +6,7 @@
 #include <array>
 #include "pusch_depth3_input_plane.h"
 #include <cmath>
+#include <limits>
 
 using namespace ocudu;
 
@@ -210,4 +211,59 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
     measurements = depth3_measurements{};
   }
   return measurements;
+}
+
+float ocudu::estimate_cfo_from_plane(span<const __fp16> plane_values, unsigned plane_channels)
+{
+  const size_t plane_size =
+      static_cast<size_t>(plane::NOF_SUBCARRIERS) * plane::NOF_SYMBOLS * plane_channels;
+  if (plane_values.size() != plane_size) {
+    return std::numeric_limits<float>::quiet_NaN();
+  }
+
+  // Which symbols carry DM-RS, from the mask channel. The first two are the pair the CPU chain uses: the
+  // largest usable spacing is not the point (it would wrap earlier), the FIRST two are, because a channel that
+  // drifts within the slot would otherwise fold the drift into the estimate.
+  unsigned symbol_index[2] = {plane::NOF_SYMBOLS, plane::NOF_SYMBOLS};
+  unsigned nof_dmrs        = 0;
+  for (unsigned t = 0; t != plane::NOF_SYMBOLS; ++t) {
+    const __fp16* first = plane_values.data() + static_cast<size_t>(t) * plane_channels;
+    if (first[plane::CH_DMRS_MASK] > static_cast<__fp16>(0.0F)) {
+      if (nof_dmrs < 2) {
+        symbol_index[nof_dmrs] = t;
+      }
+      ++nof_dmrs;
+    }
+  }
+  if (nof_dmrs < 2) {
+    return std::numeric_limits<float>::quiet_NaN();
+  }
+
+  const unsigned sym0       = symbol_index[0];
+  const unsigned sym1       = symbol_index[1];
+  const float    delta_syms = static_cast<float>(sym1 - sym0);
+
+  // acc = sum over pilot REs of ls[sym1] * conj(ls[sym0]). CF (not double) is enough: the sum is over at most
+  // a few thousand terms of bounded magnitude, and the argument is what matters, not the magnitude.
+  float acc_re = 0.0F;
+  float acc_im = 0.0F;
+  for (unsigned k = 0; k != plane::NOF_SUBCARRIERS; ++k) {
+    const __fp16* re0 = plane_values.data() + (static_cast<size_t>(k) * plane::NOF_SYMBOLS + sym0) * plane_channels;
+    const __fp16* re1 = plane_values.data() + (static_cast<size_t>(k) * plane::NOF_SYMBOLS + sym1) * plane_channels;
+    // Both symbols must carry a pilot at this subcarrier: the mask is per RE, not per symbol.
+    if ((re0[plane::CH_DMRS_MASK] <= static_cast<__fp16>(0.0F)) ||
+        (re1[plane::CH_DMRS_MASK] <= static_cast<__fp16>(0.0F))) {
+      continue;
+    }
+    const float a_re = static_cast<float>(re1[plane::CH_LS_RE]);
+    const float a_im = static_cast<float>(re1[plane::CH_LS_IM]);
+    const float b_re = static_cast<float>(re0[plane::CH_LS_RE]);
+    const float b_im = static_cast<float>(re0[plane::CH_LS_IM]);
+    acc_re += a_re * b_re + a_im * b_im;   // ls1 * conj(ls0)
+    acc_im += a_im * b_re - a_re * b_im;
+  }
+  if ((acc_re == 0.0F) && (acc_im == 0.0F)) {
+    return std::numeric_limits<float>::quiet_NaN();
+  }
+  return std::atan2(acc_im, acc_re) / (2.0F * static_cast<float>(M_PI) * delta_syms);
 }
