@@ -236,6 +236,10 @@ public:
   if (const char* env = std::getenv("OCUDU_DEPTH3_GATE_REPORT")) {
     gate_report = (env[0] != '0');
   }
+  // The fallback switch: `none` is the pure configuration the final comparison runs (design section 19.245).
+  if (const char* env = std::getenv("OCUDU_DEPTH3_FALLBACK")) {
+    fallback_enabled = !((env[0] == 'n') || (env[0] == 'N') || (env[0] == '0'));
+  }
   // Said once, at construction: which measurement gates this run, so a log never has to be guessed at.
   fmt::print(stderr, "[pusch_receiver] AI depth-3: domain gate on the {}\n",
              (domain_gate == "net") ? "arm's own plane residual (R7/S2)" : "classical estimator's SNR");
@@ -539,7 +543,7 @@ public:
     // the arm starts computing, warm, the moment the window closes.
     if (startup_grace.count() > 0) {
       if ((std::chrono::steady_clock::now() - bound_at) < startup_grace) {
-        degrade(depth3_degradation::startup_grace, codeword_buffer, notifier, grid, est_results, config);
+        degrade_or_fail(depth3_degradation::startup_grace, codeword_buffer, notifier, grid, est_results, config);
         return;
       }
       if (!grace_ended_reported) {
@@ -551,17 +555,17 @@ public:
       }
     }
     if (!any_model_bound) {
-      degrade(depth3_degradation::forward_failed, codeword_buffer, notifier, grid, est_results, config);
+      degrade_or_fail(depth3_degradation::forward_failed, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
     if (!context_is_valid) {
-      degrade(depth3_degradation::no_sequence_context, codeword_buffer, notifier, grid, est_results, config);
+      degrade_or_fail(depth3_degradation::no_sequence_context, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
 
     const unsigned qm = get_bits_per_symbol(config.modulation);
     if (qm == 0 || qm > 8) {
-      degrade(depth3_degradation::plane_refused, codeword_buffer, notifier, grid, est_results, config);
+      degrade_or_fail(depth3_degradation::plane_refused, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
     // One model per modulation (contract section 0.2(h)), so the modulation is the arm's envelope and not a
@@ -578,7 +582,7 @@ public:
       char detail[224];
       std::snprintf(detail, sizeof(detail), "no model is bound for Qm=%u (%s); bound: %s", qm,
                     depth3_model_map::name(qm), served.empty() ? "none" : served.c_str());
-      degrade(depth3_degradation::modulation_mismatch, codeword_buffer, notifier, grid, est_results, config,
+      degrade_or_fail(depth3_degradation::modulation_mismatch, codeword_buffer, notifier, grid, est_results, config,
               detail);
       return;
     }
@@ -624,7 +628,7 @@ public:
                       "the estimator measures %.2f dB and the bundle was trained on %.2f to %.2f dB, so this "
                       "reception's measurement would be an extrapolation",
                       snr_db, domain_by_qm[qm].min_db, domain_by_qm[qm].max_db);
-        degrade(depth3_degradation::measurement_outside_domain, codeword_buffer, notifier, grid, est_results,
+        degrade_or_fail(depth3_degradation::measurement_outside_domain, codeword_buffer, notifier, grid, est_results,
                 config, detail);
         return;
       }
@@ -711,7 +715,7 @@ public:
                       domain_by_qm[qm].min_db,
                       domain_by_qm[qm].max_db,
                       (plane_only.nof_pilot_re == 0) ? "no" : "with");
-        degrade(depth3_degradation::measurement_outside_domain, codeword_buffer, notifier, grid, est_results,
+        degrade_or_fail(depth3_degradation::measurement_outside_domain, codeword_buffer, notifier, grid, est_results,
                 config, detail);
         return;
       }
@@ -757,7 +761,7 @@ public:
       std::snprintf(detail, sizeof(detail), "%s (grid %u subcarriers, allocation %u PRBs, %u symbols)",
                     pusch_depth3_input_plane::to_string(status), grid.get_nof_subc(),
                     static_cast<unsigned>(config.rb_mask.count()), config.nof_symbols);
-      degrade(depth3_degradation::plane_refused, codeword_buffer, notifier, grid, est_results, config, detail);
+      degrade_or_fail(depth3_degradation::plane_refused, codeword_buffer, notifier, grid, est_results, config, detail);
       return;
     }
 
@@ -774,7 +778,7 @@ public:
     output.bits_per_symbol = qm;
 
     if (!computing_engine.predict_depth3(input, output)) {
-      degrade(depth3_degradation::forward_failed, codeword_buffer, notifier, grid, est_results, config);
+      degrade_or_fail(depth3_degradation::forward_failed, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
     const auto segment_forwarded = std::chrono::steady_clock::now();
@@ -794,7 +798,7 @@ public:
 
     // ---- gather, quantise, descramble, deliver ---------------------------------------------------
     if (!deliver(codeword_buffer, notifier, grid, est_results, config, qm, model_scales, reference_amplitude)) {
-      degrade(depth3_degradation::no_data_resource_elements, codeword_buffer, notifier, grid, est_results, config);
+      degrade_or_fail(depth3_degradation::no_data_resource_elements, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
     record_timing(segment_start, segment_assembled, segment_forwarded, std::chrono::steady_clock::now(),
@@ -991,6 +995,81 @@ private:
                "[depth3-measure]   RSRP/EPRE against the independent estimator: {} within {} dB, {} outside "
                "(since the run started)\n",
                measurements_agreeing, R6_AGREEMENT_DB, measurements_disagreeing);
+  }
+
+  /// \brief What a reception does when the arm cannot compute it: fall back, or fail.
+  ///
+  /// THE FALLBACK IS SCAFFOLDING (design section 19.245). The comparison this receiver exists for is a PURE
+  /// network path against a PURE classical path, back to back, so the final configuration has no classical chain
+  /// behind it to fall back to. Development keeps the fallback, one environment variable turns it off, and this
+  /// dispatcher is the single place the difference is made: every reason that would have degraded reaches it.
+  void degrade_or_fail(depth3_degradation                  reason,
+                       pusch_codeword_buffer&              codeword_buffer,
+                       pusch_demodulator_notifier&         notifier,
+                       const resource_grid_reader&         grid,
+                       const dmrs_pusch_estimator_results& est_results,
+                       const pusch_demodulator::configuration& config,
+                       const char*                         detail = nullptr)
+  {
+    if (fallback_enabled) {
+      degrade(reason, codeword_buffer, notifier, grid, est_results, config, detail);
+      return;
+    }
+    fail(reason, codeword_buffer, notifier, config, detail);
+  }
+
+  /// \brief A reception the arm could not compute, with nothing to fall back to.
+  ///
+  /// It is reported, counted under its own reason, and ERASED: every soft bit is written as zero, which tells the
+  /// decoder that nothing is known about that bit rather than pretending to a value. The reception then fails its
+  /// CRC like any other failed reception, which is what a pure network path must do -- and what makes the pure
+  /// legs comparable with the classical ones instead of quietly decoding somewhere else (design section 19.245).
+  void fail(depth3_degradation                  reason,
+            pusch_codeword_buffer&              codeword_buffer,
+            pusch_demodulator_notifier&         notifier,
+            const pusch_demodulator::configuration& config,
+            const char*                         detail)
+  {
+    ++degradations[static_cast<unsigned>(reason)];
+    const unsigned count = degradations[static_cast<unsigned>(reason)];
+    if ((count == 1) || ((count % 1000) == 0)) {
+      fmt::print(stderr,
+                 "[pusch_receiver] AI depth-3: reception FAILED (no fallback): {}{}{} ({} so far). This build runs "
+                 "the pure network path: the reception is erased and will not decode.\n",
+                 to_string(reason),
+                 (detail != nullptr) ? ": " : "",
+                 (detail != nullptr) ? detail : "",
+                 count);
+    }
+    ++failed_receptions;
+
+    // The allocated subcarriers, the same walk `deliver` makes: the erasure has to cover exactly the soft bits
+    // the real path would have written, or the decoder reads a block that does not exist.
+    allocated.clear();
+    for (unsigned k = 0, nof_subc = config.rb_mask.size() * NOF_SUBCARRIERS_PER_RB;
+         k != nof_subc && k != pusch_depth3_input_plane::NOF_SUBCARRIERS;
+         ++k) {
+      if (config.rb_mask.test(k / NOF_SUBCARRIERS_PER_RB)) {
+        allocated.push_back(k);
+      }
+    }
+    const unsigned qm = get_bits_per_symbol(config.modulation);
+    if (!allocated.empty() && (qm != 0)) {
+      for (unsigned symbol = 0; symbol != pusch_depth3_input_plane::NOF_SYMBOLS; ++symbol) {
+        if (config.dmrs_symb_pos.test(symbol)) {
+          continue;
+        }
+        const unsigned             nof_softbits = allocated.size() * qm;
+        span<log_likelihood_ratio> codeword     = codeword_buffer.get_next_block_view(nof_softbits);
+        if (codeword.size() != nof_softbits) {
+          break;
+        }
+        // Zero is the erasure: no information, not a guess.
+        std::fill(codeword.begin(), codeword.end(), log_likelihood_ratio{0});
+      }
+    }
+    pusch_demodulator_notifier::demodulation_stats stats;
+    notifier.on_end_stats(stats);
   }
 
   void degrade(depth3_degradation                  reason,
@@ -1239,6 +1318,12 @@ private:
   /// `net` (this arm's reporting heads). It is a string here for the same reason it is one at the command line:
   /// the value is meant to be read back in a log.
   std::string                                       reporting_source = "classic";
+  /// Whether a reception the arm cannot compute falls back to the classical chain. ON during development, OFF
+  /// for the pure comparison (design section 19.245): `OCUDU_DEPTH3_FALLBACK=none` turns it off, and then every
+  /// degradation becomes a counted, erased failure instead of a quiet switch.
+  bool                                              fallback_enabled = true;
+  /// Receptions that failed for want of a fallback, i.e. that the arm could not compute and did not hand over.
+  unsigned                                          failed_receptions = 0;
   /// Which measurement decides the domain gate, read once from the environment at construction:
   ///   "estimator" -- the classical estimator's SNR, the behaviour before R7/S2 (the default, so this change
   ///                  is inert until a flight asks for it);
