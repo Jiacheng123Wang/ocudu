@@ -50,8 +50,12 @@ private:
 
   void add_srs_pdu(const uplink_pdu_slot_repository::srs_pdu& pdu) override { has_add_srs_pdu_method_called = true; }
 
-  void handle_rx_symbol(unsigned end_symbol_index, bool is_valid) override
+  void handle_rx_symbol(unsigned end_symbol_index, const shared_resource_grid& rx_grid, bool is_valid) override
   {
+    // The spy counts the notifications; it does not consume the grid, which arrived with the symbol for the
+    // early measurement (design section 19.250).
+    (void)rx_grid;
+    (void)is_valid;
     last_end_symbol_index = end_symbol_index;
     ++on_rx_symbol_count;
   }
