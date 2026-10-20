@@ -361,6 +361,15 @@ void pusch_processor_impl::prepare(const resource_grid_reader& grid, const pdu_t
   if (!dependencies) {
     return;
   }
+  // ONE-SHOT DIAGNOSTIC (design section 19.269): the hint reaches this processor and the arm's own ledger stayed at
+  // zero, so the break is somewhere between here and the arm. Three lines say which arm is being told and whether
+  // the call arrives at all.
+  static std::atomic<unsigned> prepare_diagnostics{0};
+  if (prepare_diagnostics.fetch_add(1, std::memory_order_relaxed) < 3) {
+    logger.info("PUSCH prepare: forwarding the hint to the {} arm for slot {}",
+                (dependencies->get_depth3().kind() == pusch_depth3_kind::ai_network) ? "AI network" : "classical/identity",
+                pdu.slot);
+  }
   dependencies->get_depth3().prepare(grid, ch_est_config, demod_config);
 }
 
