@@ -1215,6 +1215,11 @@ private:
         std::fill(codeword.begin(), codeword.end(), log_likelihood_ratio{0});
       }
     }
+    // THE END OF THE CODEWORD IS WHAT RELEASES THE HARQ BUFFER (found on the pure leg, 2026-10-20): the decoder
+    // runs on this call, reports the CRC and the reception's buffer goes back to the pool. Erasing without it left
+    // every failed reception holding its buffer -- 21 of 1008 were still locked at shutdown, the stop waited for
+    // them until it was SIGKILLed, and the uplink stalled after enough failures.
+    codeword_buffer.on_end_codeword();
     pusch_demodulator_notifier::demodulation_stats stats;
     notifier.on_end_stats(stats);
   }
