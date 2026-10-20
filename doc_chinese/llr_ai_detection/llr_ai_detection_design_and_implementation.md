@@ -15649,7 +15649,34 @@ PUSCH prepare: forwarding the hint to the AI network arm for slot 971.7
 
 ★ 于是 ✓：★ **任何实例测量 ✓、★ 任何实例消费 ✓**；★ 台账从任何实例打印都能看到全局进度 ✓。
 
-★ 状态：★ 已修 ✓、★ 全量构建通过 ✓；★ 再飞同一条短诊断腿应看到 ★ `N measured ahead > 0` ✓ 与 ★ `M took the cached number` ✓。## 20. ★★★ R7 执行计划：**把经典估计器从 AI 路径里去掉**（★ 2026-10-17 冻结动机、方案、步骤、判据）
+★ 状态：★ 已修 ✓、★ 全量构建通过 ✓；★ 再飞同一条短诊断腿应看到 ★ `N measured ahead > 0` ✓ 与 ★ `M took the cached number` ✓。### 19.271 ★★★ 早测**闭环成功** ✓（★ 2026-10-21 01:00 ✓）
+
+**(a) ★★ 结果 ✓（★ 我上一条给的 grep 命令错了：★ 仪表打在 `.log.stderr` ✓，★ 不是 `.log` ✓）**
+
+```
+[depth3-timing] early measurement: 1 reception(s) measured ahead, 0 refused, 0 gate(s) took the cached number
+```
+
+★★ **⇒ 整条链已通 ✓**：★ `puxch` 符号完成 → ★ `handle_rx_symbol` → ★ 池 → ★ wrapper → ★ `pusch_processor_impl`
+★ → ★ **AI 臂 `prepare()`** ✓ → ★ 平面装配 ✓ → ★ 共享测量 ✓ → ★ **进程级缓存** ✓。
+★ 台账第一次 **> 0** ✓。
+
+**(b) ★ `0 gate(s) took the cached number` 是**预期**的 ✓**
+
+★ 这条诊断腿**只有 1 次前向** ✓ ⇒ ★ "被提示的 slot" 与"被处理的 slot"**不是同一个** ✓ ⇒ ★ 缓存没被消费 ✓。
+★ 要看到 `M ≈ N` 需要一条**有真实流量**的腿（★ 几十秒 iperf 即可 ✓）。
+
+**(c) ★ 命令订正 ✓**
+
+```bash
+S=$(ls -t $B/gnb_gpu_<label>_*.log.stderr | head -1)     # ← .log.stderr
+grep -a "\[depth3-timing\] early measurement" $S | tail -2
+```
+
+★ 所有 `[depth3-*]`、★ `[ul_*]`、★ `[metal_stats]`、★ `[phy_pipeline]` 仪表都走 **stderr** ✓；
+★ `.log` 里是 ocudulog 的记录器输出 ✓。★ 这一条我之前说过一次 ✓，★ 这次又踩 ✓ ⇒ ★ 写进上面这行 ✓。
+
+★ 状态：★ 早测链路**已实测通过** ✓；★ 下一步＝一条带流量的腿确认 `gate_from_prepare ≈ prepared` ✓。## 20. ★★★ R7 执行计划：**把经典估计器从 AI 路径里去掉**（★ 2026-10-17 冻结动机、方案、步骤、判据）
 
 > ★ 本节为**计划**，与 §19.194–§19.201 的测量记录分开：§19.x 记“发生了什么”，本节记“接下来怎么做、怎么判”。
 > ★ 所有数字来自 §19.200 的实测，所有结构事实来自代码（`pusch_depth3_receiver_impl.cpp`）。
