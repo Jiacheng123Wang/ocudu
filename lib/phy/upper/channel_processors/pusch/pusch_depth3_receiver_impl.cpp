@@ -613,13 +613,17 @@ public:
                const dmrs_pusch_estimator::configuration& est_config,
                const pusch_demodulator::configuration&    config) override
   {
-    const pusch_depth3_dmrs_context context = make_pusch_depth3_dmrs_context(est_config);
+    const auto                     prepare_started = std::chrono::steady_clock::now();
+    const pusch_depth3_dmrs_context context         = make_pusch_depth3_dmrs_context(est_config);
     float                           reference_amplitude = 0.0F;
     const size_t plane_samples =
         static_cast<size_t>(pusch_depth3_input_plane::NOF_SUBCARRIERS) *
         pusch_depth3_input_plane::NOF_SYMBOLS * plane_channels;
-    const pusch_depth3_input_plane::status status          = prepare_assembler->assemble(
-        span<__fp16>(prepare_plane).first(plane_samples), reference_amplitude, grid, config, context);
+    // DM-RS SYMBOLS ONLY (design section 19.275): this plane is measured and thrown away, never run through the
+    // network, and the measurement reads pilots -- which live on those two symbols. Assembling all fourteen cost
+    // the receive thread twelve symbols of work nobody would look at.
+    const pusch_depth3_input_plane::status status = prepare_assembler->assemble(
+        span<__fp16>(prepare_plane).first(plane_samples), reference_amplitude, grid, config, context, true);
     if (status != pusch_depth3_input_plane::status::ok) {
       ++prepare_refused;
       return;
@@ -653,6 +657,16 @@ public:
       measured_next           = (measured_next + 1) % MEASURE_RING;
     }
     ++prepared_receptions;
+    // The hint's own cost, so a leg can say what the early measurement costs the receive thread instead of inferring
+    // it from a difference between legs (design section 19.275).
+    prepare_cost_us[prepare_cost_index] =
+        static_cast<unsigned>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                  std::chrono::steady_clock::now() - prepare_started)
+                                  .count());
+    prepare_cost_index = (prepare_cost_index + 1) % prepare_cost_us.size();
+    if (prepare_cost_count != prepare_cost_us.size()) {
+      ++prepare_cost_count;
+    }
   }
 
   void demodulate(pusch_codeword_buffer&                 codeword_buffer,
@@ -852,6 +866,19 @@ public:
                    prepared_receptions.load(),
                    prepare_refused.load(),
                    gate_from_prepare.load());
+    if (prepare_cost_count != 0) {
+      // Sort only the samples taken: the ring's untouched slots are zeros and would read as a p50 of zero.
+      std::array<unsigned, 512> sorted = prepare_cost_us;
+      const unsigned            n      = prepare_cost_count;
+      std::sort(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(n));
+      fmt::print(stderr,
+                 "[depth3-timing] early measurement cost on the receive thread: p50 {} p99 {} max {} us over {} "
+                 "sample(s)\n",
+                 sorted[n / 2],
+                 sorted[std::min((n * 99) / 100, n - 1)],
+                 sorted[n - 1],
+                 n);
+    }
         // One more line, only when every reception is being reported: the CFO comparison is an offline
         // measurement, not something a live leg needs in its log.
         if (gate_report) {
@@ -1568,6 +1595,13 @@ private:
   bool                                              publish_suppressed = false;
   /// Receptions whose measurement was withheld for being outside the declared range.
   static std::atomic<unsigned>                      measurements_suppressed;
+  /// \brief What the hint costs the receive thread, in microseconds (design section 19.275).
+  ///
+  /// Recorded so the cost of running the measurement three symbols early is MEASURED on every leg instead of inferred
+  /// from a difference between two flights, which is how it was estimated wrongly the first time.
+  static std::array<unsigned, 512>                  prepare_cost_us;
+  static unsigned                                   prepare_cost_index;
+  static unsigned                                   prepare_cost_count;
   /// \brief The plane half of this reception's measurement, taken by the gate and REUSED by the publication.
   ///
   /// The gate measures before the forward pass (that is the point of having the shared layer ahead of the network)
@@ -1775,6 +1809,9 @@ std::atomic<unsigned> pusch_depth3_receiver_ai_network_impl::prepared_receptions
 std::atomic<unsigned> pusch_depth3_receiver_ai_network_impl::prepare_refused{0};
 std::atomic<unsigned> pusch_depth3_receiver_ai_network_impl::gate_from_prepare{0};
 std::atomic<unsigned> pusch_depth3_receiver_ai_network_impl::measurements_suppressed{0};
+std::array<unsigned, 512> pusch_depth3_receiver_ai_network_impl::prepare_cost_us{};
+unsigned pusch_depth3_receiver_ai_network_impl::prepare_cost_index = 0;
+unsigned pusch_depth3_receiver_ai_network_impl::prepare_cost_count = 0;
 
 std::unique_ptr<pusch_depth3_receiver> ocudu::create_pusch_depth3_receiver(
     pusch_depth3_kind               kind,

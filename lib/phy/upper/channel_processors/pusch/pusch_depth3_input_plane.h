@@ -153,11 +153,17 @@ public:
   /// \param[in]  config                The demodulator's configuration.
   /// \param[in]  dmrs                  The sequence context the estimator's configuration carried.
   /// \return \c status::ok, or the first reason the reception is outside the contract.
+  /// \param[in] dmrs_only Write only the DM-RS symbols. The early measurement reads pilot resource elements, which
+  ///                       live on those symbols, and nothing else -- yet it was assembling all fourteen on the
+  ///                       receive thread, paying for twelve it would never look at. The plane is then usable for
+  ///                       MEASUREMENT only: every other symbol is left as it was, so a forward pass must not be run
+  ///                       on it (design section 19.275).
   status assemble(span<__fp16>                           plane,
                   float&                                 reference_amplitude,
                   const resource_grid_reader&            grid,
                   const pusch_demodulator::configuration& config,
-                  const pusch_depth3_dmrs_context&       dmrs);
+                  const pusch_depth3_dmrs_context&       dmrs,
+                  bool                                   dmrs_only = false);
 
   /// Human-readable reason, for the log line that accompanies a degradation count.
   static const char* to_string(status value);

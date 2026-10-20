@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "pusch_depth3_input_plane.h"
+
+#include <algorithm>
 #include "../../signal_processors/dmrs_helper.h"
 #include "ocudu/adt/bounded_bitset.h"
 #include "ocudu/phy/phy_pipeline_crossings.h"
@@ -124,7 +126,8 @@ pusch_depth3_input_plane::assemble(span<__fp16>                           plane,
                                    float&                                 reference_amplitude,
                                    const resource_grid_reader&            grid,
                                    const pusch_demodulator::configuration& config,
-                                   const pusch_depth3_dmrs_context&       dmrs)
+                                   const pusch_depth3_dmrs_context&       dmrs,
+                                   bool                                   dmrs_only)
 {
   // The plane must hold the contract's 12 channels per block, and a conditioned bundle's plane holds more: the
   // stride follows the PLANE, so the check is "at least" and the write below uses `plane_channels`. A smaller
@@ -293,6 +296,13 @@ pusch_depth3_input_plane::assemble(span<__fp16>                           plane,
   const int dc_position = config.dc_position.has_value() ? static_cast<int>(*config.dc_position) : -1;
 
   for (unsigned symbol = 0; symbol != NOF_SYMBOLS; ++symbol) {
+    // THE EARLY MEASUREMENT'S SHORTCUT (design section 19.275): the pilot mask and the pilot LS live on the DM-RS
+    // symbols, so a caller that only measures skips the other twelve and does a seventh of the work.
+    if (dmrs_only && !std::any_of(dmrs_symbols.begin(),
+                                   dmrs_symbols.begin() + static_cast<std::ptrdiff_t>(nof_dmrs_symbols),
+                                   [symbol](unsigned dmrs_symbol) { return dmrs_symbol == symbol; })) {
+      continue;
+    }
     grid.get(row, port, symbol, 0, all_subcarriers);
     // The same crossing as the first pass: one host read of the window per symbol.
     phy_pipeline_crossings::count_host_read_site("depth3: host grid read for the input plane",
