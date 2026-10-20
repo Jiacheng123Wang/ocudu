@@ -179,9 +179,13 @@ void uplink_processor_impl::handle_rx_symbol(unsigned                    end_sym
     // ONE-SHOT DIAGNOSTIC (design section 19.255): a leg with the switch on reported "0 measured ahead", so
     // something between this call and the PDUs is empty and the leg alone cannot say which. Three lines, on the
     // first three symbols of the run, say whether the grid is valid and whether the slot has PUSCH PDUs at all.
-    if (early_diagnostics++ < 3) {
+    // The first three symbols of the run are far too early to answer the question -- the interesting moment is
+    // when a PDU's LAST DM-RS symbol arrives, which for both patterns this tree flies is late in the slot. So the
+    // three lines are taken from the late symbols, and each says whether that symbol matched a PDU.
+    if ((end_symbol_index >= 10) && (early_diagnostics++ < 3)) {
       unsigned nof_pdus = 0;
       unsigned last_dmrs_seen = 0;
+      unsigned matches        = 0;
       for (unsigned end = 0; end != MAX_NSYMB_PER_SLOT; ++end) {
         for (const uplink_pdu_slot_repository::pusch_pdu& pdu : pdu_repository.get_pusch_pdus(end)) {
           ++nof_pdus;
@@ -192,11 +196,25 @@ void uplink_processor_impl::handle_rx_symbol(unsigned                    end_sym
           }
         }
       }
-      logger.info("UL processor early measurement: symbol {} grid {} PUSCH PDU(s) {} last DM-RS {}",
+      for (unsigned end = 0; end != MAX_NSYMB_PER_SLOT; ++end) {
+        for (const uplink_pdu_slot_repository::pusch_pdu& pdu : pdu_repository.get_pusch_pdus(end)) {
+          unsigned last_dmrs = pdu.pdu.dmrs_symbol_mask.size();
+          for (unsigned symbol = 0, nof = pdu.pdu.dmrs_symbol_mask.size(); symbol != nof; ++symbol) {
+            if (pdu.pdu.dmrs_symbol_mask.test(symbol)) {
+              last_dmrs = symbol;
+            }
+          }
+          if (last_dmrs == end_symbol_index) {
+            ++matches;
+          }
+        }
+      }
+      logger.info("UL processor early measurement: symbol {} grid {} PUSCH PDU(s) {} last DM-RS {} matching {}",
                   end_symbol_index,
                   rx_grid.is_valid() ? "valid" : "INVALID",
                   nof_pdus,
-                  last_dmrs_seen);
+                  last_dmrs_seen,
+                  matches);
     }
     for (unsigned end = 0; end != MAX_NSYMB_PER_SLOT; ++end) {
       for (const uplink_pdu_slot_repository::pusch_pdu& pdu : pdu_repository.get_pusch_pdus(end)) {
