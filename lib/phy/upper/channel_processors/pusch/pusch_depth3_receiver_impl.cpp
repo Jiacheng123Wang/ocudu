@@ -749,6 +749,14 @@ public:
                    est_db,
                    domain_by_qm[qm].min_db,
                    domain_by_qm[qm].max_db);
+        // Whether the gate's number came from prepare()'s cache, i.e. whether the early measurement actually
+        // happened on this run: the leg that turns OCUDU_DEPTH3_PREPARE_ON_SYMBOL on has to show it.
+        fmt::print(stderr,
+                   "[depth3-gate] early measurement: {} reception(s) measured ahead, {} refused, {} gate(s) took "
+                   "the cached number instead of measuring again\n",
+                   prepared_receptions,
+                   prepare_refused,
+                   gate_from_prepare);
         // One more line, only when every reception is being reported: the CFO comparison is an offline
         // measurement, not something a live leg needs in its log.
         if (gate_report) {
