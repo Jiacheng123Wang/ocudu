@@ -283,6 +283,40 @@ public:
   // THE A/B SWITCH for the early measurement's assembly scope (design section 19.275): set it and prepare() assembles
   // the whole plane, as it did before the DM-RS-only change. It exists so the two modes can be compared inside ONE
   // environment -- two flights on different days cannot separate a twenty-microsecond effect from batch scatter.
+  if (const char* env = std::getenv("OCUDU_DEPTH3_IGNORE_REPORTING_HEADS")) {
+    ignore_reporting_heads = (env[0] != '0');
+    if (ignore_reporting_heads) {
+      fmt::print(stderr,
+                 "[pusch_receiver] AI depth-3: publishing from the SHARED LAYER even though the bundle carries the "
+                 "reporting heads (OCUDU_DEPTH3_IGNORE_REPORTING_HEADS=1, design section 22.7 gate 2)\n");
+    }
+  }
+  // The shared layer's conversion, per modulation, fitted once (design sections 22.3 and 19.279). The identity is the
+  // default for a modulation that was not fitted, and a run that needs a different fit says so through the knob.
+  for (shared_calibration& cal : shared_sinr_cal) {
+    cal = {1.0F, 0.0F};
+  }
+  shared_sinr_cal[6] = {0.932F, 0.33F};   // 64QAM: published = 0.932 * shared + 0.33
+  shared_sinr_cal[8] = {1.038F, -3.08F};  // 256QAM
+  if (const char* env = std::getenv("OCUDU_DEPTH3_SHARED_SINR_CAL")) {
+    // "qm:slope,offset;qm:slope,offset" -- for a fit run, so the constants can be revised without a rebuild.
+    std::string text(env);
+    size_t      pos = 0;
+    while (pos < text.size()) {
+      const size_t end   = text.find(';', pos);
+      const std::string one = text.substr(pos, (end == std::string::npos) ? std::string::npos : end - pos);
+      unsigned    qm    = 0;
+      float       slope = 1.0F;
+      float       offset = 0.0F;
+      if (std::sscanf(one.c_str(), "%u:%f,%f", &qm, &slope, &offset) == 3 && qm < shared_sinr_cal.size()) {
+        shared_sinr_cal[qm] = {slope, offset};
+      }
+      if (end == std::string::npos) {
+        break;
+      }
+      pos = end + 1;
+    }
+  }
   if (const char* env = std::getenv("OCUDU_DEPTH3_PREPARE_FULL_PLANE")) {
     prepare_full_plane = (env[0] != '0');
     fmt::print(stderr,
@@ -386,6 +420,19 @@ public:
         // whatever the reception's own Qm is.
         conditioned        = true;
         plane_channels     = engine->depth3_input_channels();
+        // WHICH HEADS THIS ARTIFACT CARRIES (design section 22.2): a bundle trained to produce soft bits only is
+        // still this contract's model, and the publication then comes from the shared measurement layer.
+        if (!engine->depth3_has_reporting_heads(has_ch_est, has_dmrs_noise)) {
+          has_ch_est     = true;
+          has_dmrs_noise = true;
+        }
+        if (!has_ch_est || !has_dmrs_noise) {
+          fmt::print(stderr,
+                     "[pusch_receiver] AI depth-3: the bound bundle carries {}; {} will be published from the shared "
+                     "measurement layer instead of from a head\n",
+                     has_ch_est ? "no DM-RS noise head" : (has_dmrs_noise ? "no channel head" : "neither reporting head"),
+                     "RSRP, EPRE and the SINR");
+        }
         // prepare() assembles into its own plane with the same width as the reception (19.273).
         prepare_assembler  = std::make_unique<pusch_depth3_input_plane>(plane_channels);
         prepare_plane.assign(static_cast<size_t>(pusch_depth3_input_plane::NOF_SUBCARRIERS) *
@@ -973,8 +1020,10 @@ public:
     metal::coreml_nn_engine::depth3_output output;
     output.llr             = reinterpret_cast<uint16_t*>(llr_head.data());
     output.post_eq_noise   = reinterpret_cast<uint16_t*>(noise_head.data());
-    output.ch_est          = reinterpret_cast<uint16_t*>(channel_head.data());
-    output.dmrs_noise      = reinterpret_cast<uint16_t*>(&dmrs_noise_head);
+    // A BUNDLE WITHOUT THE REPORTING HEADS gets null here, and the engine does not bind what the model does not
+    // declare (design section 22.2).
+    output.ch_est          = has_ch_est ? reinterpret_cast<uint16_t*>(channel_head.data()) : nullptr;
+    output.dmrs_noise      = has_dmrs_noise ? reinterpret_cast<uint16_t*>(&dmrs_noise_head) : nullptr;
     output.bits_per_symbol = qm;
 
     if (!computing_engine.predict_depth3(input, output)) {
@@ -1153,6 +1202,11 @@ private:
   {
     ++forwarded_receptions;
     if ((forwarded_receptions != 1) && ((forwarded_receptions % 1000) != 0)) {
+      return;
+    }
+    // Nothing to compare when the bundle carries no reporting heads: the whole point of such a bundle is that these
+    // numbers now come from the shared measurement layer (design section 22.3).
+    if (!has_ch_est || !has_dmrs_noise) {
       return;
     }
     const depth3_measurements net = measure_depth3(span<const __fp16>(input_plane),
@@ -1474,8 +1528,18 @@ private:
     // the scheduler acts on, so the arm publishes its own post-eq noise in both modes; what `net` adds is the
     // DOMAIN GATE below, and what R6 will add is the rest of the set (RSRP, EPRE) once the estimator's results
     // can be synthesised from head 3 (design section 19.98's largest performance item).
-    if (noise_count != 0 && noise_sum > 0.0) {
-      const float mean_noise = static_cast<float>(noise_sum / static_cast<double>(noise_count));
+    // WHICH NOISE IS PUBLISHED (design section 22.3). With the reporting heads, it is the mean of head 2's
+    // per-resource-element noise, exactly as before. WITHOUT them, the arm still has head 2 -- it is what scales the
+    // soft bits -- but the published quantity has to come from the shared measurement layer, which is the whole point
+    // of the split: `1/SINR` in the chain's convention, from the plane's residual.
+    float published_noise = (noise_count != 0) ? static_cast<float>(noise_sum / static_cast<double>(noise_count)) : 0.0F;
+    if (publish_from_shared_layer()) {
+      published_noise = (plane_measurement_valid && (plane_measurement.snr_lin > 0.0F))
+                            ? (1.0F / plane_measurement.snr_lin)
+                            : 0.0F;
+    }
+    if (published_noise > 0.0F) {
+      const float mean_noise = published_noise;
       pusch_demodulator_notifier::demodulation_stats stats;
       // THE PUBLISHED SINR IS THE ARM'S OWN IN EITHER REPORTING MODE (see the note above), and that publication needs
       // the bundle's calibration: measured against the CLASSICAL ARM's own publication on the same receptions, the raw
@@ -1484,7 +1548,15 @@ private:
       // scheduler reads -- the soft bits are scaled by `s_llr`, never by this map, so the decisions cannot move.
       float published_dB = -convert_power_to_dB(mean_noise);
       const float raw_dB = published_dB;
-      if (sinr_cal_by_qm[qm].has) {
+      if (publish_from_shared_layer()) {
+        // ONE CONSTANT, BUNDLE-INDEPENDENT (design section 22.3), and the artifact's own calibration is NOT applied:
+        // that affine was fitted to the HEAD's convention, and putting it on the shared layer's number would be
+        // calibrating one convention with another's ruler -- which is what the run measured before this branch was
+        // ordered first (34.04 dB published against the heads' 30.17 on the same reception).
+        const shared_calibration& cal = shared_sinr_cal[qm];
+        published_dB                  = (cal.slope * published_dB) + cal.offset;
+      }
+      else if (sinr_cal_by_qm[qm].has) {
         published_dB = (sinr_cal_by_qm[qm].slope * published_dB) + sinr_cal_by_qm[qm].offset;
       }
       std::get<0>(published_sinr[sinr_index]) = raw_dB;
@@ -1511,7 +1583,17 @@ private:
       // otherwise replace the estimator's numbers with the network's without the operator asking (design section
       // 19.123; the SINR is a separate case, because an arm that does not run the classical equalizer has no
       // other post-equalisation noise to publish -- section 19.116).
-      if (reporting_source == "net" && !publish_suppressed) {
+      if (reporting_source == "net" && !publish_suppressed && publish_from_shared_layer()) {
+        // NO CHANNEL HEAD (design section 22.3): RSRP is the pilots' power minus the noise they sit on, both from the
+        // shared measurement layer. Validated against the classical chain before any artifact may be the default.
+        if (plane_measurement_valid && (plane_measurement.epre_lin > plane_measurement.noise_lin)) {
+          stats.rsrp_dB.emplace(convert_power_to_dB(plane_measurement.epre_lin - plane_measurement.noise_lin));
+        }
+        if (plane_measurement_valid) {
+          stats.epre_dB.emplace(convert_power_to_dB(plane_measurement.epre_lin));
+        }
+      }
+      else if (reporting_source == "net" && !publish_suppressed) {
         // THE HEADS ONLY. The plane half was measured by the gate, before the forward pass, and is reused here:
         // recomputing it would walk the plane a second time and, worse, let the two numbers drift (19.263). When
         // the gate did not run (no declared range, or the estimator gate) it is measured now, exactly as before.
@@ -1719,6 +1801,9 @@ private:
   gate_history                                      gate_history;
 
   /// The measurements prepare() took for this slot, if it took any.
+  /// Whether the publication comes from the shared measurement layer rather than from the artifact's heads.
+  bool publish_from_shared_layer() const { return ignore_reporting_heads || !has_ch_est || !has_dmrs_noise; }
+
   std::optional<slot_measurement> prepared_measurement(slot_point slot)
   {
     static std::atomic<unsigned> lookup_diagnostics{0};
@@ -1778,6 +1863,39 @@ private:
   };
   std::array<declared_domain, 9>                    domain_by_qm{};
   unsigned                                          plane_channels = pusch_depth3_input_plane::NOF_CHANNELS;
+  /// \brief Whether the bound artifact carries the two reporting heads (design section 22.2).
+  ///
+  /// Absent, the publication is computed by the shared measurement layer from the plane alone: RSRP as the pilots'
+  /// power minus the residual, and the SINR from the residual SNR converted once, bundle-independently.
+  bool                                              has_ch_est     = true;
+  bool                                              has_dmrs_noise = true;
+  /// \brief The conversion from the shared layer's residual SNR to the chain's post-equalisation convention.
+  ///
+  /// BUNDLE-INDEPENDENT by construction (design section 22.3): an affine between two MEASUREMENT CONVENTIONS, fitted
+  /// once against the classical chain, then valid for every artifact -- which is what the per-bundle
+  /// `depth3_sinr_cal` could not be.
+  ///
+  /// Fitted on 313 attach receptions with the plane gate active (design section 19.279), in the direction that means
+  /// something: `classic = a * shared + b`, so the receiver publishes `(shared - b) / a`. Regressing the other way
+  /// (`shared = a * classic + b`) attenuates the slope through the noise in the reference, which is exactly how this
+  /// fit first read 0.649 at 256QAM before the direction was corrected.
+  ///
+  /// QPSK and 16QAM have too few receptions in that set to fit; they keep the identity until a set that covers them
+  /// is measured, and the arm says so when it uses them (19.279).
+  struct shared_calibration {
+    float slope  = 1.0F;
+    float offset = 0.0F;
+  };
+  /// Indexed by bits per symbol (QPSK 2, 16QAM 4, 64QAM 6, 256QAM 8), so the array must reach 8: a five-entry array
+  /// indexed at 8 read past its end, which is how the first version of this table produced no reception line at all.
+  std::array<shared_calibration, 12>                shared_sinr_cal{};
+  /// \brief Publication source override: ignore the reporting heads even when the artifact carries them.
+  ///
+  /// It exists for ONE experiment, and that experiment gates the whole LLR-only change (design section 22.7, gate 2):
+  /// the shared layer's publication must be compared against the heads' on the SAME receptions, and its single offset
+  /// constant fitted, BEFORE a bundle without heads can be trusted. Without this switch the comparison would need the
+  /// trained artifact first, which would make the acceptance test depend on the thing it is testing.
+  bool                                              ignore_reporting_heads = false;
   std::unique_ptr<metal::coreml_nn_engine>          shared_engine;
   /// \brief The bundle's declared calibration of the PUBLISHED SINR, read at BIND time per modulation.
   ///

@@ -63,6 +63,10 @@ struct coreml_nn_engine_impl {
   /// channels. It cannot be inferred: a conditioned bundle and a per-modulation 256QAM bundle have the same main
   /// head width (14 * 8 = 112 channels), and they are not interchangeable.
   bool      model3_conditioned = false;
+  /// Whether the bundle carries the two reporting heads (design section 22.2): it may not, once the shared
+  /// measurement layer supplies RSRP, EPRE and the SINR.
+  bool      model3_has_ch_est     = true;
+  bool      model3_has_dmrs_noise = true;
   /// The SNR range (dB) the bundle's REPORTING heads were trained on, as the bundle declares it
   /// (`depth3_snr_range`). False in `model3_has_snr_range` means the bundle declares none, which is not the same
   /// as "any range": a measurement the model extrapolated cannot be told from one it was entitled to make, and the
@@ -254,21 +258,23 @@ bool run_prediction_depth3(coreml_nn_engine_impl* e,
                   strides:strides_of(e->model3_shape[1])
               deallocator:nil
                     error:nil];
-  MLMultiArray* ch_arr = [[MLMultiArray alloc]
+  MLMultiArray* ch_arr = e->model3_has_ch_est ? [[MLMultiArray alloc]
       initWithDataPointer:out.ch_est
                     shape:e->model3_shape[2]
                  dataType:MLMultiArrayDataTypeFloat16
                   strides:strides_of(e->model3_shape[2])
               deallocator:nil
-                    error:nil];
-  MLMultiArray* dmrs_arr = [[MLMultiArray alloc]
+                    error:nil] : nil;
+  MLMultiArray* dmrs_arr = e->model3_has_dmrs_noise ? [[MLMultiArray alloc]
       initWithDataPointer:out.dmrs_noise
                     shape:e->model3_shape[3]
                  dataType:MLMultiArrayDataTypeFloat16
                   strides:strides_of(e->model3_shape[3])
               deallocator:nil
-                    error:nil];
-  if (llr_arr == nil || noise_arr == nil || ch_arr == nil || dmrs_arr == nil) {
+                    error:nil] : nil;
+  const bool reporting_built = (!e->model3_has_ch_est || (ch_arr != nil)) &&
+                               (!e->model3_has_dmrs_noise || (dmrs_arr != nil));
+  if (llr_arr == nil || noise_arr == nil || !reporting_built) {
     // Same reason as the input above: the caller only ever sees "the forward pass failed", so the head whose
     // declared shape did not fit its backing -- the one fact that identifies the contract mismatch -- is named
     // here.
@@ -291,10 +297,15 @@ bool run_prediction_depth3(coreml_nn_engine_impl* e,
     return false;
   }
   MLPredictionOptions* opts = [[MLPredictionOptions alloc] init];
-  opts.outputBackings       = @{e->out3_names[0] : llr_arr,
-                                e->out3_names[1] : noise_arr,
-                                e->out3_names[2] : ch_arr,
-                                e->out3_names[3] : dmrs_arr};
+  NSMutableDictionary* backings = [NSMutableDictionary dictionaryWithDictionary:@{e->out3_names[0] : llr_arr,
+                                                                                 e->out3_names[1] : noise_arr}];
+  if (e->model3_has_ch_est) {
+    backings[e->out3_names[2]] = ch_arr;
+  }
+  if (e->model3_has_dmrs_noise) {
+    backings[e->out3_names[3]] = dmrs_arr;
+  }
+  opts.outputBackings       = backings;
 
   const auto t0 = std::chrono::steady_clock::now();
   NSError*   err = nil;
@@ -634,6 +645,18 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
   for (unsigned head = 0; head != 4; ++head) {
     NSString* name = [NSString stringWithUTF8String:head_names[head]];
     if (desc.outputDescriptionsByName[name] == nil) {
+      // HEADS 2 AND 3 ARE OPTIONAL (design section 22.2): a bundle trained to produce soft bits only is still this
+      // contract's model, because the shared measurement layer reports RSRP, EPRE and the SINR. Heads 0 and 1 are
+      // not optional: without them there are no scaled LLRs, which is the whole arm.
+      if (head >= 2) {
+        if (head == 2) {
+          e->model3_has_ch_est = false;
+        }
+        else {
+          e->model3_has_dmrs_noise = false;
+        }
+        continue;
+      }
       ocudulog::fetch_basic_logger("PHY").error("AI depth-3: the model has no output named {}",
                                                 head_names[head]);
       return false;
@@ -651,9 +674,10 @@ bool coreml_nn_engine::init_depth3(const char* modelc_path)
   // The contract fixes what each head carries: 14 * Qm coded bits, 14 post-equalization noise
   // values, 28 channel-estimate components (14 symbols real and imaginary) and one scalar. A model
   // whose heads are shaped otherwise is not this contract's model.
+  const bool reporting_ok = (!e->model3_has_ch_est || (e->model3_channels[2] == 2 * NOF_SYMBOLS_PER_SLOT)) &&
+                            (!e->model3_has_dmrs_noise || (e->model3_channels[3] == 1));
   if (e->model3_channels[0] == 0 || e->model3_channels[0] % NOF_SYMBOLS_PER_SLOT != 0 ||
-      e->model3_channels[1] != NOF_SYMBOLS_PER_SLOT ||
-      e->model3_channels[2] != 2 * NOF_SYMBOLS_PER_SLOT || e->model3_channels[3] != 1) {
+      e->model3_channels[1] != NOF_SYMBOLS_PER_SLOT || !reporting_ok) {
     ocudulog::fetch_basic_logger("PHY").error(
         "AI depth-3: head shapes {} / {} / {} / {} do not match the contract",
         e->model3_channels[0], e->model3_channels[1], e->model3_channels[2], e->model3_channels[3]);
@@ -760,14 +784,26 @@ unsigned coreml_nn_engine::depth3_bits_per_symbol() const
   return e->model3_channels[0] / NOF_SYMBOLS_PER_SLOT;
 }
 
+namespace {
+
+/// Whether this bundle's contract requires the two reporting heads. A bundle without them publishes nothing, so the
+/// caller's buffers for them may be null (design section 22.2).
+bool is_reporting_heads_required(const coreml_nn_engine_impl* e)
+{
+  return e->model3_has_ch_est || e->model3_has_dmrs_noise;
+}
+
+} // namespace
+
 bool coreml_nn_engine::predict_depth3(const depth3_input& in, const depth3_output& out)
 {
   auto* e = static_cast<coreml_nn_engine_impl*>(impl);
   if (e == nullptr || e->model3 == nil) {
     return false;
   }
+  const bool reporting_required = is_reporting_heads_required(e);
   if (in.plane == nullptr || out.llr == nullptr || out.post_eq_noise == nullptr ||
-      out.ch_est == nullptr || out.dmrs_noise == nullptr) {
+      (reporting_required && (out.ch_est == nullptr || out.dmrs_noise == nullptr))) {
     return false;
   }
   // The caller states which modulation's model it expects; the model states what it is. A mismatch
@@ -815,6 +851,17 @@ bool coreml_nn_engine::predict_depth3(const depth3_input& in, const depth3_outpu
   }
   last_predict_us_ = e->last_predict_us;
   return e->job_ok;
+}
+
+bool coreml_nn_engine::depth3_has_reporting_heads(bool& has_ch_est, bool& has_dmrs_noise) const
+{
+  auto* e = static_cast<coreml_nn_engine_impl*>(impl);
+  if (e == nullptr || e->model3 == nil) {
+    return false;
+  }
+  has_ch_est     = e->model3_has_ch_est;
+  has_dmrs_noise = e->model3_has_dmrs_noise;
+  return true;
 }
 
 bool coreml_nn_engine::predict(const float* in, float* out, unsigned nof_subc)

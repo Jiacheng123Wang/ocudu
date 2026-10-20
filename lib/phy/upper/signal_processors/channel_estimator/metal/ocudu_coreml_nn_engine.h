@@ -102,6 +102,20 @@ public:
   /// pass failed", which is the kind of message that costs an afternoon.
   unsigned depth3_bits_per_symbol() const;
 
+  /// \brief Whether the bound bundle carries the two REPORTING heads (`ch_est`, `dmrs_noise`).
+  ///
+  /// WHY A BUNDLE MAY LACK THEM (design section 22.2). Once an independent shared measurement layer supplies RSRP,
+  /// EPRE and the SINR, the two reporting heads are redundant, and a bundle trained without them spends its whole
+  /// capacity on the soft bits instead of trading one against the other -- the trade that cost the r7 bundle its
+  /// mid-band accuracy (section 19.264). A bundle that lacks them is still this contract's model: `llr` and
+  /// `post_eq_noise` are the ones the chain cannot do without, because the logits only become correctly scaled
+  /// LLRs through the per-RE noise.
+  ///
+  /// \param[out] has_ch_est     Set to whether the bundle emits `ch_est`.
+  /// \param[out] has_dmrs_noise Set to whether the bundle emits `dmrs_noise`.
+  /// \return True when a depth-3 bundle is bound, false otherwise (in which case the flags are not touched).
+  bool depth3_has_reporting_heads(bool& has_ch_est, bool& has_dmrs_noise) const;
+
   /// \brief Whether the bound bundle declares the MODULATION-CONDITIONED contract (`depth3_layout=modcond`).
   ///
   /// A conditioned bundle serves every modulation from one artifact, with the Qm carried as extra input channels
