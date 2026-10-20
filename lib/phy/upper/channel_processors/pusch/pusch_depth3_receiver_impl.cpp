@@ -939,6 +939,15 @@ private:
                  sorted[sampled - 1]);
     }
     fmt::print(stderr, "\n");
+    // THE EARLY MEASUREMENT'S OWN LEDGER, on the same exit line group as the timings: a leg that turned the
+    // symbol hook on has to be able to say whether it ran and whether its answer was used, without a debug knob
+    // (found on the first such flight, 2026-10-20: the switch was on, the counters were invisible).
+    fmt::print(stderr,
+               "[depth3-timing] early measurement: {} reception(s) measured ahead, {} refused, {} gate(s) took the "
+               "cached number\n",
+               prepared_receptions,
+               prepare_refused,
+               gate_from_prepare);
   }
 
   /// The published SINR per reception: raw, and after the bundle's calibration. A ring, like the timing one, so a
