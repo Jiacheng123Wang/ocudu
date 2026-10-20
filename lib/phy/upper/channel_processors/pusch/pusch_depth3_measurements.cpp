@@ -16,13 +16,14 @@ using plane = pusch_depth3_input_plane;
 
 } // namespace
 
-depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
-                                          unsigned            plane_channels,
-                                          span<const __fp16> channel_head,
-                                          float               reference_amplitude,
-                                          float               noise_shape,
-                                          float               noise_scale_decades,
-                                          float               noise_scale_center)
+depth3_measurements ocudu::measure_depth3(span<const __fp16>       plane_values,
+                                          unsigned                  plane_channels,
+                                          span<const __fp16>        channel_head,
+                                          float                     reference_amplitude,
+                                          float                     noise_shape,
+                                          float                     noise_scale_decades,
+                                          float                     noise_scale_center,
+                                          span<ul_pilot_sample>     scratch)
 {
   depth3_measurements measurements;
 
@@ -33,10 +34,10 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
   const size_t plane_size =
       static_cast<size_t>(plane::NOF_SUBCARRIERS) * plane::NOF_SYMBOLS * plane_channels;
   const size_t head_size = static_cast<size_t>(plane::NOF_SUBCARRIERS) * plane::NOF_SYMBOLS * 2;
-  // AN EMPTY HEAD IS A LEGAL CALL: the plane-only part of this measurement (EPRE, the residual and the
-  // residual SNR) is what the DOMAIN GATE needs, and R7/S2 evaluates it BEFORE the forward pass -- precisely so
-  // that an out-of-domain reception costs no inference (design section 20.4, S2). The head-derived fields are
-  // left at zero in that mode, which is why the finiteness check below treats them as optional.
+  // AN EMPTY HEAD IS A LEGAL CALL: the plane-only part of this measurement is what the DOMAIN GATE needs, and
+  // R7/S2 evaluates it BEFORE the forward pass, precisely so that an out-of-domain reception costs no inference
+  // (design section 20.4). The head-derived fields are left at zero in that mode, which is why the finiteness
+  // check below treats them as optional.
   const bool has_head = !channel_head.empty();
   if ((plane_values.size() != plane_size) || (has_head && (channel_head.size() != head_size))) {
     return measurements;
@@ -48,114 +49,58 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
   // Skipped entirely when there is no head to read, i.e. on the pre-forward gate path.
   const float noise_plane_units =
       has_head ? std::pow(10.0F, noise_scale_decades * noise_shape + noise_scale_center) : 0.0F;
-  measurements.noise_variance_lin =
-      reference_amplitude * reference_amplitude * noise_plane_units;
+  measurements.noise_variance_lin = reference_amplitude * reference_amplitude * noise_plane_units;
 
-  // A three-element ring per DM-RS symbol gives the frequency-direction mean the residual is taken against,
-  // without a second pass and without a per-symbol buffer: the walk is subcarrier-major, so the three most recent
-  // pilot values of each symbol are all the window needs. The factor converts E|v - mean|^2 for a three-point mean
-  // of white noise into sigma^2, and its value is MEASURED rather than derived: 1.5 is the analytic factor for a
-  // three-point mean (2/3), and against the datasets' true noise the estimate lands 3.15 dB low -- a stable
-  // factor of 2.07, p10/p90 within 0.55 dB -- so the constant carries the correction (design section 19.128).
-  // A SECOND-ORDER difference over three consecutive pilots, `v[k] - 2 v[k-1] + v[k-2]`.
-  //
-  // Section 19.134 measured the ladder: a three-point MEAN left the channel's own variation in the residual (4-8 dB
-  // across a prescribed 12-30 dB), widening it to five made things worse (1.5-3.3 dB) because a wider trailing mean
-  // spans more bandwidth, and the difference of two ADJACENT pilots -- the least contaminated pair -- recovered
-  // 11-18 dB. The second-order difference is the next rung and it is the one that removes a LINEAR channel trend
-  // outright, which is what a first difference leaves behind. White noise gives 1 + 4 + 1 = 6 sigma^2, so the
-  // analytic factor is 1/6; the empirical correction still carries the value measured on the first version and the
-  // sweep is what says whether this rung is an improvement.
-  static constexpr unsigned RESIDUAL_WINDOW = 3;
-  // 1/6 AND NOTHING ELSE (design section 19.246). The 2.07 this line used to carry was measured against the
-  // three-point mean this estimator used BEFORE the second difference replaced it; that mean under-estimated white
-  // noise by 3.15 dB, the second difference does not, and keeping the correction reported the noise 3.15 dB high
-  // -- i.e. the SNR 3.15 dB low, which is most of the offset this gate showed against the classical estimator.
-  // Proven by depth3_slow_measurements_test against a flat channel of known sigma^2, not by reading the formula.
-  static constexpr float    RESIDUAL_FACTOR = (1.0F / 6.0F);
-  struct pilot_ring {
-    float re[RESIDUAL_WINDOW] = {0.0F, 0.0F, 0.0F};
-    float im[RESIDUAL_WINDOW] = {0.0F, 0.0F, 0.0F};
-    unsigned count = 0;
-    unsigned next  = 0;
-  };
-  std::array<pilot_ring, plane::NOF_SYMBOLS> rings{};
-  double   residual_sum = 0.0;
-  unsigned residual_count = 0;
-  // The pilot power in the PLANE's units, so the SNR below is a ratio of two quantities taken the same way
-  // (section 19.137: the two sides carried different factors and did not cancel).
-  double   ls_power_sum = 0.0;
-  unsigned ls_power_count = 0;
-
-  double   epre_sum = 0.0;
-  double   rsrp_sum = 0.0;
+  // ---- what the NETWORK's heads and the plane's geometry are needed for: EPRE, RSRP, and the pilot stream ----
+  // The residual, the noise and the CFO are NOT computed here: they come from `measure_ul_slow`, the one
+  // implementation of that arithmetic, the one a network with a different plane contract calls, and the one
+  // depth3_slow_measurements_test checks against a flat channel's closed form (design section 19.246).
+  double   epre_sum     = 0.0;
+  double   rsrp_sum     = 0.0;
   unsigned nof_pilot_re = 0;
-  // Read from the plane rather than assumed: the contract's scalars are the same ones the packer wrote,
-  // and a measurement that hard-codes them is a measurement that cannot notice a plane built differently.
-  float scaling    = 1.0F;
-  float nof_layers = 1.0F;
+  unsigned pilot_count  = 0;
+  // The plane's copies of the DM-RS to data ratio and of the layer count. They are plane-wide constants written
+  // into the scalar channels of every RE, so one read is enough; they are taken from the first pilot.
+  float    scaling      = 1.0F;
+  float    nof_layers   = 1.0F;
+  bool     have_scalars = false;
 
-  for (unsigned k = 0; k != plane::NOF_SUBCARRIERS; ++k) {
-    for (unsigned t = 0; t != plane::NOF_SYMBOLS; ++t) {
-      // The plane's block width, not the contract's constant: a conditioned plane is wider, and walking it with
-      // 12 reads the mask channel out of a neighbouring resource element -- which reports "no pilot" rather than
-      // a wrong number, so the failure looks like a capture without DM-RS (measured 2026-10-16).
-      const __fp16* re =
-          plane_values.data() + (static_cast<size_t>(k) * plane::NOF_SYMBOLS + t) * plane_channels;
-      // The plane's mask channel is set exactly at the allocated pilot resource elements of this port,
-      // which is where both averages are defined. Everywhere else the LS channels are zero and head 3 is
-      // unconstrained (training only constrains it inside the allocation), so walking the window instead
-      // of the mask would average in values that mean nothing.
-      if (re[plane::CH_DMRS_MASK] == static_cast<__fp16>(0.0F)) {
+  for (unsigned t = 0; t != plane::NOF_SYMBOLS; ++t) {
+    for (unsigned k = 0; k != plane::NOF_SUBCARRIERS; ++k) {
+      const __fp16* re = plane_values.data() + (static_cast<size_t>(k) * plane::NOF_SYMBOLS + t) * plane_channels;
+
+      // Only pilot resource elements are measured; the mask is per RE, not per symbol.
+      if (re[plane::CH_DMRS_MASK] <= static_cast<__fp16>(0.0F)) {
         continue;
       }
-      scaling    = static_cast<float>(re[plane::CH_SCALING]);
-      nof_layers = static_cast<float>(re[plane::CH_NOF_TX_LAYERS]);
+      if (!have_scalars) {
+        scaling      = static_cast<float>(re[plane::CH_SCALING]);
+        nof_layers   = static_cast<float>(re[plane::CH_NOF_TX_LAYERS]);
+        have_scalars = true;
+      }
 
-      // EPRE: the received pilot is `LS * sequence * scaling`, and the sequence has unit power, so the
-      // power is `|LS * scaling|^2` -- with the reference amplitude put back, because the plane's LS is
-      // divided by it.
+      // EPRE: the received pilot is `LS * sequence * scaling`, and the sequence has unit power, so the power is
+      // `|LS * scaling|^2` -- with the reference amplitude put back, because the plane's LS is divided by it.
       const float ls_re = static_cast<float>(re[plane::CH_LS_RE]) * reference_amplitude * scaling;
       const float ls_im = static_cast<float>(re[plane::CH_LS_IM]) * reference_amplitude * scaling;
       epre_sum += static_cast<double>(ls_re) * ls_re + static_cast<double>(ls_im) * ls_im;
 
+      // The shared layer's input: the same pilot in the GRID's units (the plane stores `LS/r`, so `r` puts it
+      // back) and tagged with its symbol.
+      if (pilot_count < scratch.size()) {
+        scratch[pilot_count] = {.symbol = t,
+                                .ls_re  = static_cast<float>(re[plane::CH_LS_RE]) * reference_amplitude,
+                                .ls_im  = static_cast<float>(re[plane::CH_LS_IM]) * reference_amplitude};
+        ++pilot_count;
+      }
+
       // RSRP: head 3 carries `H/r` (contract section 0.2(d)), and this multiplication is the whole of the
       // "multiply back by r" the design asks for.
       if (has_head) {
-        const __fp16* estimate = channel_head.data() +
-                                 (static_cast<size_t>(k) * plane::NOF_SYMBOLS + t) * 2;
-        const float h_re = static_cast<float>(estimate[0]) * reference_amplitude;
-        const float h_im = static_cast<float>(estimate[1]) * reference_amplitude;
+        const __fp16* estimate = channel_head.data() + (static_cast<size_t>(k) * plane::NOF_SYMBOLS + t) * 2;
+        const float   h_re     = static_cast<float>(estimate[0]) * reference_amplitude;
+        const float   h_im     = static_cast<float>(estimate[1]) * reference_amplitude;
         rsrp_sum += static_cast<double>(h_re) * h_re + static_cast<double>(h_im) * h_im;
-      }
-
-      // The independent estimate, from the same LS the EPRE above uses. `ls_re`/`ls_im` here carry `r` and
-      // `scaling`; the SNR wants the plane's own units, so the power is accumulated from the plane values.
-      ls_power_sum += static_cast<double>(re[plane::CH_LS_RE]) * re[plane::CH_LS_RE] +
-                      static_cast<double>(re[plane::CH_LS_IM]) * re[plane::CH_LS_IM];
-      ++ls_power_count;
-      pilot_ring& ring = rings[t];
-      ring.re[ring.next] = ls_re;
-      ring.im[ring.next] = ls_im;
-      ring.next          = (ring.next + 1) % RESIDUAL_WINDOW;
-      if (ring.count < RESIDUAL_WINDOW) {
-        ++ring.count;
-      }
-      else {
-        // The window is the most recent pilots of this symbol and the value tested against their mean is the
-        // newest one (the ring's `next` slot, about to be overwritten). The comb is every other subcarrier, so
-        // these are neighbours in frequency.
-        // The ring holds the three most recent pilots and `next` is the oldest of them, so the second difference
-        // `newest - 2*middle + oldest` is (+1, -2, +1) starting at `next`.
-        const unsigned oldest = ring.next;
-        const unsigned middle = (ring.next + 1) % RESIDUAL_WINDOW;
-        const unsigned newest = (ring.next + 2) % RESIDUAL_WINDOW;
-        const float    mean_re = ring.re[newest] - 2.0F * ring.re[middle] + ring.re[oldest];
-        const float    mean_im = ring.im[newest] - 2.0F * ring.im[middle] + ring.im[oldest];
-        const float    d_re    = mean_re;
-        const float    d_im    = mean_im;
-        residual_sum += static_cast<double>(d_re) * d_re + static_cast<double>(d_im) * d_im;
-        ++residual_count;
       }
 
       ++nof_pilot_re;
@@ -164,22 +109,21 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
 
   measurements.nof_pilot_re = nof_pilot_re;
   if (nof_pilot_re == 0) {
-    // No pilot means the three quantities are not defined, and a zero that says "not measured" must not
-    // be confusable with a zero that says "measured as zero". The count is the caller's way to tell.
+    // No pilot means the quantities are not defined, and a zero that says "not measured" must not be confusable
+    // with a zero that says "measured as zero". The count is the caller's way to tell.
     measurements.noise_variance_lin = 0.0F;
     return measurements;
   }
 
   measurements.epre_lin = static_cast<float>(epre_sum / static_cast<double>(nof_pilot_re));
-  if (residual_count != 0) {
-    measurements.nof_residuals = residual_count;
-    // `scaling^2` for the same reason the published RSRP needs it: the LS here is the received pilot, whose power
-    // is `scaling^2` above the data REs', and the noise this reports has to be in the same units as the head's.
-    const float residual_plane_units =
-        static_cast<float>(residual_sum / static_cast<double>(residual_count)) * RESIDUAL_FACTOR;
-    measurements.residual_plane_units_lin  = residual_plane_units;
-    measurements.residual_noise_variance_lin = residual_plane_units * scaling * scaling;
-  }
+
+  // THE RESIDUAL, THE SNR AND THE CFO, from the shared layer.
+  const ul_slow_measurements shared =
+      measure_ul_slow(span<const ul_pilot_sample>(scratch.first(pilot_count)), scaling, nof_layers);
+  measurements.residual_plane_units_lin    = shared.noise_lin;
+  measurements.residual_noise_variance_lin = shared.noise_lin;
+  measurements.residual_snr_lin            = shared.snr_lin;
+
   // THE DM-RS-TO-DATA RATIO BELONGS IN THE PUBLISHED RSRP, and it was missing: head 3 estimates the channel GAIN
   // (`H/r` times `r`), while RSRP is defined on the DM-RS RESOURCE ELEMENTS, whose transmit power is `scaling^2`
   // above the data REs'. Measured 2026-10-17 against the classical estimator on two independent receptions, the
@@ -189,27 +133,14 @@ depth3_measurements ocudu::measure_depth3(span<const __fp16> plane_values,
   const float rsrp_gain_lin = static_cast<float>(rsrp_sum / static_cast<double>(nof_pilot_re));
   measurements.rsrp_lin     = rsrp_gain_lin * scaling * scaling;
 
-  // The estimator's own formula (`port_channel_estimator_average_impl.cpp:289`): the data RE power is the
-  // RSRP scaled by the number of layers and by the INVERSE of the DM-RS-to-data amplitude ratio squared,
-  // and the SNR is that over the noise variance.
-  //
-  // It is fed the GAIN, not the published value above, and that is not a detail: `rsrp_gain_lin` is already in
-  // the units this formula expects (it divides by `scaling^2` itself), so using the published RSRP here would
-  // apply the ratio twice -- +3 dB of SNR, measured as a stable +1.1 to +1.3 dB offset before this change.
+  // The estimator's own formula (`port_channel_estimator_average_impl.cpp:289`): the data RE power is the RSRP
+  // scaled by the number of layers and by the INVERSE of the DM-RS-to-data amplitude ratio squared, and the SNR
+  // is that over the noise variance. It is fed the GAIN, not the published value above, because `rsrp_gain_lin`
+  // is already in the units this formula expects (it divides by `scaling^2` itself).
   const float data_rsrp = rsrp_gain_lin * nof_layers / (scaling * scaling);
   measurements.snr_lin  = (measurements.noise_variance_lin > 0.0F)
                               ? (data_rsrp / measurements.noise_variance_lin)
                               : 0.0F;
-  // BOTH SIDES IN THE PLANE'S UNITS. The estimator's formula is the data RE power over the noise: the pilot power
-  // divided by the DM-RS-to-data ratio squared, over the residual measured on that same LS. Taking the pilot power
-  // from the plane rather than from the grid-unit EPRE is the whole of section 19.137's fix -- the two sides used
-  // to carry different factors (`epre` carries `r`, the residual did not) and did not cancel, which read 17.1 dB
-  // where this reads about 25 dB, against a classical 24.5 dB on the same reception.
-  if ((measurements.residual_plane_units_lin > 0.0F) && (ls_power_count != 0)) {
-    const float pilot_power_plane_units = static_cast<float>(ls_power_sum / static_cast<double>(ls_power_count));
-    const float data_power_plane_units  = pilot_power_plane_units * nof_layers / (scaling * scaling);
-    measurements.residual_snr_lin       = data_power_plane_units / measurements.residual_plane_units_lin;
-  }
 
   if (!std::isfinite(measurements.epre_lin) || !std::isfinite(measurements.rsrp_lin) ||
       !std::isfinite(measurements.snr_lin) || !std::isfinite(measurements.noise_variance_lin)) {

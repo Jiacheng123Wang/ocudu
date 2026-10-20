@@ -66,7 +66,8 @@ add_test(depth3_slow_measurements_test depth3_slow_measurements_test)
 # The measurement source is compiled into the test rather than linked through the processor library: the
 # library carries the whole receiver, and a test of one arithmetic function should not have to satisfy it.
 add_executable(depth3_cfo_test depth3_cfo_test.cpp
-        ${CMAKE_SOURCE_DIR}/lib/phy/upper/channel_processors/pusch/pusch_depth3_measurements.cpp)
+        ${CMAKE_SOURCE_DIR}/lib/phy/upper/channel_processors/pusch/pusch_depth3_measurements.cpp
+        ${CMAKE_SOURCE_DIR}/lib/phy/upper/channel_processors/pusch/pusch_ul_slow_measurements.cpp)
 target_include_directories(depth3_cfo_test PRIVATE ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/lib/phy/upper/channel_processors/pusch)
 target_link_libraries(depth3_cfo_test PRIVATE ocudu_phy_support ocudu_support GTest::gtest GTest::gtest_main)

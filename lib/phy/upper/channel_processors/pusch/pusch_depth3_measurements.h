@@ -4,6 +4,7 @@
 #pragma once
 
 #include "ocudu/adt/span.h"
+#include "pusch_ul_slow_measurements.h"
 #include <cstdint>
 
 namespace ocudu {
@@ -115,12 +116,16 @@ struct depth3_measurements {
 /// \return The CFO in cycles per symbol, or NaN when the plane carries fewer than two DM-RS symbols.
 float estimate_cfo_from_plane(span<const __fp16> plane, unsigned plane_channels);
 
-depth3_measurements measure_depth3(span<const __fp16> plane,
-                                   unsigned            plane_channels,
-                                   span<const __fp16> channel_head,
-                                   float               reference_amplitude,
-                                   float               noise_shape,
-                                   float               noise_scale_decades,
-                                   float               noise_scale_center);
+/// \param[in,out] scratch  Room for one pilot sample per resource element, so the hot path allocates nothing.
+///                          The caller owns it and it may be reused between calls; its size decides how many pilots
+///                          can be measured, and a plane that carries more is measured up to that many.
+depth3_measurements measure_depth3(span<const __fp16>       plane,
+                                   unsigned                  plane_channels,
+                                   span<const __fp16>        channel_head,
+                                   float                     reference_amplitude,
+                                   float                     noise_shape,
+                                   float                     noise_scale_decades,
+                                   float                     noise_scale_center,
+                                   span<ul_pilot_sample>     scratch);
 
 } // namespace ocudu

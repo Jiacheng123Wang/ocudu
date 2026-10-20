@@ -652,7 +652,8 @@ public:
                                                              reference_amplitude,
                                                              0.0F,
                                                              0.0F,
-                                                             0.0F);
+                                                             0.0F,
+                                                             span<ul_pilot_sample>(pilot_scratch));
       gate_history.note(plane_only);
       // The FILTERED value is what the gate decides on once it has warmed up; before that it accepts, so the
       // first receptions of a leg are never refused on an estimate that has not seen enough pilots (19.237).
@@ -933,7 +934,8 @@ private:
                                                    reference_amplitude,
                                                    static_cast<float>(dmrs_noise_head),
                                                    scales.a_noise,
-                                                   scales.b_noise);
+                                                   scales.b_noise,
+                                                   span<ul_pilot_sample>(pilot_scratch));
     if (net.nof_pilot_re == 0) {
       fmt::print(stderr,
                  "[depth3-measure] nothing measured: the plane (width {}) carries no pilot resource element, or it "
@@ -1170,10 +1172,14 @@ private:
       // 19.123; the SINR is a separate case, because an arm that does not run the classical equalizer has no
       // other post-equalisation noise to publish -- section 19.116).
       if (reporting_source == "net") {
-        const depth3_measurements net = measure_depth3(span<const __fp16>(input_plane), plane_channels,
-                                                      span<const __fp16>(channel_head), reference_amplitude,
-                                                      static_cast<float>(dmrs_noise_head), scales.a_noise,
-                                                      scales.b_noise);
+        const depth3_measurements net = measure_depth3(span<const __fp16>(input_plane),
+                                                        plane_channels,
+                                                        span<const __fp16>(channel_head),
+                                                        reference_amplitude,
+                                                        static_cast<float>(dmrs_noise_head),
+                                                        scales.a_noise,
+                                                        scales.b_noise,
+                                                        span<ul_pilot_sample>(pilot_scratch));
         if (net.nof_pilot_re != 0) {
           stats.rsrp_dB.emplace(convert_power_to_dB(net.rsrp_lin));
           stats.epre_dB.emplace(convert_power_to_dB(net.epre_lin));
@@ -1241,6 +1247,10 @@ private:
   std::string                                       domain_gate = "estimator";
   /// Receptions the plane-based gate has measured, for its sampled report.
   unsigned                                          gate_samples = 0;
+  /// Room for one pilot sample per resource element, so measuring a reception allocates nothing. The shared
+  /// measurement layer fills it from the plane; a bigger plane than this is measured up to this many pilots.
+  std::vector<ul_pilot_sample>                      pilot_scratch = std::vector<ul_pilot_sample>(
+      static_cast<size_t>(pusch_depth3_input_plane::NOF_SUBCARRIERS) * pusch_depth3_input_plane::NOF_SYMBOLS);
   /// \brief The gate's time filter: the reported quantity is a SLOW variable, so a narrow allocation is judged
   /// on the pilots the arm has seen over the recent past rather than on its own few resource elements.
   ///
