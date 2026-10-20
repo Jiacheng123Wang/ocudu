@@ -96,13 +96,11 @@ public:
   /// Creates a PUSCH processor pool from a list of processors. Ownership is transferred to the pool.
   pusch_processor_pool(span<std::unique_ptr<pusch_processor_wrapper>> processors_,
                        std::shared_ptr<uci_processor_pool>            uci_processors_) :
-    logger(ocudulog::fetch_basic_logger("PHY")), processors(processors_), uci_processors(uci_processors_)
+    logger(ocudulog::fetch_basic_logger("PHY")),
+    hint_target((!processors_.empty() && (processors_.front() != nullptr)) ? processors_.front().get() : nullptr),
+    processors(processors_),
+    uci_processors(uci_processors_)
   {
-    // The processor a hint is given to, chosen ONCE at construction: hints are best-effort and one target is
-    // enough, while borrowing from the pool is what starved it (design section 19.268).
-    if (!processors_.empty() && (processors_.front() != nullptr)) {
-      hint_target = processors_.front().get();
-    }
   }
 
   // See interface for documentation.
@@ -183,15 +181,19 @@ public:
 private:
   /// Physical layer logger.
   ocudulog::basic_logger& logger;
+  /// \brief The processor the early-measurement hint is delivered to.
+  ///
+  /// DECLARED BEFORE THE POOL ON PURPOSE (design section 19.269). `bounded_unique_object_pool` MOVES the pointers it
+  /// is given, so a raw pointer taken in the constructor body is null by the time it runs -- which is exactly what
+  /// happened: the hint was silently dropped and the arm's ledger stayed at zero through two flights. Members
+  /// initialize in DECLARATION order, so being declared first is what makes this initializer see the live pointers.
+  pusch_processor_wrapper* hint_target = nullptr;
   /// Actual PUSCH processor pool.
   pusch_processor_wrapper::pool processors;
   /// UCI processor pool, used only the normal processor pool runs out of processors or the PUSCH transmission only
   /// contains UCI.
   std::shared_ptr<uci_processor_pool> uci_processors;
 
-  /// The processor the early-measurement hint is delivered to. Raw and non-owning: the pool owns it, and the hint
-  /// must never take ownership (section 19.268).
-  pusch_processor_wrapper* hint_target = nullptr;
 };
 
 } // namespace ocudu
