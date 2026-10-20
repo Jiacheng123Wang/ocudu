@@ -62,6 +62,17 @@ uplink_processor_impl::uplink_processor_impl(std::unique_ptr<prach_detector>  pr
   ul_tap(std::move(ul_tap_)),
   alternative_processor(*this, grid->get_reader(), ul_tap.get())
 {
+  // The early-measurement switch, read once: a run either hands the receiver its DM-RS on arrival or at the slot
+  // boundary, and which one it was is visible in the log (design section 19.250).
+  {
+    const char* env = std::getenv("OCUDU_DEPTH3_PREPARE_ON_SYMBOL");
+    early_measurement_enabled = (env != nullptr) && (env[0] != '0');
+    if (early_measurement_enabled) {
+      logger.info("UL processor: the early measurement is ON - the receiver is handed each reception's DM-RS as "
+                  "soon as its last DM-RS symbol arrives (OCUDU_DEPTH3_PREPARE_ON_SYMBOL)");
+    }
+  }
+
   ocudu_assert(prach, "A valid PRACH detector must be provided");
   ocudu_assert(pusch_proc, "A valid PUSCH processor must be provided");
   ocudu_assert(pucch_proc, "A valid PUCCH processor must be provided");
@@ -140,7 +151,9 @@ unique_uplink_pdu_slot_repository uplink_processor_impl::get_pdu_slot_repository
   return pdu_repository.create_unique_pdu_repository(std::move(stop_token));
 }
 
-void uplink_processor_impl::handle_rx_symbol(unsigned end_symbol_index, bool is_valid)
+void uplink_processor_impl::handle_rx_symbol(unsigned                    end_symbol_index,
+                                             const shared_resource_grid& rx_grid,
+                                             bool                        is_valid)
 {
   // Notify event of handling the OFDM symbol to the state machine.
   if (!state_machine.on_handle_rx_symbol(is_valid)) {
@@ -155,6 +168,32 @@ void uplink_processor_impl::handle_rx_symbol(unsigned end_symbol_index, bool is_
                    end_symbol_index,
                    nof_processed_symbols);
     return;
+  }
+
+  // ---- the early measurement: hands the receiver its DM-RS while the slot is still arriving -------------
+  // The measurements a receiver reports before it runs a network need only the DM-RS symbols, and this is the one
+  // place that knows a symbol has just been written AND which PDUs are waiting for it (design sections 19.241,
+  // 19.250). It runs on the receive thread, so it does one mask comparison per PDU and nothing else: whether a
+  // PDU's last DM-RS symbol is the one that arrived is read from the PDU's own mask, never from a constant.
+  if (early_measurement_enabled && is_valid && rx_grid.is_valid()) {
+    for (unsigned end = 0; end != MAX_NSYMB_PER_SLOT; ++end) {
+      for (const uplink_pdu_slot_repository::pusch_pdu& pdu : pdu_repository.get_pusch_pdus(end)) {
+        // The last DM-RS symbol of this reception.
+        unsigned last_dmrs = pdu.pdu.dmrs_symbol_mask.size();
+        for (unsigned symbol = 0, nof = pdu.pdu.dmrs_symbol_mask.size(); symbol != nof; ++symbol) {
+          if (pdu.pdu.dmrs_symbol_mask.test(symbol)) {
+            last_dmrs = symbol;
+          }
+        }
+        if (last_dmrs != end_symbol_index) {
+          continue;
+        }
+        ++early_measurements;
+        if (pusch_proc != nullptr) {
+          pusch_proc->prepare(rx_grid.get_reader(), pdu.pdu);
+        }
+      }
+    }
   }
 
   // Run rate matching buffer pool only at the first symbol.

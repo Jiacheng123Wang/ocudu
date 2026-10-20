@@ -36,8 +36,13 @@ public:
   void deactivate_slot() { slot.reset(); }
 
   // See the uplink_slot_processor interface for documentation.
-  void handle_rx_symbol(unsigned end_symbol_index, bool is_valid) override
+  void handle_rx_symbol(unsigned end_symbol_index, const shared_resource_grid& rx_grid, bool is_valid) override
   {
+    // The grid arrives with the symbol now (design section 19.250), but this instance keeps its own for the tap's
+    // quiet-grid check: it is the DUMMY processor, which runs when no slot is being received here, so the
+    // received grid is not what it reports.
+    (void)rx_grid;
+    (void)is_valid;
     if ((tap != nullptr) && (end_symbol_index == grid.get_nof_symbols() - 1) && (slot.has_value())) {
       tap->handle_quiet_grid(grid, *slot);
     }

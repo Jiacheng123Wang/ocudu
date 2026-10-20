@@ -195,7 +195,7 @@ private:
   static std::atomic<unsigned>& get_grid_ref_counter();
 
   // See uplink_slot_processor interface for documentation.
-  void handle_rx_symbol(unsigned end_symbol_index, bool is_valid) override;
+  void handle_rx_symbol(unsigned end_symbol_index, const shared_resource_grid& rx_grid, bool is_valid) override;
 
   // See uplink_slot_processor interface for documentation.
   void process_prach(shared_prach_buffer buffer, const prach_buffer_context& context) override;
@@ -254,6 +254,14 @@ private:
   std::unique_ptr<resource_grid> grid;
   /// Resource grid controller.
   uplink_resource_grid_controller grid_controller;
+  /// \brief Whether the receiver is handed a symbol's DM-RS as soon as it arrives.
+  ///
+  /// OFF unless OCUDU_DEPTH3_PREPARE_ON_SYMBOL asks for it (design section 19.250): the early measurement is a new
+  /// call on the receive thread, and a default run must stay byte-identical until a leg proves it changes nothing
+  /// but when the measurement happens.
+  bool early_measurement_enabled = false;
+  /// Receptions for which the early measurement was handed to the receiver, for the leg's report.
+  unsigned early_measurements = 0;
   /// Task executors.
   task_executor_collection task_executors;
   /// Receive buffer pool.

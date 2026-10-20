@@ -38,7 +38,18 @@ public:
   ///
   /// \remark The uplink slot processor discards all the receive requests that are allocated on the given slot and
   ///         afterward.
-  virtual void handle_rx_symbol(unsigned end_symbol_index, bool is_valid) = 0;
+  /// \brief Notifies the reception of a symbol, carrying the grid it was written into.
+  ///
+  /// The grid is there for the EARLY MEASUREMENT (design section 19.250): a receiver whose measurements need only
+  /// the DM-RS symbols can take them the moment the last one arrives, instead of waiting for the slot boundary.
+  /// It is a hint to the receiver, and the implementation that does not want it simply ignores it.
+  ///
+  /// \param[in] end_symbol_index Symbol index of the symbol that has just been received.
+  /// \param[in] grid             The slot's resource grid, holding every symbol received so far.
+  /// \param[in] is_valid         Whether the symbol's data is valid.
+  virtual void handle_rx_symbol(unsigned                    end_symbol_index,
+                                const shared_resource_grid& grid,
+                                bool                        is_valid) = 0;
 
   /// \brief Processes the PRACH using the given configuration and context.
   ///

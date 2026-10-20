@@ -436,7 +436,7 @@ TEST_F(UplinkProcessorFixture, pusch_normal_workflow)
   unsigned pusch_end_symbol_index = pusch_pdu.pdu.start_symbol_index + pusch_pdu.pdu.nof_symbols - 1;
 
   // Notify reception of the previous reception symbol.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(pusch_end_symbol_index - 1, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(pusch_end_symbol_index - 1, shared_resource_grid{}, true);
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), pusch_end_symbol_index);
 
   // Check that nothing happened.
@@ -446,7 +446,7 @@ TEST_F(UplinkProcessorFixture, pusch_normal_workflow)
   ASSERT_FALSE(results_notifier.has_pusch_uci_result_been_notified());
 
   // Notify reception of receive symbol.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(pusch_end_symbol_index, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(pusch_end_symbol_index, shared_resource_grid{}, true);
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), pusch_end_symbol_index + 1);
 
   // Check PUSCH processing has been enqueued and the processor was not called.
@@ -497,7 +497,7 @@ TEST_F(UplinkProcessorFixture, pucch_normal_workflow)
 
   // The PUCCH Format 0 PDU ends at symbol 0 (start=0, length=1).
   // handle_rx_symbol(0) triggers processing since the end symbol is reached.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(slot_end_symbol_index, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(slot_end_symbol_index, shared_resource_grid{}, true);
 
   // Check PUCCH processing has been enqueued.
   ASSERT_TRUE(pucch_executor.has_pending_tasks());
@@ -523,7 +523,7 @@ TEST_F(UplinkProcessorFixture, srs_normal_workflow)
   shared_resource_grid grid = repository.release();
 
   // Notify reception of the SRS OFDM symbol.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(slot_end_symbol_index, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(slot_end_symbol_index, shared_resource_grid{}, true);
 
   // Check SRS processing has been enqueued and the processor was not called.
   ASSERT_TRUE(srs_executor.has_pending_tasks());
@@ -550,7 +550,7 @@ TEST_F(UplinkProcessorFixture, phy_tap_normal_workflow)
   ASSERT_EQ(tap_spy->get_handle_quiet_grid_count(), 0);
 
   // The PUCCH Format 0 PDU ends at symbol 0. Process only that symbol.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(pucch_f0_nof_symb - 1, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(pucch_f0_nof_symb - 1, shared_resource_grid{}, true);
 
   // Tap should have been called for symbol 0.
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), 1);
@@ -562,7 +562,7 @@ TEST_F(UplinkProcessorFixture, phy_tap_normal_workflow)
 
   // Continue processing the remaining symbols (1..max_nof_symbols-1).
   for (unsigned sym = 1; sym < max_nof_symbols; ++sym) {
-    ul_processor->get_slot_processor(slot).handle_rx_symbol(sym, true);
+    ul_processor->get_slot_processor(slot).handle_rx_symbol(sym, shared_resource_grid{}, true);
     ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), sym + 1);
   }
 
@@ -581,14 +581,14 @@ TEST_F(UplinkProcessorFixture, phy_tap_quiet_workflow)
   ASSERT_EQ(tap_spy->get_handle_quiet_grid_count(), 0);
 
   // Feed one symbol.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(slot_end_symbol_index - 1, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(slot_end_symbol_index - 1, shared_resource_grid{}, true);
 
   // Tap should have been called for symbol 0.
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), 0);
   ASSERT_EQ(tap_spy->get_handle_quiet_grid_count(), 0);
 
   // Notify the last symbol within the slot. Check the processor fed the remaining symbols (1..max_nof_symbols-1).
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(slot_end_symbol_index, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(slot_end_symbol_index, shared_resource_grid{}, true);
 
   // The quiet grid shall be reported once.
   ASSERT_EQ(tap_spy->get_handle_quiet_grid_count(), 1);
@@ -613,7 +613,7 @@ TEST_F(UplinkProcessorFixture, ul_slot_hop_counts_sees_a_two_hop_slot)
   shared_resource_grid grid = repository.release();
 
   const unsigned end_symbol_index = pusch_pdu.pdu.start_symbol_index + pusch_pdu.pdu.nof_symbols - 1;
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, shared_resource_grid{}, true);
   pusch_executor.run_pending_tasks();
 
   const ul_slot_hop_counts::counts_t after = ul_slot_hop_counts::counts();
@@ -638,7 +638,7 @@ TEST_F(UplinkProcessorFixture, ul_slot_hop_counts_keeps_a_one_hop_slot_at_one)
   shared_resource_grid grid = repository.release();
 
   const unsigned end_symbol_index = pusch_pdu.pdu.start_symbol_index + pusch_pdu.pdu.nof_symbols - 1;
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, shared_resource_grid{}, true);
   pusch_executor.run_pending_tasks();
 
   const ul_slot_hop_counts::counts_t after = ul_slot_hop_counts::counts();
@@ -658,10 +658,10 @@ TEST_F(UplinkProcessorFixture, rx_symbol_bad_order)
   unsigned end_symbol_index = pusch_pdu.pdu.start_symbol_index + pusch_pdu.pdu.nof_symbols - 1;
 
   // Notify reception of the previous reception symbol.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index - 1, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index - 1, shared_resource_grid{}, true);
 
   // Notify reception of the symbol before the previous.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index - 2, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index - 2, shared_resource_grid{}, true);
 
   // Check that nothing happened.
   ASSERT_FALSE(pusch_executor.has_pending_tasks());
@@ -670,7 +670,7 @@ TEST_F(UplinkProcessorFixture, rx_symbol_bad_order)
   ASSERT_FALSE(results_notifier.has_pusch_uci_result_been_notified());
 
   // Notify reception of receive symbol.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, shared_resource_grid{}, true);
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), max_nof_symbols);
   ASSERT_EQ(tap_spy->get_handle_quiet_grid_count(), 0);
 
@@ -699,7 +699,7 @@ TEST_F(UplinkProcessorFixture, pusch_wrong_slot)
   unsigned end_symbol_index = pusch_pdu.pdu.start_symbol_index + pusch_pdu.pdu.nof_symbols - 1;
 
   // Notify reception of receive symbol for the wrong slot.
-  ul_processor->get_slot_processor(slot - 1).handle_rx_symbol(end_symbol_index, true);
+  ul_processor->get_slot_processor(slot - 1).handle_rx_symbol(end_symbol_index, shared_resource_grid{}, true);
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), 0);
   ASSERT_EQ(tap_spy->get_handle_quiet_grid_count(), 1);
 
@@ -710,7 +710,7 @@ TEST_F(UplinkProcessorFixture, pusch_wrong_slot)
   ASSERT_FALSE(results_notifier.has_pusch_uci_result_been_notified());
 
   // Notify reception of receive symbol for the right slot.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, shared_resource_grid{}, true);
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), max_nof_symbols);
   ASSERT_EQ(tap_spy->get_handle_quiet_grid_count(), 1);
 
@@ -743,7 +743,7 @@ TEST_F(UplinkProcessorFixture, pusch_exceed_tb_size)
   unsigned end_symbol_index = pusch_pdu_large.pdu.start_symbol_index + pusch_pdu_large.pdu.nof_symbols - 1;
 
   // Notify reception of receive symbol.
-  ul_processor->get_slot_processor(pusch_pdu_large.pdu.slot).handle_rx_symbol(end_symbol_index, true);
+  ul_processor->get_slot_processor(pusch_pdu_large.pdu.slot).handle_rx_symbol(end_symbol_index, shared_resource_grid{}, true);
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), max_nof_symbols);
   ASSERT_EQ(tap_spy->get_handle_quiet_grid_count(), 0);
 
@@ -769,7 +769,7 @@ TEST_F(UplinkProcessorFixture, pusch_locked_rx_buffer)
   ASSERT_TRUE(buffer_pool_spy.try_lock());
 
   // Notify reception of receive symbol.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, shared_resource_grid{}, true);
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), max_nof_symbols);
   ASSERT_EQ(tap_spy->get_handle_quiet_grid_count(), 0);
 
@@ -802,7 +802,7 @@ TEST_F(UplinkProcessorFixture, pdu_fail_defer_workflow)
   unsigned end_symbol_index = pusch_pdu.pdu.start_symbol_index + pusch_pdu.pdu.nof_symbols - 1;
 
   // Notify reception of receive symbol.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, shared_resource_grid{}, true);
 
   // PHY tap should be called as normal.
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), max_nof_symbols);
@@ -842,7 +842,7 @@ TEST_F(UplinkProcessorFixture, discard_slot_before_first_rx)
   // Discard twice from and release grid from different threads.
   std::thread discard_slot_thread  = std::thread([&slot_processor]() {
     slot_processor.discard_slot();
-    slot_processor.handle_rx_symbol(max_nof_symbols - 1, true);
+    slot_processor.handle_rx_symbol(max_nof_symbols - 1, shared_resource_grid{}, true);
   });
   std::thread discard_slot_thread2 = std::thread([&slot_processor]() { slot_processor.discard_slot(); });
   std::thread release_grid_thread  = std::thread([grid_ = std::move(grid)]() {});
@@ -918,7 +918,7 @@ TEST_F(UplinkProcessorFixture, invalid_first_symbol)
 
   // Notify an invalid symbol.
   uplink_slot_processor& slot_processor = ul_processor->get_slot_processor(slot);
-  slot_processor.handle_rx_symbol(0, false);
+  slot_processor.handle_rx_symbol(0, shared_resource_grid{}, false);
 
   // Assert PUSCH PDU was discarded.
   ASSERT_TRUE(results_notifier.has_pusch_data_result_been_notified());
@@ -946,11 +946,11 @@ TEST_F(UplinkProcessorFixture, invalid_middle_symbol_with_pusch)
   unsigned               nof_valid_symbols = 3;
   uplink_slot_processor& slot_processor    = ul_processor->get_slot_processor(slot);
   for (unsigned i_symbol = 0; i_symbol != nof_valid_symbols; ++i_symbol) {
-    slot_processor.handle_rx_symbol(i_symbol, true);
+    slot_processor.handle_rx_symbol(i_symbol, shared_resource_grid{}, true);
   }
 
   // Notify an invalid symbol.
-  slot_processor.handle_rx_symbol(nof_valid_symbols, false);
+  slot_processor.handle_rx_symbol(nof_valid_symbols, shared_resource_grid{}, false);
 
   // Assert PUSCH PDU was discarded.
   ASSERT_TRUE(results_notifier.has_pusch_data_result_been_notified());
@@ -965,7 +965,7 @@ TEST_F(UplinkProcessorFixture, invalid_middle_symbol_with_pusch)
   // Clear notifier, complete symbol reception for the entire slot. No new notification should be reported.
   results_notifier.clear();
   for (unsigned i_symbol = nof_valid_symbols; i_symbol != MAX_NSYMB_PER_SLOT; ++i_symbol) {
-    slot_processor.handle_rx_symbol(i_symbol, true);
+    slot_processor.handle_rx_symbol(i_symbol, shared_resource_grid{}, true);
   }
   ASSERT_FALSE(results_notifier.has_pusch_data_result_been_notified());
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), nof_valid_symbols);
@@ -987,19 +987,19 @@ TEST_F(UplinkProcessorFixture, invalid_middle_symbol_with_pucch_f0)
   unsigned               nof_valid_symbols = slot_end_symbol_index - 1;
   uplink_slot_processor& slot_processor    = ul_processor->get_slot_processor(slot);
   for (unsigned i_symbol = 0; i_symbol != nof_valid_symbols; ++i_symbol) {
-    slot_processor.handle_rx_symbol(i_symbol, true);
+    slot_processor.handle_rx_symbol(i_symbol, shared_resource_grid{}, true);
   }
 
   // Process PUCCH requests that fall within the valid OFDM symbols.
   ASSERT_TRUE(pucch_executor.run_pending_tasks());
 
   // Notify an invalid symbol.
-  slot_processor.handle_rx_symbol(nof_valid_symbols, false);
+  slot_processor.handle_rx_symbol(nof_valid_symbols, shared_resource_grid{}, false);
 
   // Clear notifier, complete symbol reception for the entire slot. No new notification should be reported.
   results_notifier.clear();
   for (unsigned i_symbol = nof_valid_symbols; i_symbol != MAX_NSYMB_PER_SLOT; ++i_symbol) {
-    slot_processor.handle_rx_symbol(i_symbol, true);
+    slot_processor.handle_rx_symbol(i_symbol, shared_resource_grid{}, true);
   }
   ASSERT_FALSE(results_notifier.has_pusch_data_result_been_notified());
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), nof_valid_symbols);
@@ -1028,26 +1028,26 @@ TEST_F(UplinkProcessorFixture, discard_invalid_symbol_twice)
   shared_resource_grid grid = repository.release();
 
   // Notify the PUCCH last OFDM symbol as valid. It enqueues the PUCCH processing task.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(pucch_end_symbol_index, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(pucch_end_symbol_index, shared_resource_grid{}, true);
 
   // The PUCCH task is left enqueued: the PUCCH PDU remains in execution and keeps the processor out of idle.
   ASSERT_TRUE(pucch_executor.has_pending_tasks());
   ASSERT_FALSE(results_notifier.has_pucch_result_been_notified());
 
   // Notify an invalid OFDM symbol. It discards the PUSCH PDU, which has not been processed yet.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(pucch_end_symbol_index + 1, false);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(pucch_end_symbol_index + 1, shared_resource_grid{}, false);
   EXPECT_EQ(results_notifier.get_nof_pusch_data_results(), 1);
   EXPECT_EQ(results_notifier.get_nof_pucch_results(), 4);
 
   // Notify a second invalid OFDM symbol for the same slot. The PUSCH PDU has already been discarded, so it must not be
   // discarded again.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(pucch_end_symbol_index + 2, false);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(pucch_end_symbol_index + 2, shared_resource_grid{}, false);
   EXPECT_EQ(results_notifier.get_nof_pusch_data_results(), 1);
   EXPECT_EQ(results_notifier.get_nof_pucch_results(), 4);
 
   // Advance to the last OFDM symbol as valid. The all PDUs have already been discarded, so it must not be discarded
   // again.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(slot_end_symbol_index, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(slot_end_symbol_index, shared_resource_grid{}, true);
   EXPECT_EQ(results_notifier.get_nof_pusch_data_results(), 1);
   EXPECT_EQ(results_notifier.get_nof_pucch_results(), 4);
 
@@ -1099,7 +1099,7 @@ TEST_F(UplinkProcessorFixture, pusch_execute_after_stop)
   ul_processor->stop();
 
   // Notify reception of receive symbol.
-  processor.handle_rx_symbol(end_symbol_index, true);
+  processor.handle_rx_symbol(end_symbol_index, shared_resource_grid{}, true);
 
   // Check PUSCH processing has been enqueued and the processor was not called.
   ASSERT_FALSE(pusch_executor.has_pending_tasks());
@@ -1167,7 +1167,7 @@ TEST_F(UplinkProcessorFixture, reserve_slot_twice_pending_exec)
   shared_resource_grid grid = repository.release();
 
   // Notify reception of receive symbol and release grid.
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, shared_resource_grid{}, true);
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), max_nof_symbols);
   ASSERT_EQ(tap_spy->get_handle_quiet_grid_count(), 0);
   grid.release();
@@ -1206,7 +1206,7 @@ TEST_F(UplinkProcessorFixture, reserve_slot_twice_no_request_grid_alive)
 
   // Notify reception of a receiving symbol - an asynchronous task is not expected (because there are no request).
   unsigned end_symbol_index = pusch_pdu.pdu.start_symbol_index + pusch_pdu.pdu.nof_symbols - 1;
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, shared_resource_grid{}, true);
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), 0);
   ASSERT_EQ(tap_spy->get_handle_quiet_grid_count(), 1);
   ASSERT_FALSE(pusch_executor.has_pending_tasks());
@@ -1262,7 +1262,7 @@ TEST_F(UplinkProcessorFixture, stop_while_pending_task)
 
   // Notify reception of receive symbol - an asynchronous task is expected.
   unsigned end_symbol_index = pusch_pdu.pdu.start_symbol_index + pusch_pdu.pdu.nof_symbols - 1;
-  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, true);
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, shared_resource_grid{}, true);
   ASSERT_EQ(tap_spy->get_handle_ul_symbol_count(), max_nof_symbols);
   ASSERT_EQ(tap_spy->get_handle_quiet_grid_count(), 0);
   ASSERT_TRUE(pusch_executor.has_pending_tasks());
