@@ -647,6 +647,7 @@ public:
   {
     last_forward_ok          = false;
     plane_measurement_valid  = false;
+    publish_suppressed       = false;
     // THE STARTUP GRACE, checked before anything else and costing one comparison: attach is a tight
     // request/response exchange over SRB1 and the arm's occupancy of the lane competes with the phone's ACK path
     // (measured 2026-10-18: the failing leg retransmitted the 15-byte SRB1 packet 2841 times with PUCCH format-1
@@ -741,7 +742,7 @@ public:
                       "reception's measurement would be an extrapolation",
                       snr_db, domain_by_qm[qm].min_db, domain_by_qm[qm].max_db);
         degrade_or_fail(depth3_degradation::measurement_outside_domain, codeword_buffer, notifier, grid, est_results,
-                config, detail);
+                        config, detail);
         return;
       }
     }
@@ -852,6 +853,15 @@ public:
         }
       }
       if (warm && ((plane_snr_db < domain_by_qm[qm].min_db) || (plane_snr_db > domain_by_qm[qm].max_db))) {
+        // OUT OF RANGE SUPPRESSES THE MEASUREMENT, NOT THE RECEPTION (design section 19.272). Measured on air
+        // 2026-10-20 23:05: the environment dropped to about 10 dB, the filtered measurement came out at 9.71 dB
+        // against a declared floor of 12, and every reception was erased -- the uplink went to zero bytes for a
+        // minute at a time and iperf3 could not finish. What is untrustworthy outside the trained range is the
+        // REPORTED quantity, while the soft bits were measured to decode as well there as anywhere (19.265), so the
+        // reception is computed and delivered and the publication is withheld. The scheduler then keeps its last
+        // good value instead of receiving an extrapolation, and the link keeps working.
+        ++measurements_suppressed;
+        publish_suppressed = true;
         char detail[224];
         std::snprintf(detail, sizeof(detail),
                       "the plane's own residual measures %.2f dB and the bundle declares %.2f to %.2f dB "
@@ -860,9 +870,12 @@ public:
                       domain_by_qm[qm].min_db,
                       domain_by_qm[qm].max_db,
                       (plane_only.nof_pilot_re == 0) ? "no" : "with");
-        degrade_or_fail(depth3_degradation::measurement_outside_domain, codeword_buffer, notifier, grid, est_results,
-                config, detail);
-        return;
+        if ((gate_samples == 1) || ((gate_samples % 1000) == 0)) {
+          fmt::print(stderr,
+                     "[depth3-gate] measurement SUPPRESSED for this reception: %s; the reception is computed and its "
+                     "soft bits delivered, and no measurement is published\n",
+                     detail);
+        }
       }
     }
     if (conditioned) {
@@ -1430,14 +1443,19 @@ private:
       if ((sinr_count == 1) || ((sinr_count % 1000) == 0)) {
         report_published_sinr();
       }
-      stats.sinr_dB.emplace(published_dB);
+      // A SUPPRESSED MEASUREMENT IS NOT PUBLISHED (design section 19.272): the scheduler keeps its previous value
+      // rather than receiving an extrapolation from outside the bundle's trained range. The soft bits are unaffected
+      // -- they were delivered before this point.
+      if (!publish_suppressed) {
+        stats.sinr_dB.emplace(published_dB);
+      }
 
       // R6: RSRP and EPRE from the reporting heads, in the same window and through the same call as the SINR.
       // ONLY UNDER `net`: under `classic` the chain's measurements are the classical chain's, and these two would
       // otherwise replace the estimator's numbers with the network's without the operator asking (design section
       // 19.123; the SINR is a separate case, because an arm that does not run the classical equalizer has no
       // other post-equalisation noise to publish -- section 19.116).
-      if (reporting_source == "net") {
+      if (reporting_source == "net" && !publish_suppressed) {
         // THE HEADS ONLY. The plane half was measured by the gate, before the forward pass, and is reused here:
         // recomputing it would walk the plane a second time and, worse, let the two numbers drift (19.263). When
         // the gate did not run (no declared range, or the estimator gate) it is measured now, exactly as before.
@@ -1527,6 +1545,13 @@ private:
   static std::atomic<unsigned>                      prepare_refused;
   /// Receptions whose gate took its measurement from prepare()'s cache instead of measuring the plane again.
   static std::atomic<unsigned>                      gate_from_prepare;
+  /// \brief True when this reception's measurement is outside the bundle's trained range and must not be published.
+  ///
+  /// The reception is still computed: what the range governs is the REPORT, not the soft bits (design section
+  /// 19.272). Reset at the start of every reception.
+  bool                                              publish_suppressed = false;
+  /// Receptions whose measurement was withheld for being outside the declared range.
+  static std::atomic<unsigned>                      measurements_suppressed;
   /// \brief The plane half of this reception's measurement, taken by the gate and REUSED by the publication.
   ///
   /// The gate measures before the forward pass (that is the point of having the shared layer ahead of the network)
@@ -1713,6 +1738,7 @@ std::mutex pusch_depth3_receiver_ai_network_impl::measured_mutex;
 std::atomic<unsigned> pusch_depth3_receiver_ai_network_impl::prepared_receptions{0};
 std::atomic<unsigned> pusch_depth3_receiver_ai_network_impl::prepare_refused{0};
 std::atomic<unsigned> pusch_depth3_receiver_ai_network_impl::gate_from_prepare{0};
+std::atomic<unsigned> pusch_depth3_receiver_ai_network_impl::measurements_suppressed{0};
 
 std::unique_ptr<pusch_depth3_receiver> ocudu::create_pusch_depth3_receiver(
     pusch_depth3_kind               kind,
