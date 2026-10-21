@@ -120,7 +120,7 @@ def evaluate(args):
     import tensorflow as tf
     tf.get_logger().setLevel("ERROR")
 
-    data = T.Batches(args.data, args.modulation, max_samples=args.samples, seed=args.seed,
+    data = T.Batches(args.data, args.modulation, max_samples=args.samples, seed=args.seed, cond=args.modcond,
                      snr_min=args.snr_min, snr_max=args.snr_max, layout=args.layout)
     model = tf.keras.models.load_model(args.model, compile=False,
                                        custom_objects={"FoldedScaleConv": T.FoldedScaleConv})
@@ -216,6 +216,11 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--data", required=True)
     parser.add_argument("--modulation", default="256QAM")
+    parser.add_argument("--modcond", action="store_true",
+                        help="the model is MODULATION-CONDITIONED: append the four Qm one-hot channels exactly as the "
+                             "trainer did (design section 19.102). Without it the plane arrives with 12 channels where "
+                             "the model wants 16, and the failure reads as a shape mismatch instead of a missing "
+                             "switch.")
     parser.add_argument("--samples", type=int, default=96)
     parser.add_argument("--layout", choices=("folded", "spatial", "probe8"), default="spatial",
                         help="the packing the model was trained on; must match the data")

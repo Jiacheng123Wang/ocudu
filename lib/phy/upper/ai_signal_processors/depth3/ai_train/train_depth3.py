@@ -165,16 +165,20 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
                 tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="noise_1x1")(y))
             outputs["post_eq_noise"] = tf.keras.layers.Reshape((width, NOF_SYMBOLS),
                                                                name="noise_flat")(noise)
-            # Linear for the channel: it must reach deep fades as well as peaks.
-            ch_est = tf.keras.layers.Activation("linear", dtype=keras_dtype, name="ch_est")(
-                tf.keras.layers.Conv2D(2, 1, dtype=keras_dtype, name="ch_est_1x1")(y))
-            outputs["ch_est"] = tf.keras.layers.Reshape((width, 2 * NOF_SYMBOLS),
-                                                        name="ch_est_flat")(ch_est)
-            pooled = tf.keras.layers.GlobalAveragePooling2D(keepdims=True, dtype=keras_dtype,
-                                                            name="dmrs_pool")(y)
-            outputs["dmrs_noise"] = tf.keras.layers.Activation(
-                "tanh", dtype=keras_dtype, name="dmrs_noise")(
-                    tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="dmrs_noise_1x1")(pooled))
+            # THE REPORTING HEADS ARE OPTIONAL (design section 22.2). There are TWO head-construction sites in
+            # this function, one per layout, and guarding only the spatial one left the flag silently inert --
+            # which is how a run asked for two heads produced a bundle with four.
+            if reporting_heads:
+                # Linear for the channel: it must reach deep fades as well as peaks.
+                ch_est = tf.keras.layers.Activation("linear", dtype=keras_dtype, name="ch_est")(
+                    tf.keras.layers.Conv2D(2, 1, dtype=keras_dtype, name="ch_est_1x1")(y))
+                outputs["ch_est"] = tf.keras.layers.Reshape((width, 2 * NOF_SYMBOLS),
+                                                            name="ch_est_flat")(ch_est)
+                pooled = tf.keras.layers.GlobalAveragePooling2D(keepdims=True, dtype=keras_dtype,
+                                                                name="dmrs_pool")(y)
+                outputs["dmrs_noise"] = tf.keras.layers.Activation(
+                    "tanh", dtype=keras_dtype, name="dmrs_noise")(
+                        tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="dmrs_noise_1x1")(pooled))
         return finish(tf.keras.Model(inp, outputs))
 
     inp = tf.keras.Input(shape=(width, 1, in_channels), batch_size=None, dtype=keras_dtype,
@@ -893,7 +897,7 @@ def main():
                   llr_linear=args.llr_linear, dense=args.dense_blocks, layout=args.layout,
                   in_channels=in_channels, cond=args.modcond)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
-    print(f"parameters {parameters}")
+    print(f"parameters {parameters}  heads {sorted(model.output.keys())}")
     if args.init:
         model.load_weights(args.init)
         print(f"started from {args.init}")
