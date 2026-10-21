@@ -113,9 +113,9 @@ CPU 版与 GPU 版同算法（layered normalized min-sum）⇒ 参考语义一�
 | 项 | 值 |
 |---|---|
 | 目录 | `work_tmp/ldpc_dump/ref/` |
-| 规模 | **7 931+ 条**（后台持续生成，13 个语料）|
+| 规模 | **17 563 条 / 427 MB**（13 个语料全部跑完，2026-10-21 22:20）|
 | 生成脚本 | `work_tmp/ldpc_dump/make_reference.sh`（**增量**：已有则跳过）|
-| 速度 | **~0.18 s/段** |
+| 速度 | **~0.18 s/段**（17.5 k 条约 55 分钟）|
 | 读取器 | `work_tmp/ldpc_dump/read_dump.py` |
 
 ### D3.4 首个记录揭示的两件事

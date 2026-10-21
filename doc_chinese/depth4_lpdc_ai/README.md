@@ -5,8 +5,9 @@ The next step after depth3: extend the network past the soft bits and include th
 
 | Path | What belongs here | What does NOT |
 |---|---|---|
-| `depth4_lpdc_ai_high_level_status_and_plan.md` | The rolling status: what is done, what is next, what is blocked. Short, current, edited in place. | Measurements. Those go in the design document. |
-| `depth4_lpdc_ai_design_and_implementation.md` | The design record, appended section by section, each entry dated and numbered (§N), with the measurement that justified it. Immutable once written; corrections are new entries that say what they correct. | Status, plans, wish lists. |
+| `depth4_lpdc_ai_high_level_status_and_plan.md` | The rolling status: what is done, what is next, what is blocked, the pre-registered gates, the milestones. Short, current, edited in place. | Measurements (design document), literature (survey). |
+| `depth4_lpdc_ai_design_and_implementation.md` | The design record: decisions with the measurement that justified them, appended section by section, each entry dated (D0, D1, ...). Immutable once written; corrections are new entries that say what they correct. | Status, plans, wish lists, paper summaries. |
+| `survey/` | **Literature only**: the question, the selection rule, the method families, one row per paper with what it contributes and where it stops, the conclusions that survive our constraints, the excluded directions with reasons, the reading list. | Measurements of our system, designs, plans. |
 | `work_tmp/` | Scratch: code under development, datasets, runs, captures, throwaway scripts. NOT part of the product and not referenced by the build. | Anything the build or a shipped bundle needs. |
 | `wip/` | Work in progress that is meant to survive: a probe worth keeping, a half-built harness, a script another section refers to. | Datasets and multi-gigabyte artifacts. |
 | `survey/` | Reading: papers, prior art, vendor documentation, with the reading notes that say what was taken from each. | Opinions without a source. |
