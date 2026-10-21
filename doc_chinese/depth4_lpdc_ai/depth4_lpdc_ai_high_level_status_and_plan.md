@@ -151,4 +151,4 @@
 | 3 | 逐 RE 可靠性进层内的方式 | ★ M1 里做有/无对照后定 |
 | 4 | 参考库最终规模 | ★ 先跑满 13 个语料（后台进行中）|
 | 5 | ~~解码栈放 ANE（B）还是 host（A）~~ | ★ **已裁定：必须 B**（★ 与 `apple_silicon_heterogeneous_gnb_plan.md` 的终局一致 ✓，★ 设计 D16.1 ✓）；★ B 内部再分 **B-CoreML / B-Metal** ✓，★ 由实测选（★ D16.4 ✓）|
-| 6 | B-CoreML 还是 B-Metal | ★ 先做 **B-CoreML**（一个模型、一次调用）✓；★ 若解码层边际成本 >300 µs 或内部有同步抖动 ⇒ 转 B-Metal |
+| 6 | ~~B-CoreML 还是 B-Metal~~ | ★ **已裁定：本工作流只做 B-CoreML** ✓（★ Metal 路径属于另一条工作流 ✓，★ 设计 D17.1 ✓）|
