@@ -8,7 +8,8 @@ set(ldpc_sources
         ldpc_luts_impl.cpp
         ldpc_encoder_impl.cpp
         ldpc_encoder_generic.cpp
-        ldpc_decoder_impl.cpp
+        ldpc_decode_dump.cpp
+    ldpc_decoder_impl.cpp
         ldpc_decoder_generic.cpp
         ldpc_rate_matcher_impl.cpp
         ldpc_rate_dematcher_impl.cpp

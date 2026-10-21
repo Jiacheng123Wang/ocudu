@@ -174,6 +174,13 @@ private:
   /// zero. False, otherwise.
   bool check_syndrome() const;
 
+  /// \brief Number of check nodes whose syndrome is non-zero, for the depth4 dump (survey section 10.5).
+  ///
+  /// \ref check_syndrome() answers yes or no and stops at the first failure, which is the right thing for a decoder and
+  /// the wrong thing for a measurement: an early-exit rule wants to know HOW MANY checks fail, because that is the
+  /// signal that separates "almost there" from "nowhere near". This walks the same graph and counts.
+  unsigned count_unsatisfied_checks() const;
+
 protected:
   /// Number of base graph variable nodes corresponding to information bits.
   uint16_t bg_K = 22;

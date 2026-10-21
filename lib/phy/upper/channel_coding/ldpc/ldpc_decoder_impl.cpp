@@ -3,6 +3,9 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ldpc_decoder_impl.h"
+#include "ldpc_decode_dump.h"
+
+#include <vector>
 #include "ldpc_luts_impl.h"
 #include "ocudu/ocuduvec/binary.h"
 #include "ocudu/ocuduvec/circ_shift.h"
@@ -98,6 +101,38 @@ std::optional<unsigned> ldpc_decoder_impl::decode(bit_buffer&                   
 
   unsigned nof_layers = codeblock_length / lifting_size - bg_K;
 
+  // ---- depth4 capture (survey section 10.5): what the decoder saw, and what it converged to ---------
+  // One predictable branch when the dump is off. When it is on, the input LLRs and the per-iteration syndrome weights
+  // are kept so the caller can be handed the decoder's own view after the loop; the soft values at each iteration are
+  // kept only if asked for, because that is the large part.
+  ldpc_decode_dump& dump              = ldpc_decode_dump::instance();
+  const bool        dumping           = dump.enabled();
+  const bool        dump_iterations   = dumping && dump.iterations_wanted();
+  std::vector<int8_t>   dump_soft_per_iter;
+  std::vector<uint16_t> dump_syndrome;
+  if (dumping) {
+    dump_syndrome.reserve(max_iterations);
+    if (dump_iterations) {
+      dump_soft_per_iter.reserve(static_cast<size_t>(input_size) * max_iterations);
+    }
+  }
+
+  // Records one decode into the dump, wherever the function happens to return from. Capturing every exit is the point:
+  // the failures are as interesting as the successes, and more of them.
+  auto record_dump = [&](bool success, unsigned iterations) {
+    if (!dumping) {
+      return;
+    }
+    dump.record(span<const log_likelihood_ratio>(input.data(), input_size),
+                span<const log_likelihood_ratio>(soft_bits.data(), input_size),
+                span<const int8_t>(dump_soft_per_iter),
+                span<const uint16_t>(dump_syndrome),
+                iterations,
+                success,
+                lifting_size,
+                bg_K);
+  };
+
   for (unsigned i_iteration = 0; i_iteration != max_iterations; ++i_iteration) {
     // Run all layers.
     for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
@@ -108,6 +143,16 @@ std::optional<unsigned> ldpc_decoder_impl::decode(bit_buffer&                   
       update_soft_bits(i_layer);
     }
 
+    if (dumping) {
+      // Syndrome weight at the end of this iteration: the classical measure of "how far from a codeword", and the
+      // quantity an early-exit rule would key on.
+      dump_syndrome.push_back(static_cast<uint16_t>(count_unsatisfied_checks()));
+      if (dump_iterations) {
+        const int8_t* begin = reinterpret_cast<const int8_t*>(soft_bits.data());
+        dump_soft_per_iter.insert(dump_soft_per_iter.end(), begin, begin + input_size);
+      }
+    }
+
     // If a CRC calculator was passed with the configuration parameters.
     if (crc != nullptr) {
       // Get hard bits.
@@ -115,6 +160,7 @@ std::optional<unsigned> ldpc_decoder_impl::decode(bit_buffer&                   
 
       // Early stop condition: CRC check must be zero.
       if (hard_bits_success && crc->calculate(output.first(nof_significant_bits)) == 0) {
+        record_dump(true, i_iteration + 1);
         return i_iteration + 1;
       }
     } else if (early_stop_syndrome) {
@@ -123,6 +169,7 @@ std::optional<unsigned> ldpc_decoder_impl::decode(bit_buffer&                   
 
       // Early stop condition: check syndrome.
       if (hard_bits_success && check_syndrome()) {
+        record_dump(true, i_iteration + 1);
         return i_iteration + 1;
       }
     }
@@ -130,6 +177,7 @@ std::optional<unsigned> ldpc_decoder_impl::decode(bit_buffer&                   
 
   // Skip any further decisions if an early stop condition is configured.
   if ((crc != nullptr) || early_stop_syndrome) {
+    record_dump(false, max_iterations);
     return std::nullopt;
   }
 
@@ -138,9 +186,11 @@ std::optional<unsigned> ldpc_decoder_impl::decode(bit_buffer&                   
 
   // Check syndrome for determining if the codeblock decoding is successful.
   if (!hard_bits_success || !check_syndrome()) {
+    record_dump(false, max_iterations);
     return std::nullopt;
   }
 
+  record_dump(true, max_iterations);
   return max_iterations;
 }
 
@@ -324,6 +374,48 @@ bool ldpc_decoder_impl::get_hard_bits(bit_buffer& out) const
   }
 
   return valid;
+}
+
+unsigned ldpc_decoder_impl::count_unsatisfied_checks() const
+{
+  static_vector<log_likelihood_ratio, ldpc::MAX_LIFTING_SIZE> soft_shifted_bits(lifting_size);
+  static_bit_buffer<ldpc::MAX_LIFTING_SIZE>                   hard_shifted_bits(lifting_size);
+  static_bit_buffer<ldpc::MAX_LIFTING_SIZE>                   hard_syndrome_bits(lifting_size);
+
+  hard_shifted_bits.get_buffer().back()  = 0;
+  hard_syndrome_bits.get_buffer().back() = 0;
+
+  unsigned nof_check_nodes = codeblock_length / lifting_size - bg_K;
+  unsigned unsatisfied     = 0;
+
+  for (unsigned i_check_node = 0; i_check_node != nof_check_nodes; ++i_check_node) {
+    const BG_adjacency_row_t& current_var_indices = current_graph->get_adjacency_row(i_check_node);
+    bool                      usable              = true;
+    for (BG_adjacency_row_t::const_iterator this_var_index = current_var_indices.cbegin(); *this_var_index != NO_EDGE;
+         ++this_var_index) {
+      unsigned shift = current_graph->get_lifted_node(i_check_node, *this_var_index);
+      span<const log_likelihood_ratio> this_soft_bits =
+          span<const log_likelihood_ratio>(soft_bits).subspan((*this_var_index) * node_size_byte, lifting_size);
+      ocuduvec::circ_shift_backward(soft_shifted_bits, this_soft_bits, shift);
+      if (this_var_index == current_var_indices.cbegin()) {
+        usable = hard_decision(hard_syndrome_bits, soft_shifted_bits);
+        continue;
+      }
+      if (!hard_decision(hard_shifted_bits, soft_shifted_bits)) {
+        usable = false;
+        break;
+      }
+      ocuduvec::binary_xor(
+          hard_syndrome_bits.get_buffer(), hard_shifted_bits.get_buffer(), hard_syndrome_bits.get_buffer());
+    }
+    // An undetermined bit counts as unsatisfied: the decoder cannot call this check passed either.
+    span<const uint8_t> bytes = hard_syndrome_bits.get_buffer();
+    bool                failed = !usable || std::any_of(bytes.begin(), bytes.end(), [](uint8_t b) { return b != 0; });
+    if (failed) {
+      ++unsatisfied;
+    }
+  }
+  return unsatisfied;
 }
 
 bool ldpc_decoder_impl::check_syndrome() const
