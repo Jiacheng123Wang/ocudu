@@ -144,14 +144,19 @@ def post_equalization_noise(channel, noise_variance):
 
 def total_loss(llr, llr_labels, llr_weights, ch_est, ch_est_true, ch_est_weights,
                noise_shape, noise_true, noise_weights, weights=None):
-    """The three-term objective, with `design` section 3.2's priority order and defaults."""
+    """The objective, with `design` section 3.2's priority order and defaults.
+
+    A head that the graph does not carry is passed as None and simply has no term (design section 22.2): a bundle
+    built without the reporting heads cannot be asked for a channel-estimate error it never predicted, and a zero
+    there would be a number nobody measured.
+    """
     weights = dict(DEFAULT_WEIGHTS if weights is None else weights)
-    terms = {
-        "llr": bce_loss(llr, llr_labels, llr_weights),
-        "ch_est": nmse(ch_est, ch_est_true, ch_est_weights),
-        "post_eq_noise": noise_regression_loss(noise_shape, noise_true, noise_weights),
-    }
-    total = sum(weights[name] * terms[name] for name in terms)
+    terms = {"llr": bce_loss(llr, llr_labels, llr_weights)}
+    if ch_est is not None:
+        terms["ch_est"] = nmse(ch_est, ch_est_true, ch_est_weights)
+    if noise_shape is not None:
+        terms["post_eq_noise"] = noise_regression_loss(noise_shape, noise_true, noise_weights)
+    total = sum(weights[name] * terms[name] for name in terms if name in weights)
     terms["total"] = float(total)
     return terms
 

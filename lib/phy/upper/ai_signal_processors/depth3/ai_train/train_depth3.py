@@ -96,6 +96,7 @@ class FoldedScaleConv(tf.keras.layers.Layer):
 
 
 def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, residual=True,
+          reporting_heads=True,
           dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False,
           layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False):
     """The contract's graph: the plane in, the reporting heads out.
@@ -225,19 +226,24 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         outputs["post_eq_noise"] = tf.keras.layers.Activation(
             "tanh", dtype=keras_dtype, name="post_eq_noise")(
                 tf.keras.layers.Conv2D(NOF_SYMBOLS, 1, dtype=keras_dtype, name="noise_1x1")(y))
-        # Linear for the channel: it must reach deep fades as well as peaks.
-        outputs["ch_est"] = tf.keras.layers.Activation(
-            "linear", dtype=keras_dtype, name="ch_est")(
-                tf.keras.layers.Conv2D(2 * NOF_SYMBOLS, 1, dtype=keras_dtype, name="ch_est_1x1")(y))
-        # The fourth head is one scalar for the whole slot, so the trunk is averaged over frequency
-        # first. The contract lists it as its own output because `memo_07` R4 needs the DM-RS domain
-        # noise variance, which the classical kernel can no longer measure once the estimate is the
-        # network's own: the residual it would measure has no noise left in it.
-        pooled = tf.keras.layers.GlobalAveragePooling2D(keepdims=True, dtype=keras_dtype,
-                                                        name="dmrs_pool")(y)
-        outputs["dmrs_noise"] = tf.keras.layers.Activation(
-            "tanh", dtype=keras_dtype, name="dmrs_noise")(
-                tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="dmrs_noise_1x1")(pooled))
+        # THE TWO REPORTING HEADS ARE OPTIONAL (design section 22.2): once the shared measurement layer reports
+        # RSRP, EPRE and the SINR, a bundle that also carries them spends capacity on a second job and trades one
+        # against the other -- the trade that cost the r7 bundle its mid-band accuracy (section 19.264). The noise
+        # head above is NOT optional: it is what scales the logits into the LLRs the chain quantises.
+        if reporting_heads:
+            # Linear for the channel: it must reach deep fades as well as peaks.
+            outputs["ch_est"] = tf.keras.layers.Activation(
+                "linear", dtype=keras_dtype, name="ch_est")(
+                    tf.keras.layers.Conv2D(2 * NOF_SYMBOLS, 1, dtype=keras_dtype, name="ch_est_1x1")(y))
+            # The fourth head is one scalar for the whole slot, so the trunk is averaged over frequency
+            # first. The contract lists it as its own output because `memo_07` R4 needs the DM-RS domain
+            # noise variance, which the classical kernel can no longer measure once the estimate is the
+            # network's own: the residual it would measure has no noise left in it.
+            pooled = tf.keras.layers.GlobalAveragePooling2D(keepdims=True, dtype=keras_dtype,
+                                                            name="dmrs_pool")(y)
+            outputs["dmrs_noise"] = tf.keras.layers.Activation(
+                "tanh", dtype=keras_dtype, name="dmrs_noise")(
+                    tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="dmrs_noise_1x1")(pooled))
     return finish(tf.keras.Model(inp, outputs))
 
 
@@ -762,6 +768,10 @@ def main():
     parser.add_argument("--w-ch", type=float, default=L.DEFAULT_WEIGHTS["ch_est"])
     parser.add_argument("--w-noise", type=float, default=L.DEFAULT_WEIGHTS["post_eq_noise"])
     parser.add_argument("--no-aux", action="store_true", help="LLR head only, for the R2.4 ablation")
+    parser.add_argument("--no-reporting-heads", action="store_true",
+                        help="DROP the two reporting heads (ch_est, dmrs_noise) and keep post_eq_noise, which is "
+                             "what scales the logits into LLRs. The publication then comes from the shared "
+                             "measurement layer (design sections 22.2 and 19.263).")
     parser.add_argument("--llr-linear", action="store_true",
                         help="make the LLR head linear and bound it by clamping in the loss, "
                              "instead of a tanh whose gradient vanishes where confident bits live")
@@ -844,6 +854,7 @@ def main():
         print(f"probe graph: layout {args.layout}, {in_channels} input channels, "
               f"c_hid {args.c_hid}, {args.blocks} blocks -- RANDOM WEIGHTS, measure only")
         probe_model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux,
+                            reporting_heads=not args.no_reporting_heads,
                             residual=not args.no_residual, dtype=args.dtype,
                             fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
                             llr_linear=args.llr_linear, dense=args.dense_blocks,
@@ -876,6 +887,7 @@ def main():
                      f"carries {from_data}")
     print(f"layout {args.layout}, {in_channels} input channels")
     model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux,
+                  reporting_heads=not args.no_reporting_heads,
                   residual=not args.no_residual, dtype=args.dtype,
                   fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
                   llr_linear=args.llr_linear, dense=args.dense_blocks, layout=args.layout,
@@ -914,19 +926,24 @@ def main():
                 llr = tf.clip_by_value(llr, -targets["scale"][:, None, None], targets["scale"][:, None, None])
             terms = {"llr": L.tf_bce_loss(llr, targets["llr_shape"], targets["llr_weights"])}
             if not args.no_aux:
-                ch = tf.reshape(tf.cast(outputs["ch_est"], tf.float32),
-                                (-1, D3.NOF_SUBCARRIERS, 2 * NOF_SYMBOLS))
-                terms["ch_est"] = L.tf_nmse(
-                    tf.complex(ch[:, :, 0::2], ch[:, :, 1::2]),
-                    tf.complex(targets["ch"][:, :, :, 0], targets["ch"][:, :, :, 1]),
-                    targets["ch_weights"])
+                # THE NOISE HEAD IS ALWAYS IN WHEN aux_heads IS (design section 22.2): it is what scales the logits
+                # into the LLRs the chain quantises, so it is trained even in the bundle that dropped the reporting
+                # heads. The channel and DM-RS heads are read only when the graph carries them.
+                if "ch_est" in outputs:
+                    ch = tf.reshape(tf.cast(outputs["ch_est"], tf.float32),
+                                    (-1, D3.NOF_SUBCARRIERS, 2 * NOF_SYMBOLS))
+                    terms["ch_est"] = L.tf_nmse(
+                        tf.complex(ch[:, :, 0::2], ch[:, :, 1::2]),
+                        tf.complex(targets["ch"][:, :, :, 0], targets["ch"][:, :, :, 1]),
+                        targets["ch_weights"])
                 noise = tf.reshape(tf.cast(outputs["post_eq_noise"], tf.float32),
                                    (-1, D3.NOF_SUBCARRIERS, NOF_SYMBOLS))
                 error = (noise - targets["noise"]) ** 2
                 terms["post_eq_noise"] = (tf.reduce_sum(error * targets["noise_weights"])
                                           / tf.maximum(tf.reduce_sum(targets["noise_weights"]), 1.0))
-                dmrs = tf.reshape(tf.cast(outputs["dmrs_noise"], tf.float32), (-1,))
-                terms["dmrs_noise"] = tf.reduce_mean((dmrs - targets["dmrs_noise"]) ** 2)
+                if "dmrs_noise" in outputs:
+                    dmrs = tf.reshape(tf.cast(outputs["dmrs_noise"], tf.float32), (-1,))
+                    terms["dmrs_noise"] = tf.reduce_mean((dmrs - targets["dmrs_noise"]) ** 2)
             total = sum(weights[name] * terms[name] for name in terms)
         if training:
             gradients = tape.gradient(total, model.trainable_variables)
