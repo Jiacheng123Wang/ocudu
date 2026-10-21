@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unistd.h>
 
 using namespace ocudu;
 
@@ -40,7 +41,8 @@ ldpc_decode_dump::ldpc_decode_dump()
                (max_blocks != 0) ? ", until the block cap" : ", without a block cap");
 }
 
-void ldpc_decode_dump::record(span<const log_likelihood_ratio> input,
+void ldpc_decode_dump::record(unsigned                         elapsed_us,
+                              span<const log_likelihood_ratio> input,
                               span<const log_likelihood_ratio> soft_final,
                               span<const int8_t>               soft_per_iter,
                               span<const uint16_t>             syndrome_weight,
@@ -57,7 +59,9 @@ void ldpc_decode_dump::record(span<const log_likelihood_ratio> input,
   }
 
   char path[640];
-  std::snprintf(path, sizeof(path), "%s/ldpc_%06u.bin", directory, written);
+  // THE PROCESS ID IS PART OF THE NAME. Without it every replay process starts its counter at zero and overwrites the
+  // previous run's file -- which is exactly what happened: eighty replayed captures left two files.
+  std::snprintf(path, sizeof(path), "%s/ldpc_%d_%06u.bin", directory, static_cast<int>(getpid()), written);
   std::FILE* f = std::fopen(path, "wb");
   if (f == nullptr) {
     // A dump that cannot be written must not break the decode: this path is instrumentation.
@@ -74,13 +78,15 @@ void ldpc_decode_dump::record(span<const log_likelihood_ratio> input,
     uint32_t lifting_size;
     uint32_t bg_K;
     uint32_t nof_iteration_entries;
+    uint32_t elapsed_us;
   } header = {0x44335031U, // "D3P1"
               static_cast<uint32_t>(input.size()),
               iterations,
               success ? 1U : 0U,
               lifting_size,
               bg_K,
-              static_cast<uint32_t>(syndrome_weight.size())};
+              static_cast<uint32_t>(syndrome_weight.size()),
+              elapsed_us};
   std::fwrite(&header, sizeof(header), 1, f);
 
   // The LLRs the decoder was handed, as bytes: the decoder's own type is a signed byte and re-encoding it would lose

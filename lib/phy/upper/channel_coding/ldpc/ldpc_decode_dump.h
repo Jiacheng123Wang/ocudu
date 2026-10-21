@@ -36,6 +36,8 @@ public:
 
   /// \brief Records one decode.
   ///
+  /// \param[in] elapsed_us      How long the decode took, so the cost of one iteration can be MEASURED on the real
+  ///                            graph rather than inferred from a random-topology benchmark (survey section 10.2).
   /// \param[in] input           The LLRs the decoder was handed.
   /// \param[in] soft_final      The soft values after the last iteration it ran, in the decoder's own sign convention.
   /// \param[in] soft_per_iter   One entry per iteration, each \c input.size() long, or empty when not requested.
@@ -44,7 +46,8 @@ public:
   /// \param[in] success         Whether it declared success (CRC or syndrome, as configured).
   /// \param[in] lifting_size    The block's lifting size.
   /// \param[in] bg_K            The base graph's Kb.
-  void record(span<const log_likelihood_ratio> input,
+  void record(unsigned                         elapsed_us,
+              span<const log_likelihood_ratio> input,
               span<const log_likelihood_ratio> soft_final,
               span<const int8_t>               soft_per_iter,
               span<const uint16_t>             syndrome_weight,

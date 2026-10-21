@@ -5,6 +5,7 @@
 #include "ldpc_decoder_impl.h"
 #include "ldpc_decode_dump.h"
 
+#include <chrono>
 #include <vector>
 #include "ldpc_luts_impl.h"
 #include "ocudu/ocuduvec/binary.h"
@@ -119,11 +120,16 @@ std::optional<unsigned> ldpc_decoder_impl::decode(bit_buffer&                   
 
   // Records one decode into the dump, wherever the function happens to return from. Capturing every exit is the point:
   // the failures are as interesting as the successes, and more of them.
-  auto record_dump = [&](bool success, unsigned iterations) {
+  const auto decode_started = std::chrono::steady_clock::now();
+  auto       record_dump    = [&](bool success, unsigned iterations) {
     if (!dumping) {
       return;
     }
-    dump.record(span<const log_likelihood_ratio>(input.data(), input_size),
+    const auto elapsed_us = static_cast<unsigned>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                      std::chrono::steady_clock::now() - decode_started)
+                                                      .count());
+    dump.record(elapsed_us,
+                span<const log_likelihood_ratio>(input.data(), input_size),
                 span<const log_likelihood_ratio>(soft_bits.data(), input_size),
                 span<const int8_t>(dump_soft_per_iter),
                 span<const uint16_t>(dump_syndrome),
