@@ -38,7 +38,12 @@ public:
   ///
   /// \param[in] elapsed_us      How long the decode took, so the cost of one iteration can be MEASURED on the real
   ///                            graph rather than inferred from a random-topology benchmark (survey section 10.2).
-  /// \param[in] input           The LLRs the decoder was handed.
+  /// \param[in] input           The LLRs the decoder was handed, in RATE-MATCHED order.
+  /// \param[in] soft_input      The same information in CODEWORD order, i.e. the decoder's own soft buffer right after
+  ///                            derate matching and before the first iteration. depth4's message passing works on this
+  ///                            domain -- the rate-matching permutation belongs to the assembler, not to the decoder --
+  ///                            so a training set that only holds the rate-matched order would force every experiment to
+  ///                            reimplement the dematcher.
   /// \param[in] soft_final      The soft values after the last iteration it ran, in the decoder's own sign convention.
   /// \param[in] soft_per_iter   One entry per iteration, each \c input.size() long, or empty when not requested.
   /// \param[in] syndrome_weight One entry per iteration.
@@ -48,6 +53,7 @@ public:
   /// \param[in] bg_K            The base graph's Kb.
   void record(unsigned                         elapsed_us,
               span<const log_likelihood_ratio> input,
+              span<const log_likelihood_ratio> soft_input,
               span<const log_likelihood_ratio> soft_final,
               span<const int8_t>               soft_per_iter,
               span<const uint16_t>             syndrome_weight,

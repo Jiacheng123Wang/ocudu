@@ -120,6 +120,10 @@ std::optional<unsigned> ldpc_decoder_impl::decode(bit_buffer&                   
 
   // Records one decode into the dump, wherever the function happens to return from. Capturing every exit is the point:
   // the failures are as interesting as the successes, and more of them.
+  // THE DERATE-MATCHED INPUT IS THE DECODER'S OWN BUFFER right after load_soft_bits, i.e. in CODEWORD order. depth4's
+  // message passing lives in that domain (the rate-matching permutation belongs to the assembler), so it is recorded
+  // once here rather than reimplemented by every experiment.
+  const size_t   soft_input_size = static_cast<size_t>(codeblock_length);
   const auto decode_started = std::chrono::steady_clock::now();
   auto       record_dump    = [&](bool success, unsigned iterations) {
     if (!dumping) {
@@ -130,7 +134,13 @@ std::optional<unsigned> ldpc_decoder_impl::decode(bit_buffer&                   
                                                       .count());
     dump.record(elapsed_us,
                 span<const log_likelihood_ratio>(input.data(), input_size),
-                span<const log_likelihood_ratio>(soft_bits.data(), input_size),
+                // BOTH the input and the final soft values are recorded over the CODEWORD, so a training set can align
+                // them index by index. Recording the final values over `input_size` -- the rate-matched length -- left
+                // the two arrays one truncation apart, which reads as a data bug in every experiment.
+                span<const log_likelihood_ratio>(soft_bits.data(),
+                                                 std::min<size_t>(soft_input_size, soft_bits.size())),
+                span<const log_likelihood_ratio>(soft_bits.data(),
+                                                 std::min<size_t>(soft_input_size, soft_bits.size())),
                 span<const int8_t>(dump_soft_per_iter),
                 span<const uint16_t>(dump_syndrome),
                 iterations,

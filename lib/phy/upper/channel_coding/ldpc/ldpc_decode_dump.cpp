@@ -43,6 +43,7 @@ ldpc_decode_dump::ldpc_decode_dump()
 
 void ldpc_decode_dump::record(unsigned                         elapsed_us,
                               span<const log_likelihood_ratio> input,
+                              span<const log_likelihood_ratio> soft_input,
                               span<const log_likelihood_ratio> soft_final,
                               span<const int8_t>               soft_per_iter,
                               span<const uint16_t>             syndrome_weight,
@@ -79,19 +80,24 @@ void ldpc_decode_dump::record(unsigned                         elapsed_us,
     uint32_t bg_K;
     uint32_t nof_iteration_entries;
     uint32_t elapsed_us;
-  } header = {0x44335031U, // "D3P1"
+    uint32_t nof_soft_input;
+  } header = {0x44335032U, // "D3P2": the format gained the derate-matched input
               static_cast<uint32_t>(input.size()),
               iterations,
               success ? 1U : 0U,
               lifting_size,
               bg_K,
               static_cast<uint32_t>(syndrome_weight.size()),
-              elapsed_us};
+              elapsed_us,
+              static_cast<uint32_t>(soft_input.size())};
   std::fwrite(&header, sizeof(header), 1, f);
 
   // The LLRs the decoder was handed, as bytes: the decoder's own type is a signed byte and re-encoding it would lose
   // exactly the saturation behaviour the network has to learn.
   std::fwrite(input.data(), sizeof(int8_t), input.size(), f);
+  if (!soft_input.empty()) {
+    std::fwrite(soft_input.data(), sizeof(int8_t), soft_input.size(), f);
+  }
   std::fwrite(soft_final.data(), sizeof(int8_t), soft_final.size(), f);
   if (!syndrome_weight.empty()) {
     std::fwrite(syndrome_weight.data(), sizeof(uint16_t), syndrome_weight.size(), f);

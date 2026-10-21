@@ -570,9 +570,19 @@ def rename_outputs(mlmodel, qm, keras_names):
     contract = {"llr_flat": ("llr", NOF_SYMBOLS * qm), "noise_flat": ("post_eq_noise", NOF_SYMBOLS),
                 "ch_est_flat": ("ch_est", 2 * NOF_SYMBOLS), "dmrs_noise": ("dmrs_noise", 1)}
     actual = list(spec.description.output)
-    if len(actual) != len(keras_names) or len(actual) != len(contract):
-        raise ValueError(f"the model has {len(actual)} outputs, the caller named {len(keras_names)}, "
-                         f"the contract has {len(contract)}")
+    # A SUBSET OF THE CONTRACT'S HEADS IS A VALID ARTIFACT (design section 22.2). The engine binds whatever the model
+    # declares, and a bundle trained without the two reporting heads is exactly what the shared measurement layer made
+    # possible; requiring all four here refused the export of the very artifact depth4 was built for.
+    if len(actual) != len(keras_names):
+        raise ValueError(f"the model has {len(actual)} outputs and the caller named {len(keras_names)}")
+    if len(actual) > len(contract):
+        raise ValueError(f"the model has {len(actual)} outputs, the contract has at most {len(contract)}")
+    unknown = [k for k in keras_names if k not in contract]
+    if unknown:
+        raise ValueError(f"the model's outputs {unknown} are not one of the contract's heads")
+    missing_required = [n for k, (n, _c) in contract.items() if k not in keras_names and n == "llr"]
+    if missing_required:
+        raise ValueError("the model has no llr head: without it there is nothing to decode")
     for output, keras_name in zip(actual, keras_names):
         name, channels = contract.get(keras_name, (None, None))
         if name is None:
