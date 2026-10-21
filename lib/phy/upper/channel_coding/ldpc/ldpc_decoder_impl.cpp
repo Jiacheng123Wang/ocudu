@@ -6,6 +6,7 @@
 #include "ldpc_decode_dump.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <vector>
 #include "ldpc_luts_impl.h"
 #include "ocudu/ocuduvec/binary.h"
@@ -32,6 +33,17 @@ void ldpc_decoder_impl::init(const configuration& cfg)
   lifting_size = static_cast<uint16_t>(cfg.lifting_size);
 
   max_iterations = cfg.max_iterations;
+  // AN INSTRUMENTATION CAP, not a decoder knob (design D21.3): the fidelity test needs the decoder's state after
+  // exactly one iteration to compare a learned layer against, and the chain always asks for its own maximum. Read once.
+  {
+    static const unsigned cap = []() {
+      const char* env = std::getenv("OCUDU_LDPC_MAX_ITERATIONS");
+      return (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 0U;
+    }();
+    if ((cap != 0) && (max_iterations > cap)) {
+      max_iterations = cap;
+    }
+  }
   ocudu_assert(max_iterations > 0, "Max iterations must be different to 0");
 
   unsigned nof_crc_bits = cfg.nof_crc_bits;
