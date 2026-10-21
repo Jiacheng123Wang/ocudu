@@ -16196,6 +16196,37 @@ train_depth3.py --train llr_only_train.npz --val llr_only_val.npz
 ★ 预计 ✓：★ 旧跑 40 epoch / 30 777 样本 = 15 608 s ✓ ⇒ ★ 80 epoch / 44 127 样本 ≈ **12 小时** ✓（★ 过夜 ✓）。
 
 ★ 状态：★ 数据完成 ✓；★ 训练进行中 ✓；★ 完成后按 §22.7 四关验收 ✓。
+### 19.286 ★★ 目录重整 ✓：★ 产物进 `ai_assets/` ✓，★ 下一条工作流的骨架已建 ✓（★ 2026-10-21 11:20 ✓）
+
+**(a) ★★ 三个产物目录已移入 `depth3/ai_assets/` ✓**
+
+| ★ 项 | ★ 改动 |
+|---|---|
+| ★ 移动 ✓ | ★ `depth3_modcond_{c32h,ft,r7}/` ⇒ ★ `depth3/ai_assets/` ✓（★ `git mv` ✓，★ 历史保留 ✓）|
+| ★ 代码引用 ✓ | ★ `apps/.../o_du_low/CMakeLists.txt` 的 `OCUDU_DEPTH3_DEFAULT_MODEL` ✓ |
+| ★ 文档 ✓ | ★ `depth3/README.md` 与两个产物 README ✓；★ 环境变量清单 ✓ |
+| ★ 本文件 ✓ | ★ 历史条目**不改** ✓（★ §19.226 / §19.162 写的是**当时**的路径 ✓）；★ 本节点统一说明 ✓ |
+
+★★ **配套规则（★ 写进 `depth3/README.md` ✓）**：★ **产物只有通过 §22.7 的四关才允许进 `ai_assets/`** ✓ ⇒
+★ 这个目录可以读作"**可飞行的东西**" ✓；★ 训练中/待验收的模型留在 `doc_chinese/*/work_tmp/` ✓。
+
+**(b) ★★ 下一条工作流的骨架 ✓（★ 你指定的结构 ✓）**
+
+| ★ 路径 | ★ 用途 |
+|---|---|
+| ★ `lib/phy/upper/ai_signal_processors/depth4/` ✓ | ★ **产品代码**（★ 现在**故意为空** ✓ ＋ README 说明为什么 ✓）|
+| ★ `doc_chinese/depth4_lpdc_ai/` ✓ | ★ 工作目录 ✓ |
+| ★ ├ `depth4_lpdc_ai_high_level_status_and_plan.md` ✓ | ★ 状态/计划（★ 空占位 ✓，★ 滚动编辑 ✓）|
+| ★ ├ `depth4_lpdc_ai_design_and_implementation.md` ✓ | ★ 设计记录（★ 空占位 ✓，★ 只追加 ✓）|
+| ★ ├ `work_tmp/` ✓ | ★ 开发期代码/数据/运行 ✓（★ 不进构建 ✓）|
+| ★ ├ `wip/` ✓ | ★ 值得留下的半成品/探针 ✓ |
+| ★ ├ `survey/` ✓ | ★ 文献与阅读笔记 ✓ |
+| ★ └ `probe/` ✓ | ★ 仪表与一次性调查脚本 ✓ |
+
+★ `README.md` 里写明了**晋级规则** ✓：★ `work_tmp` 允许难看 ✓；★ 代码晋级到 `depth4/` ✓、★ 产物晋级到
+★ `depth3/ai_assets/`（★ depth3 契约 ✓）或将来 depth4 自己的资产目录 ✓；★ **未过闸的模型不进资产目录** ✓。
+
+★ 状态：★ 目录重整完成 ✓；★ 构建引用已更新 ✓；★ depth4 骨架就位 ✓（★ 内容留待讨论后再写 ✓）。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）

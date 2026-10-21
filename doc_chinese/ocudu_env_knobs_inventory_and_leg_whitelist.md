@@ -274,7 +274,7 @@ OCUDU_PROBE_RE
 
 ### 模型与几何
 
-- 训练产物入库：`lib/phy/upper/ai_signal_processors/depth3/depth3_modcond_ft/`（含 README、契约声明、重建命令）。
+- 训练产物入库：`lib/phy/upper/ai_signal_processors/depth3/ai_assets/depth3_modcond_ft/`（含 README、契约声明、重建命令）。
 - 该模型是 **N78 / 20 MHz / TDD / 30 kHz / 51 PRB**：平面固定 `[1, 612, 14, 16]`，产物声明 `depth3_nsc=612`。
 - **N1 / 5 MHz / FDD 不能直接用**：5 MHz（15 kHz SCS）只有 25 PRB = 300 子载波，几何不匹配的产物在**绑定时被拒绝**（本轮新增），而不是每次接收静默回落。
 

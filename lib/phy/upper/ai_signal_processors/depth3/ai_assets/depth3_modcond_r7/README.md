@@ -68,7 +68,7 @@ SNR_RANGE=0,48 bash probe/eval_narrow_c32.sh <run-dir> --label <label>
 The predecessor is still in the tree; point the build at it and reconfigure:
 
 ```bash
-cmake -B build -DOCUDU_DEPTH3_DEFAULT_MODEL=$PWD/lib/phy/upper/ai_signal_processors/depth3/depth3_modcond_c32h/d3_modcond_c32h.mlmodelc
+cmake -B build -DOCUDU_DEPTH3_DEFAULT_MODEL=$PWD/lib/phy/upper/ai_signal_processors/depth3/ai_assets/depth3_modcond_c32h/d3_modcond_c32h.mlmodelc
 ```
 
 Nothing else changes: the arm reads the declared range from whichever bundle is bound, so the gate's floor
