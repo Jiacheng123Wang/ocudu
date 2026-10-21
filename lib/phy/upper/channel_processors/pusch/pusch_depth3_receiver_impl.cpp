@@ -296,8 +296,20 @@ public:
   for (shared_calibration& cal : shared_sinr_cal) {
     cal = {1.0F, 0.0F};
   }
-  shared_sinr_cal[6] = {0.932F, 0.33F};   // 64QAM: published = 0.932 * shared + 0.33
-  shared_sinr_cal[8] = {1.038F, -3.08F};  // 256QAM
+  // Fitted on 714 receptions across four corpora (design section 19.280), direction `classic = a * shared + b`:
+  //   QPSK   n=300  a=0.982 b=+1.27  rms 0.19 dB
+  //   16QAM  n=105  a=1.055 b=-0.13  rms 0.19 dB
+  //   64QAM  n=105  a=1.073 b=-0.35  rms 0.47 dB
+  //   256QAM n=204  a=0.963 b=+2.97  rms 2.09 dB
+  // Every slope lands inside [0.9, 1.1], which is the acceptance rule for this conversion. The 256QAM scatter is the
+  // one to watch: its mean is corrected, its spread is twice the others'.
+  // THE COEFFICIENTS ARE THE FIT ITSELF, not its inverse: the fit already reads `classic = a * shared + b`, so `a` and
+  // `b` ARE the conversion the receiver applies. Inverting them -- which the first version did, on the reflex that a
+  // fitted line must be undone -- published 27.75 dB where the fit says 31.57 on the same reception.
+  shared_sinr_cal[2] = {0.982F, +1.27F};   // QPSK
+  shared_sinr_cal[4] = {1.055F, -0.13F};   // 16QAM
+  shared_sinr_cal[6] = {1.073F, -0.35F};   // 64QAM
+  shared_sinr_cal[8] = {0.963F, +2.97F};   // 256QAM
   if (const char* env = std::getenv("OCUDU_DEPTH3_SHARED_SINR_CAL")) {
     // "qm:slope,offset;qm:slope,offset" -- for a fit run, so the constants can be revised without a rebuild.
     std::string text(env);
