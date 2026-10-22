@@ -1,8 +1,16 @@
 # depth4（AI LDPC 解码）：**网络设计**
 
-> **本文件只回答一个问题：网络应该是什么样。**
-> 实验、测量、调试、订正、里程碑进展 ⇒ `depth4_lpdc_ai_design_and_implementation.md`（过程日志）。
-> 状态与待裁定 ⇒ `depth4_lpdc_ai_high_level_status_and_plan.md`。
+> ★★ **本文件是 depth4【网络设计】的现行权威** ✓ —— ★ 它从**上位文档**
+> `depth4_lpdc_ai_design_and_implementation.md` **生长出来** ✓（★ 与 depth3 的
+> `model_network_design.md` 之于 `llr_ai_detection_design_and_implementation.md` 同一关系 ✓）。
+>
+> | 归属 | 内容 |
+> |---|---|
+> | **本文件** | ★ **网络该是什么** ✓：输入输出边界、不变式、图的形状、层内运算、深度与退出、训练与标签、部署形态、网络层判据、术语 ✓ |
+> | **上位文档**（`..._design_and_implementation.md`）| ★ **工作流全貌** ✓：打桩与参考库、数据与标签来源、测量与调试、订正链、实施细节、里程碑进展 ✓ |
+> | `..._high_level_status_and_plan.md` | ★ 当前状态、里程碑、待裁定 ✓ |
+>
+> ★ 冲突时 ✓：★ **网络本身以本文件为准** ✓；★ **接缝、数据管线、实施与里程碑以上位文档为准** ✓。
 
 ---
 

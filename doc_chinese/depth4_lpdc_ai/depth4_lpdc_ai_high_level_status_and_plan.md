@@ -18,7 +18,7 @@
 
 ## 0. 状态研判（先读这一节）
 
-> ★★ **分工（2026-10-22）**：★ **网络设计本身** ⇒ `depth4_lpdc_ai_design.md` ✓；
+> ★★ **分工（2026-10-22）**：★ **网络设计本身** ⇒ `depth4_lpdc_ai_network_design.md` ✓（★ 上位文档：`..._design_and_implementation.md` ✓）；
 > ★ **过程记录（实验/测量/调试/订正）** ⇒ `depth4_lpdc_ai_design_and_implementation.md` ✓；
 > ★ **本文件** ⇒ 状态、里程碑、判据、待裁定 ✓。
 
