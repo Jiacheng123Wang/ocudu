@@ -16973,59 +16973,60 @@ sudo -E env \
 | ★ B AI 全带 ✓ | ★ 加 `ai` ✓、★ **去掉** `OCUDU_DEPTH3_BUCKETS` ✓ | ★ AI 臂 vs 经典 ✓ |
 | ★ C AI ＋ 桶 ✓ | ★ 两个都加 ✓ | ★ **桶的收益** ✓（★ 吞吐不低于 B ✓、★ `forward p50` 下降 ✓）|
 
-#### 19.296.4 ★★★ 起飞序列（★ **直接起 gNB**，★ 不经 `run_leg.sh` ✓，2026-10-23 ✓）
+#### 19.296.4 ★★★ 起飞序列（★ **用 `run_leg.sh`** ✓，★ 不要绕开 ✓，2026-10-23 ✓）
 
-★ 为什么绕开 `run_leg.sh` ✓：★ 它会在起腿前**重建**并**重起** gNB ✓；★ 而手机在"最简命令直接起 gNB"时
-**能稳定接入** ✓（★ 用户实测 ✓）⇒ ★ 飞行改用直接启动 ✓，★ 日志用 `tee` 落到 `work_tmp/artifacts/logs/` ✓。
+★★ **为什么不绕开 ✓**：★ `run_leg.sh` 负责**预检构建** ✓、★ **日志命名与分轨**（`.log/.stderr/.stdout` ✓）、
+★ 语料目录 ✓、★ smoke 检查 ✓、★ "gNB 选项/knob" 回显 ✓ —— ★ 手工直起会漏掉其中几项 ✓，
+★ 今晚已经因为漏了 `--expert_phy.pusch_receiver_backend ai` 白飞一腿 ✓（§19.296.1 ✓）。
 
-**(a) 起 gNB（AI 臂 ＋ 8 桶）**
+**(a) 起飞（AI 臂 ＋ 8 桶）**
 
 ```bash
 cd ~/dev/ocudu
 export B=$PWD/doc_chinese/llr_ai_detection/work_tmp/artifacts/buckets/c32h
 export LIST=""; for m in $B/base_w*.mlmodelc; do LIST="${LIST:+$LIST,}$m"; done
-export LOG=$PWD/doc_chinese/llr_ai_detection/work_tmp/artifacts/logs/gnb_ai_buckets_$(date +%m%d_%H%M).log
 
 sudo -E env \
+  LEG_CONFIG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml \
   OCUDU_DEPTH3_FALLBACK=none \
   OCUDU_DEPTH3_DOMAIN_GATE=net \
   OCUDU_DEPTH3_BUCKETS="$LIST" \
-  ./build/apps/gnb/gnb -c configs/gnb_rf_b200_tdd_n78_20mhz.yml \
-    --expert_phy.pusch_receiver_backend ai 2>&1 | tee "$LOG"
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-buckets-ai \
+    --expert_phy.pusch_receiver_backend ai
 ```
+★ `run_leg.sh` 起腿前会重建（★ 想跳过就前面加 `LEG_SKIP_BUILD=1` ✓）；
+★ 需要语料时再加 `OCUDU_UL_DUMP=$PWD/doc_chinese/llr_ai_detection/work_tmp/corpus/aillr-buckets-ai/C
+OCUDU_UL_DUMP_COUNT=3000 OCUDU_UL_DUMP_MIN_RB=2 OCUDU_UL_DUMP_LLR=1` ✓（★ 纯吞吐腿可省 ✓）。
 
-**(b) 起腿后 10 秒内必须看到（同一条命令的另一个终端）**
+**(b) 起腿后 10 秒确认（stderr 与主日志各看一眼）**
 
 ```bash
-grep -aE "narrow-band buckets bound|PURE mode|NOT bound|AI depth-3: bundle" "$LOG" | head -5
+L=$(ls -t doc_chinese/phy_pipeline_gpu/wip/logs/gnb_gpu_aillr-buckets-ai_*.log | head -1)
+grep -a "gNB options" "${L%.log}.log.stderr"          # 必须含 --expert_phy.pusch_receiver_backend ai
+grep -aE "narrow-band buckets bound|PURE mode" "${L%.log}.log.stderr" | head -2
+grep -ac "NOT bound" "${L%.log}.log.stderr"           # 必须 0
+grep -ac "Real-time failure in RF" "$L"               # 起飞前 30 秒内不增长
 ```
-★ 期望三条 ✓：★ `bundle loaded` ✓、★ `buckets bound: 108 … 612` ✓、★ `PURE mode` ✓；★ **`NOT bound` 必须为 0** ✓。
 
-**(c) 手机接入**（★ 你手动 ✓，★ 接入后**不要**再开关飞行模式 ✓）
+**(c) 手机接入**（★ 你手动 ✓）★ —— ★ 若 `run_leg` 重起 gNB 后手机不回来 ✓ ⇒
+★ 用 memo §10.3 ③ 的**基带重启** ✓（★ `adb` 必须连着 ✓）。
 
-**(d) 取手机 IP ＋ 短腿**
+**(d) 短腿**
 
 ```bash
-ssh jwang@192.168.31.211 'grep -a "Session" ~/work/open5gs/install/var/log/open5gs/smf.log | tail -1'
-# 记下 IPv4（如 10.45.0.2），然后：
+ssh jwang@192.168.31.211 'grep -a "Session" ~/work/open5gs/install/var/log/open5gs/smf.log | tail -1'  # 取 IPv4
 iperf3 -c <手机IP> -R -t 60 -P 4
 ```
 
-**(e) 短腿期间盯两处**
+**(e) 短腿期间盯** ✓：★ gNB 的 `t` 屏（`pusch ok/nok` ✓）＋ ★ `grep -a "depth3-timing" "$L" | tail -1` ✓。
 
-| ★ 看哪 ✓ | ★ 命令 ✓ | ★ 判据 ✓ |
-|---|---|---|
-| ★ gNB 的 `t` 屏 ✓ | ★ 在 gNB 终端按 `t` ✓ | ★ `pusch ok` 增长 ✓、★ `nok` 比例低 ✓ |
-| ★ 深度 3 计时 ✓ | ★ `grep -a "depth3-timing" "$LOG" \| tail -1` ✓ | ★ 出现 `forward p50 …` ✓ |
+**(f) 300 秒 ＋ 两条对照腿（同样用 `run_leg.sh` ✓）**
 
-**(f) 短腿通过后：300 秒 + 两条对照腿**
-
-```bash
-# C：AI ＋ 桶（上面这条）
-iperf3 -c <手机IP> -R -t 300 -P 4
-# B：AI 全带 —— 去掉 OCUDU_DEPTH3_BUCKETS，其余不变，重起 gNB
-# A：经典    —— 去掉 OCUDU_DEPTH3_BUCKETS 与 --expert_phy.pusch_receiver_backend ai
-```
+| ★ 腿 | ★ 差别 |
+|---|---|
+| ★ **C AI＋桶** ✓ | ★ 如 (a) ✓ |
+| ★ **B AI 全带** ✓ | ★ 去掉 `OCUDU_DEPTH3_BUCKETS` ✓，★ 其余不动 ✓ |
+| ★ **A 经典** ✓ | ★ 再去掉 `--expert_phy.pusch_receiver_backend ai` ✓ |
 
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
