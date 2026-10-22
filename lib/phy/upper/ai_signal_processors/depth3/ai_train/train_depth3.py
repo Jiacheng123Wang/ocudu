@@ -729,7 +729,11 @@ def export_buckets(args, parser, source=None):
     if not args.export_probe:
         parser.error("--export-buckets derives its file names from --export-probe")
     weights = args.export_only or os.path.join(args.out, "depth3_best.keras")
-    aux = not args.no_reporting_heads
+    # TWO INDEPENDENT FLAGS, NOT ONE. `aux_heads` also builds the per-RE noise head, which a two-head bundle keeps --
+    # only the two REPORTING heads go away. Mirroring the single flag gave the bucket graph 94 weights against the
+    # source's 96 and the export refused, which is the check doing its job.
+    aux = not args.no_aux
+    reporting = not args.no_reporting_heads
     # THE SHAPE COMES FROM THE GRAPH, NOT FROM THE COMMAND LINE. `--in-channels` defaults to 0 because the layouts
     # disagree about it, and `--c-hid` defaults to 64, so a bucket built from the flags alone produced a 64-channel
     # graph with a zero-channel entry conv and refused to load. The source model knows both.
@@ -743,7 +747,7 @@ def export_buckets(args, parser, source=None):
         narrow = build(width=width, blocks=blocks, qm=D3.BITS_PER_SYMBOL[args.modulation],
                        aux_heads=aux, c_hid=c_hid, dtype=args.dtype,
                        layout=args.layout, in_channels=in_channels, cond=args.modcond,
-                       reporting_heads=aux)
+                       reporting_heads=reporting)
         # WEIGHTS ARE COPIED, NOT RELOADED. A `.keras` archive carries the width the graph was built with, and loading
         # it into a graph built for another width fails on every layer past the divergence (41 objects in the first
         # attempt). The tensor shapes do not depend on the width -- they are 1x1 and depthwise convolutions -- so

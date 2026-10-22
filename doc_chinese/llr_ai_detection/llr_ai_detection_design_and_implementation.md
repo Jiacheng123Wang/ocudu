@@ -17235,6 +17235,56 @@ sudo -E env \
 ★★ **要么把 E2 停掉再 PK ✓，要么两条腿**背靠背**在同样负载下跑 ✓** ——
 ★ 后者同样有效 ✓（★ 比较的是相对差 ✓），★ 但**必须同一天、同一位置、同一负载背景** ✓，★ 否则 15.3 vs 19.3 这种差会被误读成模型/桶的差 ✓。
 
+#### 19.297.1 ★★★ E1 的 8 个桶已备好 ✓，A/B 只需加一个参数 ✓（2026-10-23 07:20 ✓）
+
+**(a) ★ 产物位置 ✓**
+
+```
+doc_chinese/llr_ai_detection/work_tmp/artifacts/buckets/e1/
+    d3_e1_2heads.mlmodelc            # 基座（全带 612）
+    buckets/base_w{108,…,612}.mlmodelc   # 8 个桶（★ 与 ai_assets 同一命名约定 ✓）
+```
+
+★ 为什么文件名是 `base_w{N}` ✓：★ 默认的桶查找就是**探测**基座同级 `buckets/base_w{108…612}.mlmodelc` ✓
+⇒ ★ **指向 E1 的基座，8 个桶自动绑定** ✓（★ 已用回放验证：★ `buckets bound: 108 … 612` ✓）。
+
+**(b) ★★ 导出时踩的坑（★ 已修 ✓）**
+
+★ `export_buckets` 把 `--no-reporting-heads` 当成"连 `aux_heads` 一起关" ✓ ⇒
+★ 第一次建出的桶图 **94** 权重 vs 源 **96** ✓（★ 少了噪声头的 kernel/bias ✓）；
+★ 改成两个独立标志后又变成 **100** vs 96 ✓（★ 多建了两个上报头 ✓）。
+★★ **⇒ `aux_heads`（★ 含逐 RE 噪声头 ✓）与 `reporting_heads`（★ 两个上报头 ✓）是两件独立的事** ✓，
+★ 两头包 = `aux_heads=True` ＋ `reporting_heads=False` ✓（★ 已修 ✓，★ 权重数校验当场抓住 ✓）。
+
+**(c) ★★ A/B 命令（★ 只差一个参数 ✓）**
+
+```bash
+# A：现役 c32h（默认模型）
+sudo -E env \
+  LEG_CONFIG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml \
+  OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_MIN_PRB=2 \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-ab-c32h \
+    --expert_phy.pusch_receiver_backend ai
+
+# B：E1（同一命令 ＋ 一个模型路径）
+sudo -E env \
+  LEG_CONFIG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml \
+  OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_MIN_PRB=2 \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-ab-e1 \
+    --expert_phy.pusch_receiver_backend ai \
+    --expert_phy.pusch_receiver_model $PWD/doc_chinese/llr_ai_detection/work_tmp/artifacts/buckets/e1/d3_e1_2heads.mlmodelc
+```
+
+**(d) ★★ A/B 的判读纪律 ✓**
+
+| ★ 项 ✓ | ★ 说明 ✓ |
+|---|---|
+| ★ 比较什么 ✓ | ★ **crc OK 比例 ＋ 吞吐 ＋ `forward p50`** ✓ |
+| ★ **不要比 `sinr`** ✓ | ★ E1 是两头 ⇒ 公开量走**共享测量层** ✓；★ c32h 走**自己的标定** ✓ ⇒ 两条路径不同 ✓，★ 数值不可直接比 ✓ |
+| ★ 顺序 ✓ | ★ **背靠背**（★ A 后立刻 B ✓），★ 同一位置、★ 同一 ipre 参数、★ 同一背景负载 ✓（★ 见 §19.296.10 ✓）|
+| ★ 判据（§47.7 ✓）| ★ E1 更好 ⇒ 采纳（★ 再导出到 `ai_assets/` ＋ 改默认 ✓）；★ 持平/更差 ⇒ 保 c32h ✓ |
+
+★ 状态：★ **E1 桶已就绪 ✓**；★ A/B 只等机器空闲（★ E2 训练在跑 ✓，★ load ~13 ✓）。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
