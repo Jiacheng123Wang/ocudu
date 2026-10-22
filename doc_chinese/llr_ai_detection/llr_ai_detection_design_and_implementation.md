@@ -16866,6 +16866,44 @@ train_depth3.py --export-only <run>/depth3_best.keras \
 
 ★ 状态：★ **裁剪路径已验证等价 ✓**；★ 运行时选桶已生效 ✓；★ **可以准备飞行** ✓。
 
+### 19.294 ★★★ 部署模型的 8 桶就绪 ✓：★ c32h 的桶与全带臂**逐项相同** ✓（2026-10-22）
+
+★ 结论 ✓：★ **可以按现役 c32h 直接飞桶** ✓ —— ★ 不必等 E1 ✓。
+
+**(a) ★ 导出（★ 关键是 `--sinr-cal` ✓）**
+
+```bash
+train_depth3.py --export-only data/runs/d3_dmrs2711h_c32/depth3_best.keras \
+    --export-probe work_tmp/artifacts/buckets/c32h/base.mlpackage \
+    --export-buckets 108,180,252,324,396,468,540,612 \
+    --modcond --layout spatial --modulation 256QAM --snr-range 0,48 \
+    --sinr-cal "2:1.2678,-3.8298;4:1.0911,-1.3579;6:1.1251,-1.6222;8:1.2822,-4.0420"
+```
+★ 这串标定取自 c32h 自己的 `metadata.json` 的 `depth3_sinr_cal` ✓。
+
+**(b) ★★ 两个坑（★ 都会让产物"看起来对" ✓）**
+
+| ★ 坑 | ★ 现象 | ★ 修法 |
+|---|---|---|
+| ★ 导出**不带** `--sinr-cal` ✓ | ★ 宽带上 c32h 30.17 dB、★ 桶产物 **26.68 dB** ✓（★ 差 3.5 dB ✓，★ 会误导调度器 ✓）| ★ 传 `--sinr-cal` ✓（★ 桶产物随后**逐位相同** ✓）|
+| ★ 用 `ls base_w*.mlmodelc` 拼桶列表 ✓ | ★ `ls` 把**目录内容**列了出来 ✓ ⇒ ★ 绑定时出现 `bucket 'analytics' NOT bound` ✓ | ★ 用 shell 展开直接拼 ✓（★ `for m in $D/base_w*.mlmodelc` ✓）|
+
+**(c) ★★ 验证 ✓**
+
+| ★ 对照 | ★ 结果 |
+|---|---|
+| ★ 宽带捕获：c32h vs 桶 `w612` ✓ | ★ crc/it/sinr/epre/rsrp **全部相同** ✓（30.17 dB ✓）|
+| ★ 窄语料 4 段：c32h vs **8 桶集** ✓ | ★ **4/4 逐项相同** ✓（★ 含 `crc=OK it=5 sinr 17.70` ✓）|
+| ★ 绑定 ✓ | ★ `narrow-band buckets bound: 108 180 252 324 396 468 540 612` ✓ |
+
+**(d) ★ 飞行步骤**
+
+1. ★ 桶目录 ✓：`work_tmp/artifacts/buckets/c32h/`（★ 8 个 `.mlmodelc` ✓）；
+2. ★ 环境 ✓：`OCUDU_DEPTH3_BUCKETS=<8 个路径，逗号分隔，含 w612>` ✓；★ `OCUDU_DEPTH3_FALLBACK=none` ✓；
+3. ★ 断言 ✓：★ 无归零 ✓、★ 吞吐 ≥ 现役 ✓、★ 上报正常（★ 不是 0.00 dB ✓）。
+
+★ 状态：★ **桶就绪 ✓、验证通过 ✓**；★ **可飞 ✓**（★ 用 c32h 权重 ✓；★ E1 若赢再换 ✓）。
+
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
