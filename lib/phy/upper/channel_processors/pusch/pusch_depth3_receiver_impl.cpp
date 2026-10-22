@@ -502,6 +502,53 @@ public:
         }
         shared_engine      = std::move(engine);
         any_model_bound    = true;
+        // THE BUCKET SET (model_network_design section 49.9). A comma-separated list of additional artefacts, each
+        // declaring its own width; every one holds the same weights at a different input width, and the reception
+        // picks the smallest that fits. 612 belongs in the list, because that one always fits.
+        if (const char* env = std::getenv("OCUDU_DEPTH3_BUCKETS")) {
+          std::string list(env);
+          size_t      pos = 0;
+          while (pos <= list.size()) {
+            const size_t comma = list.find(',', pos);
+            const std::string one = list.substr(pos, (comma == std::string::npos) ? std::string::npos : comma - pos);
+            if (!one.empty()) {
+              auto bucket = std::make_unique<metal::coreml_nn_engine>();
+              if (bucket->init_depth3(one.c_str()) && (bucket->depth3_nsc() != 0) &&
+                  (bucket->depth3_nsc() <= pusch_depth3_input_plane::NOF_SUBCARRIERS)) {
+                narrow_buckets.push_back(bucket->depth3_nsc());
+                narrow_engines.push_back(std::move(bucket));
+              }
+            }
+            if (comma == std::string::npos) {
+              break;
+            }
+            pos = comma + 1;
+          }
+          // Ascending, so the reception's lower_bound finds the smallest fitting bucket.
+          std::vector<size_t> order(narrow_buckets.size());
+          for (size_t i = 0; i != order.size(); ++i) {
+            order[i] = i;
+          }
+          std::sort(order.begin(), order.end(),
+                    [this](size_t a, size_t b) { return narrow_buckets[a] < narrow_buckets[b]; });
+          std::vector<unsigned> sorted_nsc;
+          std::vector<std::unique_ptr<metal::coreml_nn_engine>> sorted_engines;
+          for (size_t i : order) {
+            sorted_nsc.push_back(narrow_buckets[i]);
+            sorted_engines.push_back(std::move(narrow_engines[i]));
+          }
+          narrow_buckets = std::move(sorted_nsc);
+          narrow_engines = std::move(sorted_engines);
+          if (!narrow_buckets.empty()) {
+            std::string widths;
+            for (unsigned w : narrow_buckets) {
+              widths += fmt::format("{} ", w);
+            }
+            notes.push_back(fmt::format("narrow-band buckets bound: {}subcarrier(s); the smallest that fits a "
+                                        "reception's allocation plus four PRB of context is used",
+                                        widths));
+          }
+        }
         notes.push_back(fmt::format("modcond model '{}' bound: one bundle computes {} modulation(s) "
                                     "(Qm set printed by the coverage line), plane {} channels, LLR stride {}; "
                                     "compute units '{}' requested",
@@ -828,8 +875,35 @@ public:
     // modulation over a conditioned bundle (`depth3_model_map` keeps the slot), and that reception must then
     // run the slot's engine with the slot's stride. The conditioned engine is the fallback for the
     // modulations no per-modulation model claimed.
-    metal::coreml_nn_engine& computing_engine =
-        engine_by_qm[qm] != nullptr ? *engine_by_qm[qm] : *shared_engine;
+    metal::coreml_nn_engine* computing_engine =
+        engine_by_qm[qm] != nullptr ? engine_by_qm[qm].get() : shared_engine.get();
+
+    // ---- WHICH BUCKET (model_network_design section 49.9) -------------------------------------------
+    // A bucket set is bound per modulation and the SMALLEST ONE THAT FITS is used, so "the allocation does not fit" can
+    // only happen when the 612-wide bucket is missing from the set -- 612 is the whole plane, so it always fits. The
+    // width a reception needs is its allocation plus four PRB of context on each side, clipped to the plane.
+    unsigned needed_nsc = pusch_depth3_input_plane::NOF_SUBCARRIERS;
+    unsigned bucket_nsc = bound_nsc_;
+    if (!narrow_buckets.empty()) {
+      const unsigned ctx      = 4 * NOF_SUBCARRIERS_PER_RB;
+      const unsigned first_sc = narrow_first_prb(config) * NOF_SUBCARRIERS_PER_RB;
+      const unsigned first    = (first_sc > ctx) ? (first_sc - ctx) : 0U;
+      const auto     tail     = static_cast<unsigned>((narrow_last_prb(config) + 1) * NOF_SUBCARRIERS_PER_RB) + ctx;
+      const unsigned last     = (tail < pusch_depth3_input_plane::NOF_SUBCARRIERS)
+                                    ? tail
+                                    : static_cast<unsigned>(pusch_depth3_input_plane::NOF_SUBCARRIERS);
+      needed_nsc              = last - first;
+      const auto it            = std::lower_bound(narrow_buckets.begin(), narrow_buckets.end(), needed_nsc);
+      if (it != narrow_buckets.end()) {
+        bucket_nsc = *it;
+        // The engine follows the bucket, and so does the modulation question: every bucket holds the same weights.
+        auto iter = std::find(narrow_buckets.begin(), narrow_buckets.end(), bucket_nsc);
+        const size_t index = static_cast<size_t>(std::distance(narrow_buckets.begin(), iter));
+        if (index < narrow_engines.size() && narrow_engines[index] != nullptr) {
+          computing_engine = narrow_engines[index].get();
+        }
+      }
+    }
     // A reception computes only when a model was bound for its modulation, and every binding writes the stride at
     // the same time as the engine. Asserting it keeps a future binding path from computing with a zero stride,
     // which does not fail loudly: it reads one element of the head over and over (measured 2026-10-16).
@@ -1108,11 +1182,16 @@ public:
                                                              ? noise_head.data() : narrow_noise.data());
     // A BUNDLE WITHOUT THE REPORTING HEADS gets null here, and the engine does not bind what the model does not
     // declare (design section 22.2).
-    output.ch_est          = has_ch_est ? reinterpret_cast<uint16_t*>(channel_head.data()) : nullptr;
+    // THE CHANNEL HEAD NEEDS THE SAME TREATMENT AS THE OTHER TWO. It was left pointing at the 612-wide buffer while
+    // the model asked for a 396-wide array, and the engine answered with a plain "forward pass failed" -- the kind of
+    // mismatch that reads as a broken model rather than a broken arm.
+    output.ch_est          = !has_ch_est ? nullptr
+                             : reinterpret_cast<uint16_t*>(plane_nsc == pusch_depth3_input_plane::NOF_SUBCARRIERS
+                                                               ? channel_head.data() : narrow_channel.data());
     output.dmrs_noise      = has_dmrs_noise ? reinterpret_cast<uint16_t*>(&dmrs_noise_head) : nullptr;
     output.bits_per_symbol = qm;
 
-    if (!computing_engine.predict_depth3(input, output)) {
+    if (!computing_engine->predict_depth3(input, output)) {
       degrade_or_fail(depth3_degradation::forward_failed, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
@@ -1136,7 +1215,7 @@ public:
     // `forward` above is the ARM's segment and contains the engine's glue as well: the worker-thread hand-off, the
     // five `MLMultiArray` bindings and the feature provider. Printing both is what separates "our glue" from
     // "Core ML and the ANE", which are different problems with different fixes (design section 19.171).
-    const auto predict_us = static_cast<unsigned>(computing_engine.last_predict_us());
+    const auto predict_us = static_cast<unsigned>(computing_engine->last_predict_us());
 
     // ---- the reporting heads, next to the estimator's own numbers ---------------------------------
     // R6's acceptance is that the network's measurements agree with the classical estimator's to the order
@@ -1762,6 +1841,13 @@ private:
   /// modulation's bits per symbol (2, 4, 6, 8), so a reception picks its model with one lookup.
   depth3_model_map                                  models;
   std::array<std::unique_ptr<metal::coreml_nn_engine>, 9> engine_by_qm;
+  /// \brief The narrow-band bucket set, ascending (model_network_design section 49.9), and its engines.
+  ///
+  /// A reception uses the SMALLEST bucket that fits its allocation plus four PRB of context, so "it does not fit" is
+  /// impossible while the 612-wide bucket is in the set -- that one is the whole plane. The set is bound once, from the
+  /// OCUDU_DEPTH3_BUCKETS environment variable, and every bucket holds the same weights.
+  std::vector<unsigned>                                   narrow_buckets;
+  std::vector<std::unique_ptr<metal::coreml_nn_engine>>   narrow_engines;
   std::array<depth3_scales, 9>                      scales_by_qm;
   /// True when at least one model bound: the arm will compute for the modulations it covers.
   bool                                              any_model_bound = false;
