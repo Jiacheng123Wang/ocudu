@@ -16904,6 +16904,75 @@ train_depth3.py --export-only data/runs/d3_dmrs2711h_c32/depth3_best.keras \
 
 ★ 状态：★ **桶就绪 ✓、验证通过 ✓**；★ **可飞 ✓**（★ 用 c32h 权重 ✓；★ E1 若赢再换 ✓）。
 
+### 19.296 ★★★ 飞行腿的坑：★ 没传 `--expert_phy.pusch_receiver_backend ai` ⇒ 跑的是**经典链** ✓（2026-10-23 ✓）
+
+> ★ 本节原在 `test_environment/香港测试环境与手机接入问题总结_2026-09-05.md` §9.7 ✓；
+> ★ **飞行属于 depth3 工作** ⇒ 按文档分工迁回本文件 ✓（★ 手机接入的排障仍在那份 memo 的 §9–§10 ✓）。
+
+#### 19.296.1 现象与根因：★ 没传 `--expert_phy.pusch_receiver_backend ai` ⇒ 跑的是**经典链** ✓（2026-10-23 01:10 ✓）
+
+★ 现象 ✓：★ 300 秒反向 iperf（★ 4 流 ✓）得到 **18.8 Mbit/s** ✓，★ 但 gNB 日志里 **`depth3` 出现 0 次** ✓。
+
+★ 根因 ✓：★ `run_leg.sh` 的 stderr 写着 `gNB options : <none>` ✓ ⇒ ★ **没有把 AI 臂打开** ✓ ⇒
+★ 工厂里 `pusch_receiver_backend` 默认 `auto` ✓ ＝ **classic** ✓ ⇒ ★ 这一腿量的是**经典链** ✓。
+
+★★ **正确的飞行命令 ✓**（★ AI 臂 ＋ 8 个桶 ✓）：
+
+```bash
+sudo -E env \
+  LEG_CONFIG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml \
+  OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_DOMAIN_GATE=net \
+  OCUDU_DEPTH3_BUCKETS="$LIST" \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-buckets-ai \
+    --expert_phy.pusch_receiver_backend ai
+```
+
+★ 起来后 stderr 必须出现 ✓（★ 两条缺一不可 ✓）：
+
+```
+[pusch_receiver] AI depth-3: narrow-band buckets bound: 108 180 252 324 396 468 540 612 subcarrier(s)
+[pusch_receiver] AI depth-3: PURE mode (OCUDU_DEPTH3_FALLBACK=none): ...
+```
+
+★ 对照腿 ✓：★ 同一条命令**去掉** `OCUDU_DEPTH3_BUCKETS` ✓ ⇒ ★ AI 全带；★ 再去掉 `--expert_phy...ai` ✓
+⇒ ★ 经典链（★ 今晚这条 ✓）。★ 三条腿的 iperf 参数必须一致 ✓。
+
+★ 另 ✓：★ 本腿 gNB 日志里 **`Real-time failure in RF` 68 次** ✓ —— ★ 飞行前要确认它不再增长 ✓。
+
+#### 19.296.2 ★★ AI 臂 ＋ 桶 的起飞命令（★ 已验证 ✓）
+
+```bash
+cd ~/dev/ocudu
+export B=$PWD/doc_chinese/llr_ai_detection/work_tmp/artifacts/buckets/c32h
+export LIST=""; for m in $B/base_w*.mlmodelc; do LIST="${LIST:+$LIST,}$m"; done
+
+sudo -E env \
+  LEG_CONFIG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml \
+  OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_DOMAIN_GATE=net \
+  OCUDU_DEPTH3_BUCKETS="$LIST" \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-buckets-ai \
+    --expert_phy.pusch_receiver_backend ai
+```
+
+★ **2026-10-23 01:15 实测 ✓**：★ stderr 出现 ✓
+
+```
+[pusch_receiver] AI depth-3: narrow-band buckets bound: 108 180 252 324 396 468 540 612 subcarrier(s); ...
+[pusch_receiver] AI depth-3: PURE mode (OCUDU_DEPTH3_FALLBACK=none): ...
+[pusch_receiver] AI depth-3: bucket 108 sc: conditioned yes, declares 4 modulation(s)
+```
+★ 且 ★ **`Real-time failure` 在 stderr 里为 0** ✓ ⇒ ★ **gNB 侧就绪** ✓。
+
+★★ **但这一腿 0 次接收** ✓（★ 无 `crc=`、★ 无 `depth3-timing` ✓）★ —— ★ **UE 没接上** ✓（★ 手机侧问题，见 memo §9/§10 ✓）。
+
+#### 19.296.3 ★ 三条腿的对照设计
+
+| ★ 腿 | ★ 差异 | ★ 回答 |
+|---|---|---|
+| ★ A 经典 ✓ | ★ 不加 `--expert_phy...ai` ✓ | ★ 现役基线 ✓（★ 2026-10-23 00:59 腿：★ **18.8 Mbit/s** ✓）|
+| ★ B AI 全带 ✓ | ★ 加 `ai` ✓、★ **去掉** `OCUDU_DEPTH3_BUCKETS` ✓ | ★ AI 臂 vs 经典 ✓ |
+| ★ C AI ＋ 桶 ✓ | ★ 两个都加 ✓ | ★ **桶的收益** ✓（★ 吞吐不低于 B ✓、★ `forward p50` 下降 ✓）|
+
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
