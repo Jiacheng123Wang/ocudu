@@ -17051,6 +17051,45 @@ iperf3 -c <手机IP> -R -t 60 -P 4
 
 ★ 状态：★ gNB 侧（AI 臂 ＋ 8 桶）**已验证就绪** ✓；★ 唯一缺的是**按正确顺序接手机** ✓。
 
+#### 19.296.6 ★★★ 手机接不上的真因：★ **Msg3 是 3 PRB，而 AI 臂的 `MIN_PRB` 是 4** ✓（2026-10-23 01:35 ✓）
+
+★ 01:27 腿的日志里抓到了完整的接入尝试 ✓：
+
+```
+[PHY]     PDCCH: rnti=0x4650 ...            <- 手机收到了 RAR 的调度
+[SCHED]   UL: ue=invalid rnti=0x4650 ...     <- Msg3
+[PHY]     PUSCH: rnti=0x4650 prb=[8, 11) symb=[0,14) mod=QPSK rv=0 tbs=11 **crc=KO**
+[SCHED]   Discarding UL HARQ ... tbs=11      <- 重传用尽，接入失败
+```
+
+★★ **⇒ 手机一直在尝试** ✓（★ PRACH/PDCCH 都有 ✓），★ **卡在 Msg3 解不出来** ✓。
+★ 而 `prb=[8, 11)` ＝ **3 PRB** ✓，★ 臂的装配器地板 `MIN_PRB = 4` ✓（★ 训练包络 ✓）
+★ ⇒ **3 PRB 的 Msg3 被拒** ✓ ⇒ ★ 而 `OCUDU_DEPTH3_FALLBACK=none` 下**被拒即擦除** ✓ ⇒ ★ **SRB1 永远解不出来** ✓ ⇒ 接入失败 ✓。
+
+★★ **这段失败模式代码里早有注释** ✓（★ `pusch_depth3_input_plane.cpp` ✓）：
+
+> "on 2026-10-20 it made a pure run impossible to attach: the UE's small grants are 1 to 3 PRB, every one was refused,
+> every reception was erased, and no SRB1 decoded."
+
+★ 当时的解法就是留了这个开关 ✓：**`OCUDU_DEPTH3_MIN_PRB`** ✓ —— ★ 今晚忘了带 ✓。
+
+★★ **⇒ 修正后的起飞命令（只多一个环境变量 ✓）**：
+
+```bash
+sudo -E env \
+  LEG_CONFIG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml \
+  OCUDU_DEPTH3_FALLBACK=none \
+  OCUDU_DEPTH3_DOMAIN_GATE=net \
+  OCUDU_DEPTH3_MIN_PRB=2 \
+  OCUDU_DEPTH3_BUCKETS="$LIST" \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-buckets-ai \
+    --expert_phy.pusch_receiver_backend ai
+```
+
+★ 若仍有 **1 PRB** 的 SRB 授权解不出 ✓ ⇒ ★ 再降到 `OCUDU_DEPTH3_MIN_PRB=1` ✓（★ 包络外 ✓，★ 但"算不好"优于"擦除" ✓）。
+
+★★ **⇒ 经典腿为什么没问题 ✓**：★ 经典链**没有这个地板** ✓ ⇒ ★ 3 PRB 照常解 ✓。
+★ 所以"问题在 gNB 侧"的判断**是对的** ✓ —— ★ 但不是 RF ✓、★ 是**臂的包络与 fallback 策略** ✓。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
