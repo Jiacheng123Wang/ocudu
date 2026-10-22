@@ -100,7 +100,7 @@ ru_sdr:
   sync: internal
 
 cell_cfg:
-  dl_arfcn: 625000         # 3375.0: an attached UE ran uplink here (2026-10-22 18:4x, MCS 26); test_environment section 9
+  dl_arfcn: 627264         # 3408.96: the working point -- 10-21 and the 10-22 evening attach both used it
 #  dl_arfcn: 625920         # 10M BW, iPhone17 only
 #  dl_arfcn: 624000         # 20M BW
 #  dl_arfcn: 621600         # 20M BW 
