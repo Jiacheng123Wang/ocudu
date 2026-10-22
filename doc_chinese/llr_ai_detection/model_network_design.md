@@ -5348,9 +5348,9 @@ train_depth3.py --train …/data/datasets/d3_modcond_train.npz --val …/d3_modc
 
 ```
 train_depth3.py --export-only <run>/depth3_best.keras \
-    --export-probe /tmp/buckets/base.mlpackage --export-buckets 108,396,612 ...
+    --export-probe work_tmp/artifacts/buckets/base.mlpackage --export-buckets 108,396,612 ...
 ```
-★ 产出 ✓：★ `base.mlpackage`（★ 612 ✓）＋ `base_w108 / base_w396 / base_w612` ✓（★ 同一套权重 ✓）。
+★ 产出 ✓：★ `base.mlpackage`（★ 612 ✓）＋ `base_w108 / base_w396 / base_w612`（存在 `work_tmp/artifacts/buckets/`） ✓（★ 同一套权重 ✓）。
 
 ★ 两个坑（★ 都遇到并修掉 ✓）：
 | ★ 坑 | ★ 现象 | ★ 修法 |
