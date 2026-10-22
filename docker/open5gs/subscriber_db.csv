@@ -1,0 +1,5 @@
+# Lab subscriber for the over-the-air phone, in the format add_users.py reads:
+#   imsi,key,op_type,op_code,amf,qci,ip_alloc
+# The IMSI is the one the handset presents (001010123456789), and the K/OPc are the same pair the OAI UE
+# configuration uses (configs/oaiue_b210.conf), so the phone and the software UE share one core entry.
+001010123456789,00112233445566778899aabbccddeeff,opc,00000000000000000000000000000000,8000,9,10.45.1.2
