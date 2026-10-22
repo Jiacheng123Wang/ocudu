@@ -9,9 +9,9 @@
 
 cu_cp:
   amf:
-    addrs: 192.168.31.211
+    addrs: 192.168.0.106
     port: 38412
-    bind_addrs: 192.168.31.204
+    bind_addrs: 192.168.0.231
     supported_tracking_areas:
       - tac: 7
         plmn_list:
@@ -52,11 +52,11 @@ ru_sdr:
   sync: internal
 
 cell_cfg:
-  dl_arfcn: 625000         # 3375.0: an attached UE ran uplink here (2026-10-22 18:4x, MCS 26); test_environment section 9
+#  dl_arfcn: 632628         # 20M BW, onePlus8T only
 #  dl_arfcn: 625920         # 10M BW, iPhone17 only
 #  dl_arfcn: 624000         # 20M BW
 #  dl_arfcn: 621600         # 20M BW 
-  #  dl_arfcn: 627264         # 20M BW
+  dl_arfcn: 627264         # 20M BW
 
   band: 78
   channel_bandwidth_MHz: 20
