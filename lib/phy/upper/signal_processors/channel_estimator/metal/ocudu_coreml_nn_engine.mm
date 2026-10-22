@@ -7,6 +7,8 @@
 
 #include "ocudu_coreml_nn_engine.h"
 
+#include <cstdio>
+
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
 
@@ -234,6 +236,10 @@ bool run_prediction_depth3(coreml_nn_engine_impl* e,
     // A SILENT `return false` here is indistinguishable, one level up, from a model that cannot run at all:
     // both arrive as "the forward pass failed" and the reception degrades. The reason is available and is the
     // difference between a wrong shape and a wrong buffer, so it is printed (2026-10-16).
+    std::fprintf(stderr, "AI depth-3: input plane could not be bound: shape [1,%u,14,%u] over %u element(s): %s\n",
+                 nsc, e->model3_in_channels,
+                 in.nof_subcarriers * NOF_SYMBOLS_PER_SLOT * e->model3_in_channels,
+                 in_err != nil ? in_err.localizedDescription.UTF8String : "no reason given");
     ocudulog::fetch_basic_logger("PHY").error(
         "AI depth-3: the input plane could not be bound: shape [1, {}, 14, {}] over {} element(s); {}",
         nsc, e->model3_in_channels, in.nof_subcarriers * NOF_SYMBOLS_PER_SLOT * e->model3_in_channels,
@@ -278,6 +284,14 @@ bool run_prediction_depth3(coreml_nn_engine_impl* e,
     // Same reason as the input above: the caller only ever sees "the forward pass failed", so the head whose
     // declared shape did not fit its backing -- the one fact that identifies the contract mismatch -- is named
     // here.
+    std::fprintf(stderr,
+                 "AI depth-3: a declared head does not fit the backing (llr %s, noise %s, ch_est %s, dmrs %s); "
+                 "declared shapes: llr [%u], noise [%u], ch_est [%u], dmrs [%u]\n",
+                 llr_arr != nil ? "ok" : "FAILED", noise_arr != nil ? "ok" : "FAILED",
+                 (!e->model3_has_ch_est || ch_arr != nil) ? "ok" : "FAILED",
+                 (!e->model3_has_dmrs_noise || dmrs_arr != nil) ? "ok" : "FAILED",
+                 (unsigned)e->model3_shape[0].count, (unsigned)e->model3_shape[1].count,
+                 (unsigned)e->model3_shape[2].count, (unsigned)e->model3_shape[3].count);
     ocudulog::fetch_basic_logger("PHY").error(
         "AI depth-3: a declared head does not fit the arm's backing (llr {}, post_eq_noise {}, ch_est {}, "
         "dmrs_noise {})",
@@ -314,6 +328,8 @@ bool run_prediction_depth3(coreml_nn_engine_impl* e,
   e->last_predict_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
 
   if (result == nil) {
+    std::fprintf(stderr, "AI depth-3: prediction failed: %s\n",
+                 err != nil ? err.localizedDescription.UTF8String : "nil error");
     ocudulog::fetch_basic_logger("PHY").error(
         "AI depth-3: prediction failed: {}",
         err != nil ? err.localizedDescription.UTF8String : "nil error");
@@ -798,12 +814,26 @@ bool is_reporting_heads_required(const coreml_nn_engine_impl* e)
 bool coreml_nn_engine::predict_depth3(const depth3_input& in, const depth3_output& out)
 {
   auto* e = static_cast<coreml_nn_engine_impl*>(impl);
+  // A SILENT `return false` here is indistinguishable one level up from a forward pass that ran and failed: both arrive
+  // as "the Core ML forward pass failed" and the reception degrades, with nothing naming the field. Two diagnostics are
+  // cheaper than one more guess (narrow-band buckets, model_network_design section 49.9).
   if (e == nullptr || e->model3 == nil) {
+    // ALSO ON STDERR, deliberately: the PHY logger is not attached in every tool that drives this engine (the replay
+    // tool is one), so a logger-only diagnostic is invisible exactly when it is needed -- which is why the narrow-band
+    // forward pass failed three times with no explanation.
+    std::fprintf(stderr, "AI depth-3: predict_depth3 called on an engine with no model bound (engine %s, model %s)\n",
+                 e == nullptr ? "null" : "ok", (e != nullptr && e->model3 != nil) ? "ok" : "nil");
     return false;
   }
   const bool reporting_required = is_reporting_heads_required(e);
   if (in.plane == nullptr || out.llr == nullptr || out.post_eq_noise == nullptr ||
       (reporting_required && (out.ch_est == nullptr || out.dmrs_noise == nullptr))) {
+    std::fprintf(stderr,
+                 "AI depth-3: a required pointer is null (plane %s, llr %s, noise %s, reporting required %s -> ch_est "
+                 "%s, dmrs_noise %s)\n",
+                 in.plane != nullptr ? "ok" : "null", out.llr != nullptr ? "ok" : "null",
+                 out.post_eq_noise != nullptr ? "ok" : "null", reporting_required ? "yes" : "no",
+                 out.ch_est != nullptr ? "ok" : "null", out.dmrs_noise != nullptr ? "ok" : "null");
     return false;
   }
   // The caller states which modulation's model it expects; the model states what it is. A mismatch

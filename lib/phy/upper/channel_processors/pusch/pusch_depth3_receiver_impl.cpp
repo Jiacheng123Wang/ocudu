@@ -515,8 +515,15 @@ public:
               auto bucket = std::make_unique<metal::coreml_nn_engine>();
               if (bucket->init_depth3(one.c_str()) && (bucket->depth3_nsc() != 0) &&
                   (bucket->depth3_nsc() <= pusch_depth3_input_plane::NOF_SUBCARRIERS)) {
+                // The declared MODULATIONS travel with each artefact, and a bucket whose set is empty serves nothing --
+                // which surfaces one level up as "the forward pass failed". Named here so the startup line says it.
+                notes.push_back(fmt::format("bucket {} sc: conditioned {}, declares {} modulation(s)",
+                                            bucket->depth3_nsc(), bucket->depth3_is_modulation_conditioned() ? "yes" : "no",
+                                            bucket->depth3_nof_declared_qm()));
                 narrow_buckets.push_back(bucket->depth3_nsc());
                 narrow_engines.push_back(std::move(bucket));
+              } else {
+                notes.push_back(fmt::format("bucket '{}' NOT bound: init failed or its width does not fit the plane", one));
               }
             }
             if (comma == std::string::npos) {
@@ -1131,9 +1138,13 @@ public:
     // absolute positions, so every reader downstream still indexes by subcarrier and nothing else has to know.
     unsigned plane_nsc = pusch_depth3_input_plane::NOF_SUBCARRIERS;
     unsigned crop_lo   = 0;
-    if ((bound_nsc_ != 0) && (bound_nsc_ < pusch_depth3_input_plane::NOF_SUBCARRIERS)) {
+    // THE WIDTH IS THE BUCKET THE SELECTOR CHOSE, not the shared bundle's declaration. Using the latter left the crop
+    // disabled while the bucket engine was already selected, so Core ML was handed a 612-wide plane for a 396-wide model
+    // and answered "MultiArray shape (1 x 612 x 14 x 16) does not match (1 x 396 x 14 x 16)" -- three silent failures
+    // after the selector was already right (model_network_design section 49.9).
+    if ((bucket_nsc != 0) && (bucket_nsc < pusch_depth3_input_plane::NOF_SUBCARRIERS)) {
       crop_lo   = narrow_window_lo(config);
-      plane_nsc = bound_nsc_;
+      plane_nsc = bucket_nsc;
       if ((crop_lo + plane_nsc) > pusch_depth3_input_plane::NOF_SUBCARRIERS) {
         crop_lo = pusch_depth3_input_plane::NOF_SUBCARRIERS - plane_nsc;
       }
@@ -1168,7 +1179,26 @@ public:
       // one-hots), not the contract's 12. Taking the constant here made the copy read the wrong number of values per
       // subcarrier and the forward pass died inside the engine with no message -- the third "it looks right" bug of
       // this feature, and the reason the stride now comes from the bundle.
-      const size_t row = static_cast<size_t>(pusch_depth3_input_plane::NOF_SYMBOLS) * plane_channels;
+      // THE SCRATCH BUFFERS ARE SIZED FOR THE BUCKET IN USE, not for the shared bundle. The first version allocated
+      // them at bind time only when the SHARED bundle was narrow -- which it never is, 612 -- so a bucketed reception
+      // copied a whole window into an empty vector. That does not fail loudly: it corrupts memory and the process dies
+      // with no message at all, which is what "the bucket arm prints nothing" was.
+      const size_t row    = static_cast<size_t>(pusch_depth3_input_plane::NOF_SYMBOLS) * plane_channels;
+      const size_t llr_w  = static_cast<size_t>(plane_nsc) * pusch_depth3_input_plane::NOF_SYMBOLS * 8;
+      const size_t noise_w = static_cast<size_t>(plane_nsc) * pusch_depth3_input_plane::NOF_SYMBOLS;
+      const size_t ch_w    = static_cast<size_t>(plane_nsc) * 2 * pusch_depth3_input_plane::NOF_SYMBOLS;
+      if (narrow_plane.size() != static_cast<size_t>(plane_nsc) * row) {
+        narrow_plane.assign(static_cast<size_t>(plane_nsc) * row, 0);
+      }
+      if (narrow_llr.size() != llr_w) {
+        narrow_llr.assign(llr_w, 0);
+      }
+      if (narrow_noise.size() != noise_w) {
+        narrow_noise.assign(noise_w, 0);
+      }
+      if (narrow_channel.size() != ch_w) {
+        narrow_channel.assign(ch_w, 0);
+      }
       std::copy_n(input_plane.begin() + static_cast<size_t>(crop_lo) * row, static_cast<size_t>(plane_nsc) * row,
                   narrow_plane.begin());
       input.plane           = reinterpret_cast<const uint16_t*>(narrow_plane.data());
