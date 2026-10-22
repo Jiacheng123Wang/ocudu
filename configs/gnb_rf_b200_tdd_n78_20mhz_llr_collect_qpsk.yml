@@ -42,9 +42,9 @@
 
 cu_cp:
   amf:
-    addrs: 192.168.100.153
+    addrs: 192.168.31.211
     port: 38412
-    bind_addrs: 192.168.100.125
+    bind_addrs: 192.168.31.204
     supported_tracking_areas:
       - tac: 7
         plmn_list:
