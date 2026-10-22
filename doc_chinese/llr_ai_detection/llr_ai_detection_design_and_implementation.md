@@ -16973,6 +16973,60 @@ sudo -E env \
 | ★ B AI 全带 ✓ | ★ 加 `ai` ✓、★ **去掉** `OCUDU_DEPTH3_BUCKETS` ✓ | ★ AI 臂 vs 经典 ✓ |
 | ★ C AI ＋ 桶 ✓ | ★ 两个都加 ✓ | ★ **桶的收益** ✓（★ 吞吐不低于 B ✓、★ `forward p50` 下降 ✓）|
 
+#### 19.296.4 ★★★ 起飞序列（★ **直接起 gNB**，★ 不经 `run_leg.sh` ✓，2026-10-23 ✓）
+
+★ 为什么绕开 `run_leg.sh` ✓：★ 它会在起腿前**重建**并**重起** gNB ✓；★ 而手机在"最简命令直接起 gNB"时
+**能稳定接入** ✓（★ 用户实测 ✓）⇒ ★ 飞行改用直接启动 ✓，★ 日志用 `tee` 落到 `work_tmp/artifacts/logs/` ✓。
+
+**(a) 起 gNB（AI 臂 ＋ 8 桶）**
+
+```bash
+cd ~/dev/ocudu
+export B=$PWD/doc_chinese/llr_ai_detection/work_tmp/artifacts/buckets/c32h
+export LIST=""; for m in $B/base_w*.mlmodelc; do LIST="${LIST:+$LIST,}$m"; done
+export LOG=$PWD/doc_chinese/llr_ai_detection/work_tmp/artifacts/logs/gnb_ai_buckets_$(date +%m%d_%H%M).log
+
+sudo -E env \
+  OCUDU_DEPTH3_FALLBACK=none \
+  OCUDU_DEPTH3_DOMAIN_GATE=net \
+  OCUDU_DEPTH3_BUCKETS="$LIST" \
+  ./build/apps/gnb/gnb -c configs/gnb_rf_b200_tdd_n78_20mhz.yml \
+    --expert_phy.pusch_receiver_backend ai 2>&1 | tee "$LOG"
+```
+
+**(b) 起腿后 10 秒内必须看到（同一条命令的另一个终端）**
+
+```bash
+grep -aE "narrow-band buckets bound|PURE mode|NOT bound|AI depth-3: bundle" "$LOG" | head -5
+```
+★ 期望三条 ✓：★ `bundle loaded` ✓、★ `buckets bound: 108 … 612` ✓、★ `PURE mode` ✓；★ **`NOT bound` 必须为 0** ✓。
+
+**(c) 手机接入**（★ 你手动 ✓，★ 接入后**不要**再开关飞行模式 ✓）
+
+**(d) 取手机 IP ＋ 短腿**
+
+```bash
+ssh jwang@192.168.31.211 'grep -a "Session" ~/work/open5gs/install/var/log/open5gs/smf.log | tail -1'
+# 记下 IPv4（如 10.45.0.2），然后：
+iperf3 -c <手机IP> -R -t 60 -P 4
+```
+
+**(e) 短腿期间盯两处**
+
+| ★ 看哪 ✓ | ★ 命令 ✓ | ★ 判据 ✓ |
+|---|---|---|
+| ★ gNB 的 `t` 屏 ✓ | ★ 在 gNB 终端按 `t` ✓ | ★ `pusch ok` 增长 ✓、★ `nok` 比例低 ✓ |
+| ★ 深度 3 计时 ✓ | ★ `grep -a "depth3-timing" "$LOG" \| tail -1` ✓ | ★ 出现 `forward p50 …` ✓ |
+
+**(f) 短腿通过后：300 秒 + 两条对照腿**
+
+```bash
+# C：AI ＋ 桶（上面这条）
+iperf3 -c <手机IP> -R -t 300 -P 4
+# B：AI 全带 —— 去掉 OCUDU_DEPTH3_BUCKETS，其余不变，重起 gNB
+# A：经典    —— 去掉 OCUDU_DEPTH3_BUCKETS 与 --expert_phy.pusch_receiver_backend ai
+```
+
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
