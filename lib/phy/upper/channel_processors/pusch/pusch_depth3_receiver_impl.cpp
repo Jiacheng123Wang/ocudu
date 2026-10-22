@@ -1090,8 +1090,11 @@ public:
     input.plane           = reinterpret_cast<const uint16_t*>(input_plane.data());
     input.nof_subcarriers = pusch_depth3_input_plane::NOF_SUBCARRIERS;
     if (plane_nsc != pusch_depth3_input_plane::NOF_SUBCARRIERS) {
-      const size_t row = static_cast<size_t>(pusch_depth3_input_plane::NOF_SYMBOLS) *
-                         pusch_depth3_input_plane::NOF_CHANNELS;
+      // THE ROW IS THE ASSEMBLED STRIDE, which for a conditioned bundle is 16 channels (12 plus the four Qm
+      // one-hots), not the contract's 12. Taking the constant here made the copy read the wrong number of values per
+      // subcarrier and the forward pass died inside the engine with no message -- the third "it looks right" bug of
+      // this feature, and the reason the stride now comes from the bundle.
+      const size_t row = static_cast<size_t>(pusch_depth3_input_plane::NOF_SYMBOLS) * plane_channels;
       std::copy_n(input_plane.begin() + static_cast<size_t>(crop_lo) * row, static_cast<size_t>(plane_nsc) * row,
                   narrow_plane.begin());
       input.plane           = reinterpret_cast<const uint16_t*>(narrow_plane.data());
