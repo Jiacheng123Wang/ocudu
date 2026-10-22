@@ -716,6 +716,54 @@ def cli_snr_range(args):
     return (low, high)
 
 
+def export_buckets(args, parser, source=None):
+    """Exports the same weights as several narrow-band artefacts (model_network_design section 49).
+
+    Cropping the plane to the allocation plus a four-PRB margin reproduces the full-band outputs bit for bit -- measured,
+    not assumed -- and the trunk is fully convolutional, so one weight set builds at any input width. The buckets exist
+    only because the ANE needs a static shape; the runtime picks the smallest one that covers `12 * prb + 96`
+    subcarriers. Nothing here retrains anything.
+    """
+    if not args.export_buckets:
+        return
+    if not args.export_probe:
+        parser.error("--export-buckets derives its file names from --export-probe")
+    weights = args.export_only or os.path.join(args.out, "depth3_best.keras")
+    aux = not args.no_reporting_heads
+    # THE SHAPE COMES FROM THE GRAPH, NOT FROM THE COMMAND LINE. `--in-channels` defaults to 0 because the layouts
+    # disagree about it, and `--c-hid` defaults to 64, so a bucket built from the flags alone produced a 64-channel
+    # graph with a zero-channel entry conv and refused to load. The source model knows both.
+    if source is not None:
+        entry = source.get_layer("entry_1x1").kernel.shape
+        c_hid, in_channels = int(entry[3]), int(entry[2])
+        blocks = sum(1 for layer in source.layers if layer.name.startswith("dw"))
+    else:
+        c_hid, in_channels, blocks = args.c_hid, 8, args.blocks
+    for width in [int(w) for w in args.export_buckets.split(",") if w.strip()]:
+        narrow = build(width=width, blocks=blocks, qm=D3.BITS_PER_SYMBOL[args.modulation],
+                       aux_heads=aux, c_hid=c_hid, dtype=args.dtype,
+                       layout=args.layout, in_channels=in_channels, cond=args.modcond,
+                       reporting_heads=aux)
+        # WEIGHTS ARE COPIED, NOT RELOADED. A `.keras` archive carries the width the graph was built with, and loading
+        # it into a graph built for another width fails on every layer past the divergence (41 objects in the first
+        # attempt). The tensor shapes do not depend on the width -- they are 1x1 and depthwise convolutions -- so
+        # assigning them in order is both correct and explicit about why.
+        if source is not None:
+            if len(source.weights) != len(narrow.weights):
+                raise ValueError(f"the bucket graph has {len(narrow.weights)} weights, the source {len(source.weights)}")
+            for w_src, w_dst in zip(source.weights, narrow.weights):
+                if tuple(w_src.shape) != tuple(w_dst.shape):
+                    raise ValueError(f"weight shape mismatch: {w_src.path} {tuple(w_src.shape)} against "
+                                     f"{w_dst.path} {tuple(w_dst.shape)}")
+                w_dst.assign(w_src)
+        else:
+            narrow.load_weights(weights)
+        path = f"{args.export_probe.rsplit('.', 1)[0]}_w{width}.mlpackage"
+        export_deployment(narrow, D3.BITS_PER_SYMBOL[args.modulation], path, cond=args.modcond,
+                          snr_range=cli_snr_range(args), sinr_cal=cli_sinr_cal(args))
+        print(f"bucket width {width}: {path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -806,6 +854,12 @@ def main():
     parser.add_argument("--export-probe", default="",
                         help="also write the graph as a CoreML mlpackage, so the ANE probe "
                              "measures the artifact this script trains rather than a copy of it")
+    parser.add_argument("--export-buckets", default="",
+                        help="comma-separated subcarrier widths to ALSO export, one artefact each, from the same "
+                             "weights (model_network_design section 49). The trunk is fully convolutional, so cropping "
+                             "the plane to the allocation plus four PRB is bit-exact and needs no retraining; the "
+                             "buckets exist only because the ANE wants a static shape. Ignored without --export-probe, "
+                             "which names the base artefact the bucket names are derived from.")
     parser.add_argument("--probe-graph", default="",
                         help="build the graph from the architecture flags, export it and EXIT "
                              "without training, so ANE placement and latency can be measured "
@@ -846,6 +900,7 @@ def main():
         # there are no `snr_nominal` percentiles to derive it from (see the note where training derives it).
         export_deployment(exported, D3.BITS_PER_SYMBOL[args.modulation], args.export_probe,
                           cond=args.modcond, snr_range=cli_snr_range(args), sinr_cal=cli_sinr_cal(args))
+        export_buckets(args, parser, source=exported)
         return 0
 
     qm = D3.BITS_PER_SYMBOL[args.modulation]
@@ -1099,6 +1154,280 @@ def main():
         model.load_weights(os.path.join(args.out, "depth3_best.keras"))
         export_deployment(model, qm, args.export_probe, cond=args.modcond, snr_range=snr_range,
                           sinr_cal=cli_sinr_cal(args))
+
+    # THE NARROW-BAND BUCKETS, from the trained weights (model_network_design section 49).
+    export_buckets(args, parser, source=model)
+    return 0
+
+    qm = D3.BITS_PER_SYMBOL[args.modulation]
+    # The channel count follows the packing the layout names, so the trunk cannot be built for a
+    # layout the batches do not produce. The batches are then checked against it rather than
+    # believed: a `--layout` that disagrees with the data is the kind of error that trains happily
+    # and deploys into a shape the seam cannot fill.
+    in_channels = args.in_channels or {"folded": D3.NOF_CHANNELS, "probe8": 8}.get(
+        args.layout, D3.NOF_CHANNELS_SPATIAL)
+    if args.modcond:
+        # The conditioning is FOUR EXTRA INPUT CHANNELS, appended by the dataset at sample time (it is the sample
+        # that knows its Qm). The model therefore takes the data's channel count, and this is the one place that
+        # adds them -- build() must not widen again, and the check below compares the two numbers.
+        in_channels += len(D3.COND_QM_ORDER)
+
+    if args.probe_graph:
+        # Architecture -> ANE latency, before paying for a training run. The weights are random and
+        # the artifact must never reach a receiver: it exists to be measured. `--in-channels` and
+        # the architecture flags are the whole input, so no dataset is needed.
+        print(f"probe graph: layout {args.layout}, {in_channels} input channels, "
+              f"c_hid {args.c_hid}, {args.blocks} blocks -- RANDOM WEIGHTS, measure only")
+        probe_model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux,
+                            reporting_heads=not args.no_reporting_heads,
+                            residual=not args.no_residual, dtype=args.dtype,
+                            fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
+                            llr_linear=args.llr_linear, dense=args.dense_blocks,
+                            layout=args.layout, in_channels=in_channels, cond=args.modcond)
+        export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
+        return 0
+
+    if not args.train or not args.val or not args.out:
+        parser.error("--train, --val and --out are required unless --export-only or --probe-graph "
+                     "is given")
+    train = Batches(args.train, args.modulation, args.max_train, seed=args.seed,
+                    snr_min=args.snr_min, snr_max=args.snr_max, target=args.target,
+                    layout=args.layout, cond=args.modcond)
+    val = Batches(args.val, args.modulation, args.max_val, seed=args.seed + 1,
+                  snr_min=args.snr_min, snr_max=args.snr_max, target=args.target,
+                  layout=args.layout, cond=args.modcond)
+    qm = train.qm
+    if args.modcond:
+        # The head serves every modulation, so its stride is the widest one; the per-sample Qm travels as the
+        # conditioning channels and as the label mask. This is the whole difference from a per-modulation run.
+        print(f"train {train.n} samples, val {val.n} samples, MODULATION-CONDITIONED "
+              f"(head stride {D3.COND_STRIDE}, {len(D3.COND_QM_ORDER)} conditioning channels, "
+              f"modulations from the dataset)")
+    else:
+        print(f"train {train.n} samples, val {val.n} samples, {args.modulation} (Qm={qm})")
+
+    from_data = int(train.sample(0)["x"].shape[-1])
+    if from_data != in_channels:
+        parser.error(f"--layout {args.layout} builds {in_channels} input channels but the data "
+                     f"carries {from_data}")
+    print(f"layout {args.layout}, {in_channels} input channels")
+    model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux,
+                  reporting_heads=not args.no_reporting_heads,
+                  residual=not args.no_residual, dtype=args.dtype,
+                  fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
+                  llr_linear=args.llr_linear, dense=args.dense_blocks, layout=args.layout,
+                  in_channels=in_channels, cond=args.modcond)
+    parameters = int(sum(np.prod(w.shape) for w in model.weights))
+    print(f"parameters {parameters}  heads {sorted(model.output.keys())}")
+    if args.init:
+        model.load_weights(args.init)
+        print(f"started from {args.init}")
+
+    # The scale is model-external per the contract, so the loss sees the LLR the quantizer sees. It is carried
+    # PER SAMPLE (see Batches.sample): a conditioned batch mixes modulations whose limits differ.
+    scale = D3.RANGE_LIMIT_FLOAT[args.modulation]
+    # The width of the main head follows the CONTRACT in use, not the default modulation: a conditioned model
+    # always carries COND_STRIDE per symbol (design section 19.102).
+    head_channels = NOF_SYMBOLS * (D3.COND_STRIDE if args.modcond else qm)
+    optimizer = tf.keras.optimizers.Adam(args.lr)
+    weights = {"llr": args.w_llr, "ch_est": args.w_ch, "post_eq_noise": args.w_noise,
+               "dmrs_noise": args.w_noise}
+
+    # XLA is a TRAINING choice and cannot reach the deployed graph: the bundle is exported from the Keras
+    # layer structure and the trained weights, so compiling the step changes nothing about what the ANE
+    # runs (design section 19.218). It is here because the step is latency-bound on small ops, which is
+    # exactly what a fused compilation can cut.
+    @tf.function(jit_compile=bool(args.jit))
+    def step(x, targets, training):
+        with tf.GradientTape() as tape:
+            outputs = model(x, training=training)
+            # Every head leaves the model with the contract's `[width, channels]` tail, so one
+            # reshape reads each of them and the loss cannot drift with the trunk's layout: the
+            # spatial axes are an implementation detail that stops at the head.
+            llr = tf.reshape(tf.cast(outputs["llr"], tf.float32),
+                             (-1, D3.NOF_SUBCARRIERS, head_channels)) * targets["scale"][:, None, None]
+            if args.llr_linear:
+                # The bound the contract asks for, applied where it is differentiable, per sample.
+                llr = tf.clip_by_value(llr, -targets["scale"][:, None, None], targets["scale"][:, None, None])
+            terms = {"llr": L.tf_bce_loss(llr, targets["llr_shape"], targets["llr_weights"])}
+            if not args.no_aux:
+                # THE NOISE HEAD IS ALWAYS IN WHEN aux_heads IS (design section 22.2): it is what scales the logits
+                # into the LLRs the chain quantises, so it is trained even in the bundle that dropped the reporting
+                # heads. The channel and DM-RS heads are read only when the graph carries them.
+                if "ch_est" in outputs:
+                    ch = tf.reshape(tf.cast(outputs["ch_est"], tf.float32),
+                                    (-1, D3.NOF_SUBCARRIERS, 2 * NOF_SYMBOLS))
+                    terms["ch_est"] = L.tf_nmse(
+                        tf.complex(ch[:, :, 0::2], ch[:, :, 1::2]),
+                        tf.complex(targets["ch"][:, :, :, 0], targets["ch"][:, :, :, 1]),
+                        targets["ch_weights"])
+                noise = tf.reshape(tf.cast(outputs["post_eq_noise"], tf.float32),
+                                   (-1, D3.NOF_SUBCARRIERS, NOF_SYMBOLS))
+                error = (noise - targets["noise"]) ** 2
+                terms["post_eq_noise"] = (tf.reduce_sum(error * targets["noise_weights"])
+                                          / tf.maximum(tf.reduce_sum(targets["noise_weights"]), 1.0))
+                if "dmrs_noise" in outputs:
+                    dmrs = tf.reshape(tf.cast(outputs["dmrs_noise"], tf.float32), (-1,))
+                    terms["dmrs_noise"] = tf.reduce_mean((dmrs - targets["dmrs_noise"]) ** 2)
+            total = sum(weights[name] * terms[name] for name in terms)
+        if training:
+            gradients = tape.gradient(total, model.trainable_variables)
+            optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+        return total, terms, llr
+
+    # The gather rule follows the MODEL: a conditioned head carries every modulation in one stride-8 layout, so
+    # the LLRs it produces must be gathered with that layout rather than with the reception's own Qm.
+    GATHER = D3.llr_gather_cond if getattr(val, "cond", False) else D3.llr_gather
+
+    def tensors(samples):
+        return (
+            tf.constant(stack(samples, "x")),
+            {
+                "llr_shape": tf.constant(stack(samples, "llr_shape")),
+                "llr_weights": tf.constant(stack(samples, "llr_weights")),
+                "ch": tf.constant(stack(samples, "ch")),
+                "ch_weights": tf.constant(stack(samples, "ch_weights")),
+                "noise": tf.constant(stack(samples, "noise")),
+                "noise_weights": tf.constant(stack(samples, "noise_weights")),
+                "dmrs_noise": tf.constant(stack(samples, "dmrs_noise")),
+                "scale": tf.constant(stack(samples, "scale")),
+            },
+        )
+
+    def perfect_llr(sample):
+        """The LLRs a perfect model would emit, from the contract's label plane.
+
+        The label is `1 - b` and a positive LLR means bit 0, so `(2 * label - 1) * large` is the
+        ideal LLR on every channel that carries a coded bit.
+        """
+        return (2.0 * sample["llr_shape"] - 1.0) * LD.KNOWN_LLR
+
+    def coded_rate(samples, use_perfect):
+        """The coded BLER of one batch of samples, capped by `--bler-samples`."""
+        bler = CodedBler(val)
+        for row, sample in enumerate(samples):
+            index = int(sample["index"])
+            plane = perfect_llr(sample) if use_perfect else sample["llr_prediction"]
+            bler.add(index, GATHER(plane, val.allocation_of(index),
+                                          val.dmrs_symbols_of(index), val.modulation_of(index)))
+        return bler.rate()
+
+    if args.bler_check:
+        bler = CodedBler(val)
+        checked = 0
+        for samples in val.epoch(args.batch):
+            for index_sample in range(len(samples)):
+                if checked >= max(1, min(args.bler_samples, 8)):
+                    break
+                index = int(samples[index_sample]["index"])
+                bler.add(index, GATHER(perfect_llr(samples[index_sample]),
+                                              val.allocation_of(index), val.dmrs_symbols_of(index),
+                                              val.modulation_of(index)))
+                checked += 1
+            break
+        print(f"coded BLER on perfect LLRs: {bler.summary()}")
+        assert bler.blocks > 0, "no decodable block in the validation set"
+        assert bler.rate() == 0.0, (
+            "the metric cannot reach zero, so it would never accept a good model")
+        return 0
+
+    def evaluate(use_bler):
+        totals, errors, magnitudes = [], [], []
+        bler = CodedBler(val) if use_bler else None
+        decoded = 0
+        for samples in val.epoch(args.batch):
+            x, targets = tensors(samples)
+            total, _, llr = step(x, targets, training=False)
+            ber, mag = decode_metrics(llr.numpy(), targets["llr_shape"].numpy(),
+                                      targets["llr_weights"].numpy())
+            totals.append(float(total))
+            errors.append(ber)
+            magnitudes.append(mag)
+            if bler is not None and decoded < args.bler_samples:
+                for row in range(llr.shape[0]):
+                    if decoded >= args.bler_samples:
+                        break
+                    index = int(samples[row]["index"])
+                    gathered = GATHER(llr.numpy()[row], val.allocation_of(index),
+                                             val.dmrs_symbols_of(index), val.modulation_of(index))
+                    bler.add(index, gathered)
+                    decoded += 1
+        return (float(np.mean(totals)), float(np.mean(errors)), float(np.mean(magnitudes)),
+                bler.rate() if bler is not None else float("nan"),
+                bler.skipped if bler is not None else 0)
+
+    os.makedirs(args.out, exist_ok=True)
+    history = []
+    best = np.inf
+    started = time.time()
+    for epoch in range(1, args.epochs + 1):
+        losses = []
+        for samples in train.epoch(args.batch):
+            x, targets = tensors(samples)
+            total, _, _ = step(x, targets, training=True)
+            losses.append(float(total))
+        want_bler = args.bler_samples > 0 and (epoch % max(1, args.bler_every) == 0
+                                               or epoch == args.epochs)
+        val_loss, val_ber, val_mag, val_bler, val_skipped = evaluate(want_bler)
+        history.append({"epoch": epoch, "train": float(np.mean(losses)), "val": val_loss,
+                        "val_ber": val_ber, "val_llr_mean": val_mag, "val_bler": val_bler,
+                        "val_bler_skipped": val_skipped})
+        if epoch == 1 or epoch % max(1, args.epochs // 20) == 0 or epoch == args.epochs:
+            print(f"epoch {epoch:4d}  train {np.mean(losses):.5f}  val {val_loss:.5f}  "
+                  f"uncoded BER {val_ber:.4f}  coded BLER {val_bler:.4f}  "
+                  f"mean|LLR| {val_mag:6.1f}  ({time.time() - started:.0f}s)")
+        if val_loss < best:
+            best = val_loss
+            model.save(os.path.join(args.out, "depth3_best.keras"))
+
+    with open(os.path.join(args.out, "history.json"), "w") as handle:
+        json.dump({"history": history, "parameters": parameters,
+                   "weights": weights, "scale": scale, "modulation": args.modulation}, handle,
+                  indent=1)
+    np.save(os.path.join(args.out, "val_llr_stats.npy"),
+            np.array([[h["val_ber"], h["val_llr_mean"], h["val_bler"]] for h in history]))
+    print(f"best val loss {best:.5f}; wrote {args.out}/depth3_best.keras and history.json")
+
+    # THE DECLARED RANGE. From the knob when given, otherwise from the training set itself: the 1st to 99th
+    # percentile of `snr_nominal`, which is the range the reporting heads actually saw. The extremes are left out
+    # on purpose -- a handful of samples at the very edge are not a domain, and declaring them would widen the
+    # gate to receptions the model has essentially never met.
+    snr_range = cli_snr_range(args)
+    if snr_range is None and args.train:
+        nominal = np.load(args.train, allow_pickle=True)["snr_nominal"]
+        # ONLY THE FINITE ENTRIES: one NaN poisons the percentile, and a bundle that declares 'nan,nan' is read by
+        # the engine as "no range declared" -- the domain gate would be silently off (measured 2026-10-17, on the
+        # first export of the final checkpoint).
+        nominal = nominal[np.isfinite(nominal)]
+        snr_range = (float(np.percentile(nominal, 1)), float(np.percentile(nominal, 99)))
+        print(f"declared SNR range from the training set: {snr_range[0]:.2f} to {snr_range[1]:.2f} dB "
+              f"(1st to 99th percentile of {nominal.size} sample(s))")
+
+    # Export AFTER training, from the trained weights. Exporting first would produce a deployment
+    # graph with random weights that passes every shape check, which is the kind of artifact that
+    # reaches a receiver and produces plausible nonsense.
+    if args.export_probe:
+        model.load_weights(os.path.join(args.out, "depth3_best.keras"))
+        export_deployment(model, qm, args.export_probe, cond=args.modcond, snr_range=snr_range,
+                          sinr_cal=cli_sinr_cal(args))
+
+    # THE NARROW-BAND BUCKETS (model_network_design section 49). Cropping the plane to the allocation plus a four-PRB
+    # margin reproduces the full-band outputs bit for bit, and the trunk is fully convolutional -- so ONE weight set
+    # builds at any input width. Each bucket is a separate artefact only because the ANE needs a static shape; the
+    # runtime picks the smallest one that covers `12 * prb + 96` subcarriers.
+    if args.export_buckets:
+        widths = [int(w) for w in args.export_buckets.split(",") if w.strip()]
+        weights = os.path.join(args.out, "depth3_best.keras")
+        for width in widths:
+            narrow = build(width=width, blocks=args.blocks, qm=D3.BITS_PER_SYMBOL[args.modulation],
+                           aux_heads=not args.no_reporting_heads, c_hid=args.c_hid, dtype=args.dtype,
+                           layout=args.layout, in_channels=args.in_channels, cond=args.modcond,
+                           reporting_heads=not args.no_reporting_heads)
+            narrow.load_weights(weights)
+            path = f"{args.export_probe.rsplit('.', 1)[0]}_w{width}.mlpackage"
+            export_deployment(narrow, D3.BITS_PER_SYMBOL[args.modulation], path, cond=args.modcond,
+                              snr_range=snr_range, sinr_cal=cli_sinr_cal(args))
+            print(f"bucket width {width}: {path}")
     return 0
 
 
