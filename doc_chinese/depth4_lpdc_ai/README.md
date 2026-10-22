@@ -1,12 +1,17 @@
 # depth4_lpdc_ai — where this workflow lives
 
+**Design vs process, the same split the depth3 tree settled on (2026-10-22).** A passage that records what we did or what
+we measured belongs to the process log; a passage that stipulates what the network must be belongs to the design document.
+When they disagree, the design document is the answer and the log entry is the history.
+
 The next step after depth3: extend the network past the soft bits and include the LDPC decode. The layout mirrors
 `doc_chinese/llr_ai_detection/` on purpose, because the working habits that tree accumulated are part of the method.
 
 | Path | What belongs here | What does NOT |
 |---|---|---|
 | `depth4_lpdc_ai_high_level_status_and_plan.md` | The rolling status: what is done, what is next, what is blocked, the pre-registered gates, the milestones. Short, current, edited in place. | Measurements (design document), literature (survey). |
-| `depth4_lpdc_ai_design_and_implementation.md` | The design record: decisions with the measurement that justified them, appended section by section, each entry dated (D0, D1, ...). Immutable once written; corrections are new entries that say what they correct. | Status, plans, wish lists, paper summaries. |
+| `depth4_lpdc_ai_design.md` | **What the network IS**: the goal and its boundary, the invariants, the authoritative graph, the Z-independence and base-graph densification, the message functions, depth and (no) early exit, the deployment form, the pre-registered gates. Edited in place so it never contradicts itself. | Measurement narratives, debugging, corrections, status. |
+| `depth4_lpdc_ai_design_and_implementation.md` | **The process log**: experiments, measurements, debugging, corrections, milestone progress, appended section by section and each entry dated (D0, D1, ...). Immutable once written; a correction is a new entry that says what it corrects. | Statements of what the network must be -- those belong in the design document, which wins on conflict. |
 | `survey/` | **Literature only**: the question, the selection rule, the method families, one row per paper with what it contributes and where it stops, the conclusions that survive our constraints, the excluded directions with reasons, the reading list. | Measurements of our system, designs, plans. |
 | `work_tmp/` | Scratch: code under development, datasets, runs, captures, throwaway scripts. NOT part of the product and not referenced by the build. | Anything the build or a shipped bundle needs. |
 | `wip/` | Work in progress that is meant to survive: a probe worth keeping, a half-built harness, a script another section refers to. | Datasets and multi-gigabyte artifacts. |
