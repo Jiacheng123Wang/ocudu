@@ -5168,7 +5168,10 @@ train_depth3.py --train d3_dmrs2711h_train.npz --val d3_modcond_val.npz --out <r
 | 部署 | 一套权重导出 N 个产物；`--export-buckets` 生成，**不重训** |
 | 选择 | 运行时按 `need = 分配 + 2×4 PRB` 取**最小能装下的桶**（`lower_bound`）|
 | 缺桶 | 只有**无任何桶 ≥ need** 才拒绝；★ **桶集必须含 612**（那就是整条带，永远装得下）|
-| 环境变量 | `OCUDU_DEPTH3_BUCKETS=<a_w180.mlmodelc>,…,<a_w612.mlmodelc>` |
+| **默认** ★ | ★ **分桶是默认行为** ✓：产物与它的 `buckets/` 目录同级（`ai_assets/depth3_modcond_c32h/buckets/base_w{108…612}.mlmodelc` ✓），**不设任何环境变量也会绑定** ✓ |
+| 关闭 ★ | ★ `OCUDU_DEPTH3_BUCKETS=none`（或 `full`／`0`）⇒ **只用全带模型** ✓ |
+| 指定 ★ | ★ `OCUDU_DEPTH3_BUCKETS=<a>,<b>,…` ⇒ **用给定集合** ✓（可替换单个桶 ✓）|
+| 归档 | `lib/phy/upper/ai_signal_processors/depth3/ai_assets/depth3_modcond_c32h/buckets/`（8 × 164 KB，附 README）|
 
 ### 49.3 两条不变量（★ 实现必须守住 ✓）
 

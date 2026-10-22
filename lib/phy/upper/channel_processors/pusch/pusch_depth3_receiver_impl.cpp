@@ -502,58 +502,77 @@ public:
         }
         shared_engine      = std::move(engine);
         any_model_bound    = true;
-        // THE BUCKET SET (model_network_design section 49.9). A comma-separated list of additional artefacts, each
-        // declaring its own width; every one holds the same weights at a different input width, and the reception
-        // picks the smallest that fits. 612 belongs in the list, because that one always fits.
-        if (const char* env = std::getenv("OCUDU_DEPTH3_BUCKETS")) {
-          std::string list(env);
-          size_t      pos = 0;
-          while (pos <= list.size()) {
-            const size_t comma = list.find(',', pos);
-            const std::string one = list.substr(pos, (comma == std::string::npos) ? std::string::npos : comma - pos);
-            if (!one.empty()) {
-              auto bucket = std::make_unique<metal::coreml_nn_engine>();
-              if (bucket->init_depth3(one.c_str()) && (bucket->depth3_nsc() != 0) &&
-                  (bucket->depth3_nsc() <= pusch_depth3_input_plane::NOF_SUBCARRIERS)) {
-                // The declared MODULATIONS travel with each artefact, and a bucket whose set is empty serves nothing --
-                // which surfaces one level up as "the forward pass failed". Named here so the startup line says it.
-                notes.push_back(fmt::format("bucket {} sc: conditioned {}, declares {} modulation(s)",
-                                            bucket->depth3_nsc(), bucket->depth3_is_modulation_conditioned() ? "yes" : "no",
-                                            bucket->depth3_nof_declared_qm()));
-                narrow_buckets.push_back(bucket->depth3_nsc());
-                narrow_engines.push_back(std::move(bucket));
-              } else {
-                notes.push_back(fmt::format("bucket '{}' NOT bound: init failed or its width does not fit the plane", one));
+        // THE BUCKET SET (model_network_design section 49.9). Three cases, in this order:
+        //   OCUDU_DEPTH3_BUCKETS unset        -> the bundle's own `buckets/` directory, which is how the rig flies by
+        //                                        default: a reception is computed over the window it needs, and the
+        //                                        measured result on air is 44 percent off the median forward time at the
+        //                                        same throughput and CRC.
+        //   OCUDU_DEPTH3_BUCKETS=none|full|0   -> bucketing OFF, the single full-band bundle only.
+        //   OCUDU_DEPTH3_BUCKETS=a,b,c         -> exactly those artefacts.
+        {
+          const char*          env     = std::getenv("OCUDU_DEPTH3_BUCKETS");
+          std::string          listing = (env != nullptr) ? std::string(env) : std::string();
+          const bool           opt_out = (listing == "none") || (listing == "full") || (listing == "0");
+          std::vector<std::string> paths;
+          if (opt_out) {
+            notes.push_back("narrow-band bucketing DISABLED (OCUDU_DEPTH3_BUCKETS=none): the full-band bundle computes "
+                            "every reception");
+          }
+          else if (!listing.empty()) {
+            size_t pos = 0;
+            while (pos <= listing.size()) {
+              const size_t comma = listing.find(',', pos);
+              const std::string one = listing.substr(pos, (comma == std::string::npos) ? std::string::npos : comma - pos);
+              if (!one.empty()) {
+                paths.push_back(one);
               }
+              if (comma == std::string::npos) {
+                break;
+              }
+              pos = comma + 1;
             }
-            if (comma == std::string::npos) {
-              break;
+          }
+          else if (!path.empty()) {
+            // THE DEFAULT: the bundle's sibling `buckets/` directory. The widths are known constants, so the set is
+            // probed rather than scanned -- a missing file simply means a narrower envelope, not a failure.
+            const size_t slash = path.find_last_of('/');
+            const std::string dir = ((slash == std::string::npos) ? std::string(".") : path.substr(0, slash)) + "/buckets";
+            for (unsigned width : {108U, 180U, 252U, 324U, 396U, 468U, 540U, 612U}) {
+              paths.push_back(fmt::format("{}/base_w{}.mlmodelc", dir, width));
             }
-            pos = comma + 1;
           }
-          // Ascending, so the reception's lower_bound finds the smallest fitting bucket.
-          std::vector<size_t> order(narrow_buckets.size());
-          for (size_t i = 0; i != order.size(); ++i) {
-            order[i] = i;
+
+          std::vector<std::pair<unsigned, std::unique_ptr<metal::coreml_nn_engine>>> bucket_set;
+          unsigned missing = 0;
+          for (const std::string& bucket_path : paths) {
+            auto bucket = std::make_unique<metal::coreml_nn_engine>();
+            if (bucket->init_depth3(bucket_path.c_str()) && (bucket->depth3_nsc() != 0) &&
+                (bucket->depth3_nsc() <= pusch_depth3_input_plane::NOF_SUBCARRIERS)) {
+              bucket_set.emplace_back(bucket->depth3_nsc(), std::move(bucket));
+            }
+            else {
+              ++missing;
+            }
           }
-          std::sort(order.begin(), order.end(),
-                    [this](size_t a, size_t b) { return narrow_buckets[a] < narrow_buckets[b]; });
-          std::vector<unsigned> sorted_nsc;
-          std::vector<std::unique_ptr<metal::coreml_nn_engine>> sorted_engines;
-          for (size_t i : order) {
-            sorted_nsc.push_back(narrow_buckets[i]);
-            sorted_engines.push_back(std::move(narrow_engines[i]));
+          std::sort(bucket_set.begin(), bucket_set.end(),
+                    [](const auto& a, const auto& b) { return a.first < b.first; });
+          for (auto& entry : bucket_set) {
+            narrow_buckets.push_back(entry.first);
+            narrow_engines.push_back(std::move(entry.second));
           }
-          narrow_buckets = std::move(sorted_nsc);
-          narrow_engines = std::move(sorted_engines);
           if (!narrow_buckets.empty()) {
             std::string widths;
             for (unsigned w : narrow_buckets) {
               widths += fmt::format("{} ", w);
             }
-            notes.push_back(fmt::format("narrow-band buckets bound: {}subcarrier(s); the smallest that fits a "
-                                        "reception's allocation plus four PRB of context is used",
-                                        widths));
+            notes.push_back(fmt::format("narrow-band buckets bound: {}subcarrier(s); the smallest that fits a reception's "
+                                        "allocation plus four PRB of context is used{}",
+                                        widths, (missing != 0) ? fmt::format(" ({} path(s) did not load)", missing)
+                                                               : std::string()));
+          }
+          else if (!opt_out) {
+            notes.push_back(fmt::format("no narrow-band buckets bound ({} path(s) tried): every reception uses the "
+                                        "full-band bundle", paths.size()));
           }
         }
         notes.push_back(fmt::format("modcond model '{}' bound: one bundle computes {} modulation(s) "
