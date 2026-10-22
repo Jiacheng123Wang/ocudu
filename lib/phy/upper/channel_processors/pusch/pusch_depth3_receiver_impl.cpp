@@ -37,6 +37,26 @@
 using namespace ocudu;
 
 namespace {
+/// \brief Lowest and highest PRB the whole allocation occupies, for the crop-window arithmetic.
+unsigned narrow_first_prb(const pusch_demodulator::configuration& config)
+{
+  unsigned prb = 0;
+  while ((prb + 1 < config.rb_mask.size()) && !config.rb_mask.test(prb)) {
+    ++prb;
+  }
+  return prb;
+}
+
+unsigned narrow_last_prb(const pusch_demodulator::configuration& config)
+{
+  unsigned prb = config.rb_mask.size() - 1;
+  while ((prb > 0) && !config.rb_mask.test(prb)) {
+    --prb;
+  }
+  return prb;
+}
+
+
 
 // The sidecar reader and its warning serve only the engine path below; they are compiled only where that
 // path is. A build without the depth-3 engine (Ubuntu) would otherwise carry them as dead code, which GCC
@@ -169,6 +189,7 @@ const char* to_string(depth3_degradation value)
 
 /// Inverts the scrambling of one block of soft bits, the same rule the classical demodulator applies
 /// (`pusch_demodulator_impl.cpp:48`): a set sequence bit negates the soft bit.
+
 void revert_scrambling(span<log_likelihood_ratio>       out,
                        span<const log_likelihood_ratio> in,
                        const bit_buffer&                sequence)
@@ -383,10 +404,13 @@ public:
       // refusal on every single reception -- an operator reads a broken model rather than a model for another cell.
       // Only binding can see the declaration, so the refusal is here, with both numbers named, and the undeclared
       // case is said out loud rather than passed over (design section 19.162).
-      if (loaded && (engine->depth3_nsc() != 0) &&
-          (engine->depth3_nsc() != pusch_depth3_input_plane::NOF_SUBCARRIERS)) {
+      // A NARROWER BUNDLE IS LEGAL AND IS FED A CROP (`model_network_design` section 49): the plane is assembled at
+      // the contract's width and only the window the allocation needs is handed to the network, with four PRB of
+      // context each side -- measured to reproduce the full-band outputs bit for bit. What cannot work is a bundle
+      // WIDER than the assembled plane, because the data it would need is never produced.
+      if (loaded && (engine->depth3_nsc() > pusch_depth3_input_plane::NOF_SUBCARRIERS)) {
         notes.push_back(fmt::format("model '{}' NOT bound: exported for {} subcarrier(s) and this build assembles "
-                                    "{}; the plane width is fixed, so every reception would be refused",
+                                    "{}; a wider window than the plane cannot be served",
                                     path, engine->depth3_nsc(), pusch_depth3_input_plane::NOF_SUBCARRIERS));
         return;
       }
@@ -1025,13 +1049,60 @@ public:
     }
 
     // ---- one forward pass, four heads ------------------------------------------------------------
+    // A NARROW-BAND BUNDLE IS FED A CROP, NOT THE WHOLE BAND (model_network_design section 49). The trunk is fully
+    // convolutional, so a bundle exported for a narrower window reproduces the full-band outputs bit for bit provided
+    // the window keeps four PRB of context on each side -- measured, not assumed. The plane is still ASSEMBLED at the
+    // contract's 612 subcarriers, because assembling it is a memory write and the compute is two hundred million
+    // multiply-adds; what changes is only how much of it the network sees. The heads are scattered back at their
+    // absolute positions, so every reader downstream still indexes by subcarrier and nothing else has to know.
+    unsigned plane_nsc = pusch_depth3_input_plane::NOF_SUBCARRIERS;
+    unsigned crop_lo   = 0;
+    if ((bound_nsc_ != 0) && (bound_nsc_ < pusch_depth3_input_plane::NOF_SUBCARRIERS)) {
+      crop_lo   = narrow_window_lo(config);
+      plane_nsc = bound_nsc_;
+      if ((crop_lo + plane_nsc) > pusch_depth3_input_plane::NOF_SUBCARRIERS) {
+        crop_lo = pusch_depth3_input_plane::NOF_SUBCARRIERS - plane_nsc;
+      }
+      // THE WINDOW MUST CONTAIN THE ALLOCATION. A bucket that cannot cover it would silently crop real subcarriers
+      // away and hand the demodulator LLRs from the wrong data -- plausible numbers, wrong decoding. The runtime is
+      // meant to choose the smallest bucket that fits; when it was handed one that does not, refusing is the only
+      // honest answer and the degradation counter records it.
+      const unsigned first_prb = narrow_first_prb(config);
+      const unsigned last_prb  = narrow_last_prb(config);
+      const unsigned ctx = 4 * NOF_SUBCARRIERS_PER_RB;
+      const unsigned first_sc = first_prb * NOF_SUBCARRIERS_PER_RB;
+      const unsigned need_first = (first_sc > ctx) ? (first_sc - ctx) : 0U;
+      const auto     tail      = static_cast<unsigned>((last_prb + 1) * NOF_SUBCARRIERS_PER_RB) + ctx;
+      const unsigned need_last = (tail < pusch_depth3_input_plane::NOF_SUBCARRIERS)
+                                     ? tail
+                                     : static_cast<unsigned>(pusch_depth3_input_plane::NOF_SUBCARRIERS);
+      if ((need_last - need_first) > plane_nsc) {
+        char detail[160];
+        std::snprintf(detail, sizeof(detail),
+                      "bundle covers %u subcarriers, the allocation needs %u; a wider bucket would fit",
+                      plane_nsc, need_last - need_first);
+        degrade_or_fail(depth3_degradation::plane_refused, codeword_buffer, notifier, grid, est_results, config, detail);
+        return;
+      }
+    }
+
     metal::coreml_nn_engine::depth3_input input;
     input.plane           = reinterpret_cast<const uint16_t*>(input_plane.data());
     input.nof_subcarriers = pusch_depth3_input_plane::NOF_SUBCARRIERS;
+    if (plane_nsc != pusch_depth3_input_plane::NOF_SUBCARRIERS) {
+      const size_t row = static_cast<size_t>(pusch_depth3_input_plane::NOF_SYMBOLS) *
+                         pusch_depth3_input_plane::NOF_CHANNELS;
+      std::copy_n(input_plane.begin() + static_cast<size_t>(crop_lo) * row, static_cast<size_t>(plane_nsc) * row,
+                  narrow_plane.begin());
+      input.plane           = reinterpret_cast<const uint16_t*>(narrow_plane.data());
+      input.nof_subcarriers = plane_nsc;
+    }
 
     metal::coreml_nn_engine::depth3_output output;
-    output.llr             = reinterpret_cast<uint16_t*>(llr_head.data());
-    output.post_eq_noise   = reinterpret_cast<uint16_t*>(noise_head.data());
+    output.llr             = reinterpret_cast<uint16_t*>(plane_nsc == pusch_depth3_input_plane::NOF_SUBCARRIERS
+                                                             ? llr_head.data() : narrow_llr.data());
+    output.post_eq_noise   = reinterpret_cast<uint16_t*>(plane_nsc == pusch_depth3_input_plane::NOF_SUBCARRIERS
+                                                             ? noise_head.data() : narrow_noise.data());
     // A BUNDLE WITHOUT THE REPORTING HEADS gets null here, and the engine does not bind what the model does not
     // declare (design section 22.2).
     output.ch_est          = has_ch_est ? reinterpret_cast<uint16_t*>(channel_head.data()) : nullptr;
@@ -1041,6 +1112,21 @@ public:
     if (!computing_engine.predict_depth3(input, output)) {
       degrade_or_fail(depth3_degradation::forward_failed, codeword_buffer, notifier, grid, est_results, config);
       return;
+    }
+    // Scatter the narrow heads back to their absolute subcarrier positions. Out-of-window entries are left untouched:
+    // nothing outside the allocation is ever read, and the allocation is always inside the window by construction.
+    if (plane_nsc != pusch_depth3_input_plane::NOF_SUBCARRIERS) {
+      const size_t llr_row = static_cast<size_t>(pusch_depth3_input_plane::NOF_SYMBOLS) * 8;
+      const size_t n_row   = pusch_depth3_input_plane::NOF_SYMBOLS;
+      std::copy_n(narrow_llr.begin(), static_cast<size_t>(plane_nsc) * llr_row,
+                  llr_head.begin() + static_cast<size_t>(crop_lo) * llr_row);
+      std::copy_n(narrow_noise.begin(), static_cast<size_t>(plane_nsc) * n_row,
+                  noise_head.begin() + static_cast<size_t>(crop_lo) * n_row);
+      if (has_ch_est) {
+        const size_t c_row = static_cast<size_t>(2) * pusch_depth3_input_plane::NOF_SYMBOLS;
+        std::copy_n(narrow_channel.begin(), static_cast<size_t>(plane_nsc) * c_row,
+                    channel_head.begin() + static_cast<size_t>(crop_lo) * c_row);
+      }
     }
     const auto segment_forwarded = std::chrono::steady_clock::now();
     // The engine's own reading of the `predictionFromFeatures` call, taken before anything else can overwrite it.
@@ -1936,6 +2022,17 @@ private:
   unsigned                                        forwarded_receptions = 0;
 
   std::vector<__fp16>          input_plane;
+  /// \brief Scratch buffers for a narrow-band bundle, sized for the bundle's own window.
+  ///
+  /// A bundle exported for fewer than the contract's 612 subcarriers is fed a CROP of the assembled plane
+  /// (`model_network_design` section 49); these hold the window and its heads, and the results are scattered back
+  /// to absolute positions immediately after the call so no reader downstream changes.
+  std::vector<__fp16>          narrow_plane;
+  std::vector<__fp16>          narrow_llr;
+  std::vector<__fp16>          narrow_noise;
+  std::vector<__fp16>          narrow_channel;
+  /// \brief First subcarrier of the crop: the allocation's first, less four PRB of context.
+  unsigned narrow_window_lo(const pusch_demodulator::configuration& config) const;
   std::vector<__fp16>          llr_head;
   std::vector<__fp16>          noise_head;
   std::vector<__fp16>          channel_head;
@@ -1943,6 +2040,17 @@ private:
   std::vector<unsigned>        allocated;
   std::array<unsigned, 9>      degradations{};
 };
+
+// Four PRB of context, MEASURED (model_network_design section 49.1): zeroing everything outside a window this wide
+// leaves the LLRs inside the allocation bit-identical to the full-band run, while two PRB is not quite enough and none
+// loses half a percent of the signs.
+
+unsigned pusch_depth3_receiver_ai_network_impl::narrow_window_lo(const pusch_demodulator::configuration& config) const
+{
+  constexpr unsigned context_sc = 4 * NOF_SUBCARRIERS_PER_RB;
+  const unsigned     first_sc   = narrow_first_prb(config) * NOF_SUBCARRIERS_PER_RB;
+  return (first_sc > context_sc) ? (first_sc - context_sc) : 0U;
+}
 
 #endif // OCUDU_HAVE_DEPTH3_ENGINE
 
