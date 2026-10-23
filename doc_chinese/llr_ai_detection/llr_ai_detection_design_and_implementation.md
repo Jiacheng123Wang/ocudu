@@ -18109,6 +18109,59 @@ sudo -E env \
 ★★ **⇒ 这对真实语料是决定性的补充 ✓**：★ 从 **2 536** 增到 **≈18 500** ✓（★ 7× ✓），
 ★ 且**首次把 QPSK/16QAM 的低 SNR 真实样本**纳入 ✓ —— ★ 正是 cell-edge 需要的那一块 ✓。
 
+### 19.316 ★★ E4 语料的构建流程（★ 三段命令 ＋ 一个合并 ✓，2026-10-23 13:05 ✓）
+
+★ 标注后每条捕获都有 `<unit>.bits` ✓（★ 只在 **CRC-OK** 时写 ✓）★ ⇒ ★ 索引由新脚本 `probe/lowsnr_index.py` 生成 ✓
+（★ builder 要 CSV 第 3 列是 CRC 判定 ✓，★ 而标注器不产生索引 ✓）。
+
+**(a) ★ 第 1 步：索引 ✓**
+
+```bash
+W=$PWD/doc_chinese/llr_ai_detection/work_tmp
+for seg in lowsnr_amc_1023 lowsnr_amc2_1023; do
+  python3 $W/probe/lowsnr_index.py --corpus $W/corpus/$seg \
+    --tb $W/data/tb_corpus/${seg}_tb --out $W/data/tb_corpus/${seg}_index.csv
+done
+```
+
+**(b) ★★ 第 2 步：按**调制**分别建集 ✓（★ builder 一次只收一个调制 ✓）**
+
+```bash
+for seg in lowsnr_amc_1023 lowsnr_amc2_1023; do
+  for qm in QPSK 16QAM 64QAM 256QAM; do
+    python3 lib/phy/upper/ai_signal_processors/depth3/ai_train/build_depth3_dataset.py \
+      --source real --units $W/data/tb_corpus/${seg}_index.csv \
+      --tb $W/data/tb_corpus/${seg}_tb --corpus $W/corpus/$seg \
+      --modulation $qm --min-prb 2 --out $W/data/datasets/e4_${seg}_${qm}.npz
+  done
+done
+```
+
+★ 已核对 ✓：★ 新捕获的侧车**带 `alloc_prb`** ✓（★ builder 必需 ✓）、★ `--min-prb` 必须给 **2** ✓（★ 默认 43 ✓ 会把窄分配全丢掉 ✓）。
+
+**(c) ★★ 第 3 步：合并成 E4 ✓**
+
+★ 组成（★ §19.303 的配方 ✓）：
+
+| ★ 部分 ✓ | ★ 量 ✓ |
+|---|---|
+| ★ 旧语料**真实**样本 ✓ | ★ 2 536（★ 全要 ✓）|
+| ★ **新采真实样本 ✓** | ★ ≈16 000（★ 今日两段 ✓）|
+| ★ 旧语料合成 ✓ | ★ 全量 28 241 ✓ |
+| ★ **≤10 dB 比例** ✓ | ★ 压到 **~30–35%** ✓（★ 若超出，★ 丢弃最低 SNR 的一部分 ✓）|
+
+★ 合并用 `merge_depth3_datasets.py` ✓（★ 与前几批同一工具 ✓），★ 输出 `e4_train.npz` ✓ ＋ 同法生成 `e4_val.npz` ✓。
+
+**(d) ★ E4 的判据（★ 与 E1 比 ✓）**
+
+| # ✓ | 判据 ✓ |
+|---|---|
+| ★ 1 ✓ | ★ 符号一致 **≥98.7%** ✓ |
+| ★ 2 ✓ | ★ attach 40 段 **OK ≥26** ✓ |
+| ★ 3 ✓ | ★ **分箱 BER：★ 任何箱回退 ≤0.15 pp** ✓，★ 且 **0–8 dB 各箱必须改善** ✓（★ 新增数据全在低端 ✓）|
+| ★ 4 ✓ | ★ 真实样本占比 8% → **~35–40%** ✓ |
+
+★ 状态 ✓：★ 标注进行中 ✓；★ 索引脚本已就绪并验证（★ seg2：★ 4 274 条 ✓）；★ 建集与合并命令已定 ✓。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
