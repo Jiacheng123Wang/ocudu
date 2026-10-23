@@ -910,6 +910,11 @@ public:
     // width a reception needs is its allocation plus four PRB of context on each side, clipped to the plane.
     unsigned needed_nsc = pusch_depth3_input_plane::NOF_SUBCARRIERS;
     unsigned bucket_nsc = bound_nsc_;
+    // RESET PER RECEPTION. Without this the member kept the last narrow width forever, so a leg whose first reception
+    // used a bucket reported almost every later one as narrow -- the histogram was sticky and the four legs of the
+    // first ABBA all looked like mixtures. Measured 2026-10-23: 53546 of 58500 receptions attributed to 612 while the
+    // same leg's forward time said otherwise.
+    bucket_in_use_ = 0;
     if (!narrow_buckets.empty()) {
       const unsigned ctx      = 4 * NOF_SUBCARRIERS_PER_RB;
       const unsigned first_sc = narrow_first_prb(config) * NOF_SUBCARRIERS_PER_RB;
