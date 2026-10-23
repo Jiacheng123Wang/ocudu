@@ -140,6 +140,7 @@ export LD_LIBRARY_PATH="$NV${LD_LIBRARY_PATH:-}"
 | 一条 ssh 里用 `\` 续行拼多条 `nohup` | 第二条的重定向失败 ⇒ 训练根本没起来 | **一条 ssh 一条命令** |
 | NUC-1 同时跑核心网 | 训练吃满 CPU 会让 Open5GS 抖动 | 飞行/接入测试时把 211 上的训练限到 1 条 |
 | 107 GPU 静默回落 | 见 §4 | `LD_LIBRARY_PATH` |
+| **驱动与用户态库版本不匹配** | `nvidia-smi` 报 `Driver/library version mismatch`，CUDA 失效，训练**照常跑但慢 4.4×**（实测 28 vs 122 samples/s，2026-10-23） | **重启机器**对齐版本；开训前先跑 `list_physical_devices("GPU")` 确认非空 |
 
 ---
 
