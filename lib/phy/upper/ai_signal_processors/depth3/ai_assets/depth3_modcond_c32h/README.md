@@ -1,6 +1,12 @@
 # d3_modcond_c32h — modulation-conditioned depth-3 receiver (N78 / 20 MHz / TDD / 30 kHz / 51 PRB)
 
-**This is the default model since 2026-10-19** (`OCUDU_DEPTH3_DEFAULT_MODEL`). It is a c32-width retrain
+**This was the default model from 2026-10-19 until 2026-10-23.** It remains in the tree and is one
+`--expert_phy.pusch_receiver_model` away, but the default is now `depth3_e4_real_1023/d3_e4.mlmodelc`, which delivers about
+6 % more goodput on air with 40 % fewer retransmissions at the cost of roughly 1.5 points of CRC-OK (sections 19.358–19.362 of
+the implementation document). This bundle is the four-head one -- it still publishes SINR through its own calibration and still
+produces the two reporting heads -- so it is the reference to compare against, not the deployed choice.
+
+It is a c32-width retrain
 that closed three gaps at once: DM-RS 2,7,11 coverage, the 64QAM reporting head's dynamic range, and a
 declared SINR calibration.
 
