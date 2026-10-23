@@ -68,18 +68,30 @@ class FoldedScaleConv(tf.keras.layers.Layer):
     constraint, and the bias is scaled with it because the scale sits after the affine map.
     """
 
-    def __init__(self, filters, initial_gain=0.1, **kwargs):
+    def __init__(self, filters, initial_gain=0.1, rank=0, **kwargs):
         super().__init__(**kwargs)
         self.filters = int(filters)
         self.initial_gain = float(initial_gain)
+        # LOW-RANK POINTWISE (design section 48, lever D). A `channels x filters` 1x1 costs one
+        # multiply-add per output channel per input channel per RE; splitting it into
+        # `channels x rank` then `rank x filters` costs 2*rank instead. At c=32 and rank=8 that is
+        # 512 of the 1024 multiply-adds removed per block, and the depthwise 3x3's 288 are untouched,
+        # so the trunk's per-RE work falls from 1312 to 800 -- 1.64x, not the 2x the raw ratio suggests.
+        self.rank = int(rank)
 
     def get_config(self):
         return {**super().get_config(), "filters": self.filters,
-                "initial_gain": self.initial_gain}
+                "initial_gain": self.initial_gain, "rank": self.rank}
 
     def build(self, input_shape):
         channels = int(input_shape[-1])
-        self.kernel = self.add_weight(name="kernel", shape=(1, 1, channels, self.filters),
+        inner = self.rank if self.rank > 0 else channels
+        if self.rank > 0:
+            # No bias on the factor's first half: the second half carries the affine map, and a bias
+            # in between would be absorbed by it anyway (it would only cost an operator on the ANE).
+            self.kernel_in = self.add_weight(name="kernel_in", shape=(1, 1, channels, inner),
+                                             initializer="glorot_uniform", trainable=True)
+        self.kernel = self.add_weight(name="kernel", shape=(1, 1, inner, self.filters),
                                       initializer="glorot_uniform", trainable=True)
         self.bias = self.add_weight(name="bias", shape=(self.filters,), initializer="zeros",
                                     trainable=True)
@@ -92,11 +104,13 @@ class FoldedScaleConv(tf.keras.layers.Layer):
     def call(self, inputs):
         gamma = tf.nn.softplus(self.gain)
         kernel = self.kernel * gamma[None, None, None, :]
+        if self.rank > 0:
+            inputs = tf.nn.conv2d(inputs, self.kernel_in, strides=1, padding="SAME")
         return tf.nn.conv2d(inputs, kernel, strides=1, padding="SAME") + gamma * self.bias
 
 
 def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, residual=True,
-          reporting_heads=True,
+          reporting_heads=True, low_rank=0,
           dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False,
           layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False):
     """The contract's graph: the plane in, the reporting heads out.
@@ -145,8 +159,8 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
                 3, padding="same", dilation_rate=(dilation, 1), dtype=keras_dtype,
                 name=f"dw{i}_3x3_d{dilation}")(y)
             block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}")(block)
-            block = FoldedScaleConv(c_hid, initial_gain=scale_init, dtype=keras_dtype,
-                                    name=f"pw{i}_1x1")(block)
+            block = FoldedScaleConv(c_hid, initial_gain=scale_init, rank=low_rank,
+                                    dtype=keras_dtype, name=f"pw{i}_1x1")(block)
             block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}b")(block)
             y = tf.keras.layers.Add(name=f"add{i}", dtype=keras_dtype)([y, block])
         # The heads keep the CONTRACT's channel counts (14*Qm, 14, 28, 1) whatever the trunk's
@@ -205,8 +219,8 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
                 name=f"dw{i}_3x3_d{dilation}")(y)
         block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}")(block)
         if residual and fold_scale:
-            block = FoldedScaleConv(c_hid, initial_gain=scale_init, dtype=keras_dtype,
-                                    name=f"pw{i}_1x1")(block)
+            block = FoldedScaleConv(c_hid, initial_gain=scale_init, rank=low_rank,
+                                    dtype=keras_dtype, name=f"pw{i}_1x1")(block)
             block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}b")(block)
             y = tf.keras.layers.Add(name=f"add{i}", dtype=keras_dtype)([y, block])
         else:
@@ -834,6 +848,9 @@ def main():
     parser.add_argument("--w-ch", type=float, default=L.DEFAULT_WEIGHTS["ch_est"])
     parser.add_argument("--w-noise", type=float, default=L.DEFAULT_WEIGHTS["post_eq_noise"])
     parser.add_argument("--no-aux", action="store_true", help="LLR head only, for the R2.4 ablation")
+    parser.add_argument("--low-rank", type=int, default=0,
+                        help="factorise the pointwise 1x1 into (c x rank) then (rank x c); 0 keeps the plain 1x1, "
+                             "8 removes 512 of the 1024 multiply-adds per block at c_hid 32")
     parser.add_argument("--no-reporting-heads", action="store_true",
                         help="DROP the two reporting heads (ch_est, dmrs_noise) and keep post_eq_noise, which is "
                              "what scales the logits into LLRs. The publication then comes from the shared "
@@ -926,7 +943,7 @@ def main():
         # the architecture flags are the whole input, so no dataset is needed.
         print(f"probe graph: layout {args.layout}, {in_channels} input channels, "
               f"c_hid {args.c_hid}, {args.blocks} blocks -- RANDOM WEIGHTS, measure only")
-        probe_model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux,
+        probe_model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux, low_rank=args.low_rank,
                             reporting_heads=not args.no_reporting_heads,
                             residual=not args.no_residual, dtype=args.dtype,
                             fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
@@ -959,7 +976,7 @@ def main():
         parser.error(f"--layout {args.layout} builds {in_channels} input channels but the data "
                      f"carries {from_data}")
     print(f"layout {args.layout}, {in_channels} input channels")
-    model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux,
+    model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux, low_rank=args.low_rank,
                   reporting_heads=not args.no_reporting_heads,
                   residual=not args.no_residual, dtype=args.dtype,
                   fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
@@ -1182,7 +1199,7 @@ def main():
         # the architecture flags are the whole input, so no dataset is needed.
         print(f"probe graph: layout {args.layout}, {in_channels} input channels, "
               f"c_hid {args.c_hid}, {args.blocks} blocks -- RANDOM WEIGHTS, measure only")
-        probe_model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux,
+        probe_model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux, low_rank=args.low_rank,
                             reporting_heads=not args.no_reporting_heads,
                             residual=not args.no_residual, dtype=args.dtype,
                             fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
@@ -1215,7 +1232,7 @@ def main():
         parser.error(f"--layout {args.layout} builds {in_channels} input channels but the data "
                      f"carries {from_data}")
     print(f"layout {args.layout}, {in_channels} input channels")
-    model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux,
+    model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux, low_rank=args.low_rank,
                   reporting_heads=not args.no_reporting_heads,
                   residual=not args.no_residual, dtype=args.dtype,
                   fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
