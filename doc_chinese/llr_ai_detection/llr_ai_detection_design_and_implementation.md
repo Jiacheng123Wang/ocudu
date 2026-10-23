@@ -17831,6 +17831,80 @@ sudo -E env \
 
 ★ 状态：★ 真实低 SNR 采集方案已定 ✓（★ 只能拉远 ✓，★ 流程按「会掉线」设计 ✓）；★ 分箱判据已落地 ✓（★ §19.307 ✓）；
 ★ **E6/E7 待排** ✓。
+### 19.311 ★★★ 低 SNR 语料采集 runbook（★ 用户与我配合执行 ✓，2026-10-23 10:35 ✓）
+
+**(a) ★★ 这一步用**经典链**采，不用 AI 臂 ✓**
+
+★ 理由 ✓：★ 语料要的是**网格 ＋ 标签** ✓（★ `build_depth3_dataset.py` 自己造平面 ✓），★ 与哪个接收机无关 ✓；
+★ 而纯模式下算不了的接收会**被擦掉** ✓ ⇒ ★ **少采语料** ✓。★ 所以：★ **不带 `--expert_phy.pusch_receiver_backend ai`** ✓。
+
+**(b) ★★ 环境变量（★ 名字已核对 ✓）**
+
+| ★ 变量 ✓ | ★ 含义 ✓ | ★ 本跑取值 ✓ |
+|---|---|---|
+| ★ `OCUDU_UL_DUMP` ✓ | ★ 捕获前缀（★ **目录 ＋ `/C`** ✓）| ★ `…/corpus/lowsnr_<日期>/C` ✓ |
+| ★ `OCUDU_UL_DUMP_COUNT` ✓ | ★ 最多存多少条（★ **默认只有 8** ✓）| ★ **40000** ✓ |
+| ★ `OCUDU_UL_DUMP_MIN_RB` ✓ | ★ 宽度下限 ✓ | ★ **2** ✓（★ 模型包络的底 ✓）|
+| ★ `OCUDU_UL_DUMP_LLR` ✓ | ★ 是否一并存 LLR ✓ | ★ **0/不设** ✓（★ depth3 语料用不到 ✓，★ 省空间 ✓）|
+
+★ 捕获目录里每条会写 ✓：★ `C_<slot>_<rnti>.bin`（★ 网格 ✓）、★ `C_<slot>_<rnti>_h.bin` ✓、
+★ `C_<slot>_<rnti>_ce.txt` ✓ —— ★ **`_ce.txt` 里有 `snr=` ✓** ⇒ ★ **分箱不需要另记日志** ✓。
+
+**(c) ★★ 命令（★ 一条腿采完全程 ✓，★ 不中途重起 ✓）**
+
+```bash
+cd ~/dev/ocudu
+D=$PWD/doc_chinese/llr_ai_detection/work_tmp/corpus/lowsnr_1023
+mkdir -p $D
+sudo -E env \
+  LEG_CONFIG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml \
+  OCUDU_UL_DUMP=$D/C \
+  OCUDU_UL_DUMP_COUNT=40000 \
+  OCUDU_UL_DUMP_MIN_RB=2 \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu lowsnr-collect
+```
+
+★ **不重起** ✓：★ 重起会**丢附着** ✓，★ 而"重附着"正是我们要避免的成本 ✓ ⇒
+★ 一条腿连续跑 ✓，★ 距离点靠**时间**区分 ✓（★ 我会用捕获的 slot ＋ 腿日志的墙钟来切分 ✓）。
+
+**(d) ★★ 采集顺序（★ 每点 3–5 分钟 ✓）**
+
+| ★ 点 ✓ | ★ 距离 ✓ | ★ 位置 ✓ | ★ 点内动作（★ 关键 ✓）|
+|---|---|---|---|
+| ★ **A** ✓ | ★ **1 m** ✓ | ★ LOS ✓ | ★ 基准 ✓；★ 手挡 20 s 制造深衰落 ✓ |
+| ★ **B** ✓ | ★ **4–5 m** ✓ | ★ LOS ✓ | ★ 挪 ±0.5 m ✓、★ 转 90° ✓、★ 手挡 ✓ |
+| ★ **C** ✓ | ★ **8–10 m 或隔墙** ✓ | ★ NLOS ✓ | ★ 同上 ✓；★ 若已解不出 ⇒ ★ 停在这一点别更远 ✓ |
+
+★ **判据（★ 实时看 ✓）**：★ `t` 屏幕的 `sinr` 应**跨越** ~20 dB → ~2 dB ✓；
+★ 若 C 点仍在 8 dB 以上 ✓ ⇒ ★ 再远一档 ✓。
+
+**(e) ★★ 每点要记的四项（★ 我事后要用 ✓）**
+
+| ★ 项 ✓ | ★ 例子 ✓ |
+|---|---|
+| ★ 起止时刻（★ HKT ✓）| ★ 10:42–10:47 ✓ |
+| ★ 距离/位置 ✓ | ★ 4.5 m / LOS / 桌面 ✓ |
+| ★ 是否掉线重连 ✓ | ★ 否 / 是（★ 10:44 重启基带 ✓）|
+| ★ iperf 吞吐 ✓ | ★ 12.4 Mbit/s ✓ |
+
+**(f) ★★ 收尾与交接 ✓**
+
+1. ★ 停腿（★ `Ctrl+C` ✓）；
+2. ★ `ls $D | wc -l` 报捕获数 ✓；
+3. ★ 把上面四项记录发我 ✓；
+4. ★ 我跑：★ `self_label_captures.py` 标注 ✓ → ★ 按 `_ce.txt` 的 `snr=` **分箱** ✓ → ★ 出**覆盖表** ✓
+   （★ 0–2 / 2–4 / … / 10–12 dB 各多少条 ✓）。
+
+★ 判据（★ 分箱后 ✓）：★ **每箱 ≥200 条** ✓；★ 不足的箱 ⇒ ★ 在 C 点**补采** ✓（★ 不必重头 ✓）。
+
+**(g) ★★ 掉线怎么办（★ 手机侧 ✓，★ memo §10 ✓）**
+
+```bash
+adb shell dumpsys telephony.registry | grep -E "mNrArfcn|mServiceState" | head -2
+# 空 ⇒ 基带重启（adb 会掉 30 s，属正常）
+adb shell su -c 'setprop ctl.restart vendor.qcrild; setprop ctl.restart vendor.qcrild2'
+```
+
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
