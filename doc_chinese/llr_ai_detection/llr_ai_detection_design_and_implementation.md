@@ -20135,6 +20135,44 @@ depth3_e4_real_1023/d3_e4.mlmodelc
 | ★ depth4 M1 ✓ | ★ **用户要求稍后** ✓ |
 
 ★★ **⇒ 现在最该做的是 (c)1：★ 把判据收成一个脚本 ✓** —— ★ 明天 6 条模型（★ E3 ＋ A1–A4 ＋ 可能的 A5 ✓）都要跑同一套 ✓。
+### 19.366 ★★★ 三道判据收成一个脚本 ✓：`probe/verdict.py` ✓（2026-10-23 21:15 ✓）
+
+**(a) ★ 一条命令出三栏 ✓**
+
+```bash
+W=$PWD/doc_chinese/llr_ai_detection/work_tmp
+python3 $W/probe/verdict.py \
+  --mlmodelc <bundle.mlmodelc> --keras <model.keras> [--captures 40] [--modulation QPSK]
+```
+
+★ 输出 ✓（★ E4 实测 ✓，★ 小样本 12 条 ✓）：
+
+```
+bundle d3_e4.mlmodelc
+  gate 1  sign agreement    99.29 %   (>= 98.7)   PASS
+  gate 2  attach decodes     9/10      (>= 7)     PASS
+  gate 3  per-bin BER      worst regression -0.06 pp (<= 0.15)  PASS
+           0- 2 dB   reference  18.07%   candidate  17.81%
+           ...
+```
+
+**(b) ★★ 三个设计点（★ 都是今天踩过的坑 ✓）**
+
+| ★ 点 ✓ | ★ 为什么 ✓ |
+|---|---|
+| ★ 自动 `mkdir -p` 输出目录 ✓ | ★ 目录不存在时**静默不写 LLR** ✓（★ §19.353 ✓）|
+| ★ 显式设 `OCUDU_UL_DUMP_LLR=1` ✓ | ★ AI 回放默认不写 ✓（★ 同上 ✓）|
+| ★ 解码门槛按**比例** ✓（★ 65% ✓）| ★ 26/40 是 40 条样本的值 ✓，★ 小样本时用比例才公平 ✓ |
+
+**(c) ★★ 判据 ✓**
+
+| ★ 门 ✓ | ★ 阈值 ✓ | ★ 依据 ✓ |
+|---|---|---|
+| ★ ① 符号一致 ✓ | ★ ≥98.7% ✓ | ★ c32h 的水平 ✓ |
+| ★ ② attach 解码 ✓ | ★ ≥65% ✓ | ★ 26/40 ✓ |
+| ★ ③ 分箱 ✓ | ★ 任何箱回退 ≤0.15 pp ✓ | ★ §19.305 ✓ |
+
+★ 状态 ✓：★ 脚本可用 ✓；★ **明天 E3 ＋ A1–A4 各跑一条命令即可** ✓。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
