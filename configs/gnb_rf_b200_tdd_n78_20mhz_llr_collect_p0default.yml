@@ -5,9 +5,10 @@
 # =====================================================================================================
 # COLLECTION CONFIG for the depth-3 LLR corpus (llr_ai_detection design document section 19.22 / 19.34).
 #
-# It is `gnb_rf_b200_tdd_n78_20mhz.yml` -- the delivery config -- with THREE lines changed, and only
-# those three. Everything else (radio, cell, TDD pattern, concurrency) is the delivery shape on purpose:
-# a corpus collected on a configuration nobody delivers measures a receiver nobody will run.
+# It is `gnb_rf_b200_tdd_n78_20mhz.yml` -- the delivery config -- with the MCS pin RELEASED and the
+# uplink power target named explicitly, and nothing else. Everything else (radio, cell, TDD pattern,
+# concurrency) is the delivery shape on purpose: a corpus collected on a configuration nobody delivers
+# measures a receiver nobody will run.
 #
 #   cell_cfg.pusch.min_ue_mcs: 20        [RELEASED 2026-10-23 -- AMC now free, see the pusch block]
 #   cell_cfg.pusch.max_ue_mcs: 20        (the delivery default is 28 = rate 0.948, which is what the
