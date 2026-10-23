@@ -9,7 +9,7 @@
 # those three. Everything else (radio, cell, TDD pattern, concurrency) is the delivery shape on purpose:
 # a corpus collected on a configuration nobody delivers measures a receiver nobody will run.
 #
-#   cell_cfg.pusch.min_ue_mcs: 20        pin the MCS at the FIRST 256QAM entry (rate 0.6825)
+#   cell_cfg.pusch.min_ue_mcs: 20        [RELEASED 2026-10-23 -- AMC now free, see the pusch block]
 #   cell_cfg.pusch.max_ue_mcs: 20        (the delivery default is 28 = rate 0.948, which is what the
 #                                        previous corpus captured, and almost none of it decodes)
 #   cell_cfg.pusch.p0_nominal_with_grant: -76   the DELIVERY DEFAULT -- see the round-3 note below
@@ -121,13 +121,19 @@ cell_cfg:
   pusch:
     rv_sequence: [0, 2, 3, 1]
     # ---- 本文件相对交付配置的【三行改动】（★ 采集专用，★ 见文件头的说明）----------------------
-    # ★ MCS 钉在 256QAM 表的第一档（MCS 20，rate 0.6825）。交付默认是 28（rate 0.948），
-    #   而上一批语料正是采在 28 上 —— 731 个包络内首传里【一个都译不出】✗。
-    # ★ `min = max = 20` 而不是"上限 19"：256QAM 表里 MCS 0–19 是 QPSK/16QAM/64QAM，
-    #   20–27 才是 256QAM（lib/ran/pdsch/pdsch_mcs.cpp MCS_INDEX_TABLE_2）——
-    #   卡在 19 会让语料里【一个 256QAM 都没有】，而那是当前唯一有模型的调制。
-    min_ue_mcs: 20
-    max_ue_mcs: 20
+    # ---- 从 2026-10-23 11:30 起：MCS 由 AMC 自由选择（用户明示）------------------------------
+    # 这一段原先钉着 `min = max = 20`（256QAM rate 0.6825）：它是【高 SNR 语料】的工作点，
+    # 换取"一个固定调制、一个固定码率"的可复现性。
+    #
+    # 但它让【低 SNR 采集】无法工作：256QAM rate 0.68 在 ≲20 dB 解不出来，而低 SNR 采集正是要
+    # 走到 0–12 dB —— 2026-10-23 那次低 SNR 飞行因此产出了 12 137 条捕获、抽样 42 条回放
+    # 【crc=OK 0 条】，全部没有标签（llr 实现文档 §19.312）。
+    #
+    # 所以采集配置改成让 AMC 自己走：远场自然落到 QPSK/16QAM 的低档，包才解得出来、才有标签。
+    # 代价是同一个距离上调制/码率会变，语料不再"一个工作点"——对低 SNR 语料这正是想要的。
+    # 要恢复旧行为（高 SNR 定点评测）：把下面两行取消注释即可。
+    # min_ue_mcs: 20
+    # max_ue_mcs: 20
     # ★ 上行功控目标抬 6 dB（默认 -76）。配方要"高 SNR"，这是买得到它的那个旋钮；
     #   ul_ab 腿实测 +3…+6 dB SINR。必须是 2 的倍数。
     p0_nominal_with_grant: -76
