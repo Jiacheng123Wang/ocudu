@@ -52,6 +52,7 @@ depth3_paths.add_ce_shared()
 import argparse
 import glob
 import os
+import re
 import sys
 
 import numpy as np
@@ -481,6 +482,23 @@ def build_sample(name, prefix, cfg, alloc, tb_path, source, snr_db, seed, payloa
     return sample, bits, grid, channel_grid, sigma2, r
 
 
+
+def measured_snr_db(prefix):
+    """The SNR the capture's own estimator measured, in dB.
+
+    A real sample records no target SNR because no noise was added, so `snr_nominal` came out NaN -- which then made the
+    per-bin evaluation and any SNR-based reweighting skip every real sample. The capture's `_ce.txt` carries the estimate
+    the chain itself published, so the column is filled from it (design section 19.317).
+    """
+    try:
+        with open(prefix + "_ce.txt") as handle:
+            match = re.search(r"snr=([0-9.eE+-]+)", handle.read())
+    except OSError:
+        return float("nan")
+    if match is None:
+        return float("nan")
+    return 10.0 * float(np.log10(max(float(match.group(1)), 1e-9)))
+
 def assemble(samples, keys_arrays):
     """Stack per-sample dicts into arrays, padding the packed bits to the longest sample."""
     out = {}
@@ -739,6 +757,9 @@ def main():
                     break
                 continue
             sample["source"] = 0 if args.source == "real" else 1
+            if args.source == "real":
+                # Record what the chain measured; nothing is added to the grid.
+                sample["snr_nominal"] = np.float32(measured_snr_db(prefix))
             samples.append(sample)
             names.append(f"{name}@{snr if snr is not None else 'natural'}")
             made += 1
