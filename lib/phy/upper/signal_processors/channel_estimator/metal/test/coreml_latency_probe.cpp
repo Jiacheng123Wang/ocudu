@@ -22,6 +22,7 @@
 //     --repeat-batch     call predict this many times per timed sample and report the per-call time (default 1)
 
 #include "ocudu_coreml_nn_engine.h"
+#include "coreml_compute_plan.h"
 
 #include <algorithm>
 #include <chrono>
@@ -150,6 +151,9 @@ int main(int argc, char** argv)
     const auto whole_stop = std::chrono::steady_clock::now();
     const double wall_us  = std::chrono::duration<double, std::micro>(whole_stop - whole_start).count();
     report("predict", samples);
+    // WHERE THIS PROCESS GRAPH WENT. The state being hunted is a placement, so it has to be read
+    // from the process that measured it, right after the measurement (design section 19.348).
+    ocudu_print_compute_plan(model_path.c_str());
     std::printf("%-14s wall %.1f ms for %u call(s) => %.1f us/call (includes the loop, so it is an upper bound)\n",
                 "process", wall_us / 1000.0, iterations * repeat, wall_us / static_cast<double>(iterations * repeat));
     return 0;
