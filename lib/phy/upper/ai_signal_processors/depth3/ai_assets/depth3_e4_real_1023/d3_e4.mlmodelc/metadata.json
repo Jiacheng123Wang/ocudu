@@ -1,0 +1,80 @@
+[
+  {
+    "metadataOutputVersion" : "3.0",
+    "storagePrecision" : "Float16",
+    "outputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 612 × 112)",
+        "shortDescription" : "",
+        "shape" : "[1, 612, 112]",
+        "name" : "llr",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 612 × 14)",
+        "shortDescription" : "",
+        "shape" : "[1, 612, 14]",
+        "name" : "post_eq_noise",
+        "type" : "MultiArray"
+      }
+    ],
+    "modelParameters" : [
+
+    ],
+    "specificationVersion" : 8,
+    "mlProgramOperationTypeHistogram" : {
+      "Ios17.tanh" : 2,
+      "Ios17.conv" : 39,
+      "Ios17.transpose" : 3,
+      "Ios17.reshape" : 2,
+      "Ios16.relu" : 37,
+      "Ios17.add" : 18
+    },
+    "computePrecision" : "Mixed (Float16, Int32)",
+    "isUpdatable" : "0",
+    "stateSchema" : [
+
+    ],
+    "availability" : {
+      "macOS" : "14.0",
+      "tvOS" : "17.0",
+      "visionOS" : "1.0",
+      "watchOS" : "10.0",
+      "iOS" : "17.0",
+      "macCatalyst" : "17.0"
+    },
+    "modelType" : {
+      "name" : "MLModelType_mlProgram"
+    },
+    "userDefinedMetadata" : {
+      "com.github.apple.coremltools.source" : "tensorflow==2.21.0",
+      "depth3_head_stride" : "8",
+      "com.github.apple.coremltools.conversion_date" : "2026-10-23",
+      "com.github.apple.coremltools.version" : "9.0",
+      "depth3_nsc" : "612",
+      "depth3_layout" : "modcond",
+      "depth3_snr_range" : "0.00,48.00",
+      "depth3_qm_set" : "2,4,6,8"
+    },
+    "inputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 612 × 14 × 16)",
+        "shortDescription" : "",
+        "shape" : "[1, 612, 14, 16]",
+        "name" : "x",
+        "type" : "MultiArray"
+      }
+    ],
+    "generatedClassName" : "d3_e4",
+    "method" : "predict"
+  }
+]
