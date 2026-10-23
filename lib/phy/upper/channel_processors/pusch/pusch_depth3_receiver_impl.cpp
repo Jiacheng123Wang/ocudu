@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <array>
+#include <map>
 #include <tuple>
 #include <chrono>
 #include <cstdio>
@@ -1380,6 +1381,7 @@ private:
     timings[2][timing_index] = micros(reported, delivered);
     timings[5][timing_index] = micros(forwarded, reported);
     timings[3][timing_index] = predict_us;
+    window_widths[timing_index] = bucket_in_use_;
     // The TOTAL when the gate closed the segment, otherwise the submission alone: a bundle that declares no
     // trained range skips the gate and its results are read later, where nothing here can see it.
     timings[4][timing_index] = pending_estimate_open ? pending_estimate_call_us : pending_estimate_total_us;
@@ -1416,6 +1418,23 @@ private:
     }
     if (!mix.empty()) {
       fmt::print(stderr, "[depth3-timing]   allocation mix (subcarriers x receptions): {}\n", mix);
+      // THE WINDOW'S OWN MIX (design section 19.386). The percentiles above come from the last TIMING_RING receptions,
+      // while the line just printed is cumulative over the whole leg -- so a reader who compares them is comparing two
+      // different populations, which is exactly how "fast" and "slow" legs came to look like a two-state mystery when
+      // their per-width means were in fact identical. This second line is the mix that the percentiles were measured on.
+      std::map<unsigned, unsigned> window_hits;
+      const unsigned               windowed = std::min(timing_count, TIMING_RING);
+      for (unsigned i = 0; i != windowed; ++i) {
+        ++window_hits[window_widths[i]];
+      }
+      std::string window_mix;
+      unsigned    window_shown = 0;
+      for (const auto& entry : window_hits) {
+        window_mix += fmt::format("{}{}x{}", (window_shown++ == 0) ? "" : " ", (entry.first == 0) ? 612U : entry.first,
+                                  entry.second);
+      }
+      fmt::print(stderr, "[depth3-timing]   window mix, the {} receptions the percentiles came from: {} \n",
+                 windowed, window_mix);
       std::string per_width;
       for (const auto& entry : bucket_predict_us_) {
         if (entry.second == 0) {
@@ -1497,6 +1516,8 @@ private:
   }
 
   std::array<std::array<unsigned, TIMING_RING>, 6> timings{};
+  /// The bucket width each sampled reception used, so the report can say which mix its percentiles were measured over.
+  std::array<unsigned, TIMING_RING> window_widths{};
   unsigned                                         timing_index = 0;
   unsigned                                         timing_count = 0;
   /// The classical estimator's cost for the reception in flight, carried from `estimate()` to `record_timing()`
