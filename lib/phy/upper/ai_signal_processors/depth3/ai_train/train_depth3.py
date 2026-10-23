@@ -386,12 +386,40 @@ class Batches:
             "scale": np.float32(D3.RANGE_LIMIT_FLOAT[modulation]),
         }
 
-    def epoch(self, batch_size):
-        """Yield batches for one epoch, reshuffling first."""
+    def epoch(self, batch_size, workers=0, prefetch=0):
+        """Yield batches for one epoch, reshuffling first.
+
+        `workers` builds the next `prefetch` batches in a thread pool while the accelerator consumes the current one.
+        The per-sample work -- unpacking the bit sequence, building the label plane, the loss weights and the noise
+        target -- is numpy and therefore releases the GIL, so threads genuinely overlap it with the device. Measured
+        on the RTX 3060 box, the card sat at 47 percent utilisation with this loop serial, which is what this exists
+        to fix (design section 19.367(d)).
+        """
         self.rng.shuffle(self.order)
-        for start in range(0, self.n, batch_size):
-            indices = self.order[start:start + batch_size]
-            yield [self.sample(int(i)) for i in indices]
+        if workers <= 0:
+            for start in range(0, self.n, batch_size):
+                indices = self.order[start:start + batch_size]
+                yield [self.sample(int(i)) for i in indices]
+            return
+
+        from concurrent.futures import ThreadPoolExecutor
+        from collections import deque
+
+        def build(indices):
+            return [self.sample(int(i)) for i in indices]
+
+        starts = list(range(0, self.n, batch_size))
+        ahead = max(prefetch, 1)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            pending = deque()
+            for start in starts[:ahead]:
+                pending.append(pool.submit(build, self.order[start:start + batch_size]))
+            for index, start in enumerate(starts):
+                batch = pending.popleft().result()
+                nxt = index + ahead
+                if nxt < len(starts):
+                    pending.append(pool.submit(build, self.order[starts[nxt]:starts[nxt] + batch_size]))
+                yield batch
 
 
 class CodedBler:
@@ -848,6 +876,10 @@ def main():
     parser.add_argument("--w-ch", type=float, default=L.DEFAULT_WEIGHTS["ch_est"])
     parser.add_argument("--w-noise", type=float, default=L.DEFAULT_WEIGHTS["post_eq_noise"])
     parser.add_argument("--no-aux", action="store_true", help="LLR head only, for the R2.4 ablation")
+    parser.add_argument("--workers", type=int, default=0,
+                        help="threads that build batches while the accelerator runs; 0 keeps the loop serial")
+    parser.add_argument("--prefetch", type=int, default=0,
+                        help="batches to build ahead when --workers is set (defaults to 2x the workers)")
     parser.add_argument("--low-rank", type=int, default=0,
                         help="factorise the pointwise 1x1 into (c x rank) then (rank x c); 0 keeps the plain 1x1, "
                              "8 removes 512 of the 1024 multiply-adds per block at c_hid 32")
@@ -1127,7 +1159,7 @@ def main():
     started = time.time()
     for epoch in range(1, args.epochs + 1):
         losses = []
-        for samples in train.epoch(args.batch):
+        for samples in train.epoch(args.batch, args.workers, args.prefetch or (2 * args.workers)):
             x, targets = tensors(samples)
             total, _, _ = step(x, targets, training=True)
             losses.append(float(total))
@@ -1383,7 +1415,7 @@ def main():
     started = time.time()
     for epoch in range(1, args.epochs + 1):
         losses = []
-        for samples in train.epoch(args.batch):
+        for samples in train.epoch(args.batch, args.workers, args.prefetch or (2 * args.workers)):
             x, targets = tensors(samples)
             total, _, _ = step(x, targets, training=True)
             losses.append(float(total))
