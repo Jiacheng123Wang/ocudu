@@ -159,7 +159,7 @@ CPU 版与 GPU 版同算法（layered normalized min-sum）⇒ 参考语义一�
 **结论（D4.3）**：**用 1.1% 的可解码块换 2.1 µs 是极差的交易** ⇒ **不做"提前放弃"**；
 早退只用于**确认成功**（CRC / syndrome=0），可选的学习型判据应预测"**成功**"（错了只多算，不丢块）。
 
-### D4.4 首迭代 syndrome 无法区分成败
+### D4.3 首迭代 syndrome 无法区分成败
 
 | 项 | 中位 | p90 |
 |---|---|---|
@@ -258,42 +258,6 @@ CPU 版与 GPU 版同算法（layered normalized min-sum）⇒ 参考语义一�
 **若 M1 失败**：接主干没有意义 ⇒ 在几小时内得到结论，而不是几天。
 
 ---
-
-## D24. M1 的容量改造与今晚的阻塞（2026-10-23 22:30）
-
-**数据侧已确认够用**（这是今晚最有价值的一条）：
-
-| 项 ✓ | 值 |
-|---|---|
-| 参考库 | **4 903** 条 dump |
-| `--certified-only` 后 | **2 436** 条 |
-| 最常见 (Z, n) 组 | **Z=384, 35 节点, 13 校验 ⇒ 1 548 条**（其中 1 545 条被经典解码器解出）|
-| lifting-size index | 1（BG1 表）|
-
-⇒ 足以支撑 ≥200 epoch 的训练，**不必再采数据**。
-
-**代码侧：per-degree 表已加，但撞上 Keras 的形状推断**
-
-按 D21.3 的判据（"模型太小，12 参数"），`LdpcLayer` 的 `scale`/`offset`/`damp` 从每层 1 个标量
-改成**按校验节点度数索引的表**（`max_degree ≈ 4–7`），`call()` 里按 `self.chk` 逐边 gather，并把边因子显式 reshape 成
-`[E,1,1]` 以避免与 `[E,batch,Z]` 的错轴广播。
-
-三处已改：`build()` 里 `bincount` 出度数、建表；`call()` 里按度数取曲线；`compute_output_shape()` 返回入边的形状。
-
-**但训练没起来**：Keras 报
-`Could not automatically infer the output shape / dtype of 'ldpc_layer'`，随后
-`compute_output_shape() is returning a type that cannot be interpreted as a shape`。
-也就是说 `call()` 在符号追踪阶段先失败，后者是次生消息。三次尝试都停在同一处。
-
-**明早的第一步（按可能性排序）**：
-
-1. 在 `call()` 里加断言/打印，确认 `self.chk` 的 dtype 与 `nof_checks`，以及 `tf.gather(scale, self.chk)` 的静态形状；
-2. 把 `self.check_degree` 从 `build()` 移到 `__init__`（`build()` 里造的常量在某些 Keras 版本里不参与符号形状推断）；
-3. 若仍失败，退回"每层标量"的已知可用形态，**只把 `scale` 改成 per-degree**（最小改动先跑通，再逐步加表）；
-4. 跑通后：`--layers 4 --epochs 200 --certified-only --limit 4903`（约 1 548 条 × 200 epoch，小时级）。
-
-**今晚不追**：22:30，改到能跑再跑；明早在 107 空出后与 E 轨判据一起做。
-
 
 ## D11. 与 depth3 的关系
 
@@ -948,3 +912,38 @@ BP:      v2c = soft − c2v_prev          （先"减掉自己"）
 | ★ 不合格 ✓ | ★ < 53.3% ⇒ ★ 4 层没有兑现它的深度 ✓ |
 
 ★ 状态：★ M1 标尺已量 ✓；★ 判据已细化 ✓；★ **训练尚未进行** ✓。
+
+## D24. M1 的容量改造与今晚的阻塞（2026-10-23 22:30）
+
+**数据侧已确认够用**（这是今晚最有价值的一条）：
+
+| 项 ✓ | 值 |
+|---|---|
+| 参考库 | **4 903** 条 dump |
+| `--certified-only` 后 | **2 436** 条 |
+| 最常见 (Z, n) 组 | **Z=384, 35 节点, 13 校验 ⇒ 1 548 条**（其中 1 545 条被经典解码器解出）|
+| lifting-size index | 1（BG1 表）|
+
+⇒ 足以支撑 ≥200 epoch 的训练，**不必再采数据**。
+
+**代码侧：per-degree 表已加，但撞上 Keras 的形状推断**
+
+按 D21.3 的判据（"模型太小，12 参数"），`LdpcLayer` 的 `scale`/`offset`/`damp` 从每层 1 个标量
+改成**按校验节点度数索引的表**（`max_degree ≈ 4–7`），`call()` 里按 `self.chk` 逐边 gather，并把边因子显式 reshape 成
+`[E,1,1]` 以避免与 `[E,batch,Z]` 的错轴广播。
+
+三处已改：`build()` 里 `bincount` 出度数、建表；`call()` 里按度数取曲线；`compute_output_shape()` 返回入边的形状。
+
+**但训练没起来**：Keras 报
+`Could not automatically infer the output shape / dtype of 'ldpc_layer'`，随后
+`compute_output_shape() is returning a type that cannot be interpreted as a shape`。
+也就是说 `call()` 在符号追踪阶段先失败，后者是次生消息。三次尝试都停在同一处。
+
+**明早的第一步（按可能性排序）**：
+
+1. 在 `call()` 里加断言/打印，确认 `self.chk` 的 dtype 与 `nof_checks`，以及 `tf.gather(scale, self.chk)` 的静态形状；
+2. 把 `self.check_degree` 从 `build()` 移到 `__init__`（`build()` 里造的常量在某些 Keras 版本里不参与符号形状推断）；
+3. 若仍失败，退回"每层标量"的已知可用形态，**只把 `scale` 改成 per-degree**（最小改动先跑通，再逐步加表）；
+4. 跑通后：`--layers 4 --epochs 200 --certified-only --limit 4903`（约 1 548 条 × 200 epoch，小时级）。
+
+**今晚不追**：22:30，改到能跑再跑；明早在 107 空出后与 E 轨判据一起做。
