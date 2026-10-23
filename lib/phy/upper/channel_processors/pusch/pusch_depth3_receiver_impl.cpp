@@ -358,6 +358,24 @@ public:
                prepare_full_plane ? "WHOLE" : "DM-RS-only",
                prepare_full_plane ? "OCUDU_DEPTH3_PREPARE_FULL_PLANE=1" : "OCUDU_DEPTH3_PREPARE_FULL_PLANE=0");
   }
+  // PREFERRED COMPUTE UNITS ARE PINNED BACK TO "all", AND LOUDLY (design section 19.374(b)). The engine accepts
+  // `cpu_gpu` and `cpu_ne` because the latency probe needs them to measure each tier in isolation, but on air they are
+  // not a preference -- they are a way to break the link. Measured 2026-10-23: with `cpu_gpu` the prediction took
+  // 1677 microseconds against a 500-microsecond slot, so receptions arrived late and the decode rate fell to 15.2
+  // percent, which shows up as iperf running at zero while ping still answers. `all` lets Core ML pick, and the worst
+  // it does is land at 650 to 930 microseconds with decoding intact.
+  if (const char* units = std::getenv("OCUDU_DEPTH3_COMPUTE_UNITS")) {
+    const std::string requested(units);
+    if ((requested == "cpu_gpu") || (requested == "cpu_ne") || (requested == "cpu")) {
+      fmt::print(stderr,
+                 "[pusch_receiver] AI depth-3: REFUSING OCUDU_DEPTH3_COMPUTE_UNITS={} for the receiver (it costs 1677 us "
+                 "per reception and drops decoding to 15 percent, measured 2026-10-23); using 'all'. The tier knob "
+                 "exists for the latency probe, which does not go through this receiver.\n",
+                 requested);
+      setenv("OCUDU_DEPTH3_COMPUTE_UNITS", "all", 1);
+    }
+  }
+
   // The fallback switch: `none` is the pure configuration the final comparison runs (design section 19.245).
   if (const char* env = std::getenv("OCUDU_DEPTH3_FALLBACK")) {
     fallback_enabled = !((env[0] == 'n') || (env[0] == 'N') || (env[0] == '0'));
@@ -1322,6 +1340,27 @@ private:
                            std::chrono::steady_clock::time_point to) {
       return static_cast<unsigned>(std::chrono::duration_cast<std::chrono::microseconds>(to - from).count());
     };
+    // THE SLOW STATE IS ANNOUNCED, NOT DISCOVERED LATER (design section 19.374(c)). The engine picks its compute units
+    // once, when the model loads, and on this rig that choice sometimes lands on the GPU path, where a reception costs 650
+    // to 930 microseconds instead of 400 -- through-put survives but the leg runs about half as fast. Saying so after the
+    // first sixty-four receptions is what turns a puzzling log into a line anyone can read; a real repair (reloading to
+    // re-draw the placement) needs the model-binding path made re-entrant and is not done here.
+    if (timing_count == 64) {
+      std::array<unsigned, 64> sorted{};
+      for (unsigned i = 0; i != 64; ++i) {
+        sorted[i] = timings[3][i];
+      }
+      std::sort(sorted.begin(), sorted.end());
+      const unsigned median_us = sorted[32];
+      if (median_us >= 600) {
+        fmt::print(stderr,
+                   "[depth3-timing] SLOW STATE: the first 64 predictions took {} us at the median (the fast state is about "
+                   "400). Core ML placed this model on the GPU path for this run; throughput survives, latency roughly "
+                   "doubles. Not repair-able from here -- the placement is chosen at load.\n",
+                   median_us);
+      }
+    }
+
     // One linear scan over at most nine widths, on the same path that already stamps five timestamps.
     for (unsigned slot = 0; slot != bucket_hits_.size(); ++slot) {
       if (bucket_hits_[slot].second == 0 || bucket_hits_[slot].first == bucket_in_use_) {
