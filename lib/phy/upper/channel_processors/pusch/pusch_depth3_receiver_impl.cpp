@@ -928,6 +928,7 @@ public:
         if (index < narrow_engines.size() && narrow_engines[index] != nullptr) {
           computing_engine = narrow_engines[index].get();
         }
+        bucket_in_use_ = bucket_nsc;
       }
     }
     // A reception computes only when a model was bound for its modulation, and every binding writes the stride at
@@ -1313,6 +1314,14 @@ private:
                            std::chrono::steady_clock::time_point to) {
       return static_cast<unsigned>(std::chrono::duration_cast<std::chrono::microseconds>(to - from).count());
     };
+    // One linear scan over at most nine widths, on the same path that already stamps five timestamps.
+    for (auto& entry : bucket_hits_) {
+      if (entry.second == 0 || entry.first == bucket_in_use_) {
+        entry.first = bucket_in_use_;
+        ++entry.second;
+        break;
+      }
+    }
     timings[0][timing_index] = micros(start, assembled);
     timings[1][timing_index] = micros(assembled, forwarded);
     timings[2][timing_index] = micros(forwarded, delivered);
@@ -1342,6 +1351,18 @@ private:
     fmt::print(stderr, "[depth3-timing] {} forward(s), microseconds:", timing_count);
     // `predict` last on purpose: it is the PART of `forward` that Core ML and the ANE spend, so the two are read
     // together and their difference is the engine's glue.
+    // The allocation mix behind the timing, so a reader never has to guess whether two runs are comparable.
+    std::string mix;
+    unsigned    shown = 0;
+    for (const auto& entry : bucket_hits_) {
+      if (entry.second == 0) {
+        continue;
+      }
+      mix += fmt::format("{}{}x{}", (shown++ == 0) ? "" : " ", (entry.first == 0) ? 612U : entry.first, entry.second);
+    }
+    if (!mix.empty()) {
+      fmt::print(stderr, "[depth3-timing]   allocation mix (subcarriers x receptions): {}\n", mix);
+    }
     for (unsigned segment = 0; segment != 5; ++segment) {
       std::array<unsigned, TIMING_RING> sorted = timings[segment];
       std::sort(sorted.begin(), sorted.begin() + sampled);
@@ -2104,6 +2125,12 @@ private:
   /// Absent, the publication is computed by the shared measurement layer from the plane alone: RSRP as the pilots'
   /// power minus the residual, and the SINR from the residual SNR converted once, bundle-independently.
   bool                                              has_ch_est     = true;
+  // THE WIDTH THIS RECEPTION ACTUALLY USED (0 = the full-band bundle). Recorded so a timing line can say WHICH
+  // MIX of allocations produced it: two legs of a comparison can bind the same bucket set, run the same model and
+  // still differ in median forward time purely because one carried wider grants -- measured 2026-10-23, where that
+  // ambiguity turned an A/B into "inconclusive" and cost a flight.
+  unsigned                                          bucket_in_use_ = 0;
+  std::array<std::pair<unsigned, unsigned>, 9>      bucket_hits_{};
   bool                                              has_dmrs_noise = true;
   /// \brief The conversion from the shared layer's residual SNR to the chain's post-equalisation convention.
   ///
