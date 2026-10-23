@@ -90,7 +90,16 @@ std::optional<unsigned> capture_rv()
 
 std::string make_key(slot_point slot, rnti_t rnti)
 {
-  return capture_prefix() + "_" + std::to_string(slot.count()) + "_" + std::to_string(to_underlying(rnti));
+  // THE NAME MUST BE UNIQUE OVER THE WHOLE CAPTURE, NOT OVER ONE HYPERFRAME. `slot.count()` is the slot index
+  // INSIDE the frame cycle and wraps every 20480 slots (10.24 s at 30 kHz), so a leg that runs longer than that
+  // silently OVERWRITES its own earlier captures -- measured three times on 2026-10-23: every collection capped at
+  // exactly 6144 captures per C-RNTI, which is the number of uplink slots in one cycle (20480 x 3/10). A twenty
+  // minute flight therefore kept ten seconds of it.
+  //
+  // The SYSTEM FRAME NUMBER is what makes the name unique: `count()` wraps every 1024 frames, `sfn()` rides on top
+  // of it and only repeats after 1024 x 1024 frames (about three hours at 30 kHz).
+  return capture_prefix() + "_" + std::to_string(slot.sfn()) + "_" + std::to_string(slot.count()) + "_" +
+         std::to_string(to_underlying(rnti));
 }
 
 /// \brief Reports, ONCE, that a capture cannot be written -- on stderr, and not through a logger.
