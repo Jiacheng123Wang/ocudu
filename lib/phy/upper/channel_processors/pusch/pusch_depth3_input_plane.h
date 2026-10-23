@@ -84,7 +84,17 @@ public:
   /// 31. So the constant moves to the new model's own lower bound, and the CHAIN-level measurement on
   /// the narrow captures -- the one that could not run while this refused them -- is what confirms or
   /// corrects it.
-  static constexpr unsigned MIN_PRB = 4;
+  // TWO, NOT FOUR (changed 2026-10-23 on the user's instruction). Four was this bundle family's training floor, and it
+  // cost a whole flight: the three-PRB Msg3 that every attach begins with was refused, and under a pure-network leg the
+  // refusal erased the reception instead of handing it over, so the handset could not attach at all (design section
+  // 19.296.6). The floor is a property of what the model was TRAINED on, not of what it can compute, so the honest
+  // default is the narrowest allocation the scheduler actually issues rather than the widest the corpus happened to
+  // contain. The narrow-band crop already covers two PRB with four PRB of context on each side.
+  //
+  // The history worth keeping: this constant was four because the model was fine-tuned down to four and the offline
+  // validation said the repair worked (narrow set 0.5245 to 0.4200 coded BLER against genie's 0.4051, and 32 of 35
+  // captures at chain level against the classical arm's 31). None of that stopped the attach from failing in the field.
+  static constexpr unsigned MIN_PRB = 2;
 
   /// Channel indices, `model_network_design.md` section 0.2(b). Named because a plane written with
   /// the wrong one is a plane that trains and receives nothing.
