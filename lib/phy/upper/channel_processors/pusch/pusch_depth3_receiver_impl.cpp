@@ -1320,10 +1320,12 @@ private:
       return static_cast<unsigned>(std::chrono::duration_cast<std::chrono::microseconds>(to - from).count());
     };
     // One linear scan over at most nine widths, on the same path that already stamps five timestamps.
-    for (auto& entry : bucket_hits_) {
-      if (entry.second == 0 || entry.first == bucket_in_use_) {
-        entry.first = bucket_in_use_;
-        ++entry.second;
+    for (unsigned slot = 0; slot != bucket_hits_.size(); ++slot) {
+      if (bucket_hits_[slot].second == 0 || bucket_hits_[slot].first == bucket_in_use_) {
+        bucket_hits_[slot].first = bucket_in_use_;
+        ++bucket_hits_[slot].second;
+        bucket_predict_us_[slot].first = bucket_in_use_;
+        bucket_predict_us_[slot].second += predict_us;
         break;
       }
     }
@@ -1367,6 +1369,23 @@ private:
     }
     if (!mix.empty()) {
       fmt::print(stderr, "[depth3-timing]   allocation mix (subcarriers x receptions): {}\n", mix);
+      std::string per_width;
+      for (const auto& entry : bucket_predict_us_) {
+        if (entry.second == 0) {
+          continue;
+        }
+        // The mean predict time of THIS width, which is what separates "wider grants" from "slow engine".
+        for (const auto& hits : bucket_hits_) {
+          if (hits.first == entry.first && hits.second != 0) {
+            per_width += fmt::format(" {}:{:.0f}us", (entry.first == 0) ? 612U : entry.first,
+                                     static_cast<double>(entry.second) / static_cast<double>(hits.second));
+            break;
+          }
+        }
+      }
+      if (!per_width.empty()) {
+        fmt::print(stderr, "[depth3-timing]   mean predict per width:{} \n", per_width);
+      }
     }
     for (unsigned segment = 0; segment != 5; ++segment) {
       std::array<unsigned, TIMING_RING> sorted = timings[segment];
@@ -2136,6 +2155,11 @@ private:
   // ambiguity turned an A/B into "inconclusive" and cost a flight.
   unsigned                                          bucket_in_use_ = 0;
   std::array<std::pair<unsigned, unsigned>, 9>      bucket_hits_{};
+  // PREDICT TIME PER WIDTH. The engine-level benchmark says a narrow call costs 193 microseconds for the two-head bundle
+  // and 206 for the four-head one, yet the air legs showed 758 against 380 -- so the question is not which model is
+  // faster but what the engine does per width in situ. Summing predict time into the same nine slots answers it in one
+  // leg instead of another flight of guesswork.
+  std::array<std::pair<unsigned, unsigned long long>, 9> bucket_predict_us_{};
   bool                                              has_dmrs_noise = true;
   /// \brief The conversion from the shared layer's residual SNR to the chain's post-equalisation convention.
   ///
