@@ -19654,6 +19654,67 @@ sudo -E env ... OCUDU_DEPTH3_BUCKETS="$B/base_w180.mlmodelc,$B/base_w396.mlmodel
 ★ **`OCUDU_DEPTH3_COMPUTE_UNITS=cpu_gpu`** ✓ ⇒ ★ 两腿**同一时延基线** ✓，★ 比较才只在模型维度上 ✓✓。
 
 ★ 状态 ✓：★ 模型数量假设**否掉 ✓**；★ "每腿定一次、系统级决定" ✓；★ `cpu_gpu` 是可预测的替代 ✓。
+### 19.355 ★★★ E4 vs c32h 的 ABBA runbook（★ `compute_units=all` 保留双态观察 ✓，2026-10-23 19:10 ✓）
+
+**(a) ★★ 为什么这次**不钉** `cpu_gpu` ✓**
+
+★ 用户口径 ✓：★ 保留 `all` ✓ ⇒ ★ **① 继续观察双态是否出现 ✓；★ ② 顺便比较两者的尾部 ✓**。
+★ 代价 ✓：★ 时延**跨态不可比** ✓ ⇒ ★ **判据必须按态分组 ✓**（★ 见 (d) ✓）。
+
+**(b) ★★ 四条腿（★ ABBA ✓，各 150 s ✓）**
+
+```bash
+cd ~/dev/ocudu
+CFG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml
+E4=$PWD/doc_chinese/llr_ai_detection/work_tmp/artifacts/buckets/e4/d3_e4.mlmodelc
+
+# 腿 1（c32h）
+sudo -E env LEG_CONFIG=$CFG OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_DOMAIN_GATE=net \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-abba-e4-c32h-1 \
+    --expert_phy.pusch_receiver_backend ai
+
+# 腿 2（E4）
+sudo -E env LEG_CONFIG=$CFG OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_DOMAIN_GATE=net \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-abba-e4-e4-1 \
+    --expert_phy.pusch_receiver_backend ai --expert_phy.pusch_receiver_model $E4
+
+# 腿 3（E4）
+sudo -E env LEG_CONFIG=$CFG OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_DOMAIN_GATE=net \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-abba-e4-e4-2 \
+    --expert_phy.pusch_receiver_backend ai --expert_phy.pusch_receiver_model $E4
+
+# 腿 4（c32h）
+sudo -E env LEG_CONFIG=$CFG OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_DOMAIN_GATE=net \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-abba-e4-c32h-2 \
+    --expert_phy.pusch_receiver_backend ai
+```
+
+★ 每条腿 ✓：★ 起腿 → 等 RF 失败停 → 手机接入 → `iperf3 -c <手机IP> -R -t 150 -P 4` → 停腿 ✓。
+
+**(c) ★★ 每腿要读的四项 ✓**
+
+```bash
+for t in abba-e4-c32h-1 abba-e4-e4-1 abba-e4-e4-2 abba-e4-c32h-2; do
+  L=$(ls -t doc_chinese/phy_pipeline_gpu/wip/logs/gnb_gpu_aillr-${t}_*.log | head -1); S="${L%.log}.log.stderr"
+  printf "%-16s OK %6d KO %6d | " "$t" "$(grep -ac 'crc=OK' $L)" "$(grep -ac 'crc=KO' $L)"
+  grep -ah "forward p50" "$S" | tail -1 | grep -aoE "predict p50 [0-9]+ p99 [0-9]+" | tr '\n' ' '
+  grep -ah "allocation mix" "$S" | tail -1 | sed 's/.*receptions): //' | cut -c1-40
+done
+```
+
+**(d) ★★★ 判据（★ 按态分组 ✓）**
+
+| ★ 步 ✓ | ★ 做法 ✓ |
+|---|---|
+| ★ 1 ✓ | ★ 先按 `predict p50` 给每条腿**打态标** ✓：★ **≤500 ＝ 低态** ✓、★ **≥600 ＝ 高态** ✓ |
+| ★ 2 ✓ | ★ **同一态内**比 goodput 与 crc ✓（★ 低态 vs 低态 ✓、★ 高态 vs 高态 ✓）|
+| ★ 3 ✓ | ★ 若某模型**只有一种态** ✓ ⇒ ★ **补飞一条**对齐态 ✓（★ 这是这次设计允许的 ✓）|
+| ★ 4 ✓ | ★ **尾部** ✓：★ 比较**同态下** `predict p99` ✓（★ 跨态比 p99 没意义 ✓）|
+| ★ 5 ✓ | ★ 记录**每个模型出现几种态** ✓ —— ★ 这本身就是"谁更稳"的证据 ✓ |
+
+★ 预期 ✓：★ `predict p50` 低态 ~400–430、★ 高态 ~650–930 ✓；★ `allocation mix` 两模型应同量级 ✓（★ 否则按 §19.344 处理 ✓）。
+
+★ 状态 ✓：★ runbook 已定 ✓；★ **判据按态分组**是本轮的关键 ✓。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
