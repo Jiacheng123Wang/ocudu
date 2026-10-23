@@ -16949,6 +16949,73 @@ train_depth3.py --train llr_only_train.npz --val llr_only_val.npz
 | ★ 回退开启 ✓ | ★ 有（★ 经典链 ✓）| ★ **是** ✓ |
 
 ★ 状态 ✓：★ R6 的含义已澄清 ✓；★ **我那句承诺已撤回 ✓**；★ E4 的 R6 证据 = **离线 0.01 dB ＋ 跨模型互比** ✓。
+### 19.385 ★★★ "同测量层" 对照：★ 开关已存在 ✓，★ 离线预检已通过 ✓（2026-10-24 08:10 ✓）
+
+**(a) ★★★ 不需要新代码 ✓**
+
+★ 臂里**早就有**这个开关 ✓：
+
+```bash
+OCUDU_DEPTH3_IGNORE_REPORTING_HEADS=1
+```
+
+⇒ ★ **即使包带着上报头，也改从共享测量层发布** ✓（★ 代码里 `publish_from_shared_layer()` ✓）。
+
+**(b) ★★★ 离线预检（★ 10 条捕获，n=8 有效 ✓）**
+
+| ★ 路径 ✓ | ★ 平均 SINR ✓ | ★ 偏差 vs 经典链 ✓ | ★ 抖动 ✓ |
+|---|---|---|---|
+| ★ 经典链 ✓ | ★ 29.81 dB ✓ | ★ — ✓ | ★ — ✓ |
+| ★ c32h（★ 自己的头 ✓）| ★ 28.63 dB ✓ | ★ **−1.18 dB** ✗ | ★ **1.37** ✗ |
+| ★ **c32h ＋ 共享层** ✓ | ★ **29.36 dB** ✓ | ★ **−0.45 dB** ✓ | ★ **0.41** ✓ |
+| ★ **E4（★ 共享层 ✓）** | ★ **29.36 dB** ✓ | ★ **−0.45 dB** ✓ | ★ **0.41** ✓ |
+
+★★ **⇒ 打开开关后，c32h 与 E4 上报的 SINR **完全一致** ✓**（★ 同一个层、★ 同样的输入 ✓）
+★ ⇒ ★ **测量路径被彻底中立化 ✓** ⇒ ★ **空口对比就只剩下解码能力 ✓** ✓ —— 正是用户要的那个实验 ✓。
+
+★ 附带 ✓：★ c32h 自估相对共享层 **多 0.73 dB 偏差 ＋ 3.3× 抖动** ✓ ⇒ ★ **它的弱项确实在自估标定** ✓。
+
+**(c) ★★★ 飞行 runbook（★ 4 条 ABBA ✓）**
+
+```bash
+cd ~/dev/ocudu
+CFG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml
+C32=$PWD/lib/phy/upper/ai_signal_processors/depth3/ai_assets/depth3_modcond_c32h/d3_modcond_c32h.mlmodelc
+
+# A1 = c32h ＋ 共享层
+sudo -E env LEG_CONFIG=$CFG OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_DOMAIN_GATE=net \
+  OCUDU_DEPTH3_IGNORE_REPORTING_HEADS=1 \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-shared-c32h-1 \
+    --expert_phy.pusch_receiver_backend ai --expert_phy.pusch_receiver_model $C32
+
+# B1 = E4（默认，本来就是共享层）
+sudo -E env LEG_CONFIG=$CFG OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_DOMAIN_GATE=net \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-shared-e4-1 \
+    --expert_phy.pusch_receiver_backend ai
+
+# B2 = E4（同上，腿名 aillr-shared-e4-2）
+# A2 = c32h ＋ 共享层（同上，腿名 aillr-shared-c32h-2）
+```
+
+★ 每条 300 s ＋ `iperf3 -c <手机IP> -R -t 300 -P 4` ✓。
+
+**(d) ★★★ 判据（★ 预登记 ✓）**
+
+| ★ 项 ✓ | ★ 内容 ✓ |
+|---|---|
+| ★ 有效性 ✓ | ★ `leg_validity.py`：★ RF ≤300 ✓、★ 解码 ≥65% ✓ |
+| ★ **测量中立性（★ 必查 ✓）** | ★ 启动日志须有 ★ `publishing from the SHARED LAYER` ✓；★ 且两模型 `sinr` 量级应相近 ✓ |
+| ★ **主判据** ✓ | ★ **goodput** ✓（★ 用户口径 ✓）|
+| ★ 辅助 ✓ | ★ 重传 ✓、★ crc ✓、★ `binned_deep.py` 的三项分解 ✓ |
+
+★★ **结果的两种读法 ✓**：
+
+| ★ 若 ✓ | ★ 结论 ✓ |
+|---|---|
+| ★ **E4 仍赢** ✓ | ★ **新语料确实提升了**解码/均衡 ✓ ⇒ ★ E4 的价值独立于测量路径 ✓ |
+| ★ **打成平手** ✓ | ★ E4 之前的优势**主要来自测量路径** ✓ ⇒ ★ "语料无用" ✓，★ 而 c32h 只需换上报就能追平 ✓ |
+
+★ 状态 ✓：★ 开关无需开发 ✓；★ 预检通过 ✓；★ runbook 就绪 ✓。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
