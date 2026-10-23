@@ -18654,6 +18654,65 @@ cd ~/work/ai_phy_train
 
 ★★ **⇒ 换默认的最后一个技术前提已经没有了** ✓ ⇒ ★ 剩下的只有 **A/B 空口对照**（★ c32h vs E1 ✓）★ 与**改默认** ✓。
 
+### 19.330 ★★★ E1 vs c32h 的 A/B runbook（★ 背靠背两条 300 s 腿 ✓，2026-10-23 17:00 ✓）
+
+**(a) ★★ 为什么现在可以飞 ✓**
+
+| ★ 前置 ✓ | 状态 ✓ |
+|---|---|
+| ★ 两头包离线判据 ✓ | ✓ E1 优于 c32h（★ §19.297 ✓）|
+| ★ attach 40 段 ✓ | ✓ 27/40 vs 26/40 ✓ |
+| ★ gate ② 空中斜率 ✓ | ✓ §19.280 ✓ |
+| ★ **共享层 RSRP/EPRE** ✓ | ✓ **今天关闭**（★ §19.329 ✓，★ 偏差 ≤0.08 dB ✓）|
+| ★ 8 桶默认绑定 ✓ | ✓ §19.296.10 ✓ |
+
+**(b) ★★ 两条腿（★ 同位置、同手机、同 iperf ✓）**
+
+```bash
+# ---------- 腿 A：c32h（现役默认，4 头） ----------
+cd ~/dev/ocudu
+sudo -E env \
+  LEG_CONFIG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml \
+  OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_MIN_PRB=2 OCUDU_DEPTH3_DOMAIN_GATE=net \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-ab-c32h \
+    --expert_phy.pusch_receiver_backend ai
+
+# 手机接入、iperf3 -R -t 300 -P 4 跑完、记数、停腿
+# ---------- 腿 B：E1（2 头） ----------
+sudo -E env \
+  LEG_CONFIG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml \
+  OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_MIN_PRB=2 OCUDU_DEPTH3_DOMAIN_GATE=net \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-ab-e1 \
+    --expert_phy.pusch_receiver_backend ai \
+    --expert_phy.pusch_receiver_model $PWD/doc_chinese/llr_ai_detection/work_tmp/artifacts/buckets/e1/d3_e1_2heads.mlmodelc
+```
+
+★ 腿 B 只多一个参数 ✓：★ 模型路径 ✓ —— ★ 它的同级 `buckets/` 会被**自动绑定** ✓（★ 已验证 ✓）。
+
+**(c) ★★ 每条腿起腿后 10 秒确认 ✓**
+
+```bash
+L=$(ls -t doc_chinese/phy_pipeline_gpu/wip/logs/gnb_gpu_aillr-ab-*_*.log | head -1)
+S="${L%.log}.log.stderr"
+grep -a "narrow-band buckets bound" "$S" | head -1     # 8 个宽度
+grep -a "bound:" "$S" | head -1                        # 模型路径（腿 B 应是 d3_e1_2heads）
+grep -a "dl_arfcn" "$L" | head -1                      # 627264
+grep -ac "Real-time failure" "$L"                       # 记一次数，之后不应持续增长
+```
+
+**(d) ★★ 判据（★ 预登记 ✓）**
+
+| ★ # ✓ | ★ 判据 ✓ | ★ 说明 ✓ |
+|---|---|---|
+| ★ 1 ✓ | ★ **吞吐 ≥ c32h −5%** ✓ | ★ 主判据 ✓ |
+| ★ 2 ✓ | ★ **crc OK 比例 ≥ c32h** ✓ | ★ 主判据 ✓ |
+| ★ 3 ✓ | ★ `forward p50` **两者接近** ✓ | ★ 同架构 ⇒ 应几乎相同 ✓；★ 差很多说明绑错了模型 ✓ |
+| ★ 4 ✓ | ★ **不要比 `sinr`** ✓ | ★ 两头包走共享层 ✓、★ c32h 走自己的标定 ✓ ⇒ ★ 数值路径不同 ✓ |
+
+★ 若 E1 胜 ✓ ⇒ ★ 改默认（★ `ai_assets/` 放 E1 ＋ 8 桶 ✓，★ 改 `OCUDU_DEPTH3_DEFAULT_MODEL` ✓）；
+★ 若持平 ✓ ⇒ ★ 用 E1 也不亏（★ 它少两个头 ✓、★ 参数更少 ✓），★ 由你决定 ✓；
+★ 若 E1 输 ✓ ⇒ ★ **保持 c32h** ✓（★ 回滚＝一行 ✓）。
+
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
