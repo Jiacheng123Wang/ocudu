@@ -19938,6 +19938,67 @@ strings build/apps/gnb/gnb | grep depth3_e4_real_1023   # 必须出现
 ★ `modcond model '…/depth3_e4_real_1023/d3_e4.mlmodelc' bound …` ✓ ＋ ★ `narrow-band buckets bound: 108 … 612` ✓。
 
 ★ 状态 ✓：★ **默认 = E4 ✓**（★ 二进制已含新路径 ✓）；★ 待一条腿的空口确认 ✓。
+### 19.361 ★★ 两条 60 s 腿：★ 默认（★ E4 ✓）vs c32h ✓（★ runbook ✓，2026-10-23 20:45 ✓）
+
+★ 目的 ✓：★ ① **空口确认默认已换成 E4** ✓（★ §19.360(c) 待办 ✓）；★ ② 两条短腿比 goodput/态/尾部 ✓。
+
+**(a) ★★ 腿 1：默认（★ 不应给任何模型参数 ✓）**
+
+```bash
+cd ~/dev/ocudu
+CFG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml
+sudo -E env LEG_CONFIG=$CFG OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_DOMAIN_GATE=net \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-def-e4-60 \
+    --expert_phy.pusch_receiver_backend ai
+```
+
+**(b) ★★ 腿 2：c32h（★ 显式指定 ✓）**
+
+```bash
+C32=$PWD/lib/phy/upper/ai_signal_processors/depth3/ai_assets/depth3_modcond_c32h/d3_modcond_c32h.mlmodelc
+sudo -E env LEG_CONFIG=$CFG OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_DOMAIN_GATE=net \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-def-c32h-60 \
+    --expert_phy.pusch_receiver_backend ai --expert_phy.pusch_receiver_model $C32
+```
+
+★ 每条 ✓：★ 起腿 → 等 RF 失败停 → 手机接入 → `iperf3 -c 10.45.0.31 -R -t 60 -P 4` → 停腿 ✓。
+
+**(c) ★★★ 腿 1 必须出现这一行（★ 这是默认切换的空口证据 ✓）**
+
+```bash
+S=$(ls -t doc_chinese/phy_pipeline_gpu/wip/logs/gnb_gpu_aillr-def-e4-60_*.log.stderr | head -1)
+grep -a "modcond model" "$S" | head -1 | grep -o "depth3_e4_real_1023/d3_e4.mlmodelc"
+grep -a "narrow-band buckets bound" "$S" | head -1
+```
+
+★ 若出现 `depth3_modcond_c32h` ✓ ⇒ ★ **默认没生效** ✓（★ 查 §19.360(b) 的缓存坑 ✓）。
+
+**(d) ★★ 每腿读六项 ✓**
+
+```bash
+for t in def-e4-60 def-c32h-60; do
+  L=$(ls -t doc_chinese/phy_pipeline_gpu/wip/logs/gnb_gpu_aillr-${t}_*.log | head -1); S="${L%.log}.log.stderr"
+  ok=$(grep -ac 'crc=OK' $L); ko=$(grep -ac 'crc=KO' $L)
+  printf "== %s  OK %d KO %d (%.1f%%)  RF %d\n" "$t" $ok $ko "$(echo "scale=1;100*$ok/($ok+$ko)" | bc)" "$(grep -ac 'Real-time failure' $L)"
+  grep -ah "forward p50" "$S" | tail -1 | grep -aoE "plane p50 [0-9]+|forward p50 [0-9]+|deliver p50 [0-9]+|predict p50 [0-9]+|predict p99 [0-9]+" | tr '\n' ' '; echo
+  grep -ah "allocation mix" "$S" | tail -1 | sed 's/.*receptions): //' | cut -c1-60
+done
+```
+
+**(e) ★★★ 判据（★ 两条腿、60 s ✓ ⇒ 趋势而非定论 ✓）**
+
+| ★ 项 ✓ | ★ 看什么 ✓ |
+|---|---|
+| ★ 默认 ✓ | ★ 腿 1 绑定 **E4** ✓（★ 硬要求 ✓）|
+| ★ 态 ✓ | ★ `predict p50` ≤500 低态 ✓ / ≥600 高态 ✓（★ 两条若不同态 ⇒ 按态各自与历史比较 ✓）|
+| ★ goodput ✓ | ★ iperf3 `[SUM] receiver` ✓ |
+| ★ 有效性 ✓ | ★ RF ≤ ~300 ✓（★ 超过则作废 ✓，★ §19.356 ✓）|
+| ★ crc ✓ | ★ 仅作参考 ✓（★ 调度权衡 ✓，★ §19.339 ✓）|
+| ★ 尾部 ✓ | ★ 同态下比 `predict p99` ✓ |
+
+★ 参考值（★ 历史 ✓）：★ E4 goodput **7.85–8.43** ✓、★ c32h **6.92–7.57** ✓；★ 重传 E4 **2 262–2 380** ✓、★ c32h **3 611–5 139** ✓。
+
+★ 状态 ✓：★ runbook 已定 ✓；★ 腿 1 同时是**默认切换的空口验收** ✓。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
