@@ -1279,14 +1279,16 @@ public:
     // classical estimator, so a measurement that is wrong would reach the scheduler with nothing to
     // compare it against. Measure first, then switch -- the order the rest of this work has used.
     report_measurements(reference_amplitude, est_results, config, model_scales);
+    // The end of the reporting, so the delivery segment below measures delivery and nothing else.
+    const auto segment_reported = std::chrono::steady_clock::now();
 
     // ---- gather, quantise, descramble, deliver ---------------------------------------------------
     if (!deliver(codeword_buffer, notifier, grid, est_results, config, qm, model_scales, reference_amplitude)) {
       degrade_or_fail(depth3_degradation::no_data_resource_elements, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
-    record_timing(segment_start, segment_assembled, segment_forwarded, std::chrono::steady_clock::now(),
-                  predict_us);
+    record_timing(segment_start, segment_assembled, segment_forwarded, segment_reported,
+                  std::chrono::steady_clock::now(), predict_us);
     last_forward_ok = true;
   }
 
@@ -1312,6 +1314,7 @@ private:
   void record_timing(std::chrono::steady_clock::time_point start,
                      std::chrono::steady_clock::time_point assembled,
                      std::chrono::steady_clock::time_point forwarded,
+                     std::chrono::steady_clock::time_point reported,
                      std::chrono::steady_clock::time_point delivered,
                      unsigned                               predict_us)
   {
@@ -1331,7 +1334,12 @@ private:
     }
     timings[0][timing_index] = micros(start, assembled);
     timings[1][timing_index] = micros(assembled, forwarded);
-    timings[2][timing_index] = micros(forwarded, delivered);
+    // THE DELIVERY SEGMENT IS SPLIT (2026-10-23). It used to run from the end of the forward pass to the
+    // hand-off and absorb both the measurement reporting and the gather/quantise/descramble, so the two could
+    // not be separated -- measured at 65 to 108 microseconds per reception in the legs, which is the same order
+    // as halving the network. `report` is now its own slot; `deliver` is the delivery alone.
+    timings[2][timing_index] = micros(reported, delivered);
+    timings[5][timing_index] = micros(forwarded, reported);
     timings[3][timing_index] = predict_us;
     // The TOTAL when the gate closed the segment, otherwise the submission alone: a bundle that declares no
     // trained range skips the gate and its results are read later, where nothing here can see it.
@@ -1354,7 +1362,7 @@ private:
     const unsigned sampled = std::min(timing_count, TIMING_RING);
     // `estimate` last: it is the CLASSICAL estimator's time, which happens before the three path segments, but
     // appending it keeps every existing field at the position its readers expect.
-    static const char* const names[5] = {"plane", "forward", "deliver", "predict", "estimate"};
+    static const char* const names[6] = {"plane", "forward", "deliver", "predict", "estimate", "report"};
     fmt::print(stderr, "[depth3-timing] {} forward(s), microseconds:", timing_count);
     // `predict` last on purpose: it is the PART of `forward` that Core ML and the ANE spend, so the two are read
     // together and their difference is the engine's glue.
@@ -1387,7 +1395,7 @@ private:
         fmt::print(stderr, "[depth3-timing]   mean predict per width:{} \n", per_width);
       }
     }
-    for (unsigned segment = 0; segment != 5; ++segment) {
+    for (unsigned segment = 0; segment != 6; ++segment) {
       std::array<unsigned, TIMING_RING> sorted = timings[segment];
       std::sort(sorted.begin(), sorted.begin() + sampled);
       const unsigned p99_index = std::min((sampled * 99) / 100, sampled - 1);
@@ -1449,7 +1457,7 @@ private:
                calibrated[p90], any_calibrated ? "APPLIED" : "not declared");
   }
 
-  std::array<std::array<unsigned, TIMING_RING>, 5> timings{};
+  std::array<std::array<unsigned, TIMING_RING>, 6> timings{};
   unsigned                                         timing_index = 0;
   unsigned                                         timing_count = 0;
   /// The classical estimator's cost for the reception in flight, carried from `estimate()` to `record_timing()`
