@@ -876,6 +876,8 @@ def main():
     parser.add_argument("--w-ch", type=float, default=L.DEFAULT_WEIGHTS["ch_est"])
     parser.add_argument("--w-noise", type=float, default=L.DEFAULT_WEIGHTS["post_eq_noise"])
     parser.add_argument("--no-aux", action="store_true", help="LLR head only, for the R2.4 ablation")
+    parser.add_argument("--select-on", choices=("val", "band"), default="val",
+                        help="which epoch is the best one: the validation loss, or the BER of the low-SNR band")
     parser.add_argument("--patience", type=int, default=0,
                         help="stop when the validation loss has not improved for this many epochs; 0 trains the full count")
     parser.add_argument("--workers", type=int, default=0,
@@ -1131,7 +1133,7 @@ def main():
         return 0
 
     def evaluate(use_bler):
-        totals, errors, magnitudes = [], [], []
+        totals, errors, magnitudes, band_ber = [], [], [], []
         bler = CodedBler(val) if use_bler else None
         decoded = 0
         for samples in val.epoch(args.batch):
@@ -1142,6 +1144,15 @@ def main():
             totals.append(float(total))
             errors.append(ber)
             magnitudes.append(mag)
+            # PER-ROW, SO THE LOW-SNR BAND CAN BE MEASURED (design section 19.438). The gates that decide whether a bundle is
+            # adopted are per-bin BERs on the low-SNR bands, and the validation loss is a different objective that can peak at a
+            # different epoch. Measuring the band during training lets the checkpoint be chosen on the acceptance metric itself.
+            for row in range(llr.shape[0]):
+                row_ber, _ = decode_metrics(llr.numpy()[row:row + 1],
+                                            targets["llr_shape"].numpy()[row:row + 1],
+                                            targets["llr_weights"].numpy()[row:row + 1])
+                index = int(samples[row]["index"])
+                band_ber.append((float(val.data["snr_nominal"][index]), row_ber))
             if bler is not None and decoded < args.bler_samples:
                 for row in range(llr.shape[0]):
                     if decoded >= args.bler_samples:
@@ -1151,9 +1162,11 @@ def main():
                                              val.dmrs_symbols_of(index), val.modulation_of(index))
                     bler.add(index, gathered)
                     decoded += 1
+        low = [b for snr, b in band_ber if np.isfinite(snr) and snr <= 10.0]
+        band = float(np.mean(low)) if low else float("nan")
         return (float(np.mean(totals)), float(np.mean(errors)), float(np.mean(magnitudes)),
                 bler.rate() if bler is not None else float("nan"),
-                bler.skipped if bler is not None else 0)
+                bler.skipped if bler is not None else 0, band)
 
     os.makedirs(args.out, exist_ok=True)
     history = []
@@ -1168,7 +1181,7 @@ def main():
             losses.append(float(total))
         want_bler = args.bler_samples > 0 and (epoch % max(1, args.bler_every) == 0
                                                or epoch == args.epochs)
-        val_loss, val_ber, val_mag, val_bler, val_skipped = evaluate(want_bler)
+        val_loss, val_ber, val_mag, val_bler, val_skipped, val_band = evaluate(want_bler)
         history.append({"epoch": epoch, "train": float(np.mean(losses)), "val": val_loss,
                         "val_ber": val_ber, "val_llr_mean": val_mag, "val_bler": val_bler,
                         "val_bler_skipped": val_skipped})
@@ -1180,8 +1193,12 @@ def main():
         # epoch budget is spent -- E4's minimum is at epoch 18 of 40, and the remaining twenty-two epochs are five-thousandths of
         # noise -- so a patience stops the run when it has stopped learning. The weights kept are the BEST ones, which the loop
         # already saves, so stopping early cannot make the result worse than training the full count; it only stops paying for it.
-        if val_loss < best:
-            best = val_loss
+        # WHAT "BEST" MEANS (design section 19.438): the validation loss by default, or -- with `--select-on band` -- the BER of
+        # the low-SNR band, which is the quantity the acceptance gates measure. Choosing on the latter means the checkpoint kept
+        # is the one the gates would have picked, so an early stop can no longer miss a later gate-optimal epoch.
+        chosen = val_band if (args.select_on == "band" and np.isfinite(val_band)) else val_loss
+        if chosen < best:
+            best = chosen
             epochs_without_improvement = 0
             model.save(os.path.join(args.out, "depth3_best.keras"))
         else:
@@ -1399,7 +1416,7 @@ def main():
         return 0
 
     def evaluate(use_bler):
-        totals, errors, magnitudes = [], [], []
+        totals, errors, magnitudes, band_ber = [], [], [], []
         bler = CodedBler(val) if use_bler else None
         decoded = 0
         for samples in val.epoch(args.batch):
@@ -1410,6 +1427,15 @@ def main():
             totals.append(float(total))
             errors.append(ber)
             magnitudes.append(mag)
+            # PER-ROW, SO THE LOW-SNR BAND CAN BE MEASURED (design section 19.438). The gates that decide whether a bundle is
+            # adopted are per-bin BERs on the low-SNR bands, and the validation loss is a different objective that can peak at a
+            # different epoch. Measuring the band during training lets the checkpoint be chosen on the acceptance metric itself.
+            for row in range(llr.shape[0]):
+                row_ber, _ = decode_metrics(llr.numpy()[row:row + 1],
+                                            targets["llr_shape"].numpy()[row:row + 1],
+                                            targets["llr_weights"].numpy()[row:row + 1])
+                index = int(samples[row]["index"])
+                band_ber.append((float(val.data["snr_nominal"][index]), row_ber))
             if bler is not None and decoded < args.bler_samples:
                 for row in range(llr.shape[0]):
                     if decoded >= args.bler_samples:
@@ -1419,9 +1445,11 @@ def main():
                                              val.dmrs_symbols_of(index), val.modulation_of(index))
                     bler.add(index, gathered)
                     decoded += 1
+        low = [b for snr, b in band_ber if np.isfinite(snr) and snr <= 10.0]
+        band = float(np.mean(low)) if low else float("nan")
         return (float(np.mean(totals)), float(np.mean(errors)), float(np.mean(magnitudes)),
                 bler.rate() if bler is not None else float("nan"),
-                bler.skipped if bler is not None else 0)
+                bler.skipped if bler is not None else 0, band)
 
     os.makedirs(args.out, exist_ok=True)
     history = []
@@ -1436,7 +1464,7 @@ def main():
             losses.append(float(total))
         want_bler = args.bler_samples > 0 and (epoch % max(1, args.bler_every) == 0
                                                or epoch == args.epochs)
-        val_loss, val_ber, val_mag, val_bler, val_skipped = evaluate(want_bler)
+        val_loss, val_ber, val_mag, val_bler, val_skipped, val_band = evaluate(want_bler)
         history.append({"epoch": epoch, "train": float(np.mean(losses)), "val": val_loss,
                         "val_ber": val_ber, "val_llr_mean": val_mag, "val_bler": val_bler,
                         "val_bler_skipped": val_skipped})
@@ -1448,8 +1476,12 @@ def main():
         # epoch budget is spent -- E4's minimum is at epoch 18 of 40, and the remaining twenty-two epochs are five-thousandths of
         # noise -- so a patience stops the run when it has stopped learning. The weights kept are the BEST ones, which the loop
         # already saves, so stopping early cannot make the result worse than training the full count; it only stops paying for it.
-        if val_loss < best:
-            best = val_loss
+        # WHAT "BEST" MEANS (design section 19.438): the validation loss by default, or -- with `--select-on band` -- the BER of
+        # the low-SNR band, which is the quantity the acceptance gates measure. Choosing on the latter means the checkpoint kept
+        # is the one the gates would have picked, so an early stop can no longer miss a later gate-optimal epoch.
+        chosen = val_band if (args.select_on == "band" and np.isfinite(val_band)) else val_loss
+        if chosen < best:
+            best = chosen
             epochs_without_improvement = 0
             model.save(os.path.join(args.out, "depth3_best.keras"))
         else:
