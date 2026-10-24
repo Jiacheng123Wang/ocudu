@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
+#include <fmt/format.h>
+#include <atomic>
 #include "grant_params_selector.h"
 #include "../config/time_domain_mapper.h"
 #include "../slicing/slice_ue_repository.h"
@@ -132,6 +134,19 @@ static std::optional<mcs_prbs_selection> compute_newtx_required_mcs_and_prbs(con
       ue_cc.link_adaptation_controller().calculate_ul_mcs(pusch_cfg.mcs_table, pusch_cfg.use_transform_precoder);
   sch_mcs_description mcs_config =
       pusch_mcs_get_config(pusch_cfg.mcs_table, mcs, pusch_cfg.use_transform_precoder, pusch_cfg.tp_pi2bpsk_present);
+
+  // WHAT THE SCHEDULER DERIVED FOR AN UPLINK GRANT (design section 19.421 of the LLR AI detection workflow). The reception
+  // lines report 256QAM on up to eighteen percent of receptions, yet the uplink MCS table in this tree stops at 64QAM, so the
+  // modulation the PHY sees cannot be the one this call returns -- something downstream changes it. Printing the derived pair
+  // here, sampled, makes that comparison possible without any pairing: the two distributions either match or they do not.
+  {
+    static std::atomic<unsigned> pusch_mcs_log_count{0};
+    if ((++pusch_mcs_log_count % 200) == 0) {
+      fmt::print(stderr, "[sched-mcs] PUSCH grant MCS: mcs={} mod={} tcr={:.3f} table={}\n", mcs.value(),
+                 to_string(mcs_config.modulation), mcs_config.get_normalised_target_code_rate(),
+                 static_cast<unsigned>(pusch_cfg.mcs_table));
+    }
+  }
 
   const auto nof_symbols = pusch_cfg.symbols.length();
 
