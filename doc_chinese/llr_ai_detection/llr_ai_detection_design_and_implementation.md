@@ -17259,6 +17259,112 @@ log show --start "2026-10-24 12:18:16" --end "2026-10-24 12:18:19" \
 | ★ 若不变 ✓ | ★ 转向 `log show` 逐条查慢样本时刻 ✓ |
 
 ★ 状态 ✓：★ 慢样本墙钟已就位 ✓；★ 试验清单已列 ✓；★ **这次飞行就能给出因果** ✓。
+### 19.391 ★★★ 飞行 runbook：★ 基线 vs 关系统任务 ✓ ＋ ★ E4 vs c32h（共享层）✓（2026-10-24 09:10 ✓）
+
+**(a) ★★★ 设计（★ 4 条腿，★ 两个因素**同时**平衡 ✓）**
+
+| ★ 腿 ✓ | ★ 模型 ✓ | ★ 系统设置 ✓ | ★ 用途 ✓ |
+|---|---|---|---|
+| ★ 1 ✓ | ★ **E4**（默认）| ★ **基线** ✓ | ★ 相位 A ✓ |
+| ★ 2 ✓ | ★ **c32h ＋ 共享层** ✓ | ★ **基线** ✓ | ★ 相位 A ✓ |
+| ★ 3 ✓ | ★ **E4** ✓ | ★ **关任务** ✓ | ★ 相位 B ✓ |
+| ★ 4 ✓ | ★ **c32h ＋ 共享层** ✓ | ★ **关任务** ✓ | ★ 相位 B ✓ |
+
+★ ⇒ ★ **模型**：★ E4 两条 ✓、★ c32h 两条 ✓（★ 各一基线 ＋ 一关任务 ✓）★ ⇒ ★ **平衡** ✓；
+★ **设置**：★ 基线两条 ✓、★ 关任务两条 ✓ ⇒ ★ **也平衡** ✓。★ 每条 **300 s** ✓、★ 全程**采样器**在跑 ✓。
+
+**(b) ★★ 准备（★ 一次性 ✓）**
+
+```bash
+cd ~/dev/ocudu
+CFG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml
+C32=$PWD/lib/phy/upper/ai_signal_processors/depth3/ai_assets/depth3_modcond_c32h/d3_modcond_c32h.mlmodelc
+P=$PWD/doc_chinese/llr_ai_detection/work_tmp
+mkdir -p $P/host_probe
+```
+
+**(c) ★★★ 相位 A：基线（★ 腿 1、腿 2 ✓）**
+
+★ **每条腿开两个终端** ✓：
+
+**终端 A**（★ 先起采样 ✓，★ 跑 400 s ✓）：
+
+```bash
+bash $P/probe/host_probe.sh $P/host_probe/A1_e4.txt 400
+```
+
+**终端 B**（★ 起腿 ✓）：
+
+```bash
+# 腿 1：E4（默认，不给模型参数）
+sudo -E env LEG_CONFIG=$CFG OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_DOMAIN_GATE=net \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-state-A1-e4 \
+    --expert_phy.pusch_receiver_backend ai
+```
+
+★ 手机接入后 ✓：★ `iperf3 -c <手机IP> -R -t 300 -P 4` ✓、★ 完成后**停腿** ✓（★ Ctrl-C 或按平时做法 ✓）。
+
+★ **腿 2**（★ 采样器重起 ✓，文件 `A2_c32h.txt` ✓）：
+
+```bash
+sudo -E env LEG_CONFIG=$CFG OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_DOMAIN_GATE=net \
+  OCUDU_DEPTH3_IGNORE_REPORTING_HEADS=1 \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu aillr-state-A2-c32h \
+    --expert_phy.pusch_receiver_backend ai --expert_phy.pusch_receiver_model $C32
+```
+
+**(d) ★★★ 相位 B：关掉系统周期任务（★ 腿 3、腿 4 ✓）**
+
+```bash
+# 1) 关 Spotlight 索引、关 Time Machine、退 iCloud 同步、防睡眠
+sudo mdutil -a -i off
+sudo tmutil disable
+killall bird 2>/dev/null || true
+caffeinate -dimsu &        # 记下 PID，飞完 kill
+
+# 2) 确认
+mdutil -s /            | head -3
+tmutil status          | head -3
+pgrep -l caffeinate
+```
+
+★ 然后**重复**腿 1、腿 2 的命令 ✓（★ 腿名改 `aillr-state-B1-e4` ✓、★ `aillr-state-B2-c32h` ✓；
+★ 采样文件 `B1_e4.txt` ✓、★ `B2_c32h.txt` ✓）。
+
+```bash
+# 3) 飞完恢复
+kill %1 2>/dev/null || killall caffeinate
+sudo mdutil -a -i on
+sudo tmutil enable
+```
+
+**(e) ★★★ 每条腿飞完立刻跑的三条命令 ✓**
+
+```bash
+python3 $P/probe/leg_validity.py   aillr-state-A1-e4
+python3 $P/probe/state_timeline.py aillr-state-A1-e4
+python3 $P/probe/align_state.py    aillr-state-A1-e4 $P/host_probe/A1_e4.txt
+```
+
+★ 第一条 ✓：★ 腿是否有效 ✓（★ RF ≤300 ✓、★ 解码 ≥65% ✓）；
+★ 第二条 ✓：★ **快相占比** ✓、★ 每相长度 ✓；
+★ 第三条 ✓：★ 慢相与快相的 **load／最忙进程**对比 ✓。
+
+**(f) ★★★ 预登记判据 ✓**
+
+| ★ 对比 ✓ | ★ 判据 ✓ | ★ 结论 ✓ |
+|---|---|---|
+| ★ **A1 vs B1**（★ E4 ✓）| ★ 关任务后**慢相占比**是否 <5% ✓ | ★ 是 ⇒ ★ **系统周期任务**确认 ✓ |
+| ★ **A1 vs A2**（★ 基线 ✓）| ★ 两模型 fast% 是否接近 ✓ | ★ 接近 ⇒ ★ 与模型无关 ✓（★ 已见过 ✓）|
+| ★ **A1+A2 vs B1+B2**（★ goodput ✓）| ★ 关任务是否也提高 goodput ✓ | ★ 是 ⇒ ★ 时延影响吞吐 ✓ |
+| ★ 同一秒两模型 ✓ | ★ A1 与 A2 的慢样本时刻是否**重叠** ✓ | ★ 重叠 ⇒ ★ 宿主 ✓ |
+
+**(g) ★★ 给我什么 ✓**
+
+★ 把四条腿的 **`leg_validity` ＋ `state_timeline` 输出**贴回来 ✓，★ 以及 `iperf3` 的 `[SUM]` 行 ✓
+★ ⇒ ★ 我做「关任务 × 模型」的双因素表 ✓ 和同秒重叠分析 ✓。
+
+★ 状态 ✓：★ runbook 就绪 ✓；★ 4 条腿 × 300 s ≈ **25 分钟**（★ 含准备 ✓）。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
