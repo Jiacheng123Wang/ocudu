@@ -13,9 +13,11 @@ set -euo pipefail
 SRC=${1:?usage: finish_run.sh <user@host:run-dir> <name> [reference.keras]}
 NAME=${2:?usage: finish_run.sh <user@host:run-dir> <name> [reference.keras]}
 HERE=$(cd "$(dirname "$0")" && pwd)
-ROOT=$(cd "$HERE/../../../../.." && pwd)
+# THE ROOT COMES FROM GIT, NOT FROM COUNTING `..` (design section 19.460): counting directories put the working tree under lib/, so every
+# artefact was written to lib/doc_chinese/... instead of doc_chinese/..., and the interpreter resolved to whatever happened to be first on PATH.
+ROOT=$(git -C "$HERE" rev-parse --show-toplevel)
 WORK=$ROOT/doc_chinese/llr_ai_detection/work_tmp
-PY=${PYTHON:-$HOME/ai_ce_work/venv/bin/python}
+PY=$HOME/ai_ce_work/venv/bin/python
 REF=${3:-$WORK/data/runs/d3_e4_real_1023_best.keras}
 KERAS=$WORK/data/runs/${NAME}_best.keras
 OUT=$WORK/artifacts/buckets/$NAME
@@ -33,7 +35,7 @@ if grep -q -- "--no-reporting-heads" "$WORK/data/runs/${NAME}_cmdline.txt" 2>/de
 fi
 "$PY" -u "$HERE/train_depth3.py" --export-only "$KERAS" --export-probe "$OUT/$NAME.mlpackage" \
     --export-buckets 108,180,252,324,396,468,540,612 --modcond --layout spatial \
-    --modulation 256QAM --snr-range 0,48 "${EXTRA[@]:-}"
+    --modulation 256QAM --snr-range 0,48 ${EXTRA[@]+"${EXTRA[@]}"}
 
 echo "== $NAME: compiling"
 xcrun coremlcompiler compile "$OUT/$NAME.mlpackage" "$OUT" >/dev/null

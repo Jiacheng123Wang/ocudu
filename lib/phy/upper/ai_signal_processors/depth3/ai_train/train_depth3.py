@@ -783,6 +783,13 @@ def export_buckets(args, parser, source=None):
         entry = source.get_layer("entry_1x1").kernel.shape
         c_hid, in_channels = int(entry[3]), int(entry[2])
         blocks = sum(1 for layer in source.layers if layer.name.startswith("dw"))
+        # THE HEADS COME FROM THE SOURCE TOO, for the same reason the width and the depth do: a source trained with
+        # `--no-reporting-heads` has two heads fewer than the default graph, and building the bucket with the default
+        # gives it four extra weights that the copy then refuses (observed as "the bucket graph has 100 weights, the
+        # source 96"). Reading the source makes the export follow the model instead of the command line.
+        names = {layer.name for layer in source.layers}
+        reporting = any("ch_est" in name or "dmrs_noise" in name for name in names)
+        aux = any("post_eq_noise" in name for name in names)
     else:
         c_hid, in_channels, blocks = args.c_hid, 8, args.blocks
     for width in [int(w) for w in args.export_buckets.split(",") if w.strip()]:
