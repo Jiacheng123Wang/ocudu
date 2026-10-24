@@ -104,3 +104,134 @@ have its offset negated. Declaring it as-is is the mistake that broke attach in 
 | `eval_depth3.py` | Decode and BER evaluation over a dataset |
 | `check_reporting_heads.py` | Reporting heads against known truth |
 | `depth3_paths.py` | Names the location of the AI-CE training tree, which owns the shared DSP utilities |
+
+## 30. The whole pipeline, end to end
+
+This section exists so the receiver can be trained for a **different deployment** — another band, another bandwidth, another subcarrier
+spacing — without rediscovering the steps. Each stage names the tool that does it and the artefact it leaves behind.
+
+```
+flight ──► captures ──► labels ──► datasets ──► network ──► bundle ──► buckets ──► gates ──► default
+          (PHY dump)   (replay)   (npz)        (keras)     (mlpackage) (mlmodelc)  (verdict)
+```
+
+### 30.1 Capture
+
+The PHY dumps a reception when the environment asks for it (`lib/phy/upper/channel_processors/pusch/ul_capture.cpp`):
+
+| Variable | Meaning |
+|---|---|
+| `OCUDU_UL_DUMP=<dir>` | where to write; the arm appends the slot and RNTI to this prefix |
+| `OCUDU_UL_DUMP_COUNT=N` | how many receptions to keep (the default keeps only eight, which is not enough) |
+| `OCUDU_UL_DUMP_MIN_RB=N` | skip grants narrower than this |
+| `OCUDU_UL_DUMP_LLR=1` | also write `_llr.bin`, which is what the sign-agreement gate compares against |
+
+One reception becomes four files sharing a stem `C_<sfn>_<slot>_<rnti>`: `.bin` (the frequency-domain grid), `_h.bin` (the channel the
+instrumentation knew), `_ce.txt` (the estimator's sidecar) and optionally `_llr.bin`.
+
+> The sidecar's `snr` field is written from the classical estimator's results object. In a **pure** AI run that object is the arm's own
+> empty stub, so the number is meaningless — sidecars carrying 207.9 or 2828.3 "dB" are the normal outcome of a pure flight, not bad
+> data. Take the SNR from the CPU chain's replay instead (§30.7).
+
+### 30.2 Label
+
+`build_depth3_dataset.py` turns captures into an `.npz` whose label is the **transmitted bits**, recovered by decoding the capture. Two
+rules matter:
+
+1. **Keep only CRC-passing captures.** A failing block is not a codeword, so its converged signs are not a target.
+2. **Decide that with the CPU chain.** The Metal chain's channel estimator has a serious defect at 256QAM (13 % against the CPU's 83 % on
+   sixty captures), so a Metal verdict discards good samples; `ul_chain_replay --cpu` is the reference (see
+   `doc_chinese/metal_kernel_fusion/256qam_channel_estimator_defect_2026-10-24.md`).
+
+### 30.3 Compose the corpora
+
+| Tool | Purpose |
+|---|---|
+| `build_depth3_dataset.py` | captures → one `.npz` per modulation |
+| `merge_depth3_datasets.py` | merges datasets of the SAME modulation only (it refuses a mixed input on purpose) |
+| `doc_chinese/llr_ai_detection/work_tmp/probe/concat_datasets.py` | general concatenation that accepts mixed modulations and holds out a validation slice |
+| `doc_chinese/llr_ai_detection/work_tmp/probe/split_by_qm.py` | splits an existing dataset by modulation order |
+| `doc_chinese/llr_ai_detection/work_tmp/probe/self_label_captures.py` | replays captures and writes the dataset for the ones that decode |
+
+**Balance the modulation mix to the deployment, not to the corpus.** Measured on the Hong Kong test bed, the air carries roughly 45 %
+QPSK, 30 % 16QAM, 15 % 64QAM and 10 % 256QAM, while the corpora collected for high SNR carry 60–73 % in the last two. Every attempt to
+improve the receiver by ADDING data failed (E3 synthetic narrow, E5 merged, E8 four heads) because the additions kept the same wrong mix;
+E4, which accidentally moved the mix closer, is the one that helped.
+
+### 30.4 Train
+
+```
+train_depth3.py --train <train.npz> --val <val.npz> --out <run-dir> \
+    --modcond --layout spatial --blocks 18 --c-hid 32 --in-channels 12 \
+    --w-ch 0.1 --w-noise 0.3 --batch 8 --epochs 40 --snr-range 0,48 --max-val 0 \
+    [--no-reporting-heads]
+```
+
+The flags that were measured to matter, and the ones that were not:
+
+| Knob | Finding |
+|---|---|
+| `--c-hid` | 16 is too narrow (19/30 decodes against 27/30), 24 matches 32 with 38 % fewer parameters — pin it by measurement, not by feel |
+| `--blocks` | 12 decodes as well as 15 and 18 ⇒ depth can be cut by a third |
+| `--w-noise 0.3` | the deployed value; `0.01` produces reporting heads that are clamped |
+| `--no-reporting-heads` | drops `ch_est` and `dmrs_noise`; the shared measurement layer then supplies SINR, RSRP and EPRE, and does it better |
+
+### 30.5 Export and buckets
+
+```
+python train_depth3.py --export-only <run>/depth3_best.keras --export-probe <dir>/<name>.mlpackage \
+    --export-buckets 108,180,252,324,396,468,540,612 --modcond --layout spatial --modulation 256QAM --snr-range 0,48
+xcrun coremlcompiler compile <dir>/<name>.mlpackage <dir>
+# and the same for every <name>_w<width>.mlpackage, moved into <dir>/buckets/base_w<width>.mlmodelc
+```
+
+The arm binds a sibling `buckets/` directory automatically, choosing the smallest width that fits the grant plus four PRB of context. The
+bucket widths depend on the deployment's PRB count: they are `(2, 4, 6, 8, 10, 12, 14, 16) × 3 PRB` in subcarriers, i.e. 36-sc spacing,
+regenerated when the bandwidth changes.
+
+> The default model is a **compile-time** path in `apps/units/flexible_o_du/o_du_low/CMakeLists.txt` and it is a `CACHE FILEPATH`: editing
+> the `set()` line changes nothing until the cache is overridden with `-DOCUDU_DEPTH3_DEFAULT_MODEL=...` or cleared. Verify with
+> `strings build/apps/gnb/gnb | grep <name>`.
+
+### 30.6 Gates
+
+`doc_chinese/llr_ai_detection/work_tmp/probe/verdict.py` runs all three and prints one line each:
+
+| Gate | Threshold | Why |
+|---|---|---|
+| sign agreement | ≥ 98.7 % | the soft bits must point the same way as the classical chain's |
+| attach decodes | ≥ 65 % of the captures | the mid-band behaviour must not regress |
+| per-bin BER | no bin worse than the reference by 0.15 pp | the low-SNR bands are the reason the work exists |
+
+Supporting analyses, same directory: `binned_goodput.py` and `binned_deep.py` (per-SNR decomposition of delivered bytes into chances ×
+size × decode), `bler_by_tcr.py` / `bler_full.py` (block error rate against SINR per modulation and code rate), `sinr_waterfall.py`,
+`leg_validity.py` (is a flight leg usable), `state_timeline.py` (duty cycle of the latency oscillation), `align_state.py` (host state
+during the slow phase).
+
+### 30.7 Porting to another band, bandwidth or SCS
+
+Everything that depends on the deployment lives in **one** header and **one** export flag:
+
+| Item | Where | Change |
+|---|---|---|
+| subcarrier count | `pusch_depth3_input_plane.h` (`NOF_SUBCARRIERS`) | the allocation size of the new bandwidth, plus four PRB of context |
+| plane channels | same header (`NOF_CHANNELS`) | 12 contract + 4 Qm one-hot = 16; unchanged |
+| symbols | same header (14) | unchanged |
+| bucket widths | the export command | regenerate from the new PRB count |
+| minimum grant | `MIN_PRB` in the same header | 2 today; must match what the scheduler can actually grant |
+| reported range | the export `--snr-range` | the range the reporting heads were trained on; a bundle that declares none is gated by nothing |
+| calibration | the sidecar next to the bundle | per modulation, fitted for the new deployment |
+
+A new deployment therefore needs: a capture flight on that deployment, a re-labelled corpus, one training run, one export, and the three
+gates. Nothing in the network changes.
+
+### 30.8 Pitfalls that cost a day each
+
+| Symptom | Cause |
+|---|---|
+| a leg decodes almost nothing, ping works, iperf is zero | `OCUDU_DEPTH3_COMPUTE_UNITS=cpu_gpu` — 1677 µs per reception against a 500 µs slot; the arm now refuses it |
+| `sinr=na` on every reception | a headed bundle forced onto the shared layer (`OCUDU_DEPTH3_IGNORE_REPORTING_HEADS=1`) skipped the plane measurement; fixed |
+| sidecar SNR in the hundreds | written by the pure-mode stub; use the CPU replay instead |
+| the latency median flips between 355 and 760 µs inside one leg | a five-second oscillation, not two states; the leg median is a window snapshot |
+| "the code has no 256QAM" | the PUSCH table delegates to the PDSCH one for `qam256`; read the branch at the top of the function |
+| a new export does not take effect | the CMake `CACHE FILEPATH` above |
