@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
+#include <atomic>
 #include "ue_link_adaptation_controller.h"
 #include "../config/time_domain_mapper.h"
 #include "../support/mcs_calculator.h"
@@ -160,6 +161,20 @@ sch_mcs_index ue_link_adaptation_controller::calculate_ul_mcs(pusch_mcs_table mc
   // [Instrumentation] Log the UL MCS decision inputs: last measured PUSCH SNR (which may be stale if the UE stopped
   // transmitting), OLLA offset and the resulting MCS. This explains aggressive grants (e.g., 64QAM) after a UE goes
   // silent.
+  // AT INFO, SAMPLED (design section 19.400 of the LLR AI detection workflow). The calibration of a measurement the scheduler
+  // acts on has to be fitted against the numbers the scheduler ACTUALLY uses -- the PUSCH SNR it stored plus the outer-loop
+  // offset -- and until now those lived only in a debug line, so no flight log carried them and every calibration analysis
+  // fitted the PHY's published SINR instead, which is a different quantity whenever OLLA has moved. Every hundredth decision
+  // is enough to characterise the mapping and cheap enough to leave on.
+  static std::atomic<unsigned> ul_mcs_info_count{0};
+  const unsigned               ul_mcs_info_index = ++ul_mcs_info_count;
+  if ((ul_mcs_info_index % 100) == 0) {
+    logger->info("LA UL MCS (effective): mcs={} pusch_snr={:.1f}dB olla={:+.1f}dB eff={:.1f}dB",
+                 mcs.value(),
+                 ue_ch_st.get_pusch_snr(),
+                 ul_snr_offset_db(),
+                 get_effective_snr());
+  }
   logger->debug("LA UL MCS: mcs={} pusch_snr={:.1f}dB olla={:+.1f}dB table={} tp={}",
                 mcs.value(),
                 ue_ch_st.get_pusch_snr(),
