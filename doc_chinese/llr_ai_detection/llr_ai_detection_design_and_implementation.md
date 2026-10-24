@@ -17151,6 +17151,55 @@ sudo -E env LEG_CONFIG=$CFG OCUDU_DEPTH3_FALLBACK=none OCUDU_DEPTH3_DOMAIN_GATE=
 3. ★ 若找到 ✗ ⇒ ★ 改为在**慢相期间**采集 `powermetrics` 或 `top` 的快照 ✓（★ 飞行时并行采 ✓）。
 
 ★ 状态 ✓：★ **"未解之谜"已定量为"5 秒周期的 50/50 震荡 ✓、与模型无关"** ✓；★ 定位工具已就位 ✓。
+### 19.389 ★★★ 抓证据的飞行方案：★ 宿主采样 ＋ 时间戳对齐 ✓（2026-10-24 08:50 ✓）
+
+**(a) ★★★ 两个工具 ✓**
+
+| ★ 工具 ✓ | 作用 ✓ |
+|---|---|
+| ★ `probe/host_probe.sh <out> <sec>` ✓ | ★ **每秒**采：★ 墙钟时刻 ✓、★ load average ✓、★ `pmset -g therm`（★ CPU 限速 ✓）、★ **CPU 前 4 名进程** ✓ |
+| ★ `probe/align_state.py <腿> <probe文件>` ✓ | ★ 把腿里**快相/慢相**的报告与其时刻的宿主样本**对齐** ✓ ⇒ ★ 报两相的 **load 与最忙进程** ✓ |
+
+**(b) ★★ 已看到的第一手线索 ✓**（★ 本机此刻 ✓）
+
+```
+08:16:31 load[2.43 2.66 2.69] top[53.6%:/Applications/Google;24.0%:PrivateFrame;13.6%:node;…]
+```
+
+★ ⇒ ★ **Chrome 占 30–54% CPU** ✓、★ `PrivateFrame…`（★ 系统私有框架 ✓）24–29% ✓ —— ★ **这些都是**周期性**的重负载源 ✓**
+★ ⇒ ★ 与"5 秒周期、与模型无关"的震荡**高度相容** ✓。
+
+**(c) ★★★ 飞行步骤 ✓**
+
+**终端 A（先起采样 ✓）**：
+
+```bash
+cd ~/dev/ocudu
+bash doc_chinese/llr_ai_detection/work_tmp/probe/host_probe.sh \
+  doc_chinese/llr_ai_detection/work_tmp/host_probe_<腿名>.txt 400
+```
+
+**终端 B（飞腿 ✓）**：★ 与 §19.385 的 runbook 相同 ✓（★ **E4 用默认 ✓、c32h 显式 ✓**）★ ＋ `iperf3 … -t 300 -P 4` ✓。
+
+★ 建议顺序 ✓：★ **E4 → c32h → c32h → E4** ✓（★ ABBA ✓，★ 各 300 s ✓）。
+
+**(d) ★★ 飞完怎么读 ✓**
+
+```bash
+python3 doc_chinese/llr_ai_detection/work_tmp/probe/align_state.py aillr-<腿名> \
+  doc_chinese/llr_ai_detection/work_tmp/host_probe_<腿名>.txt
+```
+
+★ 输出 ✓：★ 快相与慢相的 **mean load** 与**最忙进程** ✓ ⇒ ★ 若慢相时某进程 CPU 显著更高 ✓，★ 那个进程就是 5 秒周期的来源 ✓。
+
+**(e) ★★ 同时保留的两个对照 ✓**
+
+| ★ 对照 ✓ | 为什么 ✓ |
+|---|---|
+| ★ `predict p50` 序列 + `window mix` ✓ | ★ 确认这段的快慢与桶无关 ✓ |
+| ★ 两模型同一时段 ✓ | ★ 若两模型在**同一秒**都慢 ✓ ⇒ 宿主 ✓；★ 若不同 ✓ ⇒ 引擎/模型 ✓ |
+
+★ 状态 ✓：★ 采样器与对齐器就绪 ✓；★ 飞行命令已给 ✓；★ **一旦 p50 出现高态，证据就在同一条时间轴上** ✓。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
