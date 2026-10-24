@@ -169,11 +169,16 @@ sch_mcs_index ue_link_adaptation_controller::calculate_ul_mcs(pusch_mcs_table mc
   static std::atomic<unsigned> ul_mcs_info_count{0};
   const unsigned               ul_mcs_info_index = ++ul_mcs_info_count;
   if ((ul_mcs_info_index % 100) == 0) {
-    logger->info("LA UL MCS (effective): mcs={} pusch_snr={:.1f}dB olla={:+.1f}dB eff={:.1f}dB",
+    // The limits travel with the decision, because an MCS well below what the table would choose is either a link that is
+    // genuinely poor or a clamp, and from outside the two are indistinguishable -- the first flight with this line showed
+    // decisions seven steps below the table at the same effective SNR, which is the signature of a clamp.
+    logger->info("LA UL MCS (effective): mcs={} pusch_snr={:.1f}dB olla={:+.1f}dB eff={:.1f}dB limits=[{},{}]",
                  mcs.value(),
                  ue_ch_st.get_pusch_snr(),
                  ul_snr_offset_db(),
-                 get_effective_snr());
+                 get_effective_snr(),
+                 ul_mcs_lims.start().value(),
+                 ul_mcs_lims.stop().value());
   }
   logger->debug("LA UL MCS: mcs={} pusch_snr={:.1f}dB olla={:+.1f}dB table={} tp={}",
                 mcs.value(),
