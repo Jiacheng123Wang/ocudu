@@ -1404,7 +1404,17 @@ private:
     // `estimate` last: it is the CLASSICAL estimator's time, which happens before the three path segments, but
     // appending it keeps every existing field at the position its readers expect.
     static const char* const names[6] = {"plane", "forward", "deliver", "predict", "estimate", "report"};
-    fmt::print(stderr, "[depth3-timing] {} forward(s), microseconds:", timing_count);
+    // STAMPED, because the point of this line is now to be laid against something else that happened on the host at the
+    // same moment: the median alternates between about 355 and about 760 microseconds with a period of seconds, and the
+    // question is what else has that cadence (design section 19.388). The reception log carries timestamps and this one
+    // did not, so the two could not be aligned.
+    const auto     now        = std::chrono::system_clock::now();
+    const auto     now_time   = std::chrono::system_clock::to_time_t(now);
+    const auto     now_parts  = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    std::tm        now_local{};
+    localtime_r(&now_time, &now_local);
+    fmt::print(stderr, "[depth3-timing] {:02d}:{:02d}:{:02d}.{:03d} {} forward(s), microseconds:", now_local.tm_hour,
+               now_local.tm_min, now_local.tm_sec, static_cast<int>(now_parts.count()), timing_count);
     // `predict` last on purpose: it is the PART of `forward` that Core ML and the ANE spend, so the two are read
     // together and their difference is the engine's glue.
     // The allocation mix behind the timing, so a reader never has to guess whether two runs are comparable.
