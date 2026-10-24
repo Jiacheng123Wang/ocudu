@@ -126,7 +126,12 @@ struct formatter<ocudu::pusch_processor::pdu_t> {
 
     // Verbose parameters.
     helper.format_always(ctx, "mod={}", to_string(pdu.mcs_descr.modulation));
-    helper.format_if_verbose(ctx, "tcr={}", pdu.mcs_descr.get_normalised_target_code_rate());
+    // THE CODE RATE IS ALWAYS PRINTED (design section 19.408 of the LLR AI detection workflow). Every reception carries the
+    // modulation and the target code rate of its own grant, which together identify the MCS. Without it, a block-error analysis
+    // has to pair each reception with a separately logged scheduling decision, and that pairing is what produced a table showing
+    // 64QAM at five decibels -- a pair of numbers that cannot belong together. The code rate is the same information without the
+    // join.
+    helper.format_always(ctx, "tcr={}", pdu.mcs_descr.get_normalised_target_code_rate());
 
     // PUSCH data codeword if available.
     if (pdu.codeword.has_value()) {
