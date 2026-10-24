@@ -876,6 +876,8 @@ def main():
     parser.add_argument("--w-ch", type=float, default=L.DEFAULT_WEIGHTS["ch_est"])
     parser.add_argument("--w-noise", type=float, default=L.DEFAULT_WEIGHTS["post_eq_noise"])
     parser.add_argument("--no-aux", action="store_true", help="LLR head only, for the R2.4 ablation")
+    parser.add_argument("--patience", type=int, default=0,
+                        help="stop when the validation loss has not improved for this many epochs; 0 trains the full count")
     parser.add_argument("--workers", type=int, default=0,
                         help="threads that build batches while the accelerator runs; 0 keeps the loop serial")
     parser.add_argument("--prefetch", type=int, default=0,
@@ -1156,6 +1158,7 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     history = []
     best = np.inf
+    epochs_without_improvement = 0
     started = time.time()
     for epoch in range(1, args.epochs + 1):
         losses = []
@@ -1173,9 +1176,20 @@ def main():
             print(f"epoch {epoch:4d}  train {np.mean(losses):.5f}  val {val_loss:.5f}  "
                   f"uncoded BER {val_ber:.4f}  coded BLER {val_bler:.4f}  "
                   f"mean|LLR| {val_mag:6.1f}  ({time.time() - started:.0f}s)")
+        # EARLY TERMINATION, the way the LDPC decoder has it (design section 19.437). The validation curve is flat long before the
+        # epoch budget is spent -- E4's minimum is at epoch 18 of 40, and the remaining twenty-two epochs are five-thousandths of
+        # noise -- so a patience stops the run when it has stopped learning. The weights kept are the BEST ones, which the loop
+        # already saves, so stopping early cannot make the result worse than training the full count; it only stops paying for it.
         if val_loss < best:
             best = val_loss
+            epochs_without_improvement = 0
             model.save(os.path.join(args.out, "depth3_best.keras"))
+        else:
+            epochs_without_improvement += 1
+            if (args.patience > 0) and (epochs_without_improvement >= args.patience):
+                print(f"early stop at epoch {epoch}: no improvement for {args.patience} epoch(s); "
+                      f"best {best:.5f} at epoch {epoch - epochs_without_improvement}")
+                break
 
     with open(os.path.join(args.out, "history.json"), "w") as handle:
         json.dump({"history": history, "parameters": parameters,
@@ -1412,6 +1426,7 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     history = []
     best = np.inf
+    epochs_without_improvement = 0
     started = time.time()
     for epoch in range(1, args.epochs + 1):
         losses = []
@@ -1429,9 +1444,20 @@ def main():
             print(f"epoch {epoch:4d}  train {np.mean(losses):.5f}  val {val_loss:.5f}  "
                   f"uncoded BER {val_ber:.4f}  coded BLER {val_bler:.4f}  "
                   f"mean|LLR| {val_mag:6.1f}  ({time.time() - started:.0f}s)")
+        # EARLY TERMINATION, the way the LDPC decoder has it (design section 19.437). The validation curve is flat long before the
+        # epoch budget is spent -- E4's minimum is at epoch 18 of 40, and the remaining twenty-two epochs are five-thousandths of
+        # noise -- so a patience stops the run when it has stopped learning. The weights kept are the BEST ones, which the loop
+        # already saves, so stopping early cannot make the result worse than training the full count; it only stops paying for it.
         if val_loss < best:
             best = val_loss
+            epochs_without_improvement = 0
             model.save(os.path.join(args.out, "depth3_best.keras"))
+        else:
+            epochs_without_improvement += 1
+            if (args.patience > 0) and (epochs_without_improvement >= args.patience):
+                print(f"early stop at epoch {epoch}: no improvement for {args.patience} epoch(s); "
+                      f"best {best:.5f} at epoch {epoch - epochs_without_improvement}")
+                break
 
     with open(os.path.join(args.out, "history.json"), "w") as handle:
         json.dump({"history": history, "parameters": parameters,
