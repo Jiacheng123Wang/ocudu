@@ -1912,6 +1912,20 @@ private:
     // of the split: `1/SINR` in the chain's convention, from the plane's residual.
     float published_noise = (noise_count != 0) ? static_cast<float>(noise_sum / static_cast<double>(noise_count)) : 0.0F;
     if (publish_from_shared_layer()) {
+      // MEASURE THE PLANE IF NOBODY HAS YET (design section 19.394). The plane half is normally computed before the
+      // forward pass, once, and reused here -- but that happens on the branch that the gate and the reporting heads
+      // share, and a bundle whose heads are IGNORED (`OCUDU_DEPTH3_IGNORE_REPORTING_HEADS=1`) can reach this point with
+      // the measurement never taken. The symptom is silent: `published_noise` stayed zero, nothing was published, and
+      // the PUSCH line printed `sinr=na` for every reception of a leg that otherwise ran normally (measured 2026-10-24,
+      // leg A2). Walking the plane again costs the same few microseconds the heads branch already pays for exactly this
+      // reason, and only when the value is missing.
+      if (!plane_measurement_valid) {
+        plane_measurement       = measure_depth3_plane(span<const __fp16>(input_plane),
+                                                       plane_channels,
+                                                       reference_amplitude,
+                                                       span<ul_pilot_sample>(pilot_scratch));
+        plane_measurement_valid = (plane_measurement.nof_pilot_re != 0);
+      }
       published_noise = (plane_measurement_valid && (plane_measurement.snr_lin > 0.0F))
                             ? (1.0F / plane_measurement.snr_lin)
                             : 0.0F;
