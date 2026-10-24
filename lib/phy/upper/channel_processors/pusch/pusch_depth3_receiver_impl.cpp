@@ -1382,6 +1382,9 @@ private:
     timings[5][timing_index] = micros(forwarded, reported);
     timings[3][timing_index] = predict_us;
     window_widths[timing_index] = bucket_in_use_;
+    window_wall_ms[timing_index] = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count();
     // The TOTAL when the gate closed the segment, otherwise the submission alone: a bundle that declares no
     // trained range skips the gate and its results are read later, where nothing here can see it.
     timings[4][timing_index] = pending_estimate_open ? pending_estimate_call_us : pending_estimate_total_us;
@@ -1445,6 +1448,26 @@ private:
       }
       fmt::print(stderr, "[depth3-timing]   window mix, the {} receptions the percentiles came from: {} \n",
                  windowed, window_mix);
+      // THE SLOW SAMPLES BY WALL CLOCK (design section 19.390). The median alternates with a period near five seconds and the
+      // model and the bucket mix are both ruled out, which leaves something periodic on the host. Printing when the slow
+      // samples happened is what lets them be looked up in the system log one by one, instead of hoping the averages line up.
+      std::string slow_stamps;
+      unsigned    slow_shown = 0;
+      for (unsigned i = 0; i != windowed && slow_shown != 6; ++i) {
+        if (timings[3][i] < 600) {
+          continue;
+        }
+        const auto since_epoch = std::chrono::milliseconds(window_wall_ms[i]);
+        const auto when        = std::chrono::system_clock::to_time_t(std::chrono::system_clock::time_point(since_epoch));
+        std::tm    local{};
+        localtime_r(&when, &local);
+        const auto ms = static_cast<int>((window_wall_ms[i] % 1000));
+        slow_stamps += fmt::format("{}{:02d}:{:02d}:{:02d}.{:03d}", (slow_shown++ == 0) ? "" : " ", local.tm_hour,
+                                   local.tm_min, local.tm_sec, ms);
+      }
+      if (!slow_stamps.empty()) {
+        fmt::print(stderr, "[depth3-timing]   slow samples in this window, by wall clock: {}\n", slow_stamps);
+      }
       std::string per_width;
       for (const auto& entry : bucket_predict_us_) {
         if (entry.second == 0) {
@@ -1528,6 +1551,9 @@ private:
   std::array<std::array<unsigned, TIMING_RING>, 6> timings{};
   /// The bucket width each sampled reception used, so the report can say which mix its percentiles were measured over.
   std::array<unsigned, TIMING_RING> window_widths{};
+  /// The wall clock, in milliseconds since the epoch, of each sampled reception: what lets a slow window be looked up in the
+  /// system log instead of being argued about.
+  std::array<long long, TIMING_RING> window_wall_ms{};
   unsigned                                         timing_index = 0;
   unsigned                                         timing_count = 0;
   /// The classical estimator's cost for the reception in flight, carried from `estimate()` to `record_timing()`
