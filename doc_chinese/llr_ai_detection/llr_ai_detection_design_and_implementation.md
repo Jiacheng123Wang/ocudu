@@ -22407,6 +22407,42 @@ LEG_CONFIG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_mcs12.yml   sudo -
 | 4 ✓ | ★ 到 10–12 dB（★ console 里 64QAM 被钉住 ✓）⇒ ★ 采 ✓ |
 
 ★ 状态 ✓：★ gNB 就绪 ✓；★ **等手机近处接入** ✓。
+### 19.529 ★★★★ 接不上的真因：★ gNB 的 **NGAP 已断 26 分钟** ✗（17:05 ✓）
+
+**(a) ★★★ 证据 ✓**
+
+| ★ 时刻 ✓ | ★ AMF 侧 ✓ |
+|---|---|
+| ★ 16:37:21 ✓ | ★ `gNB-N2 accepted` ✓、★ `Number of gNBs is now 1` ✓ |
+| ★ **16:38:47** ✓ | ★ **`connection refused`** ✗、★ **`Number of gNBs is now 0`** ✗ |
+| ★ 16:38 → 17:05 ✓ | ★ **再也没有重新连上** ✗ |
+
+★ 而 **gNB 进程还活着** ✓（PID 89348 ✓，★ mcs12 配置 ✓）⇒ ★ **进程在、★ SCTP 连接死了** ✗
+★ ⇒ ★ **手机怎么开关飞行模式都接不上** ✗（★ 没有 NGAP ⇒ ★ 没有 UE 上下文 ✓）。
+
+**(b) ★★★ 与配置无关 ✓**
+
+★ 配置 diff 只有两行 ✓（★ `min_ue_mcs: 12`／`max_ue_mcs: 12` ✓）⇒ ★ **不是配置问题** ✓
+★（★ 用户说"以前钉 mcs 20 都能接入" ✓ ⇒ ★ 对的 ✓，★ 那时 NGAP 是通的 ✓。）
+
+**(c) ★★★★ 处置 ✓（需要用户执行，要 sudo ✓）**
+
+```bash
+# 1) 杀掉那个 SCTP 已死的 gNB
+sudo kill -TERM 89348
+sleep 3
+pgrep -f "apps/gnb/gnb" || echo "已清空"
+
+# 2) 用新的 label 重启这条腿（新的 NG Setup）
+unset OCUDU_UL_DUMP OCUDU_UL_DUMP_COUNT OCUDU_UL_DUMP_LLR OCUDU_LA_LOG_EVERY
+export OCUDU_UL_DUMP_RV=0
+LEG_CONFIG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_mcs12.yml \
+  sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu col_1025_mcs12b
+```
+
+★ 起来后**先看 AMF** ✓：★ 应立刻出现 `gNB-N2 accepted` ＋ `Number of gNBs is now 1` ✓ ⇒ ★ 再接手机 ✓。
+
+★ 状态 ✓：★ 原因已定（★ NGAP 断 ✓）；★ **等用户重启腿** ✓。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
