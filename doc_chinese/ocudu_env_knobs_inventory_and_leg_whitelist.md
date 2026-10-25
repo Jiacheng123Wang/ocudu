@@ -272,6 +272,35 @@ OCUDU_PROBE_RE
 | `LEG_ALLOW_DIRTY` | 跳过"二进制由未提交代码构建"的拒绝（默认拒绝） |
 | `OCUDU_DEPTH3_COMPUTE_UNITS` | **只用于测量**的放置旋钮：`all`（默认）/ `cpu_gpu` / `cpu_ne` / `cpu`。Core ML **不回读**实际放置，只能一次只给一档、从外部反推。实测（2026-10-17）：`all` ≈ `cpu_ne`（同位、同速、四列输出逐位相同）⇒ 前向跑在 **ANE** 上；仅 CPU 慢 6.6×（7.06 ms vs 1.07 ms）；**`cpu_gpu` 的输出是错的**（crc 0/700，噪声头差 5 个数量级）⇒ ANE 不能确定的机器用 `cpu_ne`。臂的 startup 注记写的是"compute units `X` **requested**"，不声称实际使用的档位 |
 
+### 增补二：2026-10-24／25 新增的旋钮与构建控制
+
+> 这一小节是**手工维护**的（生成器只扫 `getenv("OCUDU_*")`，不扫 CMake，也不写语义）。
+
+#### 环境变量
+
+| 变量 | 默认 | 读取点 | 说明 |
+|---|---|---|---|
+| `OCUDU_LA_LOG_EVERY` | `100` | `lib/scheduler/ue_context/ue_link_adaptation_controller.cpp` | 调度器 `LA UL MCS (effective)` 那行的采样间隔。**采集时设 `1`**（每决策一行），否则一行也读不到；不设则保持 1/100，行为不变。 |
+| `OCUDU_UL_DUMP` | 空 | `lib/phy/upper/channel_processors/pusch/ul_capture.cpp` | **文件名前缀，不是目录**：捕获写成 `<前缀>_<sfn>_<count>_<rnti>.*`。要让它们落进某目录，前缀必须是 `<目录>/<文件名>`。目录不存在 ⇒ **整条腿一条都不写**（`fopen` 不建目录）。 |
+| `OCUDU_UL_DUMP_COUNT` | `8` | 同上 | 预算，只计**通过过滤器**的接收。 |
+| `OCUDU_UL_DUMP_LLR` | 关 | 同上 | 同时写 `_llr.bin`（符号一致判据要用）。 |
+| `OCUDU_UL_DUMP_RV` | 不设（全收） | 同上 | **只收某一种冗余版本**。采集必须设 `0`：重传在离线回放里解不出来（无 HARQ 软合并），会把预算吃光而产出不可用样本。低 SNR 下这会把捕获率压到接收数的 ~1.5%。 |
+| `OCUDU_UL_DUMP_MIN_RB` / `_MAX_RB` | `0`（不限） | 同上 | 授权宽度的下限／上限过滤器；被拒的接收**不花预算**。 |
+| `OCUDU_DEPTH3_BUCKETS` | 不设 | `pusch_depth3_receiver_impl.cpp` | 指向 `buckets/` 目录；不设则用模型同级目录。 |
+| `OCUDU_DEPTH3_FALLBACK` | 不设 | 同上 | `none` = 服务没被任何槽认领时不回退（采集/验收用，避免静默换成别的模型）。 |
+| `OCUDU_DEPTH3_DOMAIN_GATE` | 不设 | 同上 | `net` = 用网络自己声明的定义域做门控。 |
+| `OCUDU_DEPTH3_IGNORE_REPORTING_HEADS` | 关 | 同上 | 强制走共享测量层（不读 `ch_est`／`dmrs_noise` 两个报告头）。**两头模型必须设**，否则 `sinr=na`。 |
+| `OCUDU_DEPTH3_MIN_PRB` | 由平面决定 | 同上 | 臂接受的最小授权宽度。 |
+| `OCUDU_DEPTH3_SHARED_SINR_CAL` | 不设 | 同上 | 共享层 SINR 的一元标定（乘数），用于把网络的自报 SINR 对齐到经典链。 |
+| `OCUDU_DEPTH3_PREPARE_ON_SYMBOL` / `_PREPARE_FULL_PLANE` | 关 | 同上 | 输入平面按符号增量准备 vs 一次整平面（时延实验用）。 |
+
+#### CMake 构建控制
+
+| 变量 | 类型 | 说明 |
+|---|---|---|
+| `OCUDU_DEPTH3_DEFAULT_MODEL` | **`CACHE FILEPATH`** | `--pusch_receiver_model` 缺省时绑定的产物，当前是 `ai_assets/depth3_e4_real_1023/d3_e4.mlmodelc`。**是缓存变量**：改 `set()` 那一行**不生效**，必须 `-DOCUDU_DEPTH3_DEFAULT_MODEL=…` 覆盖缓存或清缓存重建。核对方式：`strings build/apps/gnb/gnb \| grep <产物名>`。 |
+| `ENABLE_METAL_DFT` / `_CHEST` / `_EQUALIZER` / `_DEMODULATION` / `_LDPC` | `option()` | 各 Metal 模块是否编入（`apps/units/flexible_o_du/o_du_low/CMakeLists.txt` 把它们翻成 `OCUDU_METAL_*_AVAILABLE` 编译定义）。 |
+
 ### 模型与几何
 
 - 训练产物入库：`lib/phy/upper/ai_signal_processors/depth3/ai_assets/depth3_modcond_ft/`（含 README、契约声明、重建命令）。
