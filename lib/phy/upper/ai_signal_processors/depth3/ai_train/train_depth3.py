@@ -485,7 +485,14 @@ class CodedBler:
             # A retransmission that carries almost no systematic bits cannot be decoded on its own:
             # the receiver is expected to combine it with an earlier transmission first. Counting
             # it as a block error would report the HARQ design as a network failure.
-            if LD.systematic_share(len(code_blocks[block]), kb, zc, e_cb, rv, bg) < 0.2:
+            #
+            # ONLY RETRANSMISSIONS (design section 19.563). The share is also below the threshold at
+            # rv = 0 for the smallest BG2 blocks -- at the minimum BG2 size the systematic bits are
+            # eight of fifty-two columns, a share of 0.154 -- and those decode perfectly well on
+            # their own. Applying the rule there skipped 170 of 5742 first transmissions in the
+            # acceptance set, all of them BG2 with transport blocks under 2800 bits, which is exactly
+            # the small-block regime the gates are supposed to judge.
+            if rv != 0 and LD.systematic_share(len(code_blocks[block]), kb, zc, e_cb, rv, bg) < 0.2:
                 self.skipped += 1
                 continue
             buffer, _ = LD.rate_dematch(LD.deinterleave(block_llr, qm), len(code_blocks[block]), kb,
