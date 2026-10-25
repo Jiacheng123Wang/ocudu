@@ -21228,6 +21228,26 @@ adb shell "cmd connectivity airplane-mode enable; sleep 8; cmd connectivity airp
 ★ ⇒ ★ 然后跑 `attach_cycles.sh 192.168.31.141:39331 20 8` ✓。
 
 ★ 状态 ✓：★ 机制已验证 ✓（★ AMF 看到注销 ✓）；★ **手机上还在飞行模式 ✗ ⇒ 请手动关闭** ✓。
+### 19.491 ★★★★ 用户的判断对 ✓：★ 应该**只重启 modem** ✓，★ 不动整机射频 ✓（11:32 ✓）
+
+**(a) ★★ 正确的原语 ✓**
+
+| ★ 做法 ✓ | 结果 ✓ |
+|---|---|
+| ★ `cmd connectivity airplane-mode enable` ✗ | ★ **Wi-Fi 也断** ✗ ⇒ ★ **adb 失联** ✗（★ 已实测 ✓）|
+| ★ **`svc data disable; sleep 8; svc data enable`** ✓ | ★ **只断蜂窝数据** ✓ ⇒ ★ **UE 注销并重接入** ✓、★ **Wi-Fi 保持** ✓ ⇒ ★ **adb 不断** ✓ ✓ |
+| ★ 或 USB adb ✓ | ★ **最稳 ✓**（★ 不依赖 Wi-Fi ✓）|
+
+**(b) ★★ 已改 ✓**
+
+★ `probe/attach_cycles.sh` 现在用 **`svc data disable/enable`** ✓（★ 不再用飞行模式 ✓）。
+
+**(c) ★★★ 当前障碍 ✗**
+
+★ 飞行模式把**无线调试端口**也弄丢了 ✗（★ 重连后端口变化 ✓）⇒ ★ `adb connect :39331` 被拒 ✗
+★ ⇒ ★ **需要用户在手机上重新打开"无线调试"** ✓，★ 或 **插 USB** ✓
+
+★ 状态 ✓：★ 原语已改对 ✓；★ **等 adb 恢复** ✓。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
