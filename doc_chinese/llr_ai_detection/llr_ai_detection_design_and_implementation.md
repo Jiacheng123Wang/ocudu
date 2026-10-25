@@ -20675,6 +20675,46 @@ OCUDU_LA_LOG_EVERY=1     # 每条调度决策一行；不设则保持 1/100（�
 | ★ 停止 ✓ | ★ `.txt` ≥ 6 000 ✓（★ 12 分钟约能到 ✓）|
 
 ★ 状态 ✓：★ A 段有数据但**没达标** ✓；★ 前缀语义已修 ✓；★ **重采即可** ✓。
+### 19.474 ★★★ "手机接不上"其实是**gNB 已经不在了** ✗（2026-10-25 09:05 ✓）
+
+**(a) ★★★ 证据链 ✓**
+
+| ★ 时刻 ✓ | ★ 事件 ✓ |
+|---|---|
+| ★ 08:48:34 ✓ | ★ gNB 启动 ✓（★ commit `5ebfd352e6` ✓）|
+| ★ 08:48:37 ✓ | ★ `F1 Setup` 完成 ✓、★ `Cell scheduling was activated` ✓ ⇒ ★ **可以接入** ✓ |
+| ★ **08:48:37 之后日志不再增长** ✗ | ★ **gNB 停止** ✓ |
+| ★ 08:50:14 ✓ | ★ AMF：★ `gNB-N2 connection refused` ✓ ＋ ★ `Number of gNBs is now 0` ✓ |
+
+★ `.stderr` 停在无线电初始化 ✓（★ `ul_rx_pool` ✓、★ `ul_rx_policy` ✓）★ ⇒ ★ **没有崩溃** ✗（★ 无 abort／terminate ✓）
+★ ⇒ ★ **是被停止的** ✓（★ Ctrl-C ✓ 或 ★ 终端退出 ✓）✓。
+
+**(b) ★★ 于是"接不上"不是 attach 问题 ✓**
+
+★ 手机接入时 gNB **已经不在** ✓ ⇒ ★ AMF 当然报连接拒绝 ✓ ⇒ ★ **与 PHY/采集无关** ✓。
+
+**(c) ★★★ 正确的运行方式 ✓**
+
+| ★ 项 ✓ | 做法 ✓ |
+|---|---|
+| ★ 终端 ✓ | ★ **用 `tmux` 或 `screen` 跑** ✓ ⇒ ★ 终端断开不会带走这条腿 ✓ |
+| ★ 等待 ✓ | ★ 看到 `Cell scheduling was activated` 再上手机 ✓ |
+| ★ 停止 ✓ | ★ **一次 Ctrl-C** ✓，★ 等报告块打完 ✓（★ 不要 `kill` ✗）|
+| ★ 判断是否还在跑 ✓ | ★ `pgrep -f apps/gnb/gnb` ✓ |
+
+```bash
+tmux new -s leg
+doc_chinese/llr_ai_detection/work_tmp/collect_leg.sh col_1025_ping3
+# 看到 Cell scheduling was activated 后再接手机
+# 采集结束：一次 Ctrl-C，等报告打完；tmux kill-session -t leg
+```
+
+**(d) ★★ 顺带确认 ✓**
+
+★ 包装脚本的五个变量**生效了** ✓：★ `.stderr` 里 `knob: OCUDU_UL_DUMP=.../col_1025_ping2/cap` ✓ ✓
+★ ⇒ ★ **路径这次是对的** ✓（★ 后缀 `/cap` ✓）✓。
+
+★ 状态 ✓：★ 原因已定（★ gNB 被停 ✓）；★ 运行方式已写清（★ tmux ＋ 一次 Ctrl-C ✓）。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
