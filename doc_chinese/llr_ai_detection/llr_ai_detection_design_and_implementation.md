@@ -21201,6 +21201,33 @@ sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu col_1025_pi
 | ★ 每轮间隔 ✓ | ★ 15–20 s ✓（★ 等注册完成 ＋ 释放 ✓）|
 
 ★ 状态 ✓：★ **AMF 侧就绪 ✓**；★ **等 adb ✓**。
+### 19.490 ★★★★ 飞行模式会**切断 Wi-Fi** ⇒ ★ 命令必须**在手机内部定时** ✓（11:20 ✓）
+
+**(a) ★★★ 第一次尝试的结果 ✓**
+
+| ★ 现象 ✓ | ★ 原因 ✓ |
+|---|---|
+| ★ 开飞行模式后 `adb: device offline` ✗ | ★ **飞行模式关掉 Wi-Fi** ✓ ⇒ ★ **adb over Wi-Fi 断** ✓ |
+| ★ 手机现在 ping 不通 ✗ | ★ 仍在飞行模式 ✓（★ 那条 `disable` 发不出去 ✗）|
+| ★ AMF 显示 ✓ | ★ `Deregistration request` ✓ ＋ ★ `Number of gNB-UEs is now 0` ✓ ⇒ ★ **机制有效 ✓** |
+
+**(b) ★★★★ 修法：★ 把整轮命令作为**一条**发到手机上 ✓**
+
+```bash
+adb shell "cmd connectivity airplane-mode enable; sleep 8; cmd connectivity airplane-mode disable"
+```
+
+★ 手机的 shell **自己计时** ✓ ⇒ ★ **不需要第二条 adb** ✓ ⇒ ★ **8 秒后自己恢复** ✓ ✓
+
+**(c) ★★ 工具 ✓**：`probe/attach_cycles.sh <serial> [轮数] [关断秒数]` ✓
+★ 每轮之后**轮询 adb** 直到恢复 ✓（★ 而不是固定 sleep ✓）★ ⇒ ★ 再等 12 s 让注册完成 ✓。
+
+**(d) ★★ 现在这一步 ✓**
+
+★ **需要用户手动关掉飞行模式** ✗（★ 我够不到手机 ✓）⇒ ★ 关掉后 `adb devices` 会重新显示 device ✓
+★ ⇒ ★ 然后跑 `attach_cycles.sh 192.168.31.141:39331 20 8` ✓。
+
+★ 状态 ✓：★ 机制已验证 ✓（★ AMF 看到注销 ✓）；★ **手机上还在飞行模式 ✗ ⇒ 请手动关闭** ✓。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
