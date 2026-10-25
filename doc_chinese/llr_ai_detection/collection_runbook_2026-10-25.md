@@ -13,42 +13,40 @@
 
 ---
 
-## 1. 起飞：用采集包装脚本（推荐）
+## 1. 起飞：用采集 leg 运行器（推荐）
 
 ```bash
 cd ~/dev/ocudu
-doc_chinese/llr_ai_detection/work_tmp/collect_leg.sh col_1025_ping
+doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu col_1025_ping
 ```
 
-它做的事，正是标准 leg 运行器 `run_leg.sh` 做的事（**先构建✓、检查环境✓、一条腿一份日志✓、
-在 root 进程内导出 `OCUDU_*` ✓**），外加采集需要的四件事：
+这是 `doc_chinese/phy_pipeline_gpu/wip/run_leg.sh` 的**拷贝**，只做了三处采集相关的默认值，其余
+行为（先构建、环境检查、拒绝残留 gNB、日志成对、Ctrl-C 契约）**全部继承**。
 
-| 项 | 值 |
-|---|---|
-| `LEG_CONFIG` | `configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml` |
-| `LEG_LOGDIR` | `corpus/<段名>/logs` |
-| `OCUDU_UL_DUMP` | `corpus/<段名>/cap`（**前缀**，见下） |
-| `OCUDU_UL_DUMP_COUNT` | 20000 |
-| `OCUDU_UL_DUMP_LLR` | 1 |
-| `OCUDU_LA_LOG_EVERY` | 1 |
-| 流水线模式 | **cpu**（采集不需要 AI 接收机；AI 是语料的目的，不是采集时该跑的东西） |
+> **为什么是拷贝而不是包装**：第一版用一个 `exec sudo -E env …` 的包装脚本，`exec` 会把包装
+> 进程替换成 sudo，Ctrl-C 因此**到不了这个脚本的 trap**——腿结束了、gNB 没结束，下一次运行
+> 被"残留 gNB"检查拒绝。信号的归属必须和启动者在同一个进程里，所以改成拷贝。
 
-**覆盖项**：`COLLECT_MODE=gpu`、`COLLECT_COUNT=…`、`LEG_SKIP_BUILD=1`（不重新构建）。
+| 项 | 默认值 | 覆盖方式 |
+|---|---|---|
+| `LEG_CONFIG` | `configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml` | 同名环境变量 |
+| `LEG_LOGDIR` | `corpus/<label>/logs` | 同上 |
+| `OCUDU_UL_DUMP` | `corpus/<label>/cap` | 同上 |
+| `OCUDU_UL_DUMP_COUNT` | 20000 | 同上 |
+| `OCUDU_UL_DUMP_LLR` | 1 | 同上 |
+| `OCUDU_LA_LOG_EVERY` | 1 | 同上 |
+| 流水线模式 | 命令行第一参数（采集用 **cpu**） | —— |
 
-### 1.1 如果想手工拼那条命令
+**`<label>` 同时是语料目录名**，所以一个参数同时决定"这条腿叫什么"和"捕获去哪儿"。
 
-采集 = 标准 leg 运行器 + 五个环境变量：
+**运行**：在 `tmux` 里跑，等 `Cell scheduling was activated` 之后再接手机；结束用**一次
+Ctrl-C**，并等报告块打完。
 
 ```bash
-CFG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml
-SEG=col_1025_ping
-sudo -E env LEG_CONFIG=$CFG LEG_LOGDIR=$PWD/doc_chinese/llr_ai_detection/work_tmp/corpus/$SEG/logs \
-  OCUDU_UL_DUMP=$PWD/doc_chinese/llr_ai_detection/work_tmp/corpus/$SEG/cap \
-  OCUDU_UL_DUMP_COUNT=20000 OCUDU_UL_DUMP_LLR=1 OCUDU_LA_LOG_EVERY=1 \
-  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh cpu $SEG
+tmux new -s leg
+doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu col_1025_ping
+# … 采完：一次 Ctrl-C，等报告；tmux kill-session -t leg
 ```
-
-**注意**：不要加 `--expert_phy.pusch_receiver_backend ai`——采集用 CPU 接收机。
 
 ### 1.2 五个环境变量（各自的含义）
 
