@@ -22304,6 +22304,42 @@ ssh jiachengwang@192.168.31.203 'nohup caffeinate -dims > /dev/null 2>&1 &'
 ★ ⇒ ★ **一次腿就能验证** ✓：★ 若 `crc=OK` 有可观比例 ✓ ⇒ ★ 补齐该格 ✓；★ 若又是 0 ✗ ⇒ ★ **该格确认为结构性不可得** ✓。
 
 ★ 状态 ✓：★ 历史已试过（★ 太激进 ✓）；★ **温和版值得一试** ✓。
+### 19.526 ★★★ 钉 MCS 的采集配置已就绪 ✓（16:22 ✓）
+
+**(a) ★★★ 新配置 ✓**
+
+`configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_mcs12.yml` ✓ —— 采集配置 ＋ **`min_ue_mcs: 12`／`max_ue_mcs: 12`** ✓
+（★ 其余全部不变 ✓；★ 已用 pyyaml 验过 ✓：★ mcs 12/12 ✓、★ p0 −76 ✓、★ arfcn 627264 ✓）。
+
+★ MCS 12 ＝ **64QAM，码率 0.46** ✓ ⇒ ★ 在 **10–12 dB** 上**应该解得出来** ✓。
+
+**(b) ★★★ 阶梯（★ 解不出就逐级退 ✓）**
+
+| ★ 级 ✓ | ★ MCS ✓ | ★ 调制／码率 ✓ | ★ 大致可解 SNR ✓ |
+|---|---|---|---|
+| ★ 第 1 ✓ | ★ **12** ✓ | ★ 64QAM 0.46 ✓ | ★ 10–12 dB ✓ |
+| ★ 第 2 ✓ | ★ 8 ✓ | ★ 16QAM 0.60 ✓ | ★ 8–10 dB ✓ |
+| ★ 第 3 ✓ | ★ 4 ✓ | ★ QPSK 0.59 ✓ | ★ 5–7 dB ✓ |
+
+**(c) ★★★ 起飞命令 ✓**
+
+```bash
+unset OCUDU_UL_DUMP OCUDU_UL_DUMP_COUNT OCUDU_UL_DUMP_LLR OCUDU_LA_LOG_EVERY
+export OCUDU_UL_DUMP_RV=0
+LEG_CONFIG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_mcs12.yml   sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu col_1025_mcs12
+```
+
+★ **注意**：★ `LEG_CONFIG=... sudo -E` 的写法会把变量传给 sudo ✓ ✓。
+
+**(d) ★★★ 判据（★ 起飞后 5 分钟即可判 ✓）**
+
+| ★ 指标 ✓ | ★ 通过 ✓ |
+|---|---|
+| ★ **CRC-OK 比例** ✓ | ★ **≥30%** ✓ ⇒ ★ 该格可以补 ✓ |
+| ★ 若 ≈0 ✗ | ★ **退到 mcs 8** ✓ ⇒ ★ 再判 ✓ |
+| ★ 若仍 0 ✗✗ | ★ **结案：★ 结构性不可得** ✓ |
+
+★ 状态 ✓：★ 配置就绪 ✓；★ 阶梯与判据已定 ✓。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
