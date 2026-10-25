@@ -18,7 +18,9 @@
 每段飞行都设同样五个变量，**只改 `OCUDU_UL_DUMP` 和 `OCUDU_UL_DUMP_COUNT`**：
 
 ```bash
-export OCUDU_UL_DUMP=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/col_1025_ping  # 换成你要采的那一段的名字
+# OCUDU_UL_DUMP 是**文件名前缀**，不是目录：文件会写成 <前缀>_<sfn>_<slot>_<rnti>.*
+# 所以要让它们落进某个目录，前缀必须带目录名 + 一个文件名：
+export OCUDU_UL_DUMP=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/<段名>/cap
 export OCUDU_UL_DUMP_COUNT=8000        # 默认只有 8，必须放大
 # OCUDU_UL_DUMP_MIN_RB: 不要设。默认 0 = 任何宽度都收（设成 1 也只是排掉 0 PRB，没必要）
 # OCUDU_UL_DUMP_MAX_RB: 可选。只收「不超过这个宽度」的接收，用于专门采窄授权的一段
