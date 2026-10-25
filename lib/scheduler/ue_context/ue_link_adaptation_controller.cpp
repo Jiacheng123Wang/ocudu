@@ -3,6 +3,8 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include <atomic>
+#include <cstdlib>
+
 #include "ue_link_adaptation_controller.h"
 #include "../config/time_domain_mapper.h"
 #include "../support/mcs_calculator.h"
@@ -168,7 +170,16 @@ sch_mcs_index ue_link_adaptation_controller::calculate_ul_mcs(pusch_mcs_table mc
   // is enough to characterise the mapping and cheap enough to leave on.
   static std::atomic<unsigned> ul_mcs_info_count{0};
   const unsigned               ul_mcs_info_index = ++ul_mcs_info_count;
-  if ((ul_mcs_info_index % 100) == 0) {
+  // THE RATE IS AN ENVIRONMENT KNOB, because a corpus flight wants every decision and a normal run wants one in a hundred.
+  // During a collection the scheduler's own view -- its SNR, the OLLA offset it applied and the MCS it chose -- is what explains
+  // the modulation mix in the captures, and a one-in-a-hundred sample cannot be joined to a reception. Setting
+  // OCUDU_LA_LOG_EVERY=1 turns it into a per-decision line; leaving it unset keeps the sampled line and costs nothing.
+  static const unsigned        ul_mcs_info_every = [] {
+    const char* text = std::getenv("OCUDU_LA_LOG_EVERY");
+    const long  value = (text != nullptr) ? std::strtol(text, nullptr, 10) : 100;
+    return static_cast<unsigned>((value > 0) ? value : 100);
+  }();
+  if ((ul_mcs_info_index % ul_mcs_info_every) == 0) {
     // The limits travel with the decision, because an MCS well below what the table would choose is either a link that is
     // genuinely poor or a clamp, and from outside the two are indistinguishable -- the first flight with this line showed
     // decisions seven steps below the table at the same effective SNR, which is the signature of a clamp.
