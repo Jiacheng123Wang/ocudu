@@ -21169,6 +21169,38 @@ sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu col_1025_pi
 | ★ 继续 ping ✗ | ★ **没有新格子可填** ✗ |
 
 ★ 状态 ✓：★ 累计已入档 ✓；★ **结论：★ 换 attach 段** ✓。
+### 19.489 ★★ attach 段的前置：★ AMF 监控就绪 ✓、★ adb 待开无线调试 ✗（11:07 ✓）
+
+**(a) ★★★ 已就绪 ✓**
+
+| ★ 项 ✓ | ★ 状态 ✓ |
+|---|---|
+| ★ gNB ✓ | ★ 在跑 ✓（★ 1 个进程 ✓）|
+| ★ AMF 日志 ✓ | ★ `jwang@192.168.31.211:~/work/open5gs/install/var/log/open5gs/amf.log` ✓ |
+| ★ 后台监控 ✓ | ★ `tail -F` → `work_tmp/artifacts/logs/amf_watch.log` ✓ |
+| ★ 历史接入事件 ✓ | ★ **337** 条 `Registration complete／InitialUEMessage` ✓ |
+
+**(b) ★★★ 未通 ✗：adb**
+
+| ★ 尝试 ✓ | ★ 结果 ✓ |
+|---|---|
+| ★ `adb connect 192.168.31.141:5555` ✗ | ★ **Connection refused** ✗ |
+| ★ `adb mdns services` ✗ | ★ **空** ✗ |
+| ★ ping ✓ | ★ 通 ✓（★ 104–127 ms ✓）|
+
+★ ⇒ ★ **手机的"无线调试"没开 ✓（★ 或端口不是 5555 ✓）** ⇒ ★ 需要用户在手机上打开 ✓
+★ 并提供**端口** ✓（★ 若有**配对码**也要 ✓）。
+
+**(c) ★★★ 通了之后要做的 ✓**
+
+| ★ 步 ✓ | 命令 ✓ |
+|---|---|
+| ★ 开飞行模式 ✓ | ★ `adb shell cmd connectivity airplane-mode enable` ✓ |
+| ★ 关飞行模式 ✓ | ★ `adb shell cmd connectivity airplane-mode disable` ✓ |
+| ★ 看接入 ✓ | ★ 在 `amf_watch.log` 里看 `Registration complete` ✓ |
+| ★ 每轮间隔 ✓ | ★ 15–20 s ✓（★ 等注册完成 ＋ 释放 ✓）|
+
+★ 状态 ✓：★ **AMF 侧就绪 ✓**；★ **等 adb ✓**。
 ## 22. ★★★ 新模型（LLR-only）训练与验收方案 ✓（★ 2026-10-21 08:00 ✓，★ 预登记 ✓）
 
 ### 22.1 目标（★ 一句话）
