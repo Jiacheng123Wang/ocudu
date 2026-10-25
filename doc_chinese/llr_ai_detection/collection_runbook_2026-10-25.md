@@ -13,20 +13,60 @@
 
 ---
 
-## 1. 起飞前：环境变量
+## 1. 起飞：用采集包装脚本（推荐）
 
-每段飞行都设同样五个变量，**只改 `OCUDU_UL_DUMP` 和 `OCUDU_UL_DUMP_COUNT`**：
+```bash
+cd ~/dev/ocudu
+doc_chinese/llr_ai_detection/work_tmp/collect_leg.sh col_1025_ping
+```
+
+它做的事，正是标准 leg 运行器 `run_leg.sh` 做的事（**先构建✓、检查环境✓、一条腿一份日志✓、
+在 root 进程内导出 `OCUDU_*` ✓**），外加采集需要的四件事：
+
+| 项 | 值 |
+|---|---|
+| `LEG_CONFIG` | `configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml` |
+| `LEG_LOGDIR` | `corpus/<段名>/logs` |
+| `OCUDU_UL_DUMP` | `corpus/<段名>/cap`（**前缀**，见下） |
+| `OCUDU_UL_DUMP_COUNT` | 20000 |
+| `OCUDU_UL_DUMP_LLR` | 1 |
+| `OCUDU_LA_LOG_EVERY` | 1 |
+| 流水线模式 | **cpu**（采集不需要 AI 接收机；AI 是语料的目的，不是采集时该跑的东西） |
+
+**覆盖项**：`COLLECT_MODE=gpu`、`COLLECT_COUNT=…`、`LEG_SKIP_BUILD=1`（不重新构建）。
+
+### 1.1 如果想手工拼那条命令
+
+采集 = 标准 leg 运行器 + 五个环境变量：
+
+```bash
+CFG=$PWD/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml
+SEG=col_1025_ping
+sudo -E env LEG_CONFIG=$CFG LEG_LOGDIR=$PWD/doc_chinese/llr_ai_detection/work_tmp/corpus/$SEG/logs \
+  OCUDU_UL_DUMP=$PWD/doc_chinese/llr_ai_detection/work_tmp/corpus/$SEG/cap \
+  OCUDU_UL_DUMP_COUNT=20000 OCUDU_UL_DUMP_LLR=1 OCUDU_LA_LOG_EVERY=1 \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh cpu $SEG
+```
+
+**注意**：不要加 `--expert_phy.pusch_receiver_backend ai`——采集用 CPU 接收机。
+
+### 1.2 五个环境变量（各自的含义）
 
 ```bash
 # OCUDU_UL_DUMP 是**文件名前缀**，不是目录：文件会写成 <前缀>_<sfn>_<slot>_<rnti>.*
 # 所以要让它们落进某个目录，前缀必须带目录名 + 一个文件名：
+```bash
 export OCUDU_UL_DUMP=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/<段名>/cap
-export OCUDU_UL_DUMP_COUNT=8000        # 默认只有 8，必须放大
+export OCUDU_UL_DUMP_COUNT=20000        # 默认只有 8，必须放大
 # OCUDU_UL_DUMP_MIN_RB: 不要设。默认 0 = 任何宽度都收（设成 1 也只是排掉 0 PRB，没必要）
 # OCUDU_UL_DUMP_MAX_RB: 可选。只收「不超过这个宽度」的接收，用于专门采窄授权的一段
 export OCUDU_UL_DUMP_LLR=1             # 写 LLR，之后算符号一致要用
 export OCUDU_LA_LOG_EVERY=1            # 每条调度决策一行（SNR/OLLA/MCS）
 ```
+
+> `OCUDU_UL_DUMP` 是**文件名前缀**：捕获会写成 `<前缀>_<sfn>_<slot>_<rnti>.*`。要让它们落进
+> 一个目录，前缀必须**带目录名加一个文件名**（例如 `.../col_1025_ping/cap`）。`run_leg.sh`
+> 会创建它的 `dirname`，所以目录不必预先存在。
 
 **段名规范**（后面建集靠它区分来源）。
 
