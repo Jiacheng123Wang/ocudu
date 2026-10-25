@@ -18,21 +18,28 @@
 每段飞行都设同样五个变量，**只改 `OCUDU_UL_DUMP` 和 `OCUDU_UL_DUMP_COUNT`**：
 
 ```bash
-export OCUDU_UL_DUMP=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/col_1025_<段名>
+export OCUDU_UL_DUMP=$HOME/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/col_1025_ping  # 换成你要采的那一段的名字
 export OCUDU_UL_DUMP_COUNT=8000        # 默认只有 8，必须放大
-export OCUDU_UL_DUMP_MIN_RB=1          # 默认会跳过窄授权；采集窄授权时必须为 1
+# OCUDU_UL_DUMP_MIN_RB: 不要设。默认 0 = 任何宽度都收（设成 1 也只是排掉 0 PRB，没必要）
+# OCUDU_UL_DUMP_MAX_RB: 可选。只收「不超过这个宽度」的接收，用于专门采窄授权的一段
 export OCUDU_UL_DUMP_LLR=1             # 写 LLR，之后算符号一致要用
 export OCUDU_LA_LOG_EVERY=1            # 每条调度决策一行（SNR/OLLA/MCS）
 ```
 
-**段名规范**（后面建集靠它区分来源）：
+**段名规范**（后面建集靠它区分来源）。
 
-| 段 | 段名 | 目的 |
+**目录名用描述性的词，不用字母**——字母在日志和文档里看不出是什么，描述性的名字
+一眼就能对上：
+
+| 段 | **目录名** | 目的 |
 |---|---|---|
-| A | `col_1025_ping` | 小包 ping，中低 SNR ⇒ QPSK × 5–8、≤4 |
-| B | `col_1025_deep` | 更远／加衰减，低 SNR ⇒ <0、0–6 dB 两档 |
-| C | `col_1025_iperf` | 固定包长 iperf，中距离 ⇒ 64/256QAM × 5–8 |
-| D | `col_1025_attach` | 近距离反复 attach ⇒ QPSK × 20–60 |
+| A | **`col_1025_ping`** | 小包 ping，中低 SNR ⇒ QPSK × 5–8、≤4 |
+| B | **`col_1025_deep`** | 更远／加衰减，低 SNR ⇒ <0、0–6 dB 两档 |
+| C | **`col_1025_iperf`** | 固定包长 iperf，中距离 ⇒ 64/256QAM × 5–8 |
+| D | **`col_1025_attach`** | 近距离反复 attach ⇒ QPSK × 20–60 |
+
+**同一段重复采**（例如 A 段补采一次）就加序号：`col_1025_ping2`、`col_1025_ping3`。
+**不要**覆盖或续写已有目录。
 
 > **不要复用同一个目录**：`OCUDU_UL_DUMP` 指向已存在的目录会接着编号，事后无法
 > 分辨是哪一段。每段一个新目录。
@@ -144,7 +151,7 @@ EOF
 ```bash
 cd ~/dev/ocudu
 python3 doc_chinese/llr_ai_detection/work_tmp/probe/quick_census.py \
-  doc_chinese/llr_ai_detection/work_tmp/corpus/col_1025_<段名>
+  doc_chinese/llr_ai_detection/work_tmp/corpus/col_1025_ping  # 换成你要采的那一段的名字
 ```
 
 它直接读 sidecar，**不需要建集**，输出授权宽度分布、调制分布与码率分布。
@@ -152,7 +159,7 @@ python3 doc_chinese/llr_ai_detection/work_tmp/probe/quick_census.py \
 ### 5.1 原始捕获的快速检查（宽度与 SNR 分布）
 
 ```bash
-cd ~/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/col_1025_<段名>
+cd ~/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/col_1025_ping  # 换成你要采的那一段的名字
 # 授权宽度分布（从 sidecar 读，不需要建集）
 awk -F= '/^alloc_nof_rb=/{print $2}' *_ce.txt | sort -n | uniq -c | sort -k2 -n | head -20
 # 调制分布
@@ -185,7 +192,7 @@ awk -F= '/^modulation=/{print $2}' *_ce.txt | sort | uniq -c
 | 坑 | 症状 | 避免 |
 |---|---|---|
 | `OCUDU_UL_DUMP_COUNT` 没改 | 每段只有 8 条 | 设 8000 |
-| `OCUDU_UL_DUMP_MIN_RB` > 1 | **全是宽授权**，窄格子一条没有 | 设 1 |
+| `OCUDU_UL_DUMP_MIN_RB` > 1 | **全是宽授权**，窄格子一条没有 | **不设**（默认 0 = 任意宽度）|
 | 复用同一 dump 目录 | 段与段混在一起，无法归因 | 每段新目录 |
 | 钉 MCS | 采到的接收**一条都解不出来** | 不要钉，让 AMC 自由 |
 | 只看"采了多少条" | 采了一万条却全在同一种格子 | 每段跑 §5 |
