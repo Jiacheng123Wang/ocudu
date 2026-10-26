@@ -93,11 +93,19 @@
 
 ### 1.2.2 门控测量表
 
+**逐格 CSV 的绝对路径**：
+
+```
+/Users/jiachengwang/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/artifacts/gates/
+```
+
+每个模型一组文件：验收集 `<run>_test.csv`、attach 集 `<run>_attach.csv`（如 `e4_test.csv`、`e4_attach.csv`）。
+
 **每格都从同一次回放的 CSV 切出来**；CB CRC 一列已删（链上只暴露 TB CRC）。
 
-| 编号 | ① 验收集 TB CRC | ② attach TB CRC | ③ 三维分箱 min ／ median ／ max（逐格 CSV）| ④ 时延 p50／p90／p99／max |
+| 编号 | ① 验收集 TB CRC | ② attach TB CRC | ③ 三维分箱 crc=OK min ／ median ／ max（逐格 CSV）| ④ 时延 p50／p90／p99／max |
 |---|---|---|---|---|
-| **E4** | **90.7%**（2 476 条）| 待填（整腿回放中）| **0.0 ／ 100.0 ／ 100.0 %**（36 格 n≥20）| 待填 |
+| **E4** | **90.7%**（2 476 条）| 待填（整腿回放中）| **0.0 ／ 100.0 ／ 100.0 %**（`e4_test.csv`）| 待填 |
 | E12 | — | — | — | — |
 | E9／E10／E11 | — | — | — | — |
 | E13／E14 | — | — | — | — |
