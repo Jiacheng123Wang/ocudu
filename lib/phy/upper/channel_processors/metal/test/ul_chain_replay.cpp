@@ -436,6 +436,7 @@ int main(int argc, char** argv)
   bool        use_metal_ce     = false;
   bool        use_metal_demod  = false;
   bool        use_metal_decoder = false;
+  std::string receiver_backend;
   unsigned    nof_prb           = 25;
   /// \brief How many times the same reception is replayed through one process (a soak).
   ///
@@ -510,7 +511,7 @@ int main(int argc, char** argv)
       hop_pdus = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
     } else if ((arg == "--td-strategy") && (i + 1 < argc)) {
       td_strategy_average = (std::string(argv[++i]) == "average");
-    } else if ((arg == "--pipeline") && (i + 1 < argc)) {
+    } else if (((arg == "--phy_pipeline") || (arg == "--pipeline")) && (i + 1 < argc)) {
       // THE SAME VOCABULARY AS THE LIVE CHAIN (design section 19.602). The gNB takes `--expert_phy.phy_pipeline` with
       // auto / cpu / cpu_gpu / gpu, and `--expert_phy.pusch_ldpc_decoder_type` separately; this harness had invented
       // --cpu / --metal / --metal-cpu-ldpc / --metal-cpu-demod instead, so a configuration could not be carried from one
@@ -519,25 +520,49 @@ int main(int argc, char** argv)
       if (mode == "cpu") {
         use_metal_ce = use_metal_demod = false;
       } else if (mode == "cpu_gpu") {
-        use_metal_ce    = true;
+        // MODULE-LEVEL OFFLOAD IS OPT-IN PER MODULE, NOT A PACKAGE DEAL. `cpu_gpu` only says the chain MAY offload
+        // modules; with no module selected it behaves exactly like `cpu` (design section 19.603). Turning the estimator
+        // on here was wrong: it silently changed what the mode means compared with the air configuration.
+        use_metal_ce    = false;
         use_metal_demod = false;
       } else if (mode == "gpu") {
+        // The fused lane: CE, equalisation and demodulation in one Metal kernel. The network's backend is a separate
+        // choice (`OCUDU_REPLAY_RECEIVER` picks classical or depth-3, and the depth-3 bundle picks its own device).
         use_metal_ce = use_metal_demod = true;
       } else if (mode == "auto") {
         use_metal_ce = use_metal_demod = true;
       } else {
-        std::fprintf(stderr, "--pipeline takes auto, cpu, cpu_gpu or gpu (got '%s')\n", mode.c_str());
+        std::fprintf(stderr, "--phy_pipeline takes auto, cpu, cpu_gpu or gpu (got '%s')\n", mode.c_str());
         return 1;
       }
       mode_given = true;
-    } else if ((arg == "--ldpc") && (i + 1 < argc)) {
+    } else if (((arg == "--pusch_ldpc_decoder_type") || (arg == "--ldpc")) && (i + 1 < argc)) {
       const std::string type(argv[++i]);
-      use_metal_decoder = (type == "metal_async") || (type == "metal_lls");
-      if (!use_metal_decoder && (type != "auto") && (type != "generic") && (type != "neon")) {
-        std::fprintf(stderr, "--ldpc takes auto, generic, neon, metal_async or metal_lls (got '%s')\n", type.c_str());
+      // THE SAME NAMES THE AIR CONFIGURATION TAKES, and the same default: anything that does not start with `metal` is
+      // the CPU decoder, and the air default is `auto`, which is CPU. The metal variants are `metal` (layered NMS),
+      // `metal_flooding`, `metal_persistent`, `metal_async` and `metal_lls`.
+      static const char* const metal_types[] = {"metal", "metal_flooding", "metal_persistent", "metal_async", "metal_lls"};
+      static const char* const cpu_types[]   = {"auto", "generic", "neon", "avx2", "avx512"};
+      auto known = [&](const char* const* list, size_t n) {
+        for (size_t k = 0; k != n; ++k) {
+          if (type == list[k]) {
+            return true;
+          }
+        }
+        return false;
+      };
+      use_metal_decoder = known(metal_types, sizeof(metal_types) / sizeof(metal_types[0]));
+      if (!use_metal_decoder && !known(cpu_types, sizeof(cpu_types) / sizeof(cpu_types[0]))) {
+        std::fprintf(stderr, "--pusch_ldpc_decoder_type takes auto, generic, neon, avx2, avx512, metal, metal_flooding, "
+                             "metal_persistent, metal_async or metal_lls (got '%s')\n", type.c_str());
         return 1;
       }
       mode_given = true;
+    } else if ((arg == "--pusch_receiver_backend") && (i + 1 < argc)) {
+      // THE LIVE OPTION'S NAME, so a configuration line can be copied across verbatim: auto, classic or ai. The
+      // environment variable that already carried this keeps working for the scripts that use it.
+      receiver_backend = argv[++i];
+      mode_given       = true;
     } else if (arg == "--cpu") {
       use_metal_ce = use_metal_demod = use_metal_decoder = false;
       mode_given                     = true;
@@ -1232,7 +1257,10 @@ int main(int argc, char** argv)
   //   OCUDU_REPLAY_MODEL    = <model.mlmodelc>  (the --expert_phy.pusch_receiver_model value)
   // Whether the network actually RUNS is decided by the arm's binding, not by these variables being set: an
   // `ai` arm without a model reports that its output is the classical result.
-  if (const char* receiver_env = std::getenv("OCUDU_REPLAY_RECEIVER")) {
+  if (!receiver_backend.empty()) {
+    proc_cfg.pusch_receiver_backend = receiver_backend;
+    std::printf("depth-3 receiver arm: %s (--pusch_receiver_backend)\n", receiver_backend.c_str());
+  } else if (const char* receiver_env = std::getenv("OCUDU_REPLAY_RECEIVER")) {
     proc_cfg.pusch_receiver_backend = receiver_env;
     std::printf("depth-3 receiver arm: %s (OCUDU_REPLAY_RECEIVER)\n", receiver_env);
   }

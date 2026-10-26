@@ -261,6 +261,33 @@ tb_crc_ok → 逐条 CSV
 ★ ⇒ ★ **时延测量必须 ≥ 500 次重复** ✓，★ 否则量的是冷启动 ✓。
 
 ★ 状态 ✓：★ 语义已按用户更正 ✓；★ ldpc 取值已补齐 ✓；★ **冷/热报告的区别已记 ✓**。
+## 19.604 ★★★★ 选项**全部统一到实链名字** ✓
+
+**(a) ★★★ 三对名字，现已一一对应 ✓**
+
+| ★ 实链配置项 ✓ | ★ 回放选项（新）✓ | ★ 取值 ✓ |
+|---|---|---|
+| ★ `--expert_phy.phy_pipeline` ✓ | ★ **`--phy_pipeline`** ✓ | ★ auto／cpu／cpu_gpu／gpu ✓ |
+| ★ `--expert_phy.pusch_ldpc_decoder_type` ✓ | ★ **`--pusch_ldpc_decoder_type`** ✓ | ★ auto／generic／neon／avx2／avx512／metal／metal_flooding／metal_persistent／metal_async／metal_lls ✓（★ **默认 auto ＝ CPU** ✓）|
+| ★ `--expert_phy.pusch_receiver_backend` ✓ | ★ **`--pusch_receiver_backend`** ✓ | ★ auto／classic／ai ✓ |
+
+★ 旧写法（★ `--pipeline`／`--ldpc`／`--metal*`／`OCUDU_REPLAY_RECEIVER` ✓）**仍可用** ✓ —— ★ 不破坏现有脚本 ✓。
+
+**(b) ★★★ 验证 ✓（★ 同捕获 ✓）**
+
+| ★ 调用 ✓ | ★ 输出 ✓ | ★ `forward` p50 ✓ |
+|---|---|---|
+| ★ **全用实链名字** ✓：`--pusch_receiver_backend ai --phy_pipeline gpu --pusch_ldpc_decoder_type auto` ✓ | ★ `receiver arm: ai (--pusch_receiver_backend)` ✓ | ★ **208** ✓ |
+| ★ 旧写法 ✓：`OCUDU_REPLAY_RECEIVER=ai --metal-cpu-ldpc` ✓ | ★ `receiver arm: ai (OCUDU_REPLAY_RECEIVER)` ✓ | ★ **209** ✓ |
+
+★ ⇒ ★ **同一配置、同一结果 ✓** ⇒ ★ 迁移安全 ✓。
+
+**(c) ★★★ 一句状态 ✓**
+
+★ **配置文件里怎么写，回放就怎么写** ✓ —— ★ 不再有一层需要记住的翻译 ✓。
+★ `--pusch_ldpc_decoder_type` 的**默认取值就是空** ✓ ⇒ ★ **不写就是 CPU** ✓（★ Metal 待进一步优化 ✓）。
+
+★ 状态 ✓：★ 三对名字统一 ✓；★ 别名保留 ✓。
 ## 19.600 订正：★ p90 **该加** ✓ —— ★ 其他模块本来就有 ✗（★ 我上一节撤错了 ✓）
 
 **(a) ★★★ 用户的记忆是对的 ✓**
