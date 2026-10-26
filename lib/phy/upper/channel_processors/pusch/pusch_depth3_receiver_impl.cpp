@@ -1490,8 +1490,12 @@ private:
       std::array<unsigned, TIMING_RING> sorted = timings[segment];
       std::sort(sorted.begin(), sorted.begin() + sampled);
       const unsigned p99_index = std::min((sampled * 99) / 100, sampled - 1);
-      fmt::print(stderr, " {} p50 {} p99 {} max {} |", names[segment], sorted[sampled / 2], sorted[p99_index],
-                 sorted[sampled - 1]);
+      // P90 AS WELL, because every other timing report in this tree carries it: the per-stage handoff probe prints
+      // min/p50/p90/p99/p99.9/max, the Core ML latency probe prints p50/p90/p99/max, and this one was the odd one out
+      // (design section 19.600). A gate that compares this arm against the modules must use the same percentiles they do.
+      const unsigned p90_index = std::min((sampled * 90) / 100, sampled - 1);
+      fmt::print(stderr, " {} p50 {} p90 {} p99 {} max {} |", names[segment], sorted[sampled / 2],
+                 sorted[p90_index], sorted[p99_index], sorted[sampled - 1]);
     }
     fmt::print(stderr, "\n");
     // THE EARLY MEASUREMENT'S OWN LEDGER, on the same exit line group as the timings: a leg that turned the
