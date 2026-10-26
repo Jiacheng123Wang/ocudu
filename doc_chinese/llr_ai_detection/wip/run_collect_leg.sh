@@ -618,6 +618,28 @@ wait "$out_tee" "$err_tee"
 # non-zero: a reportless leg is not a leg, and it must not be read later as "the counters were
 # zero" (§5.9.97: "cannot read" is RED, never absent). The startup tees are already closed, so
 # the message goes to the real stderr.
+# WHETHER THE CAPTURE ACTUALLY KEPT WHAT IT WROTE (design section 19.621). Until 2026-10-26 the capture name was made
+# from the system frame number and the slot index, and the frame number repeats every 1024 frames -- 10.24 seconds at
+# 30 kHz -- so a longer leg overwrote its own earlier captures and left exactly one frame cycle on disk. Measured: twenty
+# thousand announced, five thousand nine hundred and twenty-eight files. The names are collision-free now, and this check
+# is what proves it on every leg instead of on the one that was looked at.
+echo >&2
+echo "-- capture yield --" >&2
+CAPS=$(find "$OCUDU_UL_DUMP" -maxdepth 1 -name 'cap_*.bin' ! -name '*_h.bin' ! -name '*_llr.bin' 2>/dev/null | wc -l | tr -d ' ')
+ANNOUNCED=$(grep -ah "\[ul_capture\] heartbeat:" "$LOG.stderr" "$LOG" 2>/dev/null | tail -1 | sed 's/.*heartbeat: \([0-9]*\) capture(s).*/\1/')
+BUDGET=$(grep -ah "\[ul_capture\] plan:" "$LOG.stderr" "$LOG" 2>/dev/null | tail -1 | sed 's/.*budget \([0-9]*\) reception.*/\1/')
+SPAN=$(find "$OCUDU_UL_DUMP" -maxdepth 1 -name 'cap_*.bin' ! -name '*_h.bin' ! -name '*_llr.bin' 2>/dev/null | sed 's|.*/cap_||;s|_.*||' | sort -n | awk 'NR==1{mn=$1} {mx=$1} END{print (mx-mn)}')
+echo "   files on disk: ${CAPS:-0}   last heartbeat: ${ANNOUNCED:-none}   budget: ${BUDGET:-none}   sfn span: ${SPAN:-0} frames" >&2
+if [ -n "$ANNOUNCED" ] && [ "${CAPS:-0}" -lt "$ANNOUNCED" ]; then
+  echo "!! CAPTURE LOSS: ${ANNOUNCED} announced, ${CAPS} on disk -- names are colliding again (see 19.621)." >&2
+  CAPTURE_VERDICT=1
+elif [ "${SPAN:-0}" -le 1024 ]; then
+  echo "   note: the frame span is ${SPAN:-0}, i.e. within one 1024-frame cycle -- the leg was shorter than 10.24 s," >&2
+  echo "         so this leg does not exercise the overwrite fix either way." >&2
+else
+  echo "   OK: every announced capture is on disk and the span exceeds one frame cycle." >&2
+fi
+
 if ! grep -q "\[phy_pipeline\] contract" "$LOG.stderr" 2>/dev/null ||
    ! grep -q "\[metal_stats\]" "$LOG.stderr" 2>/dev/null; then
   echo >&2
