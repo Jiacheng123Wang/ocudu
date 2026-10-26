@@ -194,6 +194,38 @@ tb_crc_ok → 逐条 CSV
 | ★ 298 µs ✓ | ★ 是"GPU 解码在跑"时的前向 ✗ —— ★ 不代表部署 ✓ |
 
 ★ 状态 ✓：★ 机制已查清 ✓；★ **门④ 口径固定为 CPU LDPC** ✓。
+## 19.602 ★★★★ 选项统一 ✓：★ 回放改用实链的词汇 ✓（`--pipeline` ／ `--ldpc`）
+
+**(a) ★★★ 查证：★ 两边原本是**两套词汇** ✗**
+
+| ★ 侧 ✓ | ★ 开关 ✓ |
+|---|---|
+| ★ **实链（gNB）** ✓ | ★ `--expert_phy.phy_pipeline` = **auto／cpu／cpu_gpu／gpu** ✓；★ `--expert_phy.pusch_ldpc_decoder_type` = **auto／generic／neon／metal_async／metal_lls** ✓ |
+| ★ **回放（原）** ✗ | ★ `--cpu`／`--metal`／`--metal-cpu-ldpc`／`--metal-cpu-demod` ✓ —— ★ **自己发明的一套** ✗ |
+
+★ 注 ✓：★ 本树 `apps/` 下**没有** `--metal` 这个选项 ✓（★ `grep "--metal" apps/` 为空 ✓）；
+★ 实链表达"GPU 流水线"的方式就是 **`--expert_phy.phy_pipeline gpu`** ✓。
+★ ⇒ ★ 用户说的"实链里 `--metal` 是 `--gpu` 的别名" ✓ —— ★ 在本树里**连这个别名也没有** ✗，
+★ 统一到 `--pipeline gpu` 才是**代码里实际存在**的那个名字 ✓。
+
+**(b) ★★★ 已统一 ✓**
+
+| ★ 新选项 ✓ | ★ 取值 ✓ | ★ 映射 ✓ |
+|---|---|---|
+| ★ **`--pipeline`** ✓ | ★ `auto`／`cpu`／`cpu_gpu`／`gpu` ✓ | ★ cpu ⇒ 全 CPU ✓；★ cpu_gpu ⇒ metal CE、★ CPU 解调／解码 ✓；★ gpu ⇒ metal CE ＋ metal 解调 ✓ |
+| ★ **`--ldpc`** ✓ | ★ `auto`／`generic`／`neon`／`metal_async`／`metal_lls` ✓ | ★ 后两个 ⇒ metal 解码器 ✓；★ 其余 ⇒ CPU ✓ |
+| ★ 旧开关 ✓ | ★ `--cpu`／`--metal`／`--metal-cpu-ldpc`／`--metal-cpu-demod` ✓ | ★ **保留为别名** ✓（★ 不破坏现有脚本 ✓）|
+
+**(c) ★★★ 等价性已验证 ✓**
+
+| ★ 调用 ✓ | ★ `forward` p50 ✓ |
+|---|---|
+| ★ `--pipeline gpu --ldpc auto`（★ 新 ✓）| ★ **210** ✓ |
+| ★ `--metal-cpu-ldpc`（★ 旧 ✓）| ★ **210** ✓ |
+
+★ ⇒ ★ **同一配置、同一结果 ✓** ⇒ ★ 迁移安全 ✓。
+
+★ 状态 ✓：★ 词汇已统一 ✓；★ 门控脚本改用 `--pipeline gpu --ldpc auto` ✓（★ 与空口配置一致 ✓）。
 ## 19.600 订正：★ p90 **该加** ✓ —— ★ 其他模块本来就有 ✗（★ 我上一节撤错了 ✓）
 
 **(a) ★★★ 用户的记忆是对的 ✓**

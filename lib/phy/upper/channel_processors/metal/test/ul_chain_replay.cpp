@@ -510,6 +510,34 @@ int main(int argc, char** argv)
       hop_pdus = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
     } else if ((arg == "--td-strategy") && (i + 1 < argc)) {
       td_strategy_average = (std::string(argv[++i]) == "average");
+    } else if ((arg == "--pipeline") && (i + 1 < argc)) {
+      // THE SAME VOCABULARY AS THE LIVE CHAIN (design section 19.602). The gNB takes `--expert_phy.phy_pipeline` with
+      // auto / cpu / cpu_gpu / gpu, and `--expert_phy.pusch_ldpc_decoder_type` separately; this harness had invented
+      // --cpu / --metal / --metal-cpu-ldpc / --metal-cpu-demod instead, so a configuration could not be carried from one
+      // to the other by name and every comparison had to remember the translation. The old flags stay as aliases.
+      const std::string mode(argv[++i]);
+      if (mode == "cpu") {
+        use_metal_ce = use_metal_demod = false;
+      } else if (mode == "cpu_gpu") {
+        use_metal_ce    = true;
+        use_metal_demod = false;
+      } else if (mode == "gpu") {
+        use_metal_ce = use_metal_demod = true;
+      } else if (mode == "auto") {
+        use_metal_ce = use_metal_demod = true;
+      } else {
+        std::fprintf(stderr, "--pipeline takes auto, cpu, cpu_gpu or gpu (got '%s')\n", mode.c_str());
+        return 1;
+      }
+      mode_given = true;
+    } else if ((arg == "--ldpc") && (i + 1 < argc)) {
+      const std::string type(argv[++i]);
+      use_metal_decoder = (type == "metal_async") || (type == "metal_lls");
+      if (!use_metal_decoder && (type != "auto") && (type != "generic") && (type != "neon")) {
+        std::fprintf(stderr, "--ldpc takes auto, generic, neon, metal_async or metal_lls (got '%s')\n", type.c_str());
+        return 1;
+      }
+      mode_given = true;
     } else if (arg == "--cpu") {
       use_metal_ce = use_metal_demod = use_metal_decoder = false;
       mode_given                     = true;
