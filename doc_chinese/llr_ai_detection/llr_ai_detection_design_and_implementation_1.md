@@ -322,6 +322,33 @@ tb_crc_ok → 逐条 CSV
 ★ `replay_leg_one.sh`／`replay_list.sh` 现在带**完整三项** ✓（★ `--phy_pipeline gpu --pusch_receiver_backend ai --pusch_ldpc_decoder_type auto` ✓）。
 
 ★ 状态 ✓：★ 两级语义已明确 ✓；★ 错配会报警 ✓；★ **脚本已按正确组合改** ✓。
+## 19.606 ★★★ `--pusch_ldpc_decoder_type` **可以省略** ✓ —— ★ 与实链一致 ✓
+
+**(a) ★★★ 查证 ✓（★ 同捕获、★ `repeat 700` ✓）**
+
+| ★ 调用 ✓ | ★ CRC ✓ | ★ `iterations` ✓ |
+|---|---|---|
+| ★ **省略** `--pusch_ldpc_decoder_type` ✓ | ★ OK ✓ | ★ **1** ✓ |
+| ★ 显式 `auto` ✓ | ★ OK ✓ | ★ **1** ✓ |
+| ★ 显式 `metal` ✓ | ★ OK ✓ | ★ **2** ✗ |
+
+★ ⇒ ★ **省略 ＝ `auto` ＝ CPU** ✓（★ 与实链的默认一致 ✓）
+★ ⇒ ★ `metal` 那条 **迭代数不同** ✓ ⇒ ★ **确实是另一个解码器 ✓，★ 不是空参数 ✓** ✓。
+
+**(b) ★★★ 代码上的保证 ✓**
+
+★ `use_metal_decoder` **初值就是 `false`** ✓，★ 只有 `--pusch_ldpc_decoder_type metal*`（★ 或旧的 `--metal` ✓）才置真 ✓
+★ ⇒ ★ **不写就是 CPU** ✓ ✓。
+
+**(c) ★★ 门控脚本已简化 ✓**
+
+```bash
+--phy_pipeline gpu --pusch_receiver_backend ai     # 够了
+```
+
+★ 三项变两项 ✓ —— ★ 与采集配置里"只写前两个"对齐 ✓。
+
+★ 状态 ✓：★ 省略已验证 ✓；★ 脚本已简化 ✓。
 ## 19.600 订正：★ p90 **该加** ✓ —— ★ 其他模块本来就有 ✗（★ 我上一节撤错了 ✓）
 
 **(a) ★★★ 用户的记忆是对的 ✓**
