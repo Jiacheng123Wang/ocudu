@@ -139,15 +139,6 @@ static std::optional<mcs_prbs_selection> compute_newtx_required_mcs_and_prbs(con
   // lines report 256QAM on up to eighteen percent of receptions, yet the uplink MCS table in this tree stops at 64QAM, so the
   // modulation the PHY sees cannot be the one this call returns -- something downstream changes it. Printing the derived pair
   // here, sampled, makes that comparison possible without any pairing: the two distributions either match or they do not.
-  {
-    static std::atomic<unsigned> pusch_mcs_log_count{0};
-    if ((++pusch_mcs_log_count % 200) == 0) {
-      fmt::print(stderr, "[sched-mcs] PUSCH grant MCS: mcs={} mod={} tcr={:.3f} table={}\n", mcs.value(),
-                 to_string(mcs_config.modulation), mcs_config.get_normalised_target_code_rate(),
-                 static_cast<unsigned>(pusch_cfg.mcs_table));
-    }
-  }
-
   const auto nof_symbols = pusch_cfg.symbols.length();
 
   sch_prbs_tbs prbs_tbs = get_nof_prbs(prbs_calculator_sch_config{pending_bytes.value(),
@@ -194,6 +185,22 @@ static std::optional<mcs_prbs_selection> compute_newtx_required_mcs_and_prbs(con
   if (nof_prbs == 0) {
     // No valid MCS-PRB allocation.
     return std::nullopt;
+  }
+  // THE PRB COUNT RIDES ON THE SAME LINE AS THE MCS (user request, 2026-10-26). They move together, and a narrow grant at
+  // a low MCS is precisely the cell where the arm is weakest, so one line carrying both lets a leg be watched while it is
+  // being flown. It lives here, and not beside the older line, because only here are the chosen MCS and the chosen PRBs
+  // both in scope: the other site sees the configuration, not the decision.
+  {
+    // SAMPLED EVERY TWO HUNDREDTH, AND IT NOW CARRIES THE GRANT WIDTH (user request, 2026-10-26). The MCS alone could not
+    // say whether a run was reaching the narrow, low-SNR grants the arm is weakest on; with the PRB count on the same line
+    // a leg can be steered while it is being flown. It sits here, at the return, because only here are the chosen MCS and
+    // the chosen PRBs both in scope -- the earlier site ran before the width was computed.
+    static std::atomic<unsigned> pusch_mcs_prb_log_count{0};
+    if ((++pusch_mcs_prb_log_count % 200) == 0) {
+      fmt::print(stderr, "[sched-mcs] PUSCH grant MCS: mcs={} mod={} tcr={:.3f} prbs={} table={}\n", mcs.value(),
+                 to_string(mcs_config.modulation), mcs_config.get_normalised_target_code_rate(), nof_prbs,
+                 static_cast<unsigned>(pusch_cfg.mcs_table));
+    }
   }
   return mcs_prbs_selection{mcs, nof_prbs};
 }

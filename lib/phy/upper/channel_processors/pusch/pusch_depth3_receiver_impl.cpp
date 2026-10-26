@@ -1416,6 +1416,14 @@ private:
     const auto     now_parts  = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
     std::tm        now_local{};
     localtime_r(&now_time, &now_local);
+    // SILENT UNLESS ASKED (user request, 2026-10-26). This line is a measurement instrument and it was writing itself into
+    // the gNB's console every five hundred receptions, which buries the lines an operator watches while flying a leg. The
+    // numbers are still wanted -- gate four is read from exactly this line -- so the arm prints it when
+    // `OCUDU_DEPTH3_TIMING` is set and says nothing otherwise.
+    static const bool timing_report_enabled = (std::getenv("OCUDU_DEPTH3_TIMING") != nullptr);
+    if (!timing_report_enabled) {
+      return;
+    }
     fmt::print(stderr, "[depth3-timing] {:02d}:{:02d}:{:02d}.{:03d} {} forward(s), microseconds:", now_local.tm_hour,
                now_local.tm_min, now_local.tm_sec, static_cast<int>(now_parts.count()), timing_count);
     // `predict` last on purpose: it is the PART of `forward` that Core ML and the ANE spend, so the two are read
