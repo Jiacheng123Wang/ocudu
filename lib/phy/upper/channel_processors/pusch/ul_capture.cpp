@@ -146,6 +146,13 @@ bool capture_directory_exists()
 /// to see that files are landing, and "no news" is indistinguishable from "the directory is missing".
 void report_first_capture(const std::string& name)
 {
+  // Heartbeat: every hundredth capture, so a leg that stops writing is noticed within a few hundred receptions rather
+  // than when the operator counts files afterwards.
+  static std::atomic<unsigned> written{0};
+  const unsigned               nth = ++written;
+  if ((nth % 100) == 0) {
+    std::fprintf(stderr, "[ul_capture] heartbeat: %u capture(s) written, most recent %s\n", nth, name.c_str());
+  }
   static std::atomic<bool> reported{false};
   if (reported.exchange(true)) {
     return;
@@ -169,6 +176,27 @@ std::set<std::string>& selected()
 {
   static std::set<std::string> keys;
   return keys;
+}
+
+/// \brief Says, ONCE, what the capture is doing: where the files go, how many are budgeted, and which filters narrow
+/// the set. The write-time announcement below only fires when a file is actually opened, so a leg whose filters reject
+/// everything it sees can run for an hour with no evidence either way -- which is the shape of a silent stop.
+void report_capture_plan()
+{
+  static std::atomic<bool> reported{false};
+  if (reported.exchange(true)) {
+    return;
+  }
+  const unsigned max_rb = capture_max_rb();
+  const unsigned min_rb = capture_min_rb();
+  std::fprintf(stderr,
+               "[ul_capture] plan: writing %s.* budget %u reception(s) passing the filters "
+               "(min_rb %u, max_rb %u, rv %s)\n",
+               capture_prefix().c_str(),
+               capture_budget(),
+               min_rb,
+               max_rb,
+               capture_rv().has_value() ? std::to_string(*capture_rv()).c_str() : "any");
 }
 
 bool select(const pusch_processor::pdu_t& pdu)
@@ -206,7 +234,21 @@ bool select(const pusch_processor::pdu_t& pdu)
   }
   static std::atomic<unsigned> count{0};
   std::lock_guard              lock(selected_mutex());
-  if (count.fetch_add(1, std::memory_order_relaxed) >= capture_budget()) {
+  report_capture_plan();
+  const unsigned budget = capture_budget();
+  const unsigned taken  = count.fetch_add(1, std::memory_order_relaxed);
+  if (taken >= budget) {
+    // SAID ONCE, when the budget runs out (user request, 2026-10-26). A leg that stops capturing at reception N and
+    // says nothing is indistinguishable from a leg that is capturing nothing at all, and this workflow has already lost
+    // runs to exactly that ambiguity: every counter green, no files. One line is enough to end it.
+    static std::atomic<bool> exhausted_reported{false};
+    if (!exhausted_reported.exchange(true)) {
+      std::fprintf(stderr,
+                   "[ul_capture] budget exhausted: %u reception(s) selected, nothing more will be written until the "
+                   "leg is restarted (OCUDU_UL_DUMP_COUNT=%u)\n",
+                   taken,
+                   budget);
+    }
     return false;
   }
   selected().insert(make_key(pdu.slot, pdu.rnti));

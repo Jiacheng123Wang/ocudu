@@ -845,6 +845,41 @@ sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh gpu col_1025_cm
 | ★ 合成 ✓ | ★ 仍可用于**补训练** ✓，★ 但**不能再以"不可达"为理由** ✗ |
 
 ★ 状态 ✓：★ 分类已撤回 ✓；★ 清单已改写 ✓；★ **门控无排除 ✓**。
+## 19.619 ★★★★ 采集器：★ 静默停止→**有日志的停止** ✓（17:55 ✓）
+
+**(a) ★★★ 这次停在哪 ✓**
+
+| ★ 事实 ✓ | ★ 值 ✓ |
+|---|---|
+| ★ 最新网格 ✓ | ★ **17:37:55** ✓（★ 之后 7 分钟无新文件 ✓）|
+| ★ 已采网格 ✓ | ★ **14 231** ✓ |
+| ★ gNB ✓ | ★ **活着** ✓、★ ping 在跑 ✓、★ `rnti=0x4607`＝17927 未变 ✓ |
+| ★ 日志里的 `[ul_capture]` 行 ✓ | ★ **一条都没有** ✗ |
+
+★ ⇒ ★ **业务没停、进程没死、采集却停了 ✓，★ 而且日志里查不到原因** ✗ ✓。
+
+**(b) ★★★ 加了三行日志 ✓（`ul_capture.cpp`）**
+
+| ★ 行 ✓ | ★ 何时打 ✓ | ★ 作用 ✓ |
+|---|---|---|
+| `[ul_capture] plan:` ✓ | ★ **首次选中接收**时 ✓ | ★ 预算、目录、过滤条件（★ min_rb／max_rb／rv ✓）|
+| `[ul_capture] budget exhausted:` ✓ | ★ 预算**用尽那一刻**（★ 只一次 ✓）| ★ **明确"为什么停"** ✓ |
+| `[ul_capture] heartbeat:` ✓ | ★ 每写 **100** 条 ✓ | ★ 停止后几百次接收内就能发现 ✓ |
+
+**(c) ★★★ 实测 ✓**
+
+```
+[ul_capture] plan: writing /tmp/capout.* budget 1 reception(s) passing the filters (min_rb 0, max_rb 0, rv any)
+[ul_capture] capturing: writing /tmp/capout_569_11387_17921.* (budget 1 reception(s) that pass the filters)
+[ul_capture] budget exhausted: 1 reception(s) selected, nothing more will be written until the leg is restarted
+```
+
+**(d) ★★ 注意 ✓**
+
+★ `ul_chain_replay` 会把 `OCUDU_UL_DUMP_COUNT` 设成 **1** ✓ ⇒ ★ 回放里这三行会立刻出现 ✓（★ 属正常 ✓）
+★ ⇒ ★ **上实链前要用新二进制** ✓（★ 现在跑着的腿还是旧构建 ✓）。
+
+★ 状态 ✓：★ 三行已加 ✓；★ **下次静默停止会自带原因 ✓**。
 ## 19.596 本文档启用 ＋ 首份 E17 结果入表
 
 **本节起，工作备忘写进本文。**
