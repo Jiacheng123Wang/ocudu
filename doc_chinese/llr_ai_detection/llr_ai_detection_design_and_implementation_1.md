@@ -101,6 +101,53 @@
 ★ 缺的那 695 条来自历史语料 ✓ ⇒ ★ 对它们的语料目录跑一次 `dump_tb.sh --cpu` ✓ 即可 ✓（★ 一次性的 ✓）。
 
 ★ 状态 ✓：★ 验收集已恢复 3 294 ✓；★ 自吞 bug 已修 ✓；★ **门控需在 3 294 上重跑 ✓**（★ 与 E4 的 75.8% 同集 ✓）。
+## 19.598 管线确认 ＋ ★ LDPC 必须用 **CPU 版** ✓ —— ★ 我之前用了 metal ✗
+
+**(a) ★★★ 管线是这样的 ✓ —— ★ 而且是**同一份代码** ✓**
+
+```
+采集的 T-F 网格（.bin）
+   ↓  resource_grid_reader
+depth3 网络（Core ML 产物，ANE）
+   ↓  LLR
+OCUDU 自己的 pusch_decoder（LDPC ＋ 解速率匹配 ＋ 解扰 ＋ CRC）
+   ↓
+tb_crc_ok → 逐条 CSV
+```
+
+★ 代码为证 ✓：★ 回放用的是 **`create_pusch_processor_factory_sw`** ✓ ＋ **`create_pusch_decoder_factory_sw`** ✓
+★ —— ★ **与实链同一套类** ✓；★ `dec_nof_iterations = replay_dec_nof_iterations()` ✓（★ 默认 6 ＝ 空口的
+★ `pusch_dec_max_iterations: 6` ✓）、★ `dec_enable_early_stop = true` ✓。
+
+**(b) ★★★★ 但有一处我没对齐 ✗：★ 解码器选了 **metal** ✓**
+
+| ★ 回放开关 ✓ | ★ CE／均衡／解调 ✓ | ★ LDPC ✓ |
+|---|---|---|
+| ★ `--metal`（★ 我用的 ✗）| ★ metal ✓ | ★ **metal** ✗ |
+| ★ **`--metal-cpu-ldpc`** ✓ | ★ metal ✓ | ★ **CPU（★ "auto" ✓）** ✓ |
+| ★ 空口配置 ✓ | ★ 按配置 ✓ | ★ **`pusch_ldpc_decoder_type: auto`** ✓ ⇒ ★ CPU ✓ |
+
+★ ⇒ ★ **空口用 CPU LDPC ✓，★ 而我跑门控时用了 metal ✗** ✓。
+
+**(c) ★★★ 差异实测 ✓（★ 同 149 条 attach ✓，★ 同模型 ✓）**
+
+| ★ 模式 ✓ | ★ CRC-OK ✓ |
+|---|---|
+| ★ `--metal` ✗ | ★ **99 / 149（★ 66.4% ✓）** |
+| ★ **`--metal-cpu-ldpc`** ✓ | ★ **102 / 149（★ 68.5% ✓）** |
+
+★ ⇒ ★ **CPU 版多解出 3 条 ✓（★ +2.0 pp ✓）** ✓ ⇒ ★ 用户判断成立 ✓：★ **CPU 版更好 ✓** ✓。
+
+**(d) ★★★ 于是要重跑 ✓**
+
+| ★ 项 ✓ | ★ 状态 ✓ |
+|---|---|
+| ★ 回放脚本默认 ✓ | ★ 已改为 **`--metal-cpu-ldpc`** ✓（★ `replay_leg_one.sh`／`replay_list.sh` ✓）|
+| ★ attach 整腿 ✓ | ★ 正在重跑 ✓（★ → `cpp_attach_e4_cpuldpc.csv` ✓）|
+| ★ 验收集 ✓ | ★ 正在重跑 ✓（★ → `cpp_acc_e4_cpuldpc.csv` ✓）|
+| ★ 已发布的 67.9%／90.5% ✓ | ★ **作废** ✗ —— ★ 那两个是 metal LDPC 口径 ✓ |
+
+★ 状态 ✓：★ 管线已确认 ✓；★ **解码器口径已纠正 ✓**；★ 两腿重跑中 ✓。
 ## 19.596 本文档启用 ＋ 首份 E17 结果入表
 
 **本节起，工作备忘写进本文。**
