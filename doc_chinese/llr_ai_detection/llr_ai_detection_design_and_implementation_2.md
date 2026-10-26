@@ -650,6 +650,54 @@ sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu col_1025_cm
 | ★ **同一角落的两个模型对照** ✓ | ★ 同一位置 ✓、★ 同一时长 ✓ ⇒ ★ 位置与信道可比 ✓ |
 
 ★ 状态 ✓：★ 清单已出 ✓；★ **配方已给 ✓**。
+## 19.614 ★★★★ 短腿验收 ✓ ＋ ★ 四条纠正全部成立 ✓（17:10 ✓）
+
+**(a) ★★★ 采集有效 ✓**
+
+| ★ 项 ✓ | ★ 值 ✓ |
+|---|---|
+| ★ 完整捕获（★ 网格 ＋ PDU ＋ CE ✓）| **12 076** ✓ |
+| ★ 三件配套 ✓ | ★ 抽样 2 000 条**全部成对** ✓ |
+| ★ 接收机 ✓ | ★ 日志：★ **`receiver=ai`** ✓（★ `--pusch_receiver_backend ai` 生效 ✓）|
+| ★ 空中解码 ✓ | ★ **crc=OK 27 850 ／ KO 6 980（★ 79.9% ✓）** ✓ |
+
+**(b) ★★★ 四条纠正 ✓ —— ★ 用户全部正确 ✓**
+
+| ★ # ✓ | ★ 我写的 ✗ | ★ 正确 ✓ |
+|---|---|---|
+| 1 ✓ | `run_collect_leg.sh **cpu**` ✗ | ★ 那个位置参数**就是 `phy_pipeline`** ✓ ⇒ ★ 应为 **`gpu`** ✓ |
+| 2 ✓ | 又传 `--expert_phy.phy_pipeline gpu` ✗ | ★ 脚本已设 ✓ ⇒ ★ **重复会报错** ✓ |
+| 3 ✓ | 给 E4 传 `--pusch_receiver_model ...` ✗ | ★ **E4 就是编译期默认** ✓：`ai_assets/depth3_e4_real_1023/d3_e4.mlmodelc` ✓ ⇒ ★ 不必传 ✓ |
+| 4 ✓ | （★ 未意识 ✓）| ★ 只有 E17 需要显式给路径 ✓ |
+
+**(c) ★★★ 修正后的起飞命令 ✓**
+
+```bash
+cd /Users/jiachengwang/dev/ocudu
+
+# 腿 A：E4（默认模型，只加 backend）
+sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh gpu col_1025_cmp_e4 \
+  --expert_phy.pusch_receiver_backend ai
+
+# 腿 B：E17（额外给模型路径）
+sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh gpu col_1025_cmp_e17 \
+  --expert_phy.pusch_receiver_backend ai \
+  --expert_phy.pusch_receiver_model /Users/jiachengwang/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/artifacts/buckets/e17_c32_b18/e17_c32_b18.mlmodelc
+```
+
+**(d) ★★★★ 但这条腿**没打到薄格** ✗**
+
+| ★ 格子 ✓ | ★ 条数 ✓ |
+|---|---|
+| ★ QPSK × >24 × 6–10 ✓ | 2 790 ✓ |
+| ★ QPSK × >24 × 10–20 ✓ | 2 481 ✓ |
+| ★ …（★ 以 **>24 PRB** 为主 ✓）| … ✓ |
+| ★ **≤4 PRB × <6 dB** ✓ | ★ **仅 82** ✗ |
+
+★ ⇒ ★ 这是**近场大流量**的形状（★ iperf 类 ✓），★ **不是薄格要的形状** ✓
+★ ⇒ ★ 下一步必须**改业务**：★ **attach 循环**（★ 10 s ✓）＋ **拉远** ✓。
+
+★ 状态 ✓：★ 采集链路已验证可跑 ✓；★ 命令已纠正 ✓；★ **薄格仍需专门的业务与位置** ✓。
 ## 19.596 本文档启用 ＋ 首份 E17 结果入表
 
 **本节起，工作备忘写进本文。**
