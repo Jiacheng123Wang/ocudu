@@ -103,6 +103,40 @@ static constexpr unsigned MAX_NOF_CODEBLOCKS = 64;
 /// out as "the replay decodes what the live chain could not", and the rate that was being compared against
 /// the air was not the air's. The default is therefore the air value, the knob is kept for the A/B, and the
 /// value is PRINTED at the start of a run so a comparison can see which decoder produced its verdict.
+namespace {
+
+/// \brief The per-reception CSV, opened once from `OCUDU_REPLAY_CSV` and left open for the run.
+///
+/// Why a file rather than more log lines (design section 19.577): every gate the project has is a per-cell comparison,
+/// and a cell is (modulation, grant width, SNR band). Those three are in this file plus the decode verdict, so the gates
+/// can be computed by cutting it -- from the deployed chain, in the language the arm ships, instead of from a Python
+/// re-run of the training artefact.
+FILE* replay_csv()
+{
+  static FILE* csv     = nullptr;
+  static bool  decided = false;
+  if (!decided) {
+    decided           = true;
+    const char* path  = std::getenv("OCUDU_REPLAY_CSV");
+    if (path != nullptr) {
+      // APPEND, because the replay takes one capture per process: a leg is a shell loop over captures, and every one of
+      // them must add its rows to the same file. The header goes in only when the file is still empty.
+      bool empty = true;
+      if (FILE* probe = std::fopen(path, "r")) {
+        empty = std::fgetc(probe) == EOF;
+        std::fclose(probe);
+      }
+      csv = std::fopen(path, "a");
+      if ((csv != nullptr) && empty) {
+        std::fprintf(csv, "capture,slot,rnti,modulation,nof_prb,sinr_db,crc,iterations,tbs_bytes\n");
+      }
+    }
+  }
+  return csv;
+}
+
+} // namespace
+
 unsigned replay_dec_nof_iterations()
 {
   unsigned iterations = 6;
@@ -1559,6 +1593,27 @@ int main(int argc, char** argv)
     }
     for (unsigned k = 0; k != nof_pdus; ++k) {
       const result_spy& spy = *spies[k];
+      // ONE ROW PER RECEPTION, so the gates can be computed from the DEPLOYED chain instead of from a Python re-run
+      // (design section 19.577). The columns are the ones the four gates need to bin a sample: what was transmitted, how
+      // wide it was, what the channel looked like, and whether it decoded. The gates compare per cell, so a file that can
+      // be cut by (modulation, width, snr) is enough; the bit error rate still needs a receiver-side probe, which is why
+      // it is not a column yet rather than a column filled with a guess.
+      if (FILE* csv = replay_csv()) {
+        std::fprintf(csv, "%s,%u,%u,%s,%u,%.2f,%s,%u,%u\n",
+                     std::strrchr(prefix.c_str(), '/') != nullptr ? std::strrchr(prefix.c_str(), '/') + 1
+                                                                  : prefix.c_str(),
+                     hop_pdu[k].slot.count(),
+                     hop_pdu[k].rnti,
+                     capture.get_string("modulation", "?").c_str(),
+                     // THE GRANT WIDTH, not the BWP: the cell a gate judges is (modulation, grant width, SNR), and
+                     // `bwp_size_rb` is the whole 51-PRB carrier for every reception in the leg.
+                     capture.fields.count("alloc_nof_rb") != 0 ? capture.get_unsigned("alloc_nof_rb") : 0U,
+                     spy.sinr_db,
+                     spy.crc_ok ? "OK" : "KO",
+                     spy.nof_iters,
+                     tbs);
+        std::fflush(csv);
+      }
       std::printf("  [%u] tbs=%u slot=%u rnti=%u %s: crc=%s iterations=%u sinr=%.2f dB epre=%.2f dB rsrp=%.2f dB\n",
                   i,
                   tbs,
