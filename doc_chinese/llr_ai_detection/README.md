@@ -77,3 +77,11 @@ bash doc_chinese/llr_ai_detection/wip/next_leg_label.sh baseline   # → aillr00
   （外部来源）、【未核实原文】/【估算】（**引用前必须复核**，不得当作实测引用）。
 - 每个结论给 `文件:行号` 或数据来源，便于复核。
 - 判据在实验之前写死；每个数字可追溯到一次 leg / commit（继承 `metal_kernel_fusion` 的纪律）。
+
+---
+
+## 接续工作流
+
+**第二代已另起目录：`doc_chinese/depth3_llr_ai/`（2026-10-26）。** 本目录的第一代结果**冻结保留**（`model_register.md`
+仍是一代之记录），新的设计、判据与实验写在二代目录；采集、语料、训练、回放设施由二代**直接引用**本目录的资产，
+不复制。分代的原因与五个根本性缺陷见二代 `README.md` 与一代 §19.627。
