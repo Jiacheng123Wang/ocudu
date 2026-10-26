@@ -597,6 +597,59 @@ forward p50 210 p90 223 p99 300 max 2950 | predict p50 194 p90 205 p99 288 max 2
 4. ★ 训练与门控**都用真实样本验收** ✓。
 
 ★ 状态 ✓：★ 合成路线可行 ✓、★ 方向正确 ✓、★ **三条防线已定 ✓**。
+## 19.613 ★★★★ 薄格清单 ✓ ＋ ★ "比对与采集一举两得"的飞行配方 ✓
+
+**(a) ★★★ 薄格清单 ✓（`artifacts/gates/thin_cells.md`）**
+
+| ★ 项 ✓ | ★ 值 ✓ |
+|---|---|
+| ★ 训练集非空格 ✓ | **99** ✓ |
+| ★ **<200 条的格** ✓ | ★ **58** ✓ |
+| ★ **补到 200／格 需要** ✓ | ★ **8 389 条** ✓ |
+
+★ 最薄的几格 ✓：★ 256QAM×≤4×0–6 **1** ✓、★ 256QAM×≤4×<0 **2** ✓、★ 64QAM×≤4×<0 **2** ✓、
+★ QPSK×≤4×6–10 **3** ✓、★ QPSK×≤4×0–6 **4** ✓ ⇒ ★ **几乎全在"≤4 PRB × 低 SNR"** ✓（★ 与 §19.610 的 AI 全挂角落重合 ✓）。
+
+**(b) ★★★★ 飞行配方：★ 同一位置、同一时长、两个模型各跑一条腿 ✓**
+
+★ 前提 ✓：★ 采集配置**没设** pipeline／backend ✓ ⇒ ★ 默认走经典链 ✓ ⇒ ★ 要比 AI 必须**显式传三个参数** ✓
+★（★ `cpu + ai` 与 `cpu_gpu + ai` 会被**拒绝** ✓ ⇒ ★ 必须 `gpu + ai` ✓。）
+
+```bash
+# 腿 A：E4
+unset OCUDU_UL_DUMP_COUNT OCUDU_UL_DUMP_LLR OCUDU_LA_LOG_EVERY
+export OCUDU_UL_DUMP_RV=0
+sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu col_1025_cmp_e4 \
+  --expert_phy.phy_pipeline gpu \
+  --expert_phy.pusch_receiver_backend ai \
+  --expert_phy.pusch_receiver_model $PWD/doc_chinese/llr_ai_detection/work_tmp/artifacts/buckets/e4/d3_e4.mlmodelc
+
+# 腿 B：E17（同位置、同时长）
+sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu col_1025_cmp_e17 \
+  --expert_phy.phy_pipeline gpu \
+  --expert_phy.pusch_receiver_backend ai \
+  --expert_phy.pusch_receiver_model $PWD/doc_chinese/llr_ai_detection/work_tmp/artifacts/buckets/e17_c32_b18/e17_c32_b18.mlmodelc
+```
+
+★ **采集同时进行** ✓：★ `run_collect_leg.sh` 已带 dump ✓（★ `cap_*` 文件 ✓）⇒ ★ 两条腿的捕获各自进语料 ✓。
+
+**(c) ★★★ 位置怎么选：★ 去**薄格**所在的那个角落 ✓**
+
+★ 薄格几乎全在 **≤4 PRB × 低 SNR** ✓ ⇒ ★ 配方 ✓：
+1. ★ 手机**近处接入** ✓（★ 远处接不上 ✓，★ §19.528 ✓）；
+2. ★ 起 **attach 循环**（★ 10 s 周期 ✓）★ ⇒ ★ 授权自然落在 **≤4 PRB** ✓；
+3. ★ **拉远到 QPSK 占多数** ✓（★ console 看 `[sched-mcs]` ✓，★ §19.521 ✓）⇒ ★ SNR 落进 <6 dB ✓；
+4. ★ 每条腿跑 **10–15 分钟** ✓（★ 两腿时长必须相同 ✓）。
+
+**(d) ★★ 能同时得到什么 ✓**
+
+| ★ 目的 ✓ | ★ 来源 ✓ |
+|---|---|
+| ★ **E4 vs E17 的空中对比** ✓ | ★ 两条腿 gNB 日志里的 `crc=OK` 计数 ✓ |
+| ★ **薄格语料** ✓ | ★ 两条腿的 `cap_*` ✓ ⇒ ★ 之后按 §19.583 的 CSV 口径回放统计 ✓ |
+| ★ **同一角落的两个模型对照** ✓ | ★ 同一位置 ✓、★ 同一时长 ✓ ⇒ ★ 位置与信道可比 ✓ |
+
+★ 状态 ✓：★ 清单已出 ✓；★ **配方已给 ✓**。
 ## 19.596 本文档启用 ＋ 首份 E17 结果入表
 
 **本节起，工作备忘写进本文。**
