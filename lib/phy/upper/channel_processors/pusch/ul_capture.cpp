@@ -263,9 +263,10 @@ bool is_selected(slot_point slot, rnti_t rnti)
 
 /// Reception the captures belong to (the demodulator has no access to the PDU).
 struct current_pdu {
-  slot_point slot;
-  rnti_t     rnti = to_rnti(0);
-  bool       valid = false;
+  slot_point  slot;
+  rnti_t      rnti = to_rnti(0);
+  bool        valid = false;
+  std::string name;   // resolved once per reception, so grid, ce, h and llr all land on the same name
 };
 
 current_pdu& current()
@@ -277,7 +278,45 @@ current_pdu& current()
 std::string make_key()
 {
   const current_pdu& key = current();
+  if (!key.name.empty()) {
+    return key.name;
+  }
   return make_key(key.slot, key.rnti);
+}
+
+/// \brief The name for this reception, made unique against everything written so far.
+///
+/// `slot_point::sfn()` REPEATS EVERY 1024 FRAMES -- 10.24 seconds at 30 kHz -- whatever the comment above says about it
+/// riding on top of `count()`. Measured on the 17:45 leg (2026-10-26): twenty thousand captures were announced and five
+/// thousand nine hundred and twenty-eight files existed, a ratio of 3.4 that is exactly the number of ten-second cycles
+/// the leg ran through. Every earlier capture of the same slot had been overwritten by a later one.
+///
+/// So uniqueness cannot come from the slot at all: it comes from knowing what has already been written. A reception whose
+/// name was used before gets a sequence suffix, which keeps every existing reader working and loses nothing.
+std::string resolve_name(slot_point slot, rnti_t rnti)
+{
+  static std::mutex          name_mutex;
+  static std::set<std::string> used;
+  std::lock_guard            lock(name_mutex);
+  const std::string          base = make_key(slot, rnti);
+  if (used.insert(base).second) {
+    return base;
+  }
+  for (unsigned n = 2;; ++n) {
+    std::string candidate = base + "_" + std::to_string(n);
+    if (used.insert(candidate).second) {
+      // Said once per leg at the first collision: it explains why the names carry a suffix from here on, and it is the
+      // only evidence that the leg outlived one frame cycle.
+      static std::atomic<bool> collision_reported{false};
+      if (!collision_reported.exchange(true)) {
+        std::fprintf(stderr,
+                     "[ul_capture] name collision at %s: the frame number repeats every 1024 frames (10.24 s at 30 kHz), "
+                     "so later captures carry a sequence suffix instead of overwriting earlier ones\n",
+                     base.c_str());
+      }
+      return candidate;
+    }
+  }
 }
 
 } // namespace
@@ -422,6 +461,7 @@ void ocudu::ul_capture::set_current(slot_point slot, rnti_t rnti)
   current().slot  = slot;
   current().rnti  = rnti;
   current().valid = true;
+  current().name  = resolve_name(slot, rnti);
 }
 
 void ocudu::ul_capture::capture_h(const dmrs_pusch_estimator_results& est_results,
