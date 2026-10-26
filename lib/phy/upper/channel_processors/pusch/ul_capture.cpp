@@ -106,8 +106,10 @@ uint32_t extended_frame(slot_point slot)
   const uint32_t sfn = slot.sfn();
   uint32_t       base = extended_frame_base.load(std::memory_order_relaxed);
   const uint32_t prev = last_sfn.load(std::memory_order_relaxed);
-  if (prev != 0xFFFFFFFFu && sfn < prev) {
-    // The frame number went backwards: one full cycle of 1024 frames has passed.
+  // A WRAP IS A BIG STEP BACKWARDS, NOT ANY STEP. `sfn` is read under several threads, so consecutive observations can
+  // arrive out of order by a few frames and "went backwards" would then fire constantly: the 18:35 leg produced a frame
+  // span of 678 833 in sixty seconds, about 650 wraps too many. Half a cycle of hysteresis tells a wrap from a race.
+  if ((prev != 0xFFFFFFFFu) && (sfn < prev) && ((prev - sfn) > 512u)) {
     base = extended_frame_base.fetch_add(1024u, std::memory_order_relaxed) + 1024u;
   }
   last_sfn.store(sfn, std::memory_order_relaxed);

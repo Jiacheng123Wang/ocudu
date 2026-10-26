@@ -625,11 +625,13 @@ wait "$out_tee" "$err_tee"
 # is what proves it on every leg instead of on the one that was looked at.
 echo >&2
 echo "-- capture yield --" >&2
-CAPS=$(find "$OCUDU_UL_DUMP" -maxdepth 1 -name 'cap_*.bin' ! -name '*_h.bin' ! -name '*_llr.bin' 2>/dev/null | wc -l | tr -d ' ')
+CAPS=$(find "$(dirname "$OCUDU_UL_DUMP")" -maxdepth 1 -name 'cap_*.bin' ! -name '*_h.bin' ! -name '*_llr.bin' 2>/dev/null | wc -l | tr -d ' ')
 ANNOUNCED=$(grep -ah "\[ul_capture\] heartbeat:" "$LOG.stderr" "$LOG" 2>/dev/null | tail -1 | sed 's/.*heartbeat: \([0-9]*\) capture(s).*/\1/')
 BUDGET=$(grep -ah "\[ul_capture\] plan:" "$LOG.stderr" "$LOG" 2>/dev/null | tail -1 | sed 's/.*budget \([0-9]*\) reception.*/\1/')
-SPAN=$(find "$OCUDU_UL_DUMP" -maxdepth 1 -name 'cap_*.bin' ! -name '*_h.bin' ! -name '*_llr.bin' 2>/dev/null | sed 's|.*/cap_||;s|_.*||' | sort -n | awk 'NR==1{mn=$1} {mx=$1} END{print (mx-mn)}')
+SPAN=$(find "$(dirname "$OCUDU_UL_DUMP")" -maxdepth 1 -name 'cap_*.bin' ! -name '*_h.bin' ! -name '*_llr.bin' 2>/dev/null | sed 's|.*/cap_||;s|_.*||' | sort -n | awk 'NR==1{mn=$1} {mx=$1} END{print (mx-mn)}')
 echo "   files on disk: ${CAPS:-0}   last heartbeat: ${ANNOUNCED:-none}   budget: ${BUDGET:-none}   sfn span: ${SPAN:-0} frames" >&2
+# `OCUDU_UL_DUMP` is a FILE PREFIX, not a directory: the captures land beside it as <prefix>_<fram...>. Counting inside the
+# prefix path itself finds nothing and reported a clean leg as total loss (measured 2026-10-26 18:35).
 if [ -n "$ANNOUNCED" ] && [ "${CAPS:-0}" -lt "$ANNOUNCED" ]; then
   echo "!! CAPTURE LOSS: ${ANNOUNCED} announced, ${CAPS} on disk -- names are colliding again (see 19.621)." >&2
   CAPTURE_VERDICT=1
