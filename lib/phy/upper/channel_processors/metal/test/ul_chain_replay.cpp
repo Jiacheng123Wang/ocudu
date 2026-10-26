@@ -1600,8 +1600,11 @@ int main(int argc, char** argv)
       // it is not a column yet rather than a column filled with a guess.
       if (FILE* csv = replay_csv()) {
         std::fprintf(csv, "%s,%u,%u,%s,%u,%.2f,%s,%u,%u\n",
-                     std::strrchr(prefix.c_str(), '/') != nullptr ? std::strrchr(prefix.c_str(), '/') + 1
-                                                                  : prefix.c_str(),
+                     // THE CAPTURE'S OWN NAME, not the first prefix: with `--also` one process replays several
+                     // captures, and naming every row after the first one made the round-robin runs unusable.
+                     std::strrchr(capture_prefix.c_str(), '/') != nullptr
+                         ? std::strrchr(capture_prefix.c_str(), '/') + 1
+                         : capture_prefix.c_str(),
                      hop_pdu[k].slot.count(),
                      hop_pdu[k].rnti,
                      capture.get_string("modulation", "?").c_str(),
