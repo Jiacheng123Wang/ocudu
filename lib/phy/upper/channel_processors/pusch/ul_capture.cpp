@@ -88,6 +88,32 @@ std::optional<unsigned> capture_rv()
   return static_cast<unsigned>(std::strtoul(env, nullptr, 10));
 }
 
+/// \brief The frame number made monotonic by counting wraps, so the name stays unique without changing its shape.
+///
+/// `slot_point::sfn()` repeats every 1024 frames -- 10.24 seconds at 30 kHz -- and the capture name was built from it, so
+/// a longer leg overwrote its own earlier captures. Measured on 2026-10-26: twenty thousand announced, five thousand nine
+/// hundred and twenty-eight files on disk, a ratio of 3.4 that was exactly the number of ten-second cycles the leg ran.
+///
+/// The fix keeps the name's SHAPE (`cap_<frames>_<slot>_<rnti>`), because everything downstream treats it as an opaque
+/// prefix -- the dataset builder reads `prefix + ".bin"` and `prefix + "_ce.txt"`, the replay takes the base path, and
+/// the corpus index lists prefixes -- so a changed field count would have been gratuitous risk. Only the first field
+/// changes meaning: it is now a frame number that keeps counting past 1024 instead of restarting.
+std::atomic<uint32_t> extended_frame_base{0};   // cycles x 1024, advanced when sfn wraps
+std::atomic<uint32_t> last_sfn{0xFFFFFFFFu};
+
+uint32_t extended_frame(slot_point slot)
+{
+  const uint32_t sfn = slot.sfn();
+  uint32_t       base = extended_frame_base.load(std::memory_order_relaxed);
+  const uint32_t prev = last_sfn.load(std::memory_order_relaxed);
+  if (prev != 0xFFFFFFFFu && sfn < prev) {
+    // The frame number went backwards: one full cycle of 1024 frames has passed.
+    base = extended_frame_base.fetch_add(1024u, std::memory_order_relaxed) + 1024u;
+  }
+  last_sfn.store(sfn, std::memory_order_relaxed);
+  return base + sfn;
+}
+
 std::string make_key(slot_point slot, rnti_t rnti)
 {
   // THE NAME MUST BE UNIQUE OVER THE WHOLE CAPTURE, NOT OVER ONE HYPERFRAME. `slot.count()` is the slot index
@@ -98,7 +124,7 @@ std::string make_key(slot_point slot, rnti_t rnti)
   //
   // The SYSTEM FRAME NUMBER is what makes the name unique: `count()` wraps every 1024 frames, `sfn()` rides on top
   // of it and only repeats after 1024 x 1024 frames (about three hours at 30 kHz).
-  return capture_prefix() + "_" + std::to_string(slot.sfn()) + "_" + std::to_string(slot.count()) + "_" +
+  return capture_prefix() + "_" + std::to_string(extended_frame(slot)) + "_" + std::to_string(slot.count()) + "_" +
          std::to_string(to_underlying(rnti));
 }
 
