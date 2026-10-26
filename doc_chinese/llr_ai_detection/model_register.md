@@ -105,6 +105,17 @@
 **④ 时延的取法**：`probe/gate_timing.py --model <mlmodelc>`，在**同一二进制、同一配置**下跑 700 次，
 取 `forward` 段的 p50／p90／p99／max。`predict`（网络本身）E4 实测为 **257 ／ 309 ／ 410 ／ 2 872 µs**。
 
+**`forward` 到底量的是哪一段**（`pusch_depth3_receiver_impl.cpp`，`segment_assembled` → `segment_forwarded`）：
+
+| 含 | 不含 |
+|---|---|
+| **选桶**（挑最小的可容桶，算 `crop_lo`／`plane_nsc`）| 输入平面拼装（那是 `plane` 段）|
+| **裁剪与拷贝**（612 → 桶宽的 `narrow_plane`）| LLR 收集／量化／解扰（那是 `deliver` 段）|
+| **`predict_depth3()`**（Core ML 调用，含五路 `MLMultiArray` 绑定与工作线程交接）| 经典估计器（`estimate`，纯 AI 下为 0）|
+| **窄头散射回绝对子载波**（`copy_n` 回 `llr_head`／`noise_head`／`channel_head`）| 上报（`report` 段）|
+
+⇒ 所以 **`forward − predict` ≈ 15–20 µs 是"我们的胶水"**（选桶、裁剪、散射），`predict` 是引擎自己的读数。
+
 **每格都从同一次回放的 CSV 切出来**；CB CRC 一列已删（链上只暴露 TB CRC）。
 
 | 编号 | ① 验收集 TB CRC | ② attach TB CRC | ③ 三维分箱 crc=OK min ／ median ／ max（逐格 CSV）| ④ 时延 p50／p90／p99／max |
