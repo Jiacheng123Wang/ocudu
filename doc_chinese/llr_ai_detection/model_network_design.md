@@ -5080,7 +5080,7 @@ train_depth3.py --train …/data/datasets/d3_modcond_train.npz --val …/d3_modc
 
 ## 47. 第二轮训练配方（**现行**，2026-10-22）
 
-★★ **本节只写"网络是什么、怎么训"，过程与证据在 `llr_ai_detection_design_and_implementation.md` §19.291 ✓。**
+★★ **本节只写"网络是什么、怎么训"，过程与证据在 `llr_ai_detection_design_and_implementation_1.md` §19.291 ✓。**
 
 ### 47.1 两个头的部署包
 
@@ -5121,7 +5121,7 @@ train_depth3.py --train d3_dmrs2711h_train.npz --val d3_modcond_val.npz --out <r
 
 ## 48. 省 ANE 算力：**改结构，不改参数**（2026-10-22）
 
-★ 证据与讨论见 `llr_ai_detection_design_and_implementation.md` §19.292 ✓；★ 本节省结论 ✓。
+★ 证据与讨论见 `llr_ai_detection_design_and_implementation_1.md` §19.292 ✓；★ 本节省结论 ✓。
 
 ### 48.1 现役主干的开销构成（每个 RE、每个 block）
 
@@ -5152,7 +5152,7 @@ train_depth3.py --train d3_dmrs2711h_train.npz --val d3_modcond_val.npz --out <r
 
 ## 49. 窄带裁剪：**现行设计**（2026-10-22）
 
-★ 测量、等价性验证与运行时调试记录见 `llr_ai_detection_design_and_implementation.md` §19.293 ✓。
+★ 测量、等价性验证与运行时调试记录见 `llr_ai_detection_design_and_implementation_1.md` §19.293 ✓。
 
 ### 49.1 策略
 

@@ -3,7 +3,7 @@
 **目的**：把"哪台机器能跑什么、跑多快、怎么装"写在一处，省掉每次训练前重新试错。
 
 **范围**：本文件只讲**算力与训练环境**。网络/手机接入见 `test_environment/香港测试环境与手机接入问题总结_2026-09-05.md`；
-训练配方与判据见 `llr_ai_detection_design_and_implementation.md`（尤其 §19.298、§19.323–§19.325）。
+训练配方与判据见 `llr_ai_detection_design_and_implementation_1.md`（尤其 §19.298、§19.323–§19.325）。
 
 ---
 

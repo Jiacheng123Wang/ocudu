@@ -3,7 +3,8 @@
 > 本文集中记录**每一个训练过的 depth-3 模型**：基本参数、训练语料、门控结果、
 > 决策与原因、以及空中实链测试。
 >
-> 过程记录见 `llr_ai_detection_design_and_implementation.md`（时间线、推理、订正）；
+> 过程记录见三份 memo：`llr_ai_detection_design_and_implementation.md`（§0–§19.230）、
+> `..._1.md`（§19.231–§19.595）、`..._2.md`（§19.596 起，当前）；
 > 语料的建立见 `training_corpus_construction.md`。本文只做**索引与对照**。
 >
 > **最后更新：2026-10-26 07:55。**
