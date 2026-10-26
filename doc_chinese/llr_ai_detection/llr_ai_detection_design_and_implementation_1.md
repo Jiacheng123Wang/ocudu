@@ -288,6 +288,40 @@ tb_crc_ok → 逐条 CSV
 ★ `--pusch_ldpc_decoder_type` 的**默认取值就是空** ✓ ⇒ ★ **不写就是 CPU** ✓（★ Metal 待进一步优化 ✓）。
 
 ★ 状态 ✓：★ 三对名字统一 ✓；★ 别名保留 ✓。
+## 19.605 ★★★★ 两级控制必须**同时设** ✓ —— ★ 只设一个会**静默测错** ✗
+
+**(a) ★★★ 两级 ✓**
+
+| ★ 级 ✓ | ★ 开关 ✓ | ★ 作用 ✓ |
+|---|---|---|
+| ★ **一级** ✓ | ★ `--phy_pipeline gpu` ✓ | ★ 选**融合 lane** ✓（★ CE＋EQ＋DEMOD ✓）|
+| ★ **二级** ✓ | ★ `--pusch_receiver_backend ai` ✓ | ★ 在这个 lane 里选**学习的 depth3 单元** ✓ |
+
+★ ⇒ ★ **门控必须同时给** ✓：★ `--phy_pipeline gpu --pusch_receiver_backend ai --pusch_ldpc_decoder_type auto` ✓。
+
+**(b) ★★★★ 只设一个会怎样 ✓（★ 实测 ✓）**
+
+| ★ 组合 ✓ | ★ 实际发生 ✓ |
+|---|---|
+| ★ gpu ＋ **ai** ✓ | ★ 正确：★ `arm ai` ✓、★ `forward` 210 µs ✓ |
+| ★ **cpu ＋ ai** ✗ | ★ **连 `forward` 行都没有** ✗（★ pipeline 报 "0 lanes" ✓）⇒ ★ **量不到东西** ✓ |
+| ★ **gpu ＋ classic** ✗ | ★ `arm classic` ✓ ⇒ ★ **经典接收机在跑** ✗，★ 网络没参与 ✓ |
+
+★ ⇒ ★ **两种错配都**不报错** ✗** —— ★ 一种量不出数 ✓，★ 一种量的是**别的配置** ✓ ✓。
+
+**(c) ★★★ 已加提示 ✓**
+
+★ 回放现在会打印 ✓：
+- ★ `pusch_receiver_backend=ai` 而 **不是** gpu lane ⇒ ★ `WARNING: ... this run measures a configuration the arm does not deploy` ✓
+- ★ gpu lane 而 `classic` ⇒ ★ `NOTE: ... the classical receiver runs, the learned unit does not` ✓
+
+★ 实测 ✓：★ `cpu + ai` 确实打出 WARNING ✓。
+
+**(d) ★★ 门控脚本已改 ✓**
+
+★ `replay_leg_one.sh`／`replay_list.sh` 现在带**完整三项** ✓（★ `--phy_pipeline gpu --pusch_receiver_backend ai --pusch_ldpc_decoder_type auto` ✓）。
+
+★ 状态 ✓：★ 两级语义已明确 ✓；★ 错配会报警 ✓；★ **脚本已按正确组合改** ✓。
 ## 19.600 订正：★ p90 **该加** ✓ —— ★ 其他模块本来就有 ✗（★ 我上一节撤错了 ✓）
 
 **(a) ★★★ 用户的记忆是对的 ✓**

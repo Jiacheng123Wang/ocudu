@@ -1257,6 +1257,26 @@ int main(int argc, char** argv)
   //   OCUDU_REPLAY_MODEL    = <model.mlmodelc>  (the --expert_phy.pusch_receiver_model value)
   // Whether the network actually RUNS is decided by the arm's binding, not by these variables being set: an
   // `ai` arm without a model reports that its output is the classical result.
+  // THE TWO LEVELS GO TOGETHER (design section 19.605). `phy_pipeline gpu` selects the fused lane and
+  // `pusch_receiver_backend ai` selects the learned depth-3 unit INSIDE that lane; setting only one of them does not
+  // fail, it silently measures something else -- with `cpu` plus `ai` the run produced no forward line at all, and with
+  // `gpu` plus `classic` the classical receiver ran. A measurement that reports a number for the wrong configuration is
+  // worse than one that refuses, so the mismatch is printed loudly.
+  const std::string effective_backend = !receiver_backend.empty()
+                                            ? receiver_backend
+                                            : (std::getenv("OCUDU_REPLAY_RECEIVER") != nullptr
+                                                   ? std::string(std::getenv("OCUDU_REPLAY_RECEIVER"))
+                                                   : std::string());
+  if ((effective_backend == "ai") && !(use_metal_ce && use_metal_demod)) {
+    std::fprintf(stderr,
+                 "[replay] WARNING: pusch_receiver_backend=ai without phy_pipeline=gpu -- the two levels are set "
+                 "together; this run measures a configuration the arm does not deploy\n");
+  }
+  if ((effective_backend == "classic") && use_metal_ce && use_metal_demod) {
+    std::fprintf(stderr,
+                 "[replay] NOTE: phy_pipeline=gpu with pusch_receiver_backend=classic -- the classical receiver runs, "
+                 "the learned unit does not\n");
+  }
   if (!receiver_backend.empty()) {
     proc_cfg.pusch_receiver_backend = receiver_backend;
     std::printf("depth-3 receiver arm: %s (--pusch_receiver_backend)\n", receiver_backend.c_str());
