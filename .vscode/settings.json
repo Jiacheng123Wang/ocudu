@@ -1,0 +1,40 @@
+{
+  // WHY THIS FILE EXISTS (2026-10-27): VS Code's extension host was going unresponsive on startup in this checkout --
+  // the log says "UNRESPONSIVE extension host" and then the Markdown and PDF previews stay blank until a window
+  // reload. The cause is not the GPU (argv.json already disables it) but the size of the tree the file watcher and the
+  // indexers are asked to follow: build/ is 2.7 GB and doc_chinese/ holds the capture corpus, 428 GB, with two
+  // thousand log files in it. Nothing below is used by the editor, and every excluded byte is work it stops doing
+  // before the first webview can render.
+
+  "files.watcherExclude": {
+    "**/build/**": true,
+    "**/doc_chinese/**/work_tmp/**": true,
+    "**/doc_chinese/**/corpus/**": true,
+    "**/doc_chinese/**/logs/**": true,
+    "**/*.log": true,
+    "**/*.bin": true,
+    "**/*.mlmodelc/**": true,
+    "**/*.mlpackage/**": true,
+    "**/*.npz": true,
+    "**/.git/objects/**": true
+  },
+
+  "search.exclude": {
+    "**/build/**": true,
+    "**/doc_chinese/**/work_tmp/**": true,
+    "**/doc_chinese/**/corpus/**": true,
+    "**/*.log": true,
+    "**/*.bin": true,
+    "**/*.npz": true
+  },
+
+  // The embedded-toolchain extensions (nRF Connect suite, cortex-debug, dts-lsp) activate on every window in this
+  // workspace and have nothing to do with a 5G stack; the C++ indexer alone has 2.7 GB of build output to chew.
+  "C_Cpp.intelliSenseEngine": "default",
+  "C_Cpp.files.exclude": {
+    "**/build/**": true,
+    "**/.git": true
+  },
+
+  "files.trimTrailingWhitespace": false
+}
