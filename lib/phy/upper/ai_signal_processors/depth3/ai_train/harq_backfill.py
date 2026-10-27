@@ -88,13 +88,18 @@ def main():
         pdu = read_pdu(os.path.join(args.leg, name + ".txt"))
         if pdu is None or "harq_id" not in pdu or "rnti" not in pdu or "slot" not in pdu:
             continue
+        # THE KEY COMES FROM THE NAME, BOTH FIELDS. `cap_<frame>_<slot>_<rnti>` is how the capture identifies the
+        # reception, and the live dump writes exactly that pair. The PDU's own `slot=` is the GRANT's slot, which trails
+        # the capture slot by the processing delay (measured: 78 slots apart on the same reception), so using it here
+        # would miss every match -- which is precisely what it did before this line was corrected.
         try:
-            frame = int(name.split("_")[1])
+            parts = name.split("_")
+            key = (int(parts[1]), int(parts[2]))
         except (IndexError, ValueError):
             continue
         units[name] = {
             "row": row,
-            "key": (frame, int(pdu["slot"])),
+            "key": key,
             "rnti": pdu["rnti"],
             "harq": pdu["harq_id"],
             "rv": pdu.get("rv", "?"),
