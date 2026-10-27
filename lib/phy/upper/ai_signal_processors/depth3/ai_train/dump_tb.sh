@@ -12,7 +12,12 @@
 # default that could quietly measure the AI arm instead.
 #
 # Output (all under --out):  tb/<unit>.bits, index.csv  (unit,tb_bits,crc,sinr_db,iterations,slot)
-# Usage: dump_tb.sh [--corpus DIR] [--out DIR] [--limit N] [--binary PATH] [unit-dir ...]
+# Usage: dump_tb.sh [--corpus DIR] [--out DIR] [--limit N] [--binary PATH] [--jobs N] [unit-dir ...]
+#
+# --jobs N runs N units at a time. Each unit is one replay process, so this is where the machine's cores are spent: the
+#   dump was single-threaded and left fifteen of them idle on the sixteen-core host (measured 2026-10-27). Results do not
+#   depend on the order, because every unit writes its own row and its own label file, and the index is assembled in the
+#   sorted order afterwards.
 set -uo pipefail
 
 SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -22,6 +27,7 @@ BINARY="$ROOT/build/lib/phy/upper/channel_processors/ul_chain_replay_cpu"
 CORPUS=$ROOT/doc_chinese/llr_ai_detection/work_tmp/corpus
 OUT=/tmp/tb_corpus
 LIMIT=0
+JOBS=1
 DIRS=()
 
 while [ $# -gt 0 ]; do
@@ -30,6 +36,7 @@ while [ $# -gt 0 ]; do
     --out)    OUT="$2"; shift 2 ;;
     --limit)  LIMIT="$2"; shift 2 ;;
     --binary) BINARY="$2"; shift 2 ;;
+    --jobs)   JOBS="$2"; shift 2 ;;
     *) DIRS+=("$1"); shift ;;
   esac
 done
@@ -43,37 +50,64 @@ echo "unit,tb_bits,crc,sinr_db,iterations,slot" >> "$OUT/index.csv"
 
 n_attempt=0
 n_ok=0
+one_unit() {
+  # Everything a unit touches lives under its own name, so two workers never meet: the dump directory, the staged
+  # capture and the row file are all per unit. OUT and BINARY are exported rather than passed, because `xargs` appends
+  # its item AFTER the fixed arguments and would otherwise hand `one_unit` the wrong ones.
+  local meta="$1" out="$OUT" binary="$BINARY"
+  local unit="${meta%.txt}"
+  local name
+  name=$(basename "$unit")
+  [ -f "$unit.bin" ] || return 0
+
+  local work="$out/raw/$name"
+  rm -rf "$work"; mkdir -p "$work"
+  local line
+  line=$(OCUDU_HELENA_DUMP_DIR="$work" OMP_NUM_THREADS=1 "$binary" "$unit" \
+           --phy_pipeline cpu --pusch_receiver_backend classic --out "$out/stage/$name" 2>/dev/null \
+         | grep -E '^\s*\[0\]' | head -1)
+
+  local slot crc=no sinr="" iters="" tbbits=0
+  slot=$(grep -m1 '^slot=' "$meta" | cut -d= -f2)
+  local tb
+  tb=$(ls "$work"/tb_*.bits 2>/dev/null | head -1)
+  if [ -n "$tb" ]; then
+    cp "$tb" "$out/tb/$name.bits"
+    tbbits=$(( $(wc -c < "$tb") * 8 ))
+  fi
+  if [ -n "$line" ]; then
+    case "$line" in *"crc=OK"*) crc=OK ;; esac
+    sinr=$(printf '%s' "$line"  | sed -n 's/.*sinr=\([-0-9.]*\) dB.*/\1/p')
+    iters=$(printf '%s' "$line" | sed -n 's/.*iterations=\([0-9]*\).*/\1/p')
+  fi
+  rm -rf "$work"
+  printf '%s,%s,%s,%s,%s,%s\n' "$name" "$tbbits" "$crc" "$sinr" "$iters" "$slot" > "$out/rows/$name.row"
+}
+export -f one_unit
+
+mkdir -p "$OUT/rows"
+: > "$OUT/units.txt"
 for dir in "${DIRS[@]}"; do
-  while IFS= read -r meta; do
-    unit="${meta%.txt}"
-    name=$(basename "$unit")
-    [ -f "$unit.bin" ] || continue          # a capture the dump budget cut short is a skip, not a failure
-    if [ "$LIMIT" -gt 0 ] && [ "$n_attempt" -ge "$LIMIT" ]; then break 2; fi
-    n_attempt=$((n_attempt + 1))
-
-    # A fresh dump dir per unit: the chain's own dump index restarts at zero in each process.
-    rm -rf "$OUT/raw/cur"; mkdir -p "$OUT/raw/cur"
-    line=$(OCUDU_HELENA_DUMP_DIR="$OUT/raw/cur" "$BINARY" "$unit" \
-             --phy_pipeline cpu --pusch_receiver_backend classic --out "$OUT/stage/$name" 2>/dev/null \
-           | grep -E '^\s*\[0\]' | head -1)
-
-    slot=$(grep -m1 '^slot=' "$meta" | cut -d= -f2)
-    crc=no; sinr=""; iters=""; tbbits=0
-    tb=$(ls "$OUT/raw/cur"/tb_*.bits 2>/dev/null | head -1)
-    if [ -n "$tb" ]; then
-      cp "$tb" "$OUT/tb/$name.bits"
-      tbbits=$(( $(wc -c < "$tb") * 8 ))
-    fi
-    if [ -n "$line" ]; then
-      case "$line" in *"crc=OK"*) crc=OK; n_ok=$((n_ok + 1)) ;; esac
-      sinr=$(printf '%s' "$line"  | sed -n 's/.*sinr=\([-0-9.]*\) dB.*/\1/p')
-      iters=$(printf '%s' "$line" | sed -n 's/.*iterations=\([0-9]*\).*/\1/p')
-    fi
-    echo "$name,$tbbits,$crc,$sinr,$iters,$slot" >> "$OUT/index.csv"
-    [ $((n_attempt % 100)) -eq 0 ] && echo "  $n_attempt attempted, $n_ok decoded" >&2
   # A GLOB WOULD DIE ON ARG_MAX HERE: a leg holds tens of thousands of files, and the shell silently hands `ls` an
   # empty list once the expansion is too long (measured: "attempted 0 units" on a 27k-file leg). `find` does not.
-  done < <(find "$dir" -maxdepth 1 -name '*.txt' ! -name '*_ce.txt' 2>/dev/null | LC_ALL=C sort)
+  find "$dir" -maxdepth 1 -name '*.txt' ! -name '*_ce.txt' 2>/dev/null | LC_ALL=C sort >> "$OUT/units.txt"
 done
-echo "attempted $n_attempt units, $n_ok decoded CRC-OK"
+if [ "$LIMIT" -gt 0 ]; then
+  head -n "$LIMIT" "$OUT/units.txt" > "$OUT/units.limited"; mv "$OUT/units.limited" "$OUT/units.txt"
+fi
+
+# The pool. xargs keeps JOBS units in flight; each writes its own row, so nothing needs a lock.
+echo "  $(wc -l < "$OUT/units.txt") unit(s), $JOBS at a time" >&2
+export OUT BINARY
+tr '\n' '\0' < "$OUT/units.txt" | xargs -0 -n 1 -P "$JOBS" bash -c 'one_unit "$1"' _ 2>/dev/null
+
+# Index in the sorted order the unit list already has, so two runs produce the same file.
+for meta in $(cat "$OUT/units.txt"); do
+  name=$(basename "${meta%.txt}")
+  [ -f "$OUT/rows/$name.row" ] && cat "$OUT/rows/$name.row" >> "$OUT/index.csv"
+done
+
+n_attempt=$(wc -l < "$OUT/units.txt" | tr -d ' ')
+n_ok=$(grep -c ',OK,' "$OUT/index.csv" 2>/dev/null || true)
+echo "attempted $n_attempt units, ${n_ok:-0} decoded CRC-OK"
 echo "TB files in $OUT/tb ($(ls "$OUT/tb" | wc -l | tr -d ' '))"
