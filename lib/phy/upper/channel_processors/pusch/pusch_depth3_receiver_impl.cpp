@@ -38,6 +38,9 @@
 using namespace ocudu;
 
 namespace {
+// BOTH HELPERS SERVE ONLY THE CROP-WINDOW ARITHMETIC OF THE ENGINE ARM. Outside that arm they are unused, and
+// -Werror=unused-function turns that into a build failure on Linux (found on 211, 2026-10-27).
+#if defined(OCUDU_HAVE_DEPTH3_ENGINE)
 /// \brief Lowest and highest PRB the whole allocation occupies, for the crop-window arithmetic.
 unsigned narrow_first_prb(const pusch_demodulator::configuration& config)
 {
@@ -56,6 +59,7 @@ unsigned narrow_last_prb(const pusch_demodulator::configuration& config)
   }
   return prb;
 }
+#endif // OCUDU_HAVE_DEPTH3_ENGINE
 
 
 
