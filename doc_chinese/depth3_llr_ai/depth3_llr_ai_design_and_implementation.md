@@ -257,6 +257,35 @@ Sionna↔OAI 之间实测有 **2.42 倍**的尺度差仍能工作）。所以：
 
 ## D7. Memo 区（追加）
 
+### D7.7 2026-10-27 回放可移植：★ CPU 版在 Linux 上跑通 ✓，★ 结果与 Apple 构建逐字段一致 ✓
+
+**(a) ★★★ 做了什么**
+
+| 改动 | 文件 |
+|---|---|
+| 两个 Metal 工厂的 `#include` 与构造放到 `OCUDU_METAL_EQUALIZER`／`OCUDU_METAL_DEMODULATION` 之后 | `ul_chain_replay.cpp` |
+| 无 Metal 的构建里，`--metal*` **开头就拒绝**（并说明本构建有哪些后端）| 同上 |
+| 新 target **`ul_chain_replay_cpu`**：同一份源码，只链**可移植库**，放在不受 `ENABLE_METAL_*` 门禁的 `channel_processors/CMakeLists.txt` | `CMakeLists.txt` |
+| 修 Linux 才暴露的两个 `-Werror`（`i` 遮蔽、`rnti_t` 传 `%u`）| `ul_chain_replay.cpp` |
+| 修 **depth3 的静态注册表**落在 `OCUDU_HAVE_DEPTH3_ENGINE` 之外 —— Linux 上整个 `ocudu_pusch_processor` 编不过（gNB 也受影响）| `pusch_depth3_receiver_impl.cpp` |
+| 修两个只被引擎臂使用的 helper 的 `-Werror=unused-function` | 同上 |
+
+**(b) ★★★★ 正确性验证（三组）**
+
+| 对比 | 结果 |
+|---|---|
+| Mac：`ul_chain_replay`（Apple 构建，`--cpu`）vs `ul_chain_replay_cpu`，30 条 attach | ★ **CSV 逐字段完全一致** ✓（capture/调制/PRB/SINR/CRC/迭代/TBS）|
+| **Mac vs 211**，同 30 条（固定清单）| ★ **决策字段完全一致 ✓**；SINR **最大差 0.010 dB、平均 0.000 dB** ✓ |
+| 211 上 `--metal` | ★ 拒绝并打印"equalizer no, demapper no, ldpc no, dft no" ✓ |
+
+**(c) ★★ 结论**
+
+★ **Linux 上可以用 CPU 模式回放 ✓**，★ 结果与 Apple 构建**逐条一致** ✓ ⇒
+★ **`dump_tb` 可以在 211 上跑** ✓（不必占用 Mac）。
+
+★ 状态 ✓：★ 可移植回放已就位 ✓；★ 正确性已交叉验证 ✓。
+
+
 ### D7.6 2026-10-27 LLR dump 默认关闭（采集与回放都关）
 
 | 侧 | 改动 | 文件 |
