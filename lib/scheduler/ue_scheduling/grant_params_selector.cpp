@@ -197,9 +197,12 @@ static std::optional<mcs_prbs_selection> compute_newtx_required_mcs_and_prbs(con
     // the chosen PRBs both in scope -- the earlier site ran before the width was computed.
     static std::atomic<unsigned> pusch_mcs_prb_log_count{0};
     if ((++pusch_mcs_prb_log_count % 200) == 0) {
-      fmt::print(stderr, "[sched-mcs] PUSCH grant MCS: mcs={} mod={} tcr={:.3f} prbs={} table={}\n", mcs.value(),
-                 to_string(mcs_config.modulation), mcs_config.get_normalised_target_code_rate(), nof_prbs,
-                 static_cast<unsigned>(pusch_cfg.mcs_table));
+      // THE LINE CARRIES THE SNR THE DECISION USED (user request, 2026-10-27). An MCS on its own cannot be interpreted
+      // while a leg is being flown: the same MCS means "the channel is good" or "the outer loop has drifted" depending
+      // on this number, and a phone carried further from the antenna changes it without changing anything else.
+      fmt::print(stderr, "[sched-mcs] PUSCH grant MCS: mcs={} mod={} tcr={:.3f} prbs={} table={} sinr={:.2f}dB\n",
+                 mcs.value(), to_string(mcs_config.modulation), mcs_config.get_normalised_target_code_rate(), nof_prbs,
+                 static_cast<unsigned>(pusch_cfg.mcs_table), ue_cc.link_adaptation_controller().ul_effective_snr_db());
     }
   }
   return mcs_prbs_selection{mcs, nof_prbs};

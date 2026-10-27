@@ -70,6 +70,12 @@ public:
   /// \brief Get the wideband CQI.
   unsigned get_wideband_cqi() const { return ue_ch_st.get_wideband_cqi().value(); }
 
+  /// \brief The uplink SNR the AMC decision was made from, in dB: the measured value plus the outer-loop offset.
+  ///
+  /// Exposed for the scheduler's own grant log. It is the number that explains an MCS, which is why a flight wants it
+  /// next to the MCS rather than in a separate line that cannot be joined to the grant it belongs to.
+  float ul_effective_snr_db() const { return get_effective_snr(); }
+
 private:
   /// \brief Get the value of UL SNR after applying the link adaptation SNR offset.
   float get_effective_snr() const;
