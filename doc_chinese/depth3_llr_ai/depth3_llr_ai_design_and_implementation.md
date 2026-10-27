@@ -726,3 +726,45 @@ dd_meta:  2911, ..., 25277, 14027
 | 1 PRB 样本的去处 | 保留在建库（`--min-prb 1`），★ 训练时按 `alloc_nof_prb >= 2` 过滤 ✓ |
 
 ★ 状态 ✓：★ 五条备忘已入库 ✓；★ `ping1400` 处理中（211）✓。
+
+### D7.16 2026-10-27 ★ 订正 D7.15(e)：**1 PRB 不该被过滤，应该拿来训练并把下限降到 1** ✗→✓
+
+**(a) ★★★★ 我上一条的建议是错的**
+
+| 我写的 | 事实 |
+|---|---|
+| "训练时按 `alloc_nof_prb ≥ 2` 过滤" ✗ | ★ `MIN_PRB` **不是计算能力上限，而是"模型训练覆盖到哪里"的声明** ✓ |
+
+`pusch_depth3_input_plane.h:90` 原文：
+
+> "The floor is a property of what the model was **TRAINED** on, not of what it can compute … the honest default is
+> the narrowest allocation **the scheduler actually issues** rather than the widest the corpus happened to contain."
+
+**⇒ 过滤掉 1 PRB，等于把"模型没见过调度器真会发的授权"这个错误**再犯一次**。**
+
+**(b) ★★★★ 这个错误已经付过一次代价**
+
+| 历史 | 后果 |
+|---|---|
+| `MIN_PRB` 曾是 **4**（因为模型只微调到 4 PRB）| ★ **每次接入的 3 PRB Msg3 被拒绝** ⇒ 纯网络腿里"拒绝即擦除" ⇒ ★ **手机根本接不上** ✗ |
+| 后来降到 **2** | 部分修复 |
+
+★ 现在调度器**确实会发 1 PRB**（实测：`ping500c` 腿 **1 PRB 1 638 条**）⇒
+★ 若模型仍以 2 为下限，这 1 638 次接收**在纯网络腿里会被擦除** ✗。
+
+**(c) ★★★ 正确做法**
+
+| 步 | 做法 |
+|---|---|
+| 1 | ★ **建库不过滤**（`--min-prb 1`，现状 ✓）|
+| 2 | ★ **训练全部纳入**（含 1 PRB）✓ |
+| 3 | ★ 训练完成后把 `MIN_PRB` 降到 **1**（或运行期 `OCUDU_DEPTH3_MIN_PRB=1`）✓ |
+| 4 | ★ 附**宽度覆盖表**（每宽度的样本数），让下限**由数据说话**，不靠猜 |
+
+**(d) ★★★ 为什么 1 PRB 在几何上可行**
+
+`MIN_PRB` 上方注释：**"The narrow-band crop already covers two PRB with four PRB of context on each side."**
+⇒ 裁窗对 **1 PRB ＋ 两侧各 4 PRB 上下文**同样成立 ✓（窗口按 51 PRB 契约切，宽度只决定占多少）。
+
+★ 状态 ✓：★ 判据订正 ✓；★ 1 PRB 样本**保留且必须训练** ✓；★ 训练后把下限降到 1 ✓。
+
