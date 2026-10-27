@@ -1589,8 +1589,8 @@ int main(int argc, char** argv)
     const std::vector<unsigned> alloc_prb  = capture.get_list("alloc_prb");
     const unsigned              rb_start   = alloc_prb.empty() ? bwp_start : bwp_start + alloc_prb.front();
     const bool                  has_a_hole = [&alloc_prb]() {
-      for (size_t i = 1; i != alloc_prb.size(); ++i) {
-        if (alloc_prb[i] != alloc_prb[i - 1] + 1) {
+      for (size_t idx = 1; idx != alloc_prb.size(); ++idx) {
+        if (alloc_prb[idx] != alloc_prb[idx - 1] + 1) {
           return true;
         }
       }
@@ -1736,7 +1736,7 @@ int main(int argc, char** argv)
                          ? std::strrchr(capture_prefix.c_str(), '/') + 1
                          : capture_prefix.c_str(),
                      hop_pdu[k].slot.count(),
-                     hop_pdu[k].rnti,
+                     to_underlying(hop_pdu[k].rnti),
                      capture.get_string("modulation", "?").c_str(),
                      // THE GRANT WIDTH, not the BWP: the cell a gate judges is (modulation, grant width, SNR), and
                      // `bwp_size_rb` is the whole 51-PRB carrier for every reception in the leg.
