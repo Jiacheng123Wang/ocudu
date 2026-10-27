@@ -65,8 +65,17 @@
 #include "ocudu/ran/sch/tbs_calculator.h"
 #include "ocudu/support/executors/task_worker_pool.h"
 
-#include "channel_equalizer_metal_factory.h"
-#include "demodulation_mapper_metal_factory.h"
+// THE METAL FACTORIES EXIST ONLY IN AN APPLE BUILD. `OCUDU_METAL_EQUALIZER` and `OCUDU_METAL_DEMODULATION` are set on
+// the interface of the libraries they belong to, and those directories are only added when the corresponding ENABLE_*
+// option is on -- which cannot be on for Linux, because their implementations are Objective-C++. Guarding the includes
+// and the two call sites is what lets this harness build as a CPU-only tool anywhere, which is the point of the target
+// `ul_chain_replay_cpu` (design section 19.628).
+#if defined(OCUDU_METAL_EQUALIZER)
+#  include "channel_equalizer_metal_factory.h"
+#endif
+#if defined(OCUDU_METAL_DEMODULATION)
+#  include "demodulation_mapper_metal_factory.h"
+#endif
 
 #include <random>
 
@@ -595,6 +604,39 @@ int main(int argc, char** argv)
       return 1;
     }
   }
+
+  // A BACK END THIS BUILD DOES NOT HAVE IS REFUSED HERE, not half-applied later. The CPU path is the reason the target
+  // exists outside an Apple build; asking for a Metal one there would otherwise fall through to a generic factory and
+  // silently measure the CPU chain under a Metal label, which is the exact failure mode this workflow keeps paying for.
+#if !defined(OCUDU_METAL_EQUALIZER) || !defined(OCUDU_METAL_DEMODULATION) || !defined(OCUDU_METAL_LDPC) || \
+    !defined(OCUDU_METAL_DFT)
+  if (use_metal_ce || use_metal_demod || use_metal_decoder || dft_metal) {
+    std::fprintf(stderr,
+                 "--metal* needs an Apple build with the Metal back ends (equalizer %s, demapper %s, ldpc %s, dft %s); "
+                 "this build is CPU-only. Use --cpu.\n",
+#  if defined(OCUDU_METAL_EQUALIZER)
+                 "yes",
+#  else
+                 "no",
+#  endif
+#  if defined(OCUDU_METAL_DEMODULATION)
+                 "yes",
+#  else
+                 "no",
+#  endif
+#  if defined(OCUDU_METAL_LDPC)
+                 "yes",
+#  else
+                 "no",
+#  endif
+#  if defined(OCUDU_METAL_DFT)
+                 "yes");
+#  else
+                 "no");
+#  endif
+    return 1;
+  }
+#endif
 
   // A synthetic corpus has no capture base: the tool makes the input itself (see --synth).
   if (out_prefix.empty() || (prefix.empty() && (synth_slots == 0))) {
@@ -1181,13 +1223,23 @@ int main(int argc, char** argv)
   report("created estimator_factory");
 
   // Equalizer and demapper: Metal or generic.
+#if defined(OCUDU_METAL_EQUALIZER)
   std::shared_ptr<channel_equalizer_factory> equalizer_factory =
       use_metal_demod ? create_channel_equalizer_metal_factory(channel_equalizer_algorithm_type::mmse)
                       : create_channel_equalizer_generic_factory(channel_equalizer_algorithm_type::mmse);
+#else
+  // No Metal back end in this build: the name above does not even exist, so the call has to leave the translation unit.
+  std::shared_ptr<channel_equalizer_factory> equalizer_factory =
+      create_channel_equalizer_generic_factory(channel_equalizer_algorithm_type::mmse);
+#endif
   check(equalizer_factory, "equalizer_factory");
   report("created equalizer_factory");
+#if defined(OCUDU_METAL_DEMODULATION)
   std::shared_ptr<demodulation_mapper_factory> demapper_factory =
       use_metal_demod ? create_demodulation_mapper_metal_factory() : create_demodulation_mapper_factory();
+#else
+  std::shared_ptr<demodulation_mapper_factory> demapper_factory = create_demodulation_mapper_factory();
+#endif
   check(demapper_factory, "demapper_factory");
   report("created demapper_factory");
 
