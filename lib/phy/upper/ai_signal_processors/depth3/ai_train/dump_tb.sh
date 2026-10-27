@@ -46,7 +46,7 @@ done
 
 mkdir -p "$OUT/tb" "$OUT/stage" "$OUT/raw"
 : > "$OUT/index.csv"
-echo "unit,tb_bits,crc,sinr_db,iterations,slot" >> "$OUT/index.csv"
+echo "unit,tb_bits,crc,sinr_db,iterations,slot,tbs_bytes" >> "$OUT/index.csv"
 
 n_attempt=0
 n_ok=0
@@ -67,7 +67,7 @@ one_unit() {
            --phy_pipeline cpu --pusch_receiver_backend classic --out "$out/stage/$name" 2>/dev/null \
          | grep -E '^\s*\[0\]' | head -1)
 
-  local slot crc=no sinr="" iters="" tbbits=0
+  local slot crc=no sinr="" iters="" tbbits=0 tbs=""
   slot=$(grep -m1 '^slot=' "$meta" | cut -d= -f2)
   local tb
   tb=$(ls "$work"/tb_*.bits 2>/dev/null | head -1)
@@ -79,9 +79,10 @@ one_unit() {
     case "$line" in *"crc=OK"*) crc=OK ;; esac
     sinr=$(printf '%s' "$line"  | sed -n 's/.*sinr=\([-0-9.]*\) dB.*/\1/p')
     iters=$(printf '%s' "$line" | sed -n 's/.*iterations=\([0-9]*\).*/\1/p')
+    tbs=$(printf '%s' "$line" | sed -n 's/.*tbs=\([0-9]*\).*/\1/p')
   fi
   rm -rf "$work"
-  printf '%s,%s,%s,%s,%s,%s\n' "$name" "$tbbits" "$crc" "$sinr" "$iters" "$slot" > "$out/rows/$name.row"
+  printf '%s,%s,%s,%s,%s,%s,%s\n' "$name" "$tbbits" "$crc" "$sinr" "$iters" "$slot" "$tbs" > "$out/rows/$name.row"
 }
 export -f one_unit
 
