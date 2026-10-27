@@ -2380,6 +2380,10 @@ unsigned pusch_depth3_receiver_ai_network_impl::narrow_window_lo(const pusch_dem
 
 } // namespace
 
+// THE REGISTRY BELONGS TO THE ENGINE ARM AND DISAPPEARS WITH IT. These definitions sat outside the
+// `OCUDU_HAVE_DEPTH3_ENGINE` guard that owns the class, so a build without Core ML (Linux, with
+// ENABLE_METAL_CHEST off) failed to compile a library the gNB itself needs -- found on 211.
+#if defined(OCUDU_HAVE_DEPTH3_ENGINE)
 // The process-wide early-measurement registry and its counters (design section 19.270): shared because the arm that
 // receives the hint and the arm that processes the reception both come from the dependencies pool.
 std::array<pusch_depth3_receiver_ai_network_impl::slot_measurement,
@@ -2394,6 +2398,8 @@ std::atomic<unsigned> pusch_depth3_receiver_ai_network_impl::measurements_suppre
 std::array<unsigned, 512> pusch_depth3_receiver_ai_network_impl::prepare_cost_us{};
 unsigned pusch_depth3_receiver_ai_network_impl::prepare_cost_index = 0;
 unsigned pusch_depth3_receiver_ai_network_impl::prepare_cost_count = 0;
+
+#endif // OCUDU_HAVE_DEPTH3_ENGINE
 
 std::unique_ptr<pusch_depth3_receiver> ocudu::create_pusch_depth3_receiver(
     pusch_depth3_kind               kind,
