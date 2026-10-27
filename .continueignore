@@ -1,0 +1,17 @@
+# WHAT CONTINUE MUST NOT INDEX (2026-10-27).
+#
+# Continue was indexing this workspace and the extension host sat at ninety-nine percent CPU with the Markdown preview
+# never finishing -- the same symptom the GPU setting was blamed for earlier. The tree it was chewing through is not
+# code: the capture corpus alone is a hundred and forty-seven gigabytes of .bin grids, the build directory is compiled
+# output, and the work directories hold logs and datasets. None of it is anything an editor assistent should read, and
+# all of it is regenerable.
+build/
+doc_chinese/**/work_tmp/
+doc_chinese/**/corpus/
+doc_chinese/**/logs/
+**/*.bin
+**/*.npz
+**/*.log
+**/*.mlmodelc/
+**/*.mlpackage/
+**/.git/
