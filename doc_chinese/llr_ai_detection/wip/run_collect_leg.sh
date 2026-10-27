@@ -92,7 +92,12 @@ COLLECT_CORPUS=${COLLECT_CORPUS:-$ROOT/doc_chinese/llr_ai_detection/work_tmp/cor
 export LEG_LOGDIR=${LEG_LOGDIR:-$COLLECT_CORPUS/$LABEL/logs}
 export OCUDU_UL_DUMP=${OCUDU_UL_DUMP:-$COLLECT_CORPUS/$LABEL/cap}
 export OCUDU_UL_DUMP_COUNT=${OCUDU_UL_DUMP_COUNT:-20000}
-export OCUDU_UL_DUMP_LLR=${OCUDU_UL_DUMP_LLR:-1}
+# OFF BY DEFAULT SINCE 2026-10-27. The soft-bit dump answers a question we no longer ask during collection: it records
+# the LLRs ONE arm produced at capture time, which cannot stand in for another arm and is not read by the dataset
+# builder (it opens the grid, the channel estimate, the estimator sidecar, the PDU and the transsport block). It was on
+# because this script turned it on, and it has been accumulating tens of gigabytes per long leg. The capability stays:
+# any capture can be replayed through an arm to dump its LLRs, which is what the LLR-vs-classical comparison does.
+export OCUDU_UL_DUMP_LLR=${OCUDU_UL_DUMP_LLR:-0}
 export OCUDU_LA_LOG_EVERY=${OCUDU_LA_LOG_EVERY:-1}
 
 CONFIG=${LEG_CONFIG:-$ROOT/configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml}
