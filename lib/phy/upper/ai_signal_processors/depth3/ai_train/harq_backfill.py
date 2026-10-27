@@ -19,7 +19,13 @@ SAFEGUARDS, because a wrong label is worse than a missing one:
 OUTPUT: <out>/index_harq.csv with an extra column label_from in {self, harq, none}, and copies of the recovered .bits
 under <out>/tb/.
 
-Usage: harq_backfill.py --leg <capture dir> --index <dump index.csv> --out <dir> [--max-gap-slots 40]
+A SECOND, BETTER DONOR SOURCE. `--live-tb <dir>` reads the transport blocks the gNB dumped DURING the flight
+(OCUDU_HELENA_DUMP_DIR): one `tb_<idx>_tbs<bits>.bits` per successful decode, plus `dd_meta.csv` whose last column is
+the system slot. Those decodes used the live chain's HARQ soft combining, which an offline replay of the same
+retransmission cannot reproduce -- so for a retransmission that only decodes after combining, this is the only place the
+bits exist. When the flag is given it is preferred; the offline replay is the fallback.
+
+Usage: harq_backfill.py --leg <capture dir> --index <dump index.csv> --out <dir> [--max-gap-slots 40] [--live-tb DIR]
 """
 import argparse
 import collections
@@ -48,9 +54,25 @@ def main():
     ap.add_argument("--leg", required=True, help="capture directory holding the PDU sidecars")
     ap.add_argument("--index", required=True, help="index.csv written by dump_tb.sh")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--live-tb", default="",
+                    help="directory holding the live dd_meta.csv and tb_*.bits (OCUDU_HELENA_DUMP_DIR during the leg)")
     ap.add_argument("--max-gap-slots", type=int, default=40,
                     help="a gap this large starts a new chain: the HARQ id has been reused for another block")
     args = ap.parse_args()
+
+    live_by_slot = {}
+    if args.live_tb:
+        meta = os.path.join(args.live_tb, "dd_meta.csv")
+        if os.path.exists(meta):
+            for line in open(meta, errors="ignore"):
+                parts = line.strip().split(",")
+                if len(parts) < 5:
+                    continue
+                idx, bits, slot = parts[0], parts[2], int(parts[4])
+                path = os.path.join(args.live_tb, f"tb_{int(idx):08d}_tbs{bits}.bits")
+                if os.path.exists(path):
+                    live_by_slot[slot] = path
+        print(f"live dumps: {len(live_by_slot)} slot(s) from {meta}", file=sys.stderr)
 
     rows = list(csv.DictReader(open(args.index)))
     if not rows:
@@ -95,7 +117,9 @@ def main():
         # the first decoded member AFTER a failure is the donor; an earlier decode means there was nothing to recover
         donor = None
         for slot, name in chain:
-            if units[name]["row"]["crc"] == "OK":
+            decoded_offline = units[name]["row"]["crc"] == "OK"
+            decoded_live = slot in live_by_slot
+            if decoded_offline or decoded_live:
                 donor = (slot, name)
                 break
         if donor is None:
@@ -108,15 +132,19 @@ def main():
             failed, ok = units[name], units[donor[1]]
             if failed["tbs"] and ok["tbs"] and failed["tbs"] != ok["tbs"]:
                 continue                     # different block sizes: not the same transport block, do not guess
-            recovered.append((name, donor[1]))
+            src = os.path.join(os.path.dirname(args.index), "tb", donor[1] + ".bits")
+            if donor[0] in live_by_slot and (not failed["tbs"] or
+                                             int(units[donor[1]]["tbs"] or 0) == 0 or
+                                             units[donor[1]]["row"]["crc"] != "OK"):
+                src = live_by_slot[donor[0]]  # the live decode is the only place these bits exist
+            recovered.append((name, donor[1], src))
 
     os.makedirs(os.path.join(args.out, "tb"), exist_ok=True)
-    donor_of = dict(recovered)
+    donor_of = {name: donor for name, donor, _ in recovered}
     label_from = {}
     for name in units:
         label_from[name] = "self" if units[name]["row"]["crc"] == "OK" else ("harq" if name in donor_of else "none")
-    for name, donor in recovered:
-        src = os.path.join(os.path.dirname(args.index), "tb", donor + ".bits")
+    for name, donor, src in recovered:
         if not os.path.exists(src):
             label_from[name] = "none"
             continue

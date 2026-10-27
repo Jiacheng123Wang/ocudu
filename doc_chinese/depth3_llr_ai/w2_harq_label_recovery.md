@@ -81,3 +81,42 @@ grep -o "rv=[0-3]" <腿日志> | sort | uniq -c
 | W3 放大网络 | W2 的样本才能证明"放大后在这些困难格子上确实更好" |
 
 **⇒ W2 是唯一能让我们**超过经典链**的数据来源。**
+
+---
+
+## 6. 采集用 **CPU 路径**（2026-10-27 定）
+
+**采集不需要 AI 臂**：我们要的是捕获（网格／CE／PDU）和**活体的解码结果**，两者都在**经典链**上。
+CPU 路径还更快（不占 ANE、不与门控抢设备）。
+
+```bash
+# 关键环境变量（都必须在 sudo 前 export）
+unset OCUDU_UL_DUMP_RV                  # 不过滤 rv：重传也要采
+export OCUDU_UL_DUMP_COUNT=100000       # 预算要能容纳重传
+export OCUDU_HELENA_DUMP_DIR=<腿目录>/tb_live   # ★ 活体 TB 落盘
+
+sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu <label>
+#                                                        ^^^ 位置参数＝phy_pipeline
+```
+
+## 7. ★ 为什么必须是**活体** TB 而不是离线回放
+
+| 事实 | 后果 |
+|---|---|
+| 重传常常**只有结合软缓冲**才解得出来 | 对同一条重传做**离线单次回放**往往**解不出** ⇒ 拿不到供体比特 |
+| 活体链（CPU 经典链）在腿里就完成了合并与解码 | `OCUDU_HELENA_DUMP_DIR` 会在**每次 CRC 通过时**写 `tb_<idx>_tbs<bits>.bits` ＋ `dd_meta.csv` |
+
+`dd_meta.csv` 的列：`idx, timestamp_us, tb_bits, nof_codeblocks, system_slot`
+⇒ ★ **按 slot 把活体 TB 对回捕获** ✓（单 UE 场景无歧义）。
+
+**⇒ 这是 W2 能成立的关键：供体来自**活体解码**，样本仍是**单次接收**。**
+
+## 8. 工具已支持两种供体来源
+
+| 来源 | 开关 | 优先级 |
+|---|---|---|
+| **活体 dump**（推荐）| `--live-tb <腿目录>/tb_live` | ★ 优先 |
+| 离线回放（同一次接收自己解出）| 默认 | 回退 |
+
+**已测**（合成链）：① 离线供体 → 捞回 2 条 ✓；② 离线全 KO、仅活体供体 → **仍捞回 2 条** ✓；
+③ 块大小不符 → 0 ✓；④ 槽间隔过大 → 切链 0 ✓。
