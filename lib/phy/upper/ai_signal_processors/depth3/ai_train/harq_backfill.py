@@ -183,11 +183,17 @@ def main():
     # build (and a later merge) decides which population it wants, instead of having to re-derive it from a column.
     self_rows = [r for r in rows if label_from.get(r["unit"]) == "self"]
     harq_rows = [r for r in rows if label_from.get(r["unit"]) == "harq"]
-    cols_plain = list(rows[0].keys())
+    # BOTH FILES CARRY THE AUDIT COLUMNS. Without them a recovered row cannot be checked against the transmission it
+    # came from -- the first version wrote only the plain columns and made the population unverifiable after the fact.
+    cols_plain = list(rows[0].keys()) + ["label_from", "donor"]
     with open(os.path.join(args.out, "index_self.csv"), "w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=cols_plain)
+        writer = csv.DictWriter(handle, fieldnames=cols_plain, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(self_rows)
+        for row in self_rows:
+            out = dict(row)
+            out["label_from"] = "self"
+            out["donor"] = ""
+            writer.writerow(out)
     with open(os.path.join(args.out, "index_harq_only.csv"), "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=cols_plain)
         writer.writeheader()
@@ -195,6 +201,8 @@ def main():
             out = dict(row)
             out["crc"] = "OK"       # usable by the builder; the file name says where the label came from
             out["tb_bits"] = str(os.path.getsize(os.path.join(args.out, "tb", row["unit"] + ".bits")) * 8)
+            out["label_from"] = "harq"
+            out["donor"] = donor_of.get(row["unit"], "")
             writer.writerow(out)
 
     with open(os.path.join(args.out, "index_harq.csv"), "w", newline="") as handle:
