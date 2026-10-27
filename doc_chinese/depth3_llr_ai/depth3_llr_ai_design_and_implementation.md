@@ -257,6 +257,22 @@ Sionna↔OAI 之间实测有 **2.42 倍**的尺度差仍能工作）。所以：
 
 ## D7. Memo 区（追加）
 
+### D7.6 2026-10-27 LLR dump 默认关闭（采集与回放都关）
+
+| 侧 | 改动 | 文件 |
+|---|---|---|
+| **采集腿** | `OCUDU_UL_DUMP_LLR` 默认 **1 → 0** | `llr_ai_detection/wip/run_collect_leg.sh` |
+| **回放工具** | 默认也**不再设置**为 1，改为显式 `0` | `ul_chain_replay.cpp` |
+| 解析 | `llr_enabled()` 已是"设了且不为 "0"" | `ul_capture.cpp`（无需改）|
+| 头注释 | "set" → "set to anything but 0（off by default）" | `ul_capture.h` |
+
+**依据**：`_llr.bin` 既不进建库（五个文件里没有它），也不进门控（回放会重算 LLR）。它的用途（未编码 BER 门、
+两臂 LLR 对比）都已完成或改口径。实测：默认跑一次**零个** `_llr.bin`；`OCUDU_UL_DUMP_LLR=1` 时**正常产生**。
+
+**代价与保留**：需要 LLR 级诊断时，一条命令即可打开（`OCUDU_UL_DUMP_LLR=1`），今天的 LLR 幅度/悬崖分析就是这样做的。
+
+
+
 ### D7.5 ★★★★★ 为什么"符号一致 99%+" 却只有 70% 的 CRC-OK ✓
 
 **(a) ★★★ 同一批 20 条 attach，逐条对照 ✓**

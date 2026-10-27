@@ -624,10 +624,12 @@ int main(int argc, char** argv)
   // The staged capture of this replay: the tool sets the environment before the first PUSCH
   // processing (the capture reads it once).
   setenv("OCUDU_UL_DUMP", out_prefix.c_str(), 1);
-  // The soft-bit capture can be disabled from the environment (OCUDU_UL_DUMP_LLR=0), which is how
-  // a crash inside it can be told apart from one in the receiver.
+  // SOFT BITS ARE NOT DUMPED UNLESS ASKED (2026-10-27). They were on by default because the LLR-vs-classical
+  // comparisons needed them; the third gate is a binned transport-block rate now, the dataset builder never reads them,
+  // and a gate sweep of a few thousand captures multiplies the extra file writes by the number of models measured. Turn
+  // them on with OCUDU_UL_DUMP_LLR=1 when the question is about the LLRs themselves.
   if (std::getenv("OCUDU_UL_DUMP_LLR") == nullptr) {
-    setenv("OCUDU_UL_DUMP_LLR", "1", 1);
+    setenv("OCUDU_UL_DUMP_LLR", "0", 1);
   }
   // The capture budget: one reception is what a single-reception replay wants (its stages are the point),
   // but the L1b harness replays a slot sequence and compares the LLRs of every slot, so the budget has to

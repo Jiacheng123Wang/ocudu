@@ -30,7 +30,7 @@ namespace ul_capture {
 /// True when OCUDU_UL_DUMP is set (grid and channel estimator captures).
 bool enabled();
 
-/// True when OCUDU_UL_DUMP_LLR is set (soft-bit capture).
+/// True when OCUDU_UL_DUMP_LLR is set to anything but "0" (soft-bit capture; off by default).
 bool llr_enabled();
 
 /// Captures the PDU configuration and the received grid of one PUSCH reception.
