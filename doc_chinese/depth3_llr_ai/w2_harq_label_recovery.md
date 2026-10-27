@@ -120,3 +120,47 @@ sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu <label>
 
 **已测**（合成链）：① 离线供体 → 捞回 2 条 ✓；② 离线全 KO、仅活体供体 → **仍捞回 2 条** ✓；
 ③ 块大小不符 → 0 ✓；④ 槽间隔过大 → 切链 0 ✓。
+
+---
+
+## 9. 腿命名约定：**一条腿 ＝ 一种业务形态**（2026-10-27 定）
+
+业务形态靠**腿名**区分，不靠"同一条腿里换流量"。这样：
+① 不用相位标记；② 每个子集天然干净；③ 建库/分析时按腿名分组即可。
+
+| 腿名 | 业务 | 上行块形状 |
+|---|---|---|
+| **`w2_harq_1027`** | ping 默认（56 B）| 窄，4–6 PRB ★ 正在跑 |
+| `w2_harq_ping500_1027` | `ping -s 500` | 中，约 10–25 PRB |
+| `w2_harq_ping1400_1027` | `ping -s 1400` | 宽，30–51 PRB |
+| `w2_harq_iperfudp_1027` | `iperf3 -R -u -b 20M -l 1200` | 宽，BLER 可控 |
+| `w2_harq_iperftcp_1027` | `iperf3 -R -t 300` | 最宽，AMC 降档 |
+
+**命名规则**：`w2_harq_<业务>_<日期>`；业务 ∈ {ping56, ping500, ping1400, iperfudp, iperftcp}。
+
+### 每条腿的起飞命令（模板）
+
+```bash
+cd /Users/jiachengwang/dev/ocudu
+LABEL=w2_harq_ping500_1027
+
+unset OCUDU_UL_DUMP_RV
+export OCUDU_UL_DUMP_COUNT=100000
+export OCUDU_HELENA_DUMP_DIR=$PWD/doc_chinese/llr_ai_detection/work_tmp/corpus/$LABEL/tb_live
+mkdir -p "$OCUDU_HELENA_DUMP_DIR"          # fopen 失败是静默的，必须先建
+
+sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu $LABEL
+```
+
+## 10. 第一条腿 `w2_harq_1027` 的实测结构（21 523 条时）
+
+| 项 | 值 |
+|---|---|
+| 捕获 | **21 523** / 100 000 |
+| **活体 TB** | **21 056** |
+| 差值 | **467** ← ★ 正好等于失败次数 |
+| rv 分布 | rv0 21 070 ／ rv1 5 ／ **rv2 445** ／ rv3 17 ⇒ **467 次重传** ✓ |
+| 磁盘 | 3.5 GB |
+
+★ **差值 467 ＝ 重传 467**：说明**每一次失败都跟了一次成功重传** ⇒
+★ **W2 的捞回率接近"所有失败"** ✓（这条腿约 2.2% ⇒ 满 100 k 约 **2 200 个捞回样本**）。
