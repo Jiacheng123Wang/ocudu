@@ -42,7 +42,7 @@ def read_pdu(path):
         with open(path, errors="ignore") as handle:
             for line in handle:
                 key, sep, value = line.strip().partition("=")
-                if sep and key in ("rnti", "harq_id", "rv", "slot"):
+                if sep and key in ("rnti", "harq_id", "rv", "slot", "scs_khz"):
                     fields[key] = value
     except OSError:
         return None
@@ -97,9 +97,16 @@ def main():
             key = (int(parts[1]), int(parts[2]))
         except (IndexError, ValueError):
             continue
+        # A MONOTONIC COORDINATE FOR ORDERING AND GAPS. The slot alone restarts every 10.24 s, so a chain sorted by
+        # slot breaks at every wrap and its retransmission lands before its first transmission -- which is why one leg
+        # with eight and a half thousand retransmissions recovered sixty-eight labels. Frames are already monotonic
+        # (extended_frame), so the coordinate is frame * slots_per_frame + slot.
+        # slots per frame from the PDU (the dump index does not carry it): 30 kHz is the deployed shape, 20 slots.
+        slots_per_frame = 20 if str(pdu.get("scs_khz", "30")) == "30" else 10
         units[name] = {
             "row": row,
             "key": key,
+            "ord": key[0] * slots_per_frame + key[1],
             "rnti": pdu["rnti"],
             "harq": pdu["harq_id"],
             "rv": pdu.get("rv", "?"),
@@ -119,7 +126,7 @@ def main():
     # captured opens a chain of its own and can supply no label.
     by_process = collections.defaultdict(list)
     for name, info in units.items():
-        by_process[(info["rnti"], info["harq"])].append((info["slot"], name))
+        by_process[(info["rnti"], info["harq"])].append((info["ord"], name))
     chains = []
     for key, members in by_process.items():
         members.sort()
