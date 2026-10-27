@@ -1751,7 +1751,9 @@ int main(int argc, char** argv)
                   i,
                   tbs,
                   hop_pdu[k].slot.count(),
-                  hop_pdu[k].rnti,
+                  // A STRONG TYPE, NOT AN INTEGER: GCC rejects %u against rnti_t under -Wformat while Clang accepts it,
+                  // and the conversion is explicit here for the same reason it is everywhere else in the tree.
+                  to_underlying(hop_pdu[k].rnti),
                   capture.get_string("modulation", "?").c_str(),
                   spy.crc_ok ? "OK" : "KO",
                   spy.nof_iters,
