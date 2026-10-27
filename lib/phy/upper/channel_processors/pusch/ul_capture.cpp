@@ -174,11 +174,14 @@ bool capture_directory_exists()
 /// to see that files are landing, and "no news" is indistinguishable from "the directory is missing".
 void report_first_capture(const std::string& name)
 {
-  // Heartbeat: every hundredth capture, so a leg that stops writing is noticed within a few hundred receptions rather
-  // than when the operator counts files afterwards.
+  // HEARTBEAT, OFF BY DEFAULT SINCE 2026-10-27. It exists because a silent stop is indistinguishable from a leg that is
+  // capturing nothing, and it earned its place by catching exactly that. But the leg-end check now prints the file count
+  // against the announced count on every exit, and a line every hundred captures floods a console whose job is to show
+  // the live MCS. `OCUDU_UL_CAPTURE_VERBOSE` brings it back for the next time a leg has to be watched while it runs.
   static std::atomic<unsigned> written{0};
   const unsigned               nth = ++written;
-  if ((nth % 100) == 0) {
+  static const bool            heartbeat_enabled = (std::getenv("OCUDU_UL_CAPTURE_VERBOSE") != nullptr);
+  if (heartbeat_enabled && ((nth % 100) == 0)) {
     std::fprintf(stderr, "[ul_capture] heartbeat: %u capture(s) written, most recent %s\n", nth, name.c_str());
   }
   static std::atomic<bool> reported{false};

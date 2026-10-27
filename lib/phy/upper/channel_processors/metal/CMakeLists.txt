@@ -86,6 +86,10 @@ target_link_libraries(channel_equalizer_metal_unit_test PRIVATE
 
 # ---- Offline replay of a recorded PUSCH reception (A/B/C of one test vector) ----
 add_executable(ul_chain_replay test/ul_chain_replay.cpp)
+# THIS TARGET HAS THE METAL BACK ENDS, the portable one in channel_processors/CMakeLists.txt does not. The macro is set
+# here rather than inferred from OCUDU_METAL_EQUALIZER, which is an interface definition of ocudu_channel_processors and
+# does not reach a target that links the processor library instead (that mistake silently disabled --metal).
+target_compile_definitions(ul_chain_replay PRIVATE OCUDU_REPLAY_METAL=1)
 target_include_directories(ul_chain_replay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pusch)
 target_link_libraries(ul_chain_replay PRIVATE
     ocudu_pusch_processor ocudu_pusch_demodulator

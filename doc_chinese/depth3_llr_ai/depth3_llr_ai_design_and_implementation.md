@@ -257,6 +257,38 @@ Sionna↔OAI 之间实测有 **2.42 倍**的尺度差仍能工作）。所以：
 
 ## D7. Memo 区（追加）
 
+### D7.13 2026-10-27 控制台降噪：`heartbeat` 与 `depth3-sinr` 默认关 ✓（★ 顺带修掉一个我自己引入的回归）
+
+**(a) ★★★ 用户要求**
+
+| 行 | 处置 |
+|---|---|
+| `[ul_capture] heartbeat:`（每 100 条）| ★ **默认关**，`OCUDU_UL_CAPTURE_VERBOSE=1` 打开 ✓ |
+| `[depth3-sinr]`（每 1 000 次接收）| ★ **默认关**，`OCUDU_DEPTH3_SINR=1` 打开 ✓ |
+| `[sched-mcs] PUSCH grant MCS: …`（每 200 次调度）| ★ **保留** ✓（用户：用它**实时**看信道状态）|
+
+**(b) ★★★★ 验证**
+
+| 项 | 结果 |
+|---|---|
+| 默认运行 | heartbeat＋sinr **命中 0 行** ✓ |
+| `OCUDU_DEPTH3_SINR=1` | **命中 1 行** ✓ |
+| `OCUDU_UL_CAPTURE_VERBOSE=1` | 离线回放**无法**触发（回放把预算强制为 1，到不了 100 条）⇒ **只能在线验证**，代码路径与已验证的 sinr 同形 ✓ |
+
+**(c) ★★★ 修掉一个我自己引入的回归：`--metal` 在 Apple 构建里被拒**
+
+| 事实 | 说明 |
+|---|---|
+| 我上一轮用 `OCUDU_METAL_EQUALIZER` 判断"有没有 Metal" | ✗ 该宏是 `ocudu_channel_processors` 的 **INTERFACE** 定义，**传不到**只链 `ocudu_pusch_processor` 的目标 |
+| 后果 | ★ **Apple 构建的 `ul_chain_replay --metal` 被误拒** ✗（`--metal* needs an Apple build…`）|
+| 修法 | ★ 改由**目标自己**声明：`metal/CMakeLists.txt` 给 `ul_chain_replay` 定义 **`OCUDU_REPLAY_METAL=1`**，可移植目标不定义 ✓ |
+| 复验 | `[metal_stats] mmse_ce commits=16` ⇒ ★ **Metal 路径恢复** ✓；CPU 目标仍正确拒绝 `--metal` ✓ |
+
+★ 教训：**能力宏要由"拥有能力的那个 target"定义**，不能借道别的库的 interface 定义。
+
+★ 状态 ✓：★ 两行噪声已默认关闭 ✓；★ `sched-mcs` 保留 ✓；★ `--metal` 回归已修 ✓。
+
+
 ### D7.12 2026-10-27 ★ W2 工具就位：`harq_backfill.py` ✓（含正反例测试）
 
 **(a) ★★★ 两个工具**

@@ -1555,6 +1555,13 @@ private:
     }
     std::sort(raw.begin(), raw.begin() + sampled);
     std::sort(calibrated.begin(), calibrated.begin() + sampled);
+    // SILENT UNLESS ASKED (user request, 2026-10-27). One line per thousand receptions is still a line the operator did
+    // not ask for, and the flight console has one job: show the MCS, PRB and SINR of the current grant live. The
+    // percentiles are wanted for analysis, so `OCUDU_DEPTH3_SINR` brings them back.
+    static const bool sinr_report_enabled = (std::getenv("OCUDU_DEPTH3_SINR") != nullptr);
+    if (!sinr_report_enabled) {
+      return;
+    }
     const unsigned p10 = sampled / 10;
     const unsigned p90 = std::min((sampled * 9) / 10, sampled - 1);
     fmt::print(stderr,

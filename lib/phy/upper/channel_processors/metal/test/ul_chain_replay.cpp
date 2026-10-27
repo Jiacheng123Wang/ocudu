@@ -65,15 +65,13 @@
 #include "ocudu/ran/sch/tbs_calculator.h"
 #include "ocudu/support/executors/task_worker_pool.h"
 
-// THE METAL FACTORIES EXIST ONLY IN AN APPLE BUILD. `OCUDU_METAL_EQUALIZER` and `OCUDU_METAL_DEMODULATION` are set on
-// the interface of the libraries they belong to, and those directories are only added when the corresponding ENABLE_*
-// option is on -- which cannot be on for Linux, because their implementations are Objective-C++. Guarding the includes
-// and the two call sites is what lets this harness build as a CPU-only tool anywhere, which is the point of the target
-// `ul_chain_replay_cpu` (design section 19.628).
-#if defined(OCUDU_METAL_EQUALIZER)
+// THE METAL FACTORIES EXIST ONLY WHERE THE METAL BACK ENDS ARE BUILT, which is a property of THIS TARGET, not of the
+// platform: `OCUDU_REPLAY_METAL` is set by the metal directory's CMakeLists and absent for the portable twin
+// `ul_chain_replay_cpu`, whose whole point is to run the CPU path on a machine with no Metal (design section 19.628).
+// Keying off OCUDU_METAL_EQUALIZER was wrong: it is an interface definition of ocudu_channel_processors and does not
+// reach a target that links the processor library, so the guard refused --metal in the Apple build too.
+#if defined(OCUDU_REPLAY_METAL)
 #  include "channel_equalizer_metal_factory.h"
-#endif
-#if defined(OCUDU_METAL_DEMODULATION)
 #  include "demodulation_mapper_metal_factory.h"
 #endif
 
@@ -608,32 +606,11 @@ int main(int argc, char** argv)
   // A BACK END THIS BUILD DOES NOT HAVE IS REFUSED HERE, not half-applied later. The CPU path is the reason the target
   // exists outside an Apple build; asking for a Metal one there would otherwise fall through to a generic factory and
   // silently measure the CPU chain under a Metal label, which is the exact failure mode this workflow keeps paying for.
-#if !defined(OCUDU_METAL_EQUALIZER) || !defined(OCUDU_METAL_DEMODULATION) || !defined(OCUDU_METAL_LDPC) || \
-    !defined(OCUDU_METAL_DFT)
+#if !defined(OCUDU_REPLAY_METAL)
   if (use_metal_ce || use_metal_demod || use_metal_decoder || dft_metal) {
     std::fprintf(stderr,
-                 "--metal* needs an Apple build with the Metal back ends (equalizer %s, demapper %s, ldpc %s, dft %s); "
-                 "this build is CPU-only. Use --cpu.\n",
-#  if defined(OCUDU_METAL_EQUALIZER)
-                 "yes",
-#  else
-                 "no",
-#  endif
-#  if defined(OCUDU_METAL_DEMODULATION)
-                 "yes",
-#  else
-                 "no",
-#  endif
-#  if defined(OCUDU_METAL_LDPC)
-                 "yes",
-#  else
-                 "no",
-#  endif
-#  if defined(OCUDU_METAL_DFT)
-                 "yes");
-#  else
-                 "no");
-#  endif
+                 "--metal* needs the Metal back ends, which this build does not have (it is the portable CPU-only target). "
+                 "Use --cpu.\n");
     return 1;
   }
 #endif
@@ -1223,7 +1200,7 @@ int main(int argc, char** argv)
   report("created estimator_factory");
 
   // Equalizer and demapper: Metal or generic.
-#if defined(OCUDU_METAL_EQUALIZER)
+#if defined(OCUDU_REPLAY_METAL)
   std::shared_ptr<channel_equalizer_factory> equalizer_factory =
       use_metal_demod ? create_channel_equalizer_metal_factory(channel_equalizer_algorithm_type::mmse)
                       : create_channel_equalizer_generic_factory(channel_equalizer_algorithm_type::mmse);
@@ -1234,7 +1211,7 @@ int main(int argc, char** argv)
 #endif
   check(equalizer_factory, "equalizer_factory");
   report("created equalizer_factory");
-#if defined(OCUDU_METAL_DEMODULATION)
+#if defined(OCUDU_REPLAY_METAL)
   std::shared_ptr<demodulation_mapper_factory> demapper_factory =
       use_metal_demod ? create_demodulation_mapper_metal_factory() : create_demodulation_mapper_factory();
 #else
