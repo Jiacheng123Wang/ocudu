@@ -66,13 +66,15 @@ def main():
         if os.path.exists(meta):
             for line in open(meta, errors="ignore"):
                 parts = line.strip().split(",")
-                if len(parts) < 5:
+                # SIX COLUMNS SINCE 2026-10-27: idx,ts_us,tb_bits,nof_cb,frame,slot. The frame is the monotonic one,
+                # because the slot alone repeats every 10.24 s and matching on it picked the wrong block (or none).
+                if len(parts) < 6:
                     continue
-                idx, bits, slot = parts[0], parts[2], int(parts[4])
+                idx, bits, frame, slot = parts[0], parts[2], int(parts[4]), int(parts[5])
                 path = os.path.join(args.live_tb, f"tb_{int(idx):08d}_tbs{bits}.bits")
                 if os.path.exists(path):
-                    live_by_slot[slot] = path
-        print(f"live dumps: {len(live_by_slot)} slot(s) from {meta}", file=sys.stderr)
+                    live_by_slot[(frame, slot)] = path
+        print(f"live dumps: {len(live_by_slot)} reception(s) from {meta}", file=sys.stderr)
 
     rows = list(csv.DictReader(open(args.index)))
     if not rows:
@@ -86,8 +88,13 @@ def main():
         pdu = read_pdu(os.path.join(args.leg, name + ".txt"))
         if pdu is None or "harq_id" not in pdu or "rnti" not in pdu or "slot" not in pdu:
             continue
+        try:
+            frame = int(name.split("_")[1])
+        except (IndexError, ValueError):
+            continue
         units[name] = {
             "row": row,
+            "key": (frame, int(pdu["slot"])),
             "rnti": pdu["rnti"],
             "harq": pdu["harq_id"],
             "rv": pdu.get("rv", "?"),
@@ -95,20 +102,35 @@ def main():
             "tbs": row.get("tbs_bytes", ""),
         }
 
-    # Chains: same (rnti, harq), consecutive in slot within the gap, in time order.
+    # CHAINS START AT A FIRST TRANSMISSION, NOT AT AN RNTI AND A HARQ ID.
+    #
+    # The first version grouped by (rnti, harq) and split only on a large slot gap, which is wrong on real data: a HARQ
+    # id is reused for a NEW block as soon as the previous one is acknowledged, so on one leg with one RNTI the whole
+    # capture collapsed into three enormous chains and nothing could be recovered -- every failure had a "donor" far
+    # earlier in the same chain, which is not a retransmission of it.
+    #
+    # What actually identifies a chain is the redundancy-version sequence: rv=0 opens a block, and any following
+    # transmissions with rv != 0 at a short interval belong to it. A retransmission whose first transmission was not
+    # captured opens a chain of its own and can supply no label.
     by_process = collections.defaultdict(list)
     for name, info in units.items():
         by_process[(info["rnti"], info["harq"])].append((info["slot"], name))
     chains = []
     for key, members in by_process.items():
         members.sort()
-        current = [members[0]]
-        for slot, name in members[1:]:
-            if slot - current[-1][0] > args.max_gap_slots:
-                chains.append(current)
-                current = []
-            current.append((slot, name))
-        chains.append(current)
+        current = []
+        for slot, name in members:
+            rv = units[name]["rv"]
+            starts = (rv == "0")
+            too_far = bool(current) and (slot - current[-1][0] > args.max_gap_slots)
+            if starts or too_far or not current:
+                if current:
+                    chains.append(current)
+                current = [(slot, name)]
+            else:
+                current.append((slot, name))
+        if current:
+            chains.append(current)
 
     recovered = []
     for chain in chains:
@@ -118,7 +140,7 @@ def main():
         donor = None
         for slot, name in chain:
             decoded_offline = units[name]["row"]["crc"] == "OK"
-            decoded_live = slot in live_by_slot
+            decoded_live = units[name]["key"] in live_by_slot
             if decoded_offline or decoded_live:
                 donor = (slot, name)
                 break
@@ -133,10 +155,10 @@ def main():
             if failed["tbs"] and ok["tbs"] and failed["tbs"] != ok["tbs"]:
                 continue                     # different block sizes: not the same transport block, do not guess
             src = os.path.join(os.path.dirname(args.index), "tb", donor[1] + ".bits")
-            if donor[0] in live_by_slot and (not failed["tbs"] or
+            if units[donor[1]]["key"] in live_by_slot and (not failed["tbs"] or
                                              int(units[donor[1]]["tbs"] or 0) == 0 or
                                              units[donor[1]]["row"]["crc"] != "OK"):
-                src = live_by_slot[donor[0]]  # the live decode is the only place these bits exist
+                src = live_by_slot[units[donor[1]]["key"]]  # the live decode is the only place these bits exist
             recovered.append((name, donor[1], src))
 
     os.makedirs(os.path.join(args.out, "tb"), exist_ok=True)
@@ -149,6 +171,26 @@ def main():
             label_from[name] = "none"
             continue
         shutil.copy(src, os.path.join(args.out, "tb", name + ".bits"))
+
+    # TWO INDEXES, NOT ONE. A sample whose label came from its own decode and a sample whose label came from a
+    # retransmission are different populations: the second is a reception the reference chain failed on, so it can train
+    # but must never enter an acceptance set that compares against that chain. Keeping them in separate files means a
+    # build (and a later merge) decides which population it wants, instead of having to re-derive it from a column.
+    self_rows = [r for r in rows if label_from.get(r["unit"]) == "self"]
+    harq_rows = [r for r in rows if label_from.get(r["unit"]) == "harq"]
+    cols_plain = list(rows[0].keys())
+    with open(os.path.join(args.out, "index_self.csv"), "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=cols_plain)
+        writer.writeheader()
+        writer.writerows(self_rows)
+    with open(os.path.join(args.out, "index_harq_only.csv"), "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=cols_plain)
+        writer.writeheader()
+        for row in harq_rows:
+            out = dict(row)
+            out["crc"] = "OK"       # usable by the builder; the file name says where the label came from
+            out["tb_bits"] = str(os.path.getsize(os.path.join(args.out, "tb", row["unit"] + ".bits")) * 8)
+            writer.writerow(out)
 
     with open(os.path.join(args.out, "index_harq.csv"), "w", newline="") as handle:
         cols = list(rows[0].keys()) + ["label_from", "donor"]
@@ -169,7 +211,7 @@ def main():
     n_harq = sum(1 for v in label_from.values() if v == "harq")
     print(f"units with a HARQ process: {len(units)}  chains: {len(chains)}")
     print(f"decoded on their own: {n_self}   recovered from a retransmission: {n_harq}")
-    print(f"wrote {os.path.join(args.out, 'index_harq.csv')}")
+    print(f"wrote index_self.csv ({len(self_rows)}) and index_harq_only.csv ({len(harq_rows)}) in {args.out}")
     return 0
 
 

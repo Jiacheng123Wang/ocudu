@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pusch_decoder_impl.h"
+#include "ul_capture_frame.h"
 #include "ocudu/instrumentation/traces/du_traces.h"
 #include "ocudu/ocuduvec/bit.h"
 #include "ocudu/ocuduvec/copy.h"
@@ -521,8 +522,16 @@ void pusch_decoder_impl::join_and_notify()
       std::snprintf(path, sizeof(path), "%s/dd_meta.csv", dump_dir);
       f = std::fopen(path, "a");
       if (f != nullptr) {
-        std::fprintf(f, "%u,%lld,%u,%u,%u\n", idx, static_cast<long long>(t_us), tb_bits,
-                     stats.nof_codeblocks_total, current_config.slot.system_slot());
+        // THE SLOT COLUMN IS THE MONOTONIC SLOT INDEX, the same number the capture's PDU sidecar writes
+        // (`pdu.slot.count()`). It used to be system_slot(), which restarts with the frame number every 10.24 s: on a
+        // long leg its values repeat, so matching a live transport block back to the reception that produced it was
+        // ambiguous by construction and the first attempt at label recovery matched the wrong ones (2026-10-27).
+        // THE FRAME COLUMN IS THE MONOTONIC ONE (see ul_capture_frame.h): the slot alone repeats every 10.24 s, so a
+        // retransmission's block could not be told apart from one decoded ten seconds earlier -- which is exactly the
+        // ambiguity that made the first recovery attempt match nothing (2026-10-27).
+        std::fprintf(f, "%u,%lld,%u,%u,%u,%llu\n", idx, static_cast<long long>(t_us), tb_bits,
+                     stats.nof_codeblocks_total, extended_frame(current_config.slot),
+                     static_cast<unsigned long long>(current_config.slot.count()));
         std::fclose(f);
       }
     }

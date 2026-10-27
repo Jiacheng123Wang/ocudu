@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ul_capture.h"
+#include "ul_capture_frame.h"
 
 #include "ocudu/phy/support/resource_grid_writer.h"
 
@@ -98,24 +99,6 @@ std::optional<unsigned> capture_rv()
 /// prefix -- the dataset builder reads `prefix + ".bin"` and `prefix + "_ce.txt"`, the replay takes the base path, and
 /// the corpus index lists prefixes -- so a changed field count would have been gratuitous risk. Only the first field
 /// changes meaning: it is now a frame number that keeps counting past 1024 instead of restarting.
-std::atomic<uint32_t> extended_frame_base{0};   // cycles x 1024, advanced when sfn wraps
-std::atomic<uint32_t> last_sfn{0xFFFFFFFFu};
-
-uint32_t extended_frame(slot_point slot)
-{
-  const uint32_t sfn = slot.sfn();
-  uint32_t       base = extended_frame_base.load(std::memory_order_relaxed);
-  const uint32_t prev = last_sfn.load(std::memory_order_relaxed);
-  // A WRAP IS A BIG STEP BACKWARDS, NOT ANY STEP. `sfn` is read under several threads, so consecutive observations can
-  // arrive out of order by a few frames and "went backwards" would then fire constantly: the 18:35 leg produced a frame
-  // span of 678 833 in sixty seconds, about 650 wraps too many. Half a cycle of hysteresis tells a wrap from a race.
-  if ((prev != 0xFFFFFFFFu) && (sfn < prev) && ((prev - sfn) > 512u)) {
-    base = extended_frame_base.fetch_add(1024u, std::memory_order_relaxed) + 1024u;
-  }
-  last_sfn.store(sfn, std::memory_order_relaxed);
-  return base + sfn;
-}
-
 std::string make_key(slot_point slot, rnti_t rnti)
 {
   // THE NAME MUST BE UNIQUE OVER THE WHOLE CAPTURE, NOT OVER ONE HYPERFRAME. `slot.count()` is the slot index
