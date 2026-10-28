@@ -1110,7 +1110,22 @@ md5sum lib/phy/upper/ai_signal_processors/depth3/ai_train/train_depth3.py
 | `cu_cp.amf.addrs` | `192.168.31.211` | ★ **`192.168.0.106`**（AMF 在 106 上）|
 | `cu_cp.amf.bind_addrs` | `192.168.31.204` | ★ **`192.168.0.231`**（本机在广州的地址）|
 
-★ 影响 `configs/*.yml` **15 个文件**，全部已更新 ⇒ 用**任何一份**配置起飞都能连上核心网。
+★ **只改"正在用"的 5 个配置**（用户 2026-10-29 明确要求）：
+
+| 文件 | 用途 |
+|---|---|
+| `pinned_mcs02.yml` / `pinned_mcs06.yml` / `pinned_mcs12.yml` / `pinned_mcs20.yml` | 四条钉 MCS 的采集配置 |
+| `gnb_rf_b200_tdd_n78_20mhz_llr_collect_p0default.yml` | `run_collect_leg.sh` 的**默认**配置 |
+
+★ 其余 **12 个配置保持香港地址不变**（`git checkout 55e1b22c8c^ -- <file>` 已回滚）。
+
+**★ 原因**：网络环境随地点变，**回香港要改回来**。改动越少，来回切换越不容易漏。
+**★ 换地点时的检查清单**（回到香港反向操作即可）：
+
+```bash
+grep -rln "192.168.0.106\|192.168.0.231" configs/*.yml      # 广州地址在哪些文件里
+grep -rln "192.168.31.211\|192.168.31.204" configs/*.yml    # 香港地址在哪些文件里
+```
 
 **(b) ★★★★ 教训：`signal_handling.cpp` 的 2 秒去重窗口是**有意设计**，不要再改 ✗**
 
