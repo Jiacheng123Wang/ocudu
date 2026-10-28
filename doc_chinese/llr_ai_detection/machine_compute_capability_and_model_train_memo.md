@@ -198,6 +198,9 @@ export LD_LIBRARY_PATH="$NV${LD_LIBRARY_PATH:-}"
 | **广州 106** | **`~/work/ocudu`** | ★ `git pull`（HTTPS 匿名可读 ✓）|
 | **广州 221** | **`~/work/ocudu`** | ★ `git pull`（同上；已 clone 到同一 commit）|
 
+★ **只有开发 Mac 能 `push`**；**香港／广州／北京的所有机器都只 `pull`**。
+★ HTTPS 拉取：本仓库公开可读（106／221 实测匿名成功）；若转私有则需 **token** 或 SSH key。
+
 **★ 训练代码与仓库的关系**：训练跑在 `~/work/ai_phy_train/lib/...`（一个**副本**）。为免"两份代码不一致"，
 每次 `git pull` 之后把两个子树同步过去（**不要**整库复制，只这两个目录）：
 
