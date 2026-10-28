@@ -127,7 +127,8 @@ Out of memory: Killed process (python) total-vm:18435688kB
 
 ## 4. 环境安装（每台机器只需一次）
 
-三台训练机都**不要用系统 Python**（3.9/3.12 要么太旧，要么受 PEP 668 限制）：
+所有训练机都**不要用系统 Python**（3.9/3.12 要么太旧，要么受 PEP 668 限制）。
+**两条安装路线**：uf 有 uv 的机器用 uv（下法一）；**广州两台没有 uv，用标准 `venv` ＋ pip**（下法二，已实测）。
 
 ```bash
 # 1) 装 uv（无需 sudo，落在 ~/.local/bin）
@@ -138,6 +139,19 @@ cd ~/work/ai_phy_train
 ~/.local/bin/uv venv --python 3.12 .venv
 ~/.local/bin/uv pip install --python .venv/bin/python "tensorflow[and-cuda]" numpy   # 107（有 N 卡）
 ~/.local/bin/uv pip install --python .venv/bin/python tensorflow numpy               # 211 / 66（纯 CPU）
+```
+
+
+**下法二（广州 106／221 实测，无 uv）**：
+
+```bash
+cd ~/work/ai_phy_train
+python3 -m venv .venv                                  # 106：python3 = 3.12.3
+# 221：系统 python3 是 3.7（TF 只到 2.11）⇒ 用 python.org 的 3.10.5 建 venv
+/Library/Frameworks/Python.framework/Versions/3.10/bin/python3.10 -m venv .venv
+./.venv/bin/pip install -U pip
+./.venv/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple tensorflow            # 106 ⇒ 2.21.0
+./.venv/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple tensorflow==2.16.2   # 221 ⇒ 2.16.2
 ```
 
 **⚠ 107 号机的关键一条**：`tensorflow[and-cuda]` 装好后 **GPU 默认不注册**（`list_physical_devices("GPU")` 为空，
@@ -156,6 +170,8 @@ export LD_LIBRARY_PATH="$NV${LD_LIBRARY_PATH:-}"
 | 211 | 3.12 | 2.21（CPU） | — |
 | 66 | 3.10.5（`/usr/local/bin/python3.10`） | **2.16.2**（x86_64 上限，Keras 3 ✓） | 系统自带 3.9 太旧 |
 | 107 | 3.12 | 2.21（GPU，需 `LD_LIBRARY_PATH`） | 驱动 580 |
+| **广州 106** | **3.12.3** | **2.21.0**（CPU）| 与开发 Mac 同版本 ✓；`.venv` + pip |
+| **广州 221** | **3.10.5**（python.org）| **2.16.2**（CPU，x86 macOS 上限）| 系统 3.7 太旧 ✗；必须用 3.10 建 venv |
 
 **★ 广州（以及任何境内网络）必须用镜像装包**：
 
@@ -550,6 +566,7 @@ nohup /tmp/weekend_queue.sh > logs/week_queue.log 2>&1 &
 |---|---|
 | 2026-10-23 | 建立本 memo；实测四台；确认 107 为最快（122/s）；记录 107 的 `LD_LIBRARY_PATH` 坑；评估 M2 与 2016 MBP 为评估机 |
 | 2026-10-23 | 补 66 号机内存 32 GB；新增 §9 跨地点环境（广州 192.168.0.*、北京 192.168.100.*，初步）与 §10 跨地点排期策略（本地 ≤24 h、离开前提交一周量） |
+| **2026-10-28** | §4 补 **无 uv 的安装路线**（广州实测：`python3 -m venv` ＋ pip ＋ 镜像）与 **广州两台的版本行**（106 = 3.12/TF 2.21、221 = 3.10.5/TF 2.16.2）|
 | **2026-10-28** | ★ **全面核对过时内容**：广州两台从「待测」改为**已实测**；221 磁盘 **37 G → 255 G**（清理 APFS 快照后）、106 **429 → 416 G**（放下 e17 语料后）；§7 补六条真实踩坑（镜像、APFS 快照、`timeout`/`setsid`、`pkill` 自杀、`ARG_MAX`、变量不联动）|
 | **2026-10-28** | ★ 补 **§3 内存去向实测**（`X` 7.30 GB ＋ `H` 3.19 GB ＝ **11.81 GB**，占 99%；模型只占 0.001 GB）与 **§8.6 训练→部署四步**（221 训练 → 回传 Apple Silicon → 导出 → 飞行）；§8 小节重排为 8.1–8.8 |
 | **2026-10-28** | ★ **订正角色**：**导出 Core ML／分桶／飞行 只能在 Apple Silicon 的 macOS 上**；**66（香港）与 221（广州）都是 x86 macOS ⇒ 只能训练**；**M2 MacBook Pro（8 GB）可以**导出/分桶/飞行，但内存吃紧 |
