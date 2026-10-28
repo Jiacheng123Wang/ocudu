@@ -562,7 +562,7 @@ done
 # press reaches the gNB twice, once from the terminal and once from the trap below, and two signals from one press
 # are indistinguishable from "the operator pressed again". Measured 2026-10-16 (leg aillrr-256qam-ai_1016_1804): the
 # second delivery forced the exit, the report block was truncated and the guard below printed "THIS LEG HAS NO
-# COMPLETE REPORT". signal_handling.cpp also ignores duplicates inside a two-second window now; this removes the
+# COMPLETE REPORT". signal_handling.cpp also ignores duplicates inside a half-second window now; this removes the
 # duplicate at its source, so the single signal the trap sends is the one the app acts on.
 set -m
 ./build/apps/gnb/gnb -c "$CONFIG" \
