@@ -925,3 +925,119 @@ final_queue.sh
 
 ★ 状态 ✓：★ 方案已定稿 ✓；★ 211 正在按此执行 ✓。
 
+### D7.20 2026-10-28 ★ 代码同步的唯一来源：**GitHub**（gitlab 已废弃）
+
+**(a) ★★★ 规则**
+
+| 项 | 值 |
+|---|---|
+| 唯一来源 | ★ **`origin = git@github.com:Jiacheng123Wang/ocudu.git`**，分支 **`apple-silicon`** |
+| 废弃 | ★ **gitlab**（开发机上的 `gitlab` remote 已删除）|
+| 各机器仓库位置 | 开发 Mac `~/dev/ocudu`；**广州 106 `~/work/ocudu`**；**广州 221 `~/work/ocudu`** |
+| 拉取方式 | ★ **HTTPS 匿名可读**（广州两台实测 ✓，无需密钥）|
+
+**(b) ★★★ 日常流程**
+
+```bash
+# 改之前先同步；改完推；其他机器再拉
+git pull origin apple-silicon
+git add -A && git commit -m "..." && git push origin apple-silicon
+```
+
+**(c) ★★★★ 训练代码与仓库的关系（★ 容易出错的地方）**
+
+训练跑在 **`~/work/ai_phy_train/lib/...`（副本）**，仓库在 `~/work/ocudu`。**副本不能忘同步**，否则"改的代码没生效"：
+
+```bash
+cd ~/work/ocudu
+for d in lib/phy/upper/ai_signal_processors/depth3/ai_train \
+         lib/phy/upper/signal_processors/channel_estimator/metal/ai_train; do
+  rsync -a --exclude='__pycache__' "$d/" "$HOME/work/ai_phy_train/$d/"
+done
+```
+
+**核对（三台必须相同）**：
+
+```bash
+md5sum lib/phy/upper/ai_signal_processors/depth3/ai_train/train_depth3.py
+```
+
+★ 2026-10-28 实测三台一致：`ee0ea220a45d7cb5f17cb93fba154bec` ✓
+
+**为什么不直接 symlink**：运行中的训练进程持有已打开文件，运行期替换目录有风险 ⇒ **等训练空闲时再考虑**（收益有限）。
+
+★ 状态 ✓：★ 三台同一 commit `cb81b14e86` ✓；★ 训练子树已核对一致 ✓。
+
+---
+
+### D7.21 2026-10-28 ★★ 全天工作汇总：**从香港搬到广州，两台机器落地 ＋ 两条训练开跑**
+
+**(a) ★★★ 地点与机器（今天做的第一件事）**
+
+| 机器 | 地址 | 系统 | CPU | 内存 | 磁盘 | Python / TF | **实测 samples/s** |
+|---|---|---|---|---|---|---|---|
+| **广州-106** | `192.168.0.106`（`jwang`）| Ubuntu 24.04.3 | Xeon E-2286M **8C/8T（无 HT）** | 16 GB | **416 G** | 3.12.3 / **TF 2.21.0** | **12.7** |
+| **广州-221** | `192.168.0.221`（`jiachengwang`）| macOS 12.7.6 | i7-9750H **6C/12T** | 32 GB | **255 G** | 3.10.5 / **TF 2.16.2** | **15.6** |
+
+★ 两台**均无独显**；★ **都是 x86 ⇒ 只能训练，不能导出 Core ML／分桶／飞行**（导出只在 Apple Silicon）。
+★ 工作目录实为 **`~/work/ai_phy_train`**（`/work` 不存在、`sudo` 需密码）。
+
+**(b) ★★★★ 三个真金白银的坑**
+
+| # | 坑 | 现象 | 结论 |
+|---|---|---|---|
+| 1 | ★ **APFS 本地快照钉住空间** | 221 删 48 G，`df` **毫无变化**；`tmutil listlocalsnapshots` 显示三个快照（含删除后生成的）| ★ 关掉自动备份后 **26 G → 255 G**；或 `sudo tmutil deletelocalsnapshots <date>` |
+| 2 | ★ **默认 PyPI 在广州装不动** | 572 MB 的 TF 轮子 **40 分钟无进展** | ★ 清华镜像 **24.7 MB/s** ⇒ 两三分钟装完 |
+| 3 | ★ **`--resume` 在新机器上不存在** | 106 上的 `train_depth3.py` 是旧版 ⇒ `unrecognized arguments`，包装脚本每 30 秒重试 | ★ **代码必须先同步**（见 §D7.20）|
+
+**(c) ★★★★ 内存账：e17 语料 11.8 GB，16 GB 机器装不下**
+
+| 数组 | dtype | 形状 | 内存 |
+|---|---|---|---|
+| `X` | float16 | (100 004, 612, 64) | **7.30 GB** |
+| `H` | float16 | (100 004, 612, 14, 2) | **3.19 GB** |
+| `bits` / `tb_bits` | uint8 | — | 1.31 GB |
+| **合计** | | | ★ **11.81 GB** |
+
+★ 106 上实测被 **OOM 杀掉**（`total-vm:18435688kB`）⇒ ★ **e17 全量只能 ≥32 GB**；
+★ 用 `slice_depth3_dataset.py` 等距切到 **43 902 样本（2.4 GB）** 后，106 上**峰值 8.89 GB** ✓ 可跑。
+
+**(d) ★★★ 语料与数据**
+
+| 项 | 状态 |
+|---|---|
+| e17 语料（9.3 G）| ★ 已复制到 **106**（`~/work/ai_phy_train/data/`），`e17_train` **100 004** 校验通过 ✓ |
+| e17 语料 | ★ 也已复制到 **221**（train/monitor/test ≈ 5.7 G）✓ |
+| **W2 语料** | ★ **在香港 211 上**（`datasets_bin/` ＋ 13 条 `w2_*` 腿），★ **广州连不上 192.168.31.211** ⇒ 待回香港取 |
+
+**(e) ★★★★ 两条训练（模型训练细节见子文档）**
+
+| 运行 | 机器 | 模型 | 语料 | 开始 | 目的 |
+|---|---|---|---|---|---|
+| `20261028_c128_e17` | 221 | **c128 / 325 897 参数** | e17_train **100 004** | 19:50 | 主训练 |
+| `20261028_c128_e17_40k` | 106 | c128（同）。| e17_train **43 902**（等距切片）| 21:05 | ★ **语料规模对照** |
+
+★ 两条都带 **`--patience 3`（早停）** ＋ **`--resume`（断点续训）** ＋ 自动重启包装脚本。
+★ 实测速度：c128 在 221 = **4.0 samples/s**、在 106 = **2.6**；每 epoch 分别 ≈**7 h** / **4.7 h**。
+
+**(f) ★★★★ 断点续训（今天新写的代码）**
+
+| 改动 | 说明 |
+|---|---|
+| 每 epoch 写 `depth3_last.keras` | ★ `.keras` 格式**含优化器状态** ⇒ 不是热启动 |
+| 每 epoch 写 `resume.json` | `{epoch, best, since}` ⇒ 早停计数也恢复 |
+| `--resume` | 从 **epoch+1** 继续 |
+| 包装脚本 | 崩溃自动重启并 resume ⇒ **损失 ≤ 1 epoch**；机器重启后**手工再执行一次**即可 |
+
+★ 已实测：跑完 epoch 1 再 `--resume` ⇒ `resumed ... next epoch 2` ✓
+
+**(g) ★★ 文档结构调整（今天）**
+
+| 动作 | 结果 |
+|---|---|
+| 拆分/改名 | ★ `machine_compute_capability_memo.md` → **`..._and_model_train_memo.md`**（**固定文档**：机器、环境、训练步骤、续训机制）|
+| ★ 新建 | ★ **`depth3_llr_ai_model_train_status.md`（活文档，子文档）**：只记"在跑什么、跑到哪、回来检查什么" |
+| 分工 | ★ **本文件（D7）= 一般工作 memo**；训练状态进子文档 |
+
+★ 状态 ✓：★ 两台机器可用 ✓；★ 语料到位 ✓；★ 两条训练在跑 ✓；★ 代码单一来源 ✓；★ 文档分工清楚 ✓。
+
