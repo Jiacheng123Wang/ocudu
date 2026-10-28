@@ -892,6 +892,8 @@ def main():
     parser.add_argument("--no-aux", action="store_true", help="LLR head only, for the R2.4 ablation")
     parser.add_argument("--select-on", choices=("val", "band"), default="val",
                         help="which epoch is the best one: the validation loss, or the BER of the low-SNR band")
+    parser.add_argument("--resume", action="store_true",
+                        help="continue from <out>/depth3_last.keras if it exists, instead of starting over")
     parser.add_argument("--patience", type=int, default=0,
                         help="stop when the validation loss has not improved for this many epochs; 0 trains the full count")
     parser.add_argument("--workers", type=int, default=0,
@@ -1186,8 +1188,26 @@ def main():
     history = []
     best = np.inf
     epochs_without_improvement = 0
+    start_epoch = 1
+    # RESUME, BECAUSE A MULTI-DAY RUN MUST NOT RESTART FROM ZERO. The whole model is saved every epoch, in the format that
+    # carries the optimizer state, so continuing is not a warm start: the learning-rate schedule position, the best value
+    # and the patience counter come back too. Without it an eleven-day run costs eleven days again after a power cut,
+    # which is the one failure a long training on a machine that is not a data centre will actually meet.
+    if args.resume:
+        last_path = os.path.join(args.out, "depth3_last.keras")
+        state_path = os.path.join(args.out, "resume.json")
+        if os.path.exists(last_path) and os.path.exists(state_path):
+            model = tf.keras.models.load_model(last_path)
+            state = json.load(open(state_path))
+            start_epoch = int(state.get("epoch", 1)) + 1
+            best = float(state.get("best", best))
+            epochs_without_improvement = int(state.get("since", 0))
+            print(f"resumed from {last_path}: next epoch {start_epoch}, best {best:.5f}, "
+                  f"{epochs_without_improvement} epoch(s) without improvement")
+        else:
+            print("no checkpoint to resume from; starting fresh")
     started = time.time()
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         losses = []
         for samples in train.epoch(args.batch, args.workers, args.prefetch or (2 * args.workers)):
             x, targets = tensors(samples)
@@ -1210,6 +1230,13 @@ def main():
         # WHAT "BEST" MEANS (design section 19.438): the validation loss by default, or -- with `--select-on band` -- the BER of
         # the low-SNR band, which is the quantity the acceptance gates measure. Choosing on the latter means the checkpoint kept
         # is the one the gates would have picked, so an early stop can no longer miss a later gate-optimal epoch.
+        # THE RESUMABLE STATE, EVERY EPOCH (see --resume): the model with its optimizer plus the three numbers the loop
+        # carries. Written before the best-model decision, so a crash during that decision still leaves a checkpoint one
+        # epoch old rather than none.
+        model.save(os.path.join(args.out, "depth3_last.keras"))
+        with open(os.path.join(args.out, "resume.json"), "w") as _state:
+            json.dump({"epoch": epoch, "best": float(best),
+                       "since": int(epochs_without_improvement)}, _state)
         chosen = val_band if (args.select_on == "band" and np.isfinite(val_band)) else val_loss
         if chosen < best:
             best = chosen
@@ -1469,8 +1496,26 @@ def main():
     history = []
     best = np.inf
     epochs_without_improvement = 0
+    start_epoch = 1
+    # RESUME, BECAUSE A MULTI-DAY RUN MUST NOT RESTART FROM ZERO. The whole model is saved every epoch, in the format that
+    # carries the optimizer state, so continuing is not a warm start: the learning-rate schedule position, the best value
+    # and the patience counter come back too. Without it an eleven-day run costs eleven days again after a power cut,
+    # which is the one failure a long training on a machine that is not a data centre will actually meet.
+    if args.resume:
+        last_path = os.path.join(args.out, "depth3_last.keras")
+        state_path = os.path.join(args.out, "resume.json")
+        if os.path.exists(last_path) and os.path.exists(state_path):
+            model = tf.keras.models.load_model(last_path)
+            state = json.load(open(state_path))
+            start_epoch = int(state.get("epoch", 1)) + 1
+            best = float(state.get("best", best))
+            epochs_without_improvement = int(state.get("since", 0))
+            print(f"resumed from {last_path}: next epoch {start_epoch}, best {best:.5f}, "
+                  f"{epochs_without_improvement} epoch(s) without improvement")
+        else:
+            print("no checkpoint to resume from; starting fresh")
     started = time.time()
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         losses = []
         for samples in train.epoch(args.batch, args.workers, args.prefetch or (2 * args.workers)):
             x, targets = tensors(samples)
@@ -1493,6 +1538,13 @@ def main():
         # WHAT "BEST" MEANS (design section 19.438): the validation loss by default, or -- with `--select-on band` -- the BER of
         # the low-SNR band, which is the quantity the acceptance gates measure. Choosing on the latter means the checkpoint kept
         # is the one the gates would have picked, so an early stop can no longer miss a later gate-optimal epoch.
+        # THE RESUMABLE STATE, EVERY EPOCH (see --resume): the model with its optimizer plus the three numbers the loop
+        # carries. Written before the best-model decision, so a crash during that decision still leaves a checkpoint one
+        # epoch old rather than none.
+        model.save(os.path.join(args.out, "depth3_last.keras"))
+        with open(os.path.join(args.out, "resume.json"), "w") as _state:
+            json.dump({"epoch": epoch, "best": float(best),
+                       "since": int(epochs_without_improvement)}, _state)
         chosen = val_band if (args.select_on == "band" and np.isfinite(val_band)) else val_loss
         if chosen < best:
             best = chosen
