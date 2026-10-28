@@ -1149,3 +1149,41 @@ grep -rln "192.168.31.211\|192.168.31.204" configs/*.yml    # 香港地址在哪
 
 ★ 状态 ✓：★ 地址已全量更新 ✓；★ 信号代码已 revert 到原状 ✓；★ 冻结问题在脚本层解决 ✓。
 
+### D7.24 2026-10-29 ★★ 两条工作约定：**检索排除大目录**、**iperf 上行要 `-R`**
+
+**(a) ★★★ 检索时必须排除的目录（否则 grep 会扫 452 GB）**
+
+| 目录 | 大小 | 排除理由 |
+|---|---|---|
+| ★ `doc_chinese/llr_ai_detection/work_tmp/corpus/` | ★ **452 GB** | 原始捕获（每条腿几十万小文件）|
+| `build/` | 2.7 GB | 编译产物 |
+| `.git/` | 2.8 GB | 仓库对象 |
+| `doc_chinese/**/work_tmp/venvs/`、`**/datasets*/`、`**/tb_*/` | 数 GB–数十 GB | 虚拟环境、语料、活体 TB |
+
+**⇒ 检索时**：只搜 `*.md`/`*.sh`/`*.py`，或用 `--exclude-dir=corpus --exclude-dir=venvs --exclude-dir=build --exclude-dir=.git`，
+**绝不对 `doc_chinese/` 整目录做无过滤的 `grep -r`**。
+
+**(b) ★★★★ iperf：server 在手机、client 在 CN；**要上行必须加 `-R`**
+
+| 项 | 值 |
+|---|---|
+| 服务端（**手机**）| `iperf3 -s -p 5201` |
+| 客户端（**106**，`ogstun` = `10.45.0.1/16`）| ★ **`iperf3 -c 10.45.0.7 -p 5201 -R -u -b <rate> -t 30 --omit 3`** |
+| ★ 为什么 `-R` | 默认是"客户端发、服务端收" ⇒ **下行**；`-R` 让**服务端（手机）发** ⇒ ★ **上行**，才是我们语料要的方向 |
+| 手机 IP | **`10.45.0.7`**（PDU 会话地址；ICMP 抓包里 src 就是它 ✓）|
+
+**不同流量档位的测试梯度**（观察宽度/PRB 随速率变化）：
+
+```bash
+# 在 106 上，每个档位 30 秒
+for b in 1M 3M 5M 8M 0; do
+  echo "=== phase b=$b $(date +%T) ==="
+  iperf3 -c 10.45.0.7 -p 5201 -R -u -b $b -t 30 --omit 3
+  sleep 3
+done
+```
+
+**观察点**：每个档位期间 gNB 日志的 `[sched-mcs] … prbs=<n> sinr=<x>dB` ⇒ **速率 ↑ ⇒ PRB ↑**（这正是宽度轴的另一种控制手段）。
+
+★ 状态 ✓：★ 检索规则已定 ✓；★ iperf 方向与命令已定 ✓；★ 待手机 attach 后执行 ⏳。
+
