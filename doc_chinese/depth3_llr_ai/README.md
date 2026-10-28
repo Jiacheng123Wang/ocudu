@@ -56,4 +56,5 @@
 | 文件 | 性质 | 内容 |
 |---|---|---|
 | `depth3_llr_ai_model_train_status.md` | ★ **活文档** | 训练运行登记、当前进度、回来检查清单、精度基线 |
+| `corpus_capture_and_new_datasets_build.md` | **活的采集/建库记录** | 采集腿清单、建库批次、★ **全量分箱盘点（§6）** |
 | `../llr_ai_detection/machine_compute_capability_and_model_train_memo.md` | **固定文档** | 机器算力、环境安装、训练步骤与断点续训 |
