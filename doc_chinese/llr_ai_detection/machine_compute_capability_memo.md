@@ -163,6 +163,67 @@ export LD_LIBRARY_PATH="$NV${LD_LIBRARY_PATH:-}"
 | **北京** | **4 台 NUC**：**3 台 Ubuntu**、**1 台 macOS 13** | — | 待测同上 |
 | **北京** | **1 台带独立 N 卡的工作站**：**16 CPU / 32 线程** | — | 用户描述为"前面评估过的那台机器（192.168.31.223）"；香港侧同类机型实测为 **RTX 3060 / ~122 samples/s**（§2），北京这台待实测确认卡型与内存 |
 
+### 9.1 广州实测（2026-10-28，本机已移入 192.168.0.*）
+
+| 机器 | 地址／用户 | 系统 | CPU | 内存 | GPU | 磁盘可用 | Python | TF | samples/s |
+|---|---|---|---|---|---|---|---|---|---|
+| **广州-NUC-1** | **192.168.0.106**／`jwang` | **Ubuntu 24.04.3**（x86_64） | **Xeon E-2286M，8 核 8 线程**（**无 HT**） | **16 GB**（15.3 GiB） | **无独显**（Intel UHD 630） | **429 G** | **3.12.3** | **2.21.0**（cp312） | ★ **12.7**（1 epoch × 2 000 样本 = 157 s） |
+| **广州-Mac-NUC** | **192.168.0.221**／`jiachengwang` | **macOS 12.7.6**（x86_64） | **i7-9750H，6 核 12 线程** | **32 GB** | **无独显**（UHD 630） | ★ **37 G**（很紧） | **3.10.5**（系统另有 3.7.3） | **2.16.2**（x86 macOS 上限） | ★ **15.6**（128 s） |
+
+**这两台的关键差异（会直接决定分工）**：
+
+| 项 | 106（Ubuntu） | 221（macOS 12） |
+|---|---|---|
+| 内存 | **16 GB** ⇒ 与香港 NUC 同档，能跑 E4 级别语料但吃紧 | **32 GB** ⇒ 内存不愁 |
+| 磁盘 | **429 G** ⇒ 可放整套语料到 2027 | ★ **37 G** ⇒ **只能放 1–2 套语料**，训练产物要勤清理 |
+| TF 版本 | **2.21.0**（与本机一致）| ★ **2.16.2**（x86 macOS 天花板，Keras 3）|
+| Python | 3.12.3 | 3.10.5（**venv 已用 3.10 建**；系统默认 3.7 太旧，且 TF 只到 2.11）|
+| 训练代码 | `/work` 不存在 ⇒ 实际目录是 ★ **`~/work/ai_phy_train`** | 同左 |
+
+**⚠️ 路径更正**：两台机器上用户建的是 **`~/work/ai_phy_train`**（家目录下），不是 `/work/ai_phy_train`；`/work` 在两边都不存在，且 `sudo` 需要密码 ⇒ **按家目录使用**。
+
+**⚠️ 221 的 Python 选择**：系统自带 **3.7.3**（TF 上限 2.11，太旧），但机器上另装了 **python.org 3.10.5**（`/Library/Frameworks/Python.framework/Versions/3.10/bin/python3.10`）⇒ **venv 用 3.10 建，TF 装 2.16.2** ✓。
+
+**实测口径**（与 §2 完全相同，2026-10-28）：
+
+| 机器 | 2 000 样本 × 1 epoch | **samples/s** | 24 h 可容纳（40 epoch）|
+|---|---|---|---|
+| **221（i7-9750H，12 线程）** | **128 s** | ★ **15.6** | ≈**33 700** |
+| **106（Xeon E8C/8T，无 HT）** | **157 s** | ★ **12.7** | ≈**27 400** |
+| 对照：NUC-1 211 / NUC-2 66 | — | 19 | ≈41 000 |
+| 对照：开发 Mac（M4 Pro）| — | 89 | ≈192 000 |
+| 对照：107（RTX 3060）| — | 122 | ≈263 000 |
+
+**⇒ 两台广州机器都比香港 NUC 慢 20–33%**：106 是 **8 核 8 线程**（E-2286M 未开 HT，只有 8 个逻辑核），
+221 虽然 12 线程但 **TF 2.16.2 + macOS 12** 的数据管道更旧。**⇒ 广州只适合跑"一周量"的排队任务，不适合快出结果。**
+
+**装环境要点（★ 广州网络必须用镜像）**：
+
+```bash
+# 默认 PyPI 在广州不可用：572 MB 的 TF 轮子下了 40 分钟没动
+# 清华镜像 24.7 MB/s ⇒ 两三分钟装完
+./.venv/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple tensorflow        # 106
+./.venv/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple tensorflow==2.16.2 # 221
+```
+
+| 机器 | venv | 备注 |
+|---|---|---|
+| 106 | `~/work/ai_phy_train/.venv`（py3.12）| TF **2.21.0**，与开发 Mac 完全一致 ✓ |
+| 221 | `~/work/ai_phy_train/.venv`（py3.10）| TF **2.16.2**；系统自带 3.7 只能到 TF 2.11 ✗ ⇒ **必须用 python.org 的 3.10.5** |
+
+**训练代码与语料就位方式**（两台相同）：
+
+```bash
+# 代码：从开发机打包传过去（ai_train 目录 ＋ AI-CE 共享模块，共 2.7 MB）
+scp /tmp/ai_train_tree.tgz <host>:/tmp/ && ssh <host> 'cd ~/work/ai_phy_train && tar xzf /tmp/ai_train_tree.tgz'
+# 语料：任取一份 npz
+scp data/datasets/e17_test/depth3.npz <host>:work/ai_phy_train/data/speed_test.npz
+```
+
+**★ 已验证可训练**：两台都完整跑通 1 epoch（`runs/_speed/depth3_best.keras` ＋ `history.json` 产出正常，
+`parameters 26185`、`heads ['llr','post_eq_noise']`），Keras 3 兼容 ✓。
+
+
 **待实地评估时要补的字段**（每台机器一行）：
 
 ```text
