@@ -61,6 +61,21 @@ time .venv/bin/python -u lib/phy/upper/ai_signal_processors/depth3/ai_train/trai
 
 外加 TensorFlow 自身约 2.5–3 GB。⇒ **E4 需要 ≥16 GB**；15 GB 的 107 号机跑 E4 时峰值约 9 GB，**不能并行第二条**。
 
+**★ e17 语料（100 004 样本）实测：16 GB 装不下**（2026-10-28，106 上被 OOM 杀掉）：
+
+```
+Out of memory: Killed process (python) total-vm:18435688kB
+```
+
+| 语料 | 样本 | npz 磁盘 | 说明 |
+|---|---|---|---|
+| `e17_train` | **100 004** | **5.5 GB** | ★ **需要 >16 GB 内存**（`np.load` 全量物化 ＋ TF 张量）|
+| `e17_monitor` | 1 523 | 86 MB | 验证集，无压力 |
+| `e17_test` | 3 294 | 155 MB | — |
+
+**⇒ 结论：`e17_train` 只能在 ≥32 GB 的机器上直接训（221 ✓、开发 Mac ✓）；106（16 GB）只能做
+①语料仓库 ②小切片训练（例如先抽 2 万样本另存一个 npz）③并行消融。**
+
 ---
 
 ## 4. 环境安装（每台机器只需一次）
@@ -219,6 +234,16 @@ scp /tmp/ai_train_tree.tgz <host>:/tmp/ && ssh <host> 'cd ~/work/ai_phy_train &&
 # 语料：任取一份 npz
 scp data/datasets/e17_test/depth3.npz <host>:work/ai_phy_train/data/speed_test.npz
 ```
+
+**★ 磁盘陷阱（2026-10-28，221 实测）**：删掉 `~/anaconda3`(3.4 G) 与 `~/macOS_tool`(45 G) 后 `df` **毫无变化**，
+原因不是没删，而是 **APFS 本地 Time Machine 快照**钉住了这些块（`tmutil listlocalsnapshots /` 显示三个，最近一个就生成在
+删除之后）。**关掉自动备份后可用空间 26 G → 261 G**（快照共占约 **235 G**）。
+
+| 现象 | 处置 |
+|---|---|
+| 删大文件后 `df` 不变 | `tmutil listlocalsnapshots /` ⇒ `sudo tmutil deletelocalsnapshots <date>` |
+| 只想腾一部分 | `sudo tmutil thinlocalsnapshots / <字节> <保留个数>` |
+| 长期 | 关掉本机自动备份，或接外置盘让 TM 有目标（本地快照会自动瘦身）|
 
 **★ 已验证可训练**：两台都完整跑通 1 epoch（`runs/_speed/depth3_best.keras` ＋ `history.json` 产出正常，
 `parameters 26185`、`heads ['llr','post_eq_noise']`），Keras 3 兼容 ✓。
