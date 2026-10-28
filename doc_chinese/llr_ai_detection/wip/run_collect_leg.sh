@@ -105,6 +105,23 @@ if [ ! -f "$CONFIG" ]; then
   echo "REFUSING to run: LEG_CONFIG=$CONFIG is not a file." >&2
   exit 2
 fi
+# THE CONFIG'S OWN ADDRESS MUST EXIST ON THIS MACHINE, OR THE LEG CANNOT START.
+# Two failures, one cause, both measured: a misspelt variable (LEG_ONFIG=...) leaves this script reading its DEFAULT config, which
+# names the address of whichever site the default belongs to; and a config that was right at one site is wrong at the next. Either way
+# gnb starts, cannot bind its NG-U socket, and exits 1 about two seconds later with "Failed to bind UDP socket to <addr>:2152" -- a
+# message that looks like a network fault and is really a stale file. Refusing here says which file and which address, which is the
+# difference between a five-second fix and a lost leg.
+BIND_ADDR=$(awk '/^[[:space:]]*bind_addrs:/{sub(/^[[:space:]]*bind_addrs:[[:space:]]*/, ""); gsub(/["\047]/, ""); print; exit}' "$CONFIG")
+if [ -n "$BIND_ADDR" ] && [ "$BIND_ADDR" != "0.0.0.0" ]; then
+  LOCAL_IPS=$(ifconfig 2>/dev/null | awk '/inet /{sub(/^addr:/, "", $2); sub(/\/.*/, "", $2); print $2}')
+  if ! printf '%s\n' "$LOCAL_IPS" | grep -qx "$BIND_ADDR"; then
+    echo "REFUSING to run: $CONFIG binds NG-U to $BIND_ADDR, which is not an address of this machine." >&2
+    echo "  this machine has: $(printf '%s ' $LOCAL_IPS)" >&2
+    echo "  LEG_CONFIG currently = ${LEG_CONFIG:-<unset: using the DEFAULT config above>}" >&2
+    echo "  Fix: pass LEG_CONFIG=<config for this site>, or correct bind_addrs in $CONFIG." >&2
+    exit 2
+  fi
+fi
 # WHERE THE LEG'S THREE FILES GO. The default is this directory's logs - every leg flown before 2026-10-01 is
 # there - and LEG_LOGDIR overrides it for a workstream that keeps its own: doc_chinese/macos_thread_priority/
 # README.md declares that this line's legs live in doc_chinese/macos_thread_priority/wip/logs, and the three
