@@ -7,11 +7,18 @@ collection decision now starts from.
 
 The bins are the same ones select_by_bin.py and split_depth3_stratified.py use, so the three agree by construction.
 
-Usage: census_bins.py [--jobs N] [--csv OUT] <leg dir> [<leg dir> ...]
+INCREMENTAL BY DESIGN. A corpus grows a leg at a time, and recounting a million and a half captures to add twenty thousand is
+waste; the ledger remembers which legs have already been counted and their per-bin counts, so a run over new legs adds to the
+running total and the table in the document is updated rather than rebuilt.
+
+Usage:
+  census_bins.py [--jobs N] [--csv OUT] [--ledger FILE] [--force] <leg dir> [...]
+  --ledger  a JSON file holding {"legs": {leg: {...}}, "bins": {bin: n}}; legs already in it are skipped unless --force
 """
 import argparse
 import collections
 import glob
+import json
 import math
 import os
 from multiprocessing import Pool
@@ -82,13 +89,27 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--jobs", type=int, default=14)
     ap.add_argument("--csv", default="")
+    ap.add_argument("--ledger", default="", help="JSON file of legs already counted and the running per-bin totals")
+    ap.add_argument("--force", action="store_true", help="recount legs that the ledger already lists")
     ap.add_argument("legs", nargs="+")
     args = ap.parse_args()
 
+    ledger = {"legs": {}, "bins": {}}
+    if args.ledger and os.path.exists(args.ledger):
+        ledger = json.load(open(args.ledger))
+    known = set(ledger["legs"])
+    legs = [l for l in args.legs if args.force or os.path.basename(l.rstrip("/")) not in known]
+    skipped = len(args.legs) - len(legs)
+    if skipped:
+        print(f"{skipped} leg(s) already in the ledger, skipped", flush=True)
+    if not legs:
+        print("nothing new to count")
+        return 0
+
     files = []
-    for leg in args.legs:
+    for leg in legs:
         files += [f for f in glob.glob(os.path.join(leg, "cap_*.txt")) if not f.endswith("_ce.txt")]
-    print(f"{len(files)} capture(s) over {len(args.legs)} leg(s)", flush=True)
+    print(f"{len(files)} capture(s) over {len(legs)} leg(s)", flush=True)
 
     per_leg = collections.Counter()
     total = collections.Counter()
@@ -110,6 +131,20 @@ def main():
             for (mod, width, snr), n in sorted(total.items()):
                 handle.write(f"ALL,{mod},{width},{snr},{n}\n")
         print(f"wrote {args.csv}")
+
+    if args.ledger:
+        for (leg, (mod, width, snr)), n in per_leg.items():
+            entry = ledger["legs"].setdefault(leg, {})
+            key = f"{mod}|{width}|{snr}"
+            entry[key] = entry.get(key, 0) + n
+        for (mod, width, snr), n in total.items():
+            key = f"{mod}|{width}|{snr}"
+            ledger["bins"][key] = ledger["bins"].get(key, 0) + n
+        ledger["updated"] = args.csv or ledger.get("updated", "")
+        with open(args.ledger, "w") as handle:
+            json.dump(ledger, handle, indent=1, sort_keys=True)
+        print(f"ledger {args.ledger}: {len(ledger['legs'])} leg(s), {len(ledger['bins'])} bin(s), "
+              f"{sum(ledger['bins'].values())} sample(s) in total")
 
     print(f"bins: {len(total)}  samples: {sum(total.values())}")
     print("--- most populated ---")
