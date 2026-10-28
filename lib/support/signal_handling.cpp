@@ -22,7 +22,7 @@ static constexpr unsigned TERMINATION_TIMEOUT_S =
 /// How long after the first signal a later one is still read as a DUPLICATE rather than as a deliberate second
 /// press. See the force path below: Ctrl+C reaches a process twice in the ordinary runner setup, and treating that
 /// duplicate as "the operator pressed again" SIGKILLs a shutdown that was working.
-static constexpr auto FORCE_GRACE_S = std::chrono::milliseconds{500};
+static constexpr auto FORCE_GRACE_S = std::chrono::seconds{2};
 
 /// When the first signal was handled, in nanoseconds on the steady clock. Zero means "no stop has begun".
 static std::atomic<int64_t> stop_began_ns{0};
@@ -57,11 +57,7 @@ static void signal_handler(int signal)
         ::alarm(TERMINATION_TIMEOUT_S);
         return;
       }
-      // A DELIBERATE SECOND SIGNAL FORCES THE EXIT -- and a duplicate one must not. THE WINDOW IS HALF A SECOND, not
-      // two: a duplicate is the SAME key press delivered twice, which the runner measured at microseconds apart, while an
-      // operator who presses again has waited and seen nothing happen. Two seconds ate honest presses -- measured
-      // 2026-10-29 on leg w2_harq_mcs02_ping_1028f, where the operator pressed again, was told the press was a duplicate,
-      // and had to press a third time. Half a second still covers every duplicate the runner can produce. Measured 2026-10-16, twice, in
+      // A DELIBERATE SECOND SIGNAL FORCES THE EXIT -- and a duplicate one must not. Measured 2026-10-16, twice, in
       // opposite directions, and both readings matter here:
       //
       //  * an operator whose Ctrl+C did not stop the gNB pressed it again, and the second press did NOTHING: the
@@ -79,7 +75,7 @@ static void signal_handler(int signal)
       if ((steady_ns() - stop_began_ns.load(std::memory_order_relaxed)) <
           std::chrono::duration_cast<std::chrono::nanoseconds>(FORCE_GRACE_S).count()) {
         fmt::print(stderr,
-                   "Ignoring a duplicate interrupt that arrived within {} ms of the first: the graceful stop is "
+                   "Ignoring a duplicate interrupt that arrived within {} s of the first: the graceful stop is "
                    "still running. Press again (or kill) if it stays stuck.\n",
                    FORCE_GRACE_S.count());
         return;
