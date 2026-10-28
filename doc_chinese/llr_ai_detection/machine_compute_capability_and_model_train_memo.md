@@ -189,6 +189,32 @@ export LD_LIBRARY_PATH="$NV${LD_LIBRARY_PATH:-}"
 
 **⚠ macOS 上缺两个常用命令**：`timeout` 与 `setsid` 都没有 ⇒ 后台启动用 `nohup cmd > log 2>&1 &` 即可，不要套 `setsid`。
 
+**★ 代码的唯一来源是 GitHub**（2026-10-28 起）：`origin = git@github.com:Jiacheng123Wang/ocudu.git`，分支 `apple-silicon`。
+**gitlab 已废弃**（开发机上的 `gitlab` remote 已删除）。
+
+| 机器 | 仓库位置 | 拿代码的方式 |
+|---|---|---|
+| 开发 Mac | `~/dev/ocudu` | `git push origin apple-silicon` |
+| **广州 106** | **`~/work/ocudu`** | ★ `git pull`（HTTPS 匿名可读 ✓）|
+| **广州 221** | **`~/work/ocudu`** | ★ `git pull`（同上；已 clone 到同一 commit）|
+
+**★ 训练代码与仓库的关系**：训练跑在 `~/work/ai_phy_train/lib/...`（一个**副本**）。为免"两份代码不一致"，
+每次 `git pull` 之后把两个子树同步过去（**不要**整库复制，只这两个目录）：
+
+```bash
+cd ~/work/ocudu
+for d in lib/phy/upper/ai_signal_processors/depth3/ai_train \
+         lib/phy/upper/signal_processors/channel_estimator/metal/ai_train; do
+  rsync -a --exclude='__pycache__' "$d/" "$HOME/work/ai_phy_train/$d/"
+done
+```
+
+**核对一致性**（三台机器的这个 md5 必须相同）：
+
+```bash
+md5sum lib/phy/upper/ai_signal_processors/depth3/ai_train/train_depth3.py
+```
+
 **代码布局**（四台相同，且**不能压平**）：
 
 ```
@@ -573,6 +599,7 @@ nohup /tmp/weekend_queue.sh > logs/week_queue.log 2>&1 &
 | 2026-10-23 | 建立本 memo；实测四台；确认 107 为最快（122/s）；记录 107 的 `LD_LIBRARY_PATH` 坑；评估 M2 与 2016 MBP 为评估机 |
 | 2026-10-23 | 补 66 号机内存 32 GB；新增 §9 跨地点环境（广州 192.168.0.*、北京 192.168.100.*，初步）与 §10 跨地点排期策略（本地 ≤24 h、离开前提交一周量） |
 | **2026-10-28** | §4 补 **无 uv 的安装路线**（广州实测：`python3 -m venv` ＋ pip ＋ 镜像）与 **广州两台的版本行**（106 = 3.12/TF 2.21、221 = 3.10.5/TF 2.16.2）|
+| **2026-10-28** | ★ **代码统一到 GitHub**：`origin = github.com/Jiacheng123Wang/ocudu`（gitlab 废弃，开发机已删该 remote）；**106 与 221 都 clone 到 `~/work/ocudu` 并拉到同一 commit `cb81b14e86`**；训练子树用 `rsync` 同步（附核对 md5 的命令）|
 | **2026-10-28** | ★ **全面核对过时内容**：广州两台从「待测」改为**已实测**；221 磁盘 **37 G → 255 G**（清理 APFS 快照后）、106 **429 → 416 G**（放下 e17 语料后）；§7 补六条真实踩坑（镜像、APFS 快照、`timeout`/`setsid`、`pkill` 自杀、`ARG_MAX`、变量不联动）|
 | **2026-10-28** | ★ 补 **§3 内存去向实测**（`X` 7.30 GB ＋ `H` 3.19 GB ＝ **11.81 GB**，占 99%；模型只占 0.001 GB）与 **§8.6 训练→部署四步**（221 训练 → 回传 Apple Silicon → 导出 → 飞行）；§8 小节重排为 8.1–8.8 |
 | **2026-10-28** | ★ **订正角色**：**导出 Core ML／分桶／飞行 只能在 Apple Silicon 的 macOS 上**；**66（香港）与 221（广州）都是 x86 macOS ⇒ 只能训练**；**M2 MacBook Pro（8 GB）可以**导出/分桶/飞行，但内存吃紧 |
