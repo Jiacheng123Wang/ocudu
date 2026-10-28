@@ -571,8 +571,16 @@ set -m
   --expert_phy.phy_pipeline "$MODE" \
   "${LOG_LEVEL_ARGS[@]}" \
   --log.filename "$LOG" \
-  >&3 2>&4 &
+  0</dev/null >&3 2>&4 &
 GNB_PID=$!
+# STDIN IS /dev/null, AND THAT IS NOT COSMETIC. gnb registers STDIN_FILENO with its command dispatcher and reads it
+# asynchronously. This process is a BACKGROUND job (job control is on above, so it has its own process group), and the
+# kernel sends SIGTTIN -- stop -- to a background process that reads its controlling terminal. So a single keystroke in
+# the terminal froze a leg mid-run: measured 2026-10-29 on leg w2_harq_mcs02_ping_1028f, the process sat in state T with
+# rc=149 (128+21, SIGTTIN) after printing every sched-mcs line for half an hour, the wrapper waited forever, and the
+# leg's shutdown counters never printed, so the guard below refused it as a result. The console's only jobs are `h` and
+# `q`, which nobody uses during a flight; /dev/null gives it EOF once, `parse_stdin` logs "Connection closed" and returns,
+# and no read can ever reach the tty again.
 # ONE Ctrl-C MUST STOP gnb AND NOT THIS SCRIPT. Until 2026-09-28 gnb ran in the FOREGROUND, and the script survived
 # a Ctrl-C only because bash ignores SIGINT in itself while it waits for a foreground job. Holding the pid (which
 # the smoke test below needs) turned that into `wait` on a BACKGROUND job, where that protection does NOT apply:

@@ -1054,3 +1054,50 @@ md5sum lib/phy/upper/ai_signal_processors/depth3/ai_train/train_depth3.py
 
 ★ 状态 ✓：★ 两台机器可用 ✓；★ 语料到位 ✓；★ 两条训练在跑 ✓；★ 代码单一来源 ✓；★ 文档分工清楚 ✓。
 
+### D7.22 2026-10-28/29 ★★★★ 采集"莫名冻结"的根因：**SIGTTIN**（后台进程读终端）—— 已修
+
+**(a) ★★★ 现象**
+
+腿 `w2_harq_mcs02_ping_1028f` 正常打印 `[sched-mcs]` 半小时后**突然冻结**：
+
+| 观察 | 值 |
+|---|---|
+| 进程状态 | ★ **`T`（stopped）**，不是 `Z`（退出）|
+| 脚本判定 | `the gNB exited with rc=149` |
+| ★ 解码 | **149 − 128 = 21 = SIGTTIN**（macOS 信号编号）|
+| 收尾报告 | contract 之后的所有计数器**缺失** ⇒ 脚本正确地判 `NO COMPLETE REPORT` |
+| 数据 | ✅ **63 511 条捕获完整**，`gaps=0 rx_overflows=0 rx_lates=0` |
+
+**(b) ★★★★ 根因：后台进程**读终端** ⇒ 内核发 SIGTTIN**
+
+| 环节 | 事实 |
+|---|---|
+| gNB 的命令行控制器 | `cmdline_command_dispatcher` 把 **STDIN_FILENO** 注册进 io_broker，**异步读**（`parse_stdin()`）|
+| 脚本把 gNB 放后台 | `set -m` ⇒ gNB 在**自己的进程组**，**不是**终端的**前台进程组** |
+| 终端有输入时 | ★ 内核给"后台进程读 tty"发 **SIGTTIN** ⇒ **进程被停住** |
+
+**⇒ 只要那个终端里**出现任何输入**（一个按键、Ctrl-C 的回显处理等），gNB 的 `read()` 就会触发 SIGTTIN ⇒ 冻结。**
+**⇒ 不是 Ctrl-C 被"错误传递"，而是**内核因为"后台读终端"这个动作**发的信号。**
+
+**(c) ★★★ 修复（已改 `run_collect_leg.sh`）**
+
+```diff
+   --log.filename "$LOG" \
+-  >&3 2>&4 &
++  0</dev/null >&3 2>&4 &
+```
+
+**为什么安全**：`parse_stdin()` 遇 EOF 只 `logger.debug("Connection closed"); return;` ⇒ **不会退出 app**，
+而控制台只有 `h`/`q` 两个用途，飞行时没人用。
+
+**(d) ★★ 结论与后续**
+
+| 项 | 结论 |
+|---|---|
+| 数据 | ★ **该腿数据可用**（只是"报告不完整"，不是"样本有问题"）|
+| 脚本 | ★ 已修：gNB 的 stdin 指向 `/dev/null`，**不可能再被 SIGTTIN 停住** |
+| 操作侧 | 仍建议 **tmux** 跑腿；Ctrl-C 只发给**跑脚本**的那个终端 |
+| 报告完整性 | 脚本的 `NO COMPLETE REPORT` 守卫**工作正常** ✓（缺计数器就拒绝当结果读）|
+
+★ 状态 ✓：★ 根因已定位并有信号编号为证（149 = 128+21）✓；★ 脚本已修 ✓；★ 该腿数据保留 ✓。
+
