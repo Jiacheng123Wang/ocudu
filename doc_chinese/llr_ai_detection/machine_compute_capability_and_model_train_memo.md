@@ -13,9 +13,9 @@
 |---|---|---|---|---|---|---|
 | **开发 Mac**（本机） | 192.168.31.121 | macOS 26.6.2 | **Apple M4 Pro，14 核** | **64 GB** | 集成 | 开发、导出 Core ML、飞行；**夜间可训练** |
 | NUC-1 | **192.168.31.211** | Ubuntu | 16 线程 | 31 GB | 无 | 训练（长期）、**核心网 Open5GS** |
-| NUC-2 | **192.168.31.66** | macOS 13.7.8 | Intel Xeon E-2286M，8 核/16 线程 | **32 GB** | 无 | 训练 |
+| NUC-2 | **192.168.31.66** | macOS 13.7.8 | Intel Xeon E-2286M，8 核/16 线程 | **32 GB** | 无 | **训练**（★ x86 ⇒ 不能导出/分桶/飞行）|
 | Asus notebook | **192.168.31.107** | Ubuntu | 16 线程 | **15 GB** | **RTX 3060 Laptop 6 GB**（compute 8.6） | **主力训练**（最快） |
-| M2 MacBook | 192.168.31.203 | macOS 26.6.2 | Apple M2，4P+4E | **8 GB** | 集成 | **仅评估**（内存不足，见 §5） |
+| M2 MacBook | 192.168.31.203 | macOS 26.6.2 | Apple M2，4P+4E | **8 GB** | 集成 | ★ **可导出 Core ML／分桶／飞行**（Apple Silicon），但内存 8 GB ⇒ 只适合评估与小规模训练（见 §5）|
 | 2016 MacBook Pro | （未接入） | macOS | Intel i7 4C/8T | 16 GB | — | **仅评估/截断训练**（太慢，见 §5） |
 
 登录：三台训练机与 M2 均**免密 SSH**，用户名 `jwang`（211/107）与 `jiachengwang`（66/203）；工作目录 **`~/work/ai_phy_train`**。
@@ -26,7 +26,7 @@
 | 机器 | 地址 | 系统 | CPU | 内存 | GPU | 磁盘可用 | 角色 |
 |---|---|---|---|---|---|---|---|
 | **广州-106** | **192.168.0.106**（`jwang`） | Ubuntu 24.04.3 | Xeon E-2286M **8C/8T（无 HT）** | **16 GB** | 无 | **416 G** | **语料仓库** ＋ 小切片训练 ＋ 消融 |
-| **广州-221** | **192.168.0.221**（`jiachengwang`） | macOS 12.7.6 | i7-9750H **6C/12T** | **32 GB** | 无 | **255 G** | ★ **主力训练**（能装下 e17 全量）|
+| **广州-221** | **192.168.0.221**（`jiachengwang`） | macOS 12.7.6 | i7-9750H **6C/12T** | **32 GB** | 无 | **255 G** | ★ **主力训练**（能装下 e17 全量）；★ **x86 ⇒ 不能导出/分桶/飞行** |
 
 ---
 
@@ -164,7 +164,7 @@ export LD_LIBRARY_PATH="$NV${LD_LIBRARY_PATH:-}"
 
 | 机器 | 原因 |
 |---|---|
-| **M2 / 8 GB（.203）** | 语料 3.9–5.6 GB ＋ TF 2.5 GB 放不下；且机器**已在换页**（swap 6/7.2 GB）。只适合分箱 BER、LLR 诊断这类逐样本评估。 |
+| **M2 / 8 GB（.203）** | 语料 3.9–5.6 GB ＋ TF 2.5 GB 放不下；且机器**已在换页**（swap 6/7.2 GB）。只适合分箱 BER、LLR 诊断这类逐样本评估。★ **但它是 Apple Silicon ⇒ 是"导出 Core ML／分桶／飞行"的可用机器**（与 66/221 相反），只是不能在上面跑大训练。 |
 | **2016 MBP / i7 4C8T / 16 GB** | 内存够（16 GB ✓），但吞吐推算 9–11 samples/s ⇒ 一条 E 轨 46–54 h。只适合截断训练（`--max-train ≤8000`）。 |
 
 ---
@@ -176,7 +176,8 @@ export LD_LIBRARY_PATH="$NV${LD_LIBRARY_PATH:-}"
 | 出结论要快（E 轨、A/B 候选） | **107（122/s）**，其次开发 Mac |
 | 多条消融并行 | 211 ＋ 66（各 19/s，各可 2 条 × 8 线程） |
 | 夜间长跑 | 开发 Mac（过夜）＋ 107（连续） |
-| 导出 Core ML / 分桶 / 飞行 | **只能在 macOS**（`coremltools` ＋ `xcrun coremlcompiler`）⇒ 开发 Mac 或 66 |
+| ★ **导出 Core ML / 分桶 / 飞行** | ★ **只能在 Apple Silicon 的 macOS 上**（`coremltools` ＋ `xcrun coremlcompiler`，目标是 ANE）⇒ **开发 Mac（M4 Pro，64 GB，首选）** 或 **M2 MacBook Pro（8 GB，可用但吃紧）** |
+| ✗ **不能做上面三件事的** | ★ **66（香港 macOS 13）与 221（广州 macOS 12）都是 x86_64** ⇒ **只能训练**，**不能**导出 Core ML、**不能**分桶、**不能**飞行 |
 | 评估（分箱 BER、符号一致） | 任意；内存小的优先 211/107 |
 
 **经验值**：一台机器并行 2 条训练时，每条用 `OMP_NUM_THREADS=8`（16 线程机器），耗时约为单条的 1.3–1.6 倍。
@@ -271,7 +272,7 @@ epoch   12  train 0.04521  val 0.09311  uncoded BER 0.0149  coded BLER 0.0000  m
 | `history.json` | 每 epoch 的完整指标（画曲线用）|
 | `val_llr_stats.npy` | `[val_ber, val_llr_mean, val_bler]` 三列 |
 
-导出 Core ML 用 `depth3_best.keras`（导出只能在 macOS 上做）。
+导出 Core ML 用 `depth3_best.keras`，★ **但只能在 Apple Silicon 的 Mac 上做**（开发 Mac 或 M2 MacBook Pro）；**x86 的 macOS（66 / 221）不能导出**——它们只能训练。
 
 ### 8.5 ★ 断点续训（2026-10-28 新增）
 
@@ -479,7 +480,8 @@ chmod +x /tmp/weekend_queue.sh
 nohup /tmp/weekend_queue.sh > logs/week_queue.log 2>&1 &
 ```
 
-- **成果取回**：`runs/<name>/depth3_best.keras` ＋ `train.log`，用 `rsync` 拉回本机再导出 Core ML
+- **成果取回**：`runs/<name>/depth3_best.keras` ＋ `train.log`，用 `rsync` 拉回**Apple Silicon 的 Mac**再导出 Core ML
+  （x86 macOS 只能训练，导出／分桶／飞行都不行）
   （导出只能在 macOS，见 §6）。
 - **一周任务的纪律**：① 每条都要写 `train.log`；② 队列脚本里**不要**用相对路径以外的假设（`cd` 到工作目录）；
   ③ 离开前确认 `nohup` 已脱离终端（`ps` 里父进程是 1）；④ 留一份 `disk` 余量检查（E 轨语料 5 GB/条产物）。
@@ -500,5 +502,6 @@ nohup /tmp/weekend_queue.sh > logs/week_queue.log 2>&1 &
 |---|---|
 | 2026-10-23 | 建立本 memo；实测四台；确认 107 为最快（122/s）；记录 107 的 `LD_LIBRARY_PATH` 坑；评估 M2 与 2016 MBP 为评估机 |
 | 2026-10-23 | 补 66 号机内存 32 GB；新增 §9 跨地点环境（广州 192.168.0.*、北京 192.168.100.*，初步）与 §10 跨地点排期策略（本地 ≤24 h、离开前提交一周量） |
+| **2026-10-28** | ★ **订正角色**：**导出 Core ML／分桶／飞行 只能在 Apple Silicon 的 macOS 上**；**66（香港）与 221（广州）都是 x86 macOS ⇒ 只能训练**；**M2 MacBook Pro（8 GB）可以**导出/分桶/飞行，但内存吃紧 |
 | **2026-10-28** | ★ **文件改名**：`machine_compute_capability_memo.md` → **`machine_compute_capability_and_model_train_memo.md`**（范围从「算力」扩到「算力 ＋ 模型训练」）；★ **新增 §8 模型训练完整步骤**（命令、参数、日志字段、产物、断点续训、耗时、故障）；★ §1 加广州两台并标注香港机器**已不可达**；★ §2 吞吐表补广州两行；★ §4 补**镜像装包**与 macOS 缺 `timeout`/`setsid` 两条；★ 变更记录从 §8 改为 §11 并移到文末 |
 | **2026-10-28** | ★ **广州实测（§9.1）**：**106** = Ubuntu 24.04.3 / Xeon E-2286M **8 核 8 线程（无 HT）** / **16 GB** / **429 G** / py3.12 / **TF 2.21.0** / ★ **12.7 samples/s**；**221** = macOS **12.7.6** / i7-9750H **12 线程** / **32 GB** / ★ **仅 37 G** / py3.10 / **TF 2.16.2** / ★ **15.6 samples/s**。两台**均无独显**，都慢于香港 NUC 的 19/s。★ 工作目录实为 **`~/work/ai_phy_train`**（`/work` 不存在、`sudo` 需密码）；★ 广州**默认 PyPI 不可用，必须用清华镜像**（24.7 MB/s vs 卡死）；★ 两台均已建 venv ＋ 装 TF ＋ 传训练代码与语料，并**各跑通 1 epoch** |
