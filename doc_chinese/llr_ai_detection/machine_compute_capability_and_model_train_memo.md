@@ -1,8 +1,8 @@
-# 机器算力 memo（香港本地局域网 192.168.31.*）
+# 机器算力与模型训练 memo（香港 192.168.31.* ＋ 广州 192.168.0.*）
 
 **目的**：把"哪台机器能跑什么、跑多快、怎么装"写在一处，省掉每次训练前重新试错。
 
-**范围**：本文件只讲**算力与训练环境**。网络/手机接入见 `test_environment/香港测试环境与手机接入问题总结_2026-09-05.md`；
+**范围**：本文件讲**算力、训练环境**与**模型训练的完整步骤（含断点续训）**。网络/手机接入见 `test_environment/香港测试环境与手机接入问题总结_2026-09-05.md`；
 训练配方与判据见 `llr_ai_detection_design_and_implementation_1.md`（尤其 §19.298、§19.323–§19.325）。
 
 ---
@@ -19,6 +19,14 @@
 | 2016 MacBook Pro | （未接入） | macOS | Intel i7 4C/8T | 16 GB | — | **仅评估/截断训练**（太慢，见 §5） |
 
 登录：三台训练机与 M2 均**免密 SSH**，用户名 `jwang`（211/107）与 `jiachengwang`（66/203）；工作目录 **`~/work/ai_phy_train`**。
+
+**★ 上表是香港的机器（192.168.31.*）。2026-10-28 起人已移到广州（192.168.0.*），香港那批从广州**不可达**，
+上面的数字只能在回到香港或打通专线后使用。广州的两台见下表与 §9.1。**
+
+| 机器 | 地址 | 系统 | CPU | 内存 | GPU | 磁盘可用 | 角色 |
+|---|---|---|---|---|---|---|---|
+| **广州-106** | **192.168.0.106**（`jwang`） | Ubuntu 24.04.3 | Xeon E-2286M **8C/8T（无 HT）** | **16 GB** | 无 | **416 G** | **语料仓库** ＋ 小切片训练 ＋ 消融 |
+| **广州-221** | **192.168.0.221**（`jiachengwang`） | macOS 12.7.6 | i7-9750H **6C/12T** | **32 GB** | 无 | **255 G** | ★ **主力训练**（能装下 e17 全量）|
 
 ---
 
@@ -40,6 +48,8 @@ time .venv/bin/python -u lib/phy/upper/ai_signal_processors/depth3/ai_train/trai
 | 开发 Mac（M4 Pro） | ~89 | ≈5.5 h |
 | NUC-1 211（Ubuntu） | ~19 | ≈26 h |
 | NUC-2 66（Intel Mac） | ~19 | ≈26 h |
+| **广州 221（i7-9750H）** | **15.6** | ≈31 h |
+| **广州 106（Xeon 8C/8T）** | **12.7** | ≈38 h |
 | 2016 MBP（推算） | ~9–11 | ≈46–54 h |
 
 **模型宽度的影响（2026-10-28，221 实测；`e17_train` 5 000 样本切片，batch 8，`--blocks 18`）**：
@@ -126,7 +136,17 @@ export LD_LIBRARY_PATH="$NV${LD_LIBRARY_PATH:-}"
 | 66 | 3.10.5（`/usr/local/bin/python3.10`） | **2.16.2**（x86_64 上限，Keras 3 ✓） | 系统自带 3.9 太旧 |
 | 107 | 3.12 | 2.21（GPU，需 `LD_LIBRARY_PATH`） | 驱动 580 |
 
-**代码布局**（三台相同，且**不能压平**）：
+**★ 广州（以及任何境内网络）必须用镜像装包**：
+
+```bash
+./.venv/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple tensorflow==2.16.2   # 实测 24.7 MB/s
+```
+
+默认 PyPI 在广州实测**卡死**（572 MB 的 TF 轮子 40 分钟无进展），换清华镜像后两三分钟装完。
+
+**⚠ macOS 上缺两个常用命令**：`timeout` 与 `setsid` 都没有 ⇒ 后台启动用 `nohup cmd > log 2>&1 &` 即可，不要套 `setsid`。
+
+**代码布局**（四台相同，且**不能压平**）：
 
 ```
 ~/work/ai_phy_train/
@@ -175,7 +195,154 @@ export LD_LIBRARY_PATH="$NV${LD_LIBRARY_PATH:-}"
 
 ---
 
-## 9. 跨地点环境（初步，待实地评估后补充）
+## 8. 模型训练：完整步骤（含断点续训）
+
+**一句话**：一条命令启动，日志看 epoch 行，产物是 `depth3_best.keras`；**中途断了不用重跑**，加 `--resume`
+（或用下面的自动重启包装脚本）从上一个 epoch 继续。
+
+### 8.1 一次训练的全部输入
+
+| 输入 | 位置 | 说明 |
+|---|---|---|
+| 训练代码 | `~/work/ai_phy_train/lib/phy/upper/ai_signal_processors/depth3/ai_train/` | ＋ 同级的 `.../metal/ai_train/`（借用的 DSP 工具），**布局不能压平** |
+| 训练语料 | `data/e17_train/depth3.npz` | 100 004 样本，5.5 GB |
+| 验证语料 | `data/e17_monitor/depth3.npz` | 1 523 样本 |
+| Python 环境 | `.venv/` | §4；TF 2.16.2（221）/ 2.21（106）|
+| 输出目录 | `runs/<名字>/` | 全部产物与检查点 |
+
+### 8.2 标准命令（改三个地方即可复用）
+
+```bash
+cd ~/work/ai_phy_train
+./.venv/bin/python -u lib/phy/upper/ai_signal_processors/depth3/ai_train/train_depth3.py \
+  --train data/e17_train/depth3.npz --val data/e17_monitor/depth3.npz \
+  --out runs/c128_e17 \
+  --modcond --layout spatial --blocks 18 --c-hid 128 --in-channels 12 \
+  --no-reporting-heads --w-ch 0.1 --w-noise 0.3 \
+  --batch 8 --epochs 60 --patience 3 --bler-every 5 --bler-samples 8 \
+  --resume
+```
+
+| 参数 | 含义 | 怎么选 |
+|---|---|---|
+| `--train` / `--val` | 训练／验证 npz | 验证集**永远不要**与训练集重叠 |
+| `--out` | 产物目录 | 一次实验一个目录，断点续训靠它 |
+| `--layout spatial` | 输入平面布局 | 与部署一致，别改 |
+| `--blocks` | 残差块数 | 现役 18 |
+| **`--c-hid`** | ★ **通道宽度** | **32 / 64 / 128**（见 §2 的宽度表）|
+| `--in-channels` | 输入通道 | 12 |
+| `--no-reporting-heads` | 关掉上报头 | 只训 LLR 主头时用 |
+| `--w-ch` / `--w-noise` | 辅助损失权重 | 0.1 / 0.3 |
+| `--batch` | 批大小 | 8（内存宽裕可 16）|
+| `--epochs` | 上限 | 60；早停会提前结束 |
+| **`--patience`** | ★ **早停耐心** | 3（验证损失 3 个 epoch 不改善就停）|
+| `--bler-every` / `--bler-samples` | 每 N 个 epoch 解一次 LDPC 算 BLER／每次解几块 | 5 / 8（解码很贵）|
+| **`--resume`** | ★ **断点续训** | 有检查点就接着跑 |
+
+### 8.3 训练过程中看什么
+
+```bash
+tail -f runs_c128.log
+```
+
+**每行 epoch 都要读这六个字段**：
+
+```
+epoch   12  train 0.04521  val 0.09311  uncoded BER 0.0149  coded BLER 0.0000  mean|LLR| 31.2  (25234s)
+```
+
+| 字段 | 含义 | 健康的样子 |
+|---|---|---|
+| `train` / `val` | 训练／验证损失 | 两者一起降；val 长期不降 ⇒ 过拟合或该早停 |
+| **`uncoded BER`** | **解码前**误比特率（LLR 取符号与真值比）| 从 0.5 往下降（0.5＝瞎猜）|
+| **`coded BLER`** | **解码后**误块率（过真实 LDPC ＋ 重编码校验）| ★ **这才是判据**；越低越好 |
+| `mean|LLR|` | LLR 平均幅度 | 从 0 涨到 20–40（涨不动＝没学到）|
+| 括号里的秒数 | 本 epoch 墙钟时间 | 与 §2 的 samples/s 对照 |
+
+**★ 判据不是 BER，是 coded BLER**（设计 §2.3）：BER 只说"指向对不对"，只有解码才知道码还能不能纠回来。
+
+### 8.4 产物
+
+| 文件 | 用途 |
+|---|---|
+| ★ `runs/<名字>/depth3_best.keras` | **部署用**（验证损失／低 SNR 带最优的那个 epoch）|
+| `depth3_last.keras` | ★ **续训用**（含优化器状态，最后一个 epoch）|
+| `resume.json` | `{epoch, best, since}` ⇒ "跑到第几个 epoch"的唯一真相 |
+| `history.json` | 每 epoch 的完整指标（画曲线用）|
+| `val_llr_stats.npy` | `[val_ber, val_llr_mean, val_bler]` 三列 |
+
+导出 Core ML 用 `depth3_best.keras`（导出只能在 macOS 上做）。
+
+### 8.5 ★ 断点续训（2026-10-28 新增）
+
+| 情形 | 行为 |
+|---|---|
+| **进程崩溃／被杀** | 包装脚本自动重启并 `--resume` ⇒ **最多损失 1 个 epoch** |
+| **机器重启／断电** | 检查点在磁盘上；★ **重新执行一次包装脚本**即可继续 |
+| **正常早停** | 退出码 0 ⇒ 包装脚本停止，不再重启 |
+
+**机制**：每个 epoch **在最优模型判定之前**写一次 `depth3_last.keras`（`.keras` 格式**同时含权重和优化器状态**）
+＋ `resume.json`。`--resume` 读到它们就把 `start_epoch = epoch+1`、`best`、`since` 一并恢复 ⇒
+**不是热启动，是真正的续训**（学习率进度、动量都在）。
+
+**自动重启包装脚本**（`~/work/ai_phy_train/run_c128.sh`，改 `--c-hid` 与 `--out` 即可复用）：
+
+```bash
+#!/usr/bin/env bash
+set -u
+cd "$HOME/work/ai_phy_train"
+PY=./.venv/bin/python
+TRAIN=lib/phy/upper/ai_signal_processors/depth3/ai_train/train_depth3.py
+OUT=runs/c128_e17
+while true; do
+  "$PY" -u "$TRAIN" --train data/e17_train/depth3.npz --val data/e17_monitor/depth3.npz \
+    --out "$OUT" --modcond --layout spatial --blocks 18 --c-hid 128 --in-channels 12 \
+    --no-reporting-heads --w-ch 0.1 --w-noise 0.3 --batch 8 --epochs 60 \
+    --patience 3 --bler-every 5 --bler-samples 8 --resume >> runs_c128.log 2>&1
+  rc=$?
+  echo "trainer exited rc=$rc at $(date +%T)" >> runs_c128.log
+  [ "$rc" -eq 0 ] && break      # 0 = 正常结束（含早停）
+  sleep 30
+done
+```
+
+```bash
+cd ~/work/ai_phy_train && nohup ./run_c128.sh > /dev/null 2>&1 &
+```
+
+**验证过的行为**：
+
+```
+$ cat runs/_resume/resume.json
+{"epoch": 1, "best": Infinity, "since": 0}
+$ ... --epochs 3 --resume
+resumed from runs/_resume/depth3_last.keras: next epoch 2, best inf, 0 epoch(s) without improvement
+epoch    2 ... epoch 3 ...
+```
+
+### 8.6 典型耗时（广州 221，100 004 样本）
+
+| 宽度 | 每 epoch | 收敛通常要 | 总时长 |
+|---|---|---|---|
+| c32 | ≈1.6 h | 20–40 epoch | 1.5–3 天 |
+| **c64** | ≈3.5 h | 15–30 epoch | 2–4 天 |
+| **c128** | ≈7 h | 8–20 epoch（更宽收敛更快）| **3–6 天** |
+
+**⇒ 排"一周量"时：c128 一条，或 c64 两条串行。**
+
+### 8.7 常见故障
+
+| 现象 | 原因 | 处置 |
+|---|---|---|
+| `Out of memory: Killed process` | 语料物化 ＋ TF 超出内存 | 换 ≥32 GB 机器，或用 `--max-train` 切片 |
+| `the AI-CE training tree is not at ...` | 代码目录被压平 | 保持 §4 的目录层级 |
+| `ModuleNotFoundError: tensorflow` | venv 用错 | `./.venv/bin/python` 显式指定 |
+| 训练极慢（≈1 sample/s）| 落到了 CPU 而以为在用 GPU | 这些机器**都没有 GPU**，慢是正常的 |
+| `timeout: command not found` | macOS 无 `timeout` | 直接跑，或用 `nohup` |
+
+---
+
+## 9. 跨地点环境（2026-10-28 已实地评估广州）
 
 **地点由本机 IP 段推断**——本机（开发 Mac）与 M2 MacBook 会随队移动到广州和北京，所以"在哪"可以直接从网络看出来：
 
@@ -325,10 +492,13 @@ nohup /tmp/weekend_queue.sh > logs/week_queue.log 2>&1 &
 
 ---
 
-## 8. 变更记录
+---
+
+## 11. 变更记录
 
 | 日期 | 变更 |
 |---|---|
 | 2026-10-23 | 建立本 memo；实测四台；确认 107 为最快（122/s）；记录 107 的 `LD_LIBRARY_PATH` 坑；评估 M2 与 2016 MBP 为评估机 |
 | 2026-10-23 | 补 66 号机内存 32 GB；新增 §9 跨地点环境（广州 192.168.0.*、北京 192.168.100.*，初步）与 §10 跨地点排期策略（本地 ≤24 h、离开前提交一周量） |
+| **2026-10-28** | ★ **文件改名**：`machine_compute_capability_memo.md` → **`machine_compute_capability_and_model_train_memo.md`**（范围从「算力」扩到「算力 ＋ 模型训练」）；★ **新增 §8 模型训练完整步骤**（命令、参数、日志字段、产物、断点续训、耗时、故障）；★ §1 加广州两台并标注香港机器**已不可达**；★ §2 吞吐表补广州两行；★ §4 补**镜像装包**与 macOS 缺 `timeout`/`setsid` 两条；★ 变更记录从 §8 改为 §11 并移到文末 |
 | **2026-10-28** | ★ **广州实测（§9.1）**：**106** = Ubuntu 24.04.3 / Xeon E-2286M **8 核 8 线程（无 HT）** / **16 GB** / **429 G** / py3.12 / **TF 2.21.0** / ★ **12.7 samples/s**；**221** = macOS **12.7.6** / i7-9750H **12 线程** / **32 GB** / ★ **仅 37 G** / py3.10 / **TF 2.16.2** / ★ **15.6 samples/s**。两台**均无独显**，都慢于香港 NUC 的 19/s。★ 工作目录实为 **`~/work/ai_phy_train`**（`/work` 不存在、`sudo` 需密码）；★ 广州**默认 PyPI 不可用，必须用清华镜像**（24.7 MB/s vs 卡死）；★ 两台均已建 venv ＋ 装 TF ＋ 传训练代码与语料，并**各跑通 1 epoch** |
