@@ -656,8 +656,29 @@ if [ "$SMOKE" -gt 0 ]; then
   ) &
   SMOKE_PID=$!
 fi
+# A HEARTBEAT, BECAUSE ONE LINE AT RECEPTION 100000 IS NOT ENOUGH. ul_capture prints "budget exhausted" once, to stderr, and then falls
+# silent while the leg keeps running: the scheduler's own [sched-mcs] lines continue, so the console still looks busy and the operator has no way
+# to tell a finished capture from a working one. Measured 2026-10-29 on leg w2_harq_QPSK_iperf_1029d: the message was there, at line 508 of 597,
+# between two grant lines -- and the operator, watching that console, could not find it.
+# So say it every minute, in the runner's own voice, whether the answer is good or bad.
+CAPTURE_DIR=$(dirname "$OCUDU_UL_DUMP")
+(
+  while sleep 60; do
+    n=$(find "$CAPTURE_DIR" -maxdepth 1 -name 'cap_*.bin' ! -name '*_h.bin' ! -name '*_llr.bin' 2>/dev/null | wc -l | tr -d ' ')
+    if grep -aq "budget exhausted" "$LOG.stderr" "$LOG" 2>/dev/null; then
+      echo "[capture] ${n} file(s) -- BUDGET SPENT: the leg is still running but nothing more will be written. Restart it to continue." >&2
+    elif [ "$n" -eq 0 ]; then
+      echo "[capture] 0 file(s) -- NOTHING IS BEING WRITTEN (check the capture plan above and the phone)." >&2
+    else
+      echo "[capture] ${n} file(s) -- writing" >&2
+    fi
+  done
+) &
+HEARTBEAT_PID=$!
+
 wait "$GNB_PID"
 rc=$?
+kill "$HEARTBEAT_PID" 2>/dev/null
 if [ -n "$SMOKE_PID" ]; then kill "$SMOKE_PID" 2>/dev/null; wait "$SMOKE_PID" 2>/dev/null; fi
 exec 3>&- 4>&-
 wait "$out_tee" "$err_tee"

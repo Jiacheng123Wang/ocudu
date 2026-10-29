@@ -1609,3 +1609,41 @@ setsid nohup ./archive_and_reclaim.sh --dest /mnt/corpus/tarballs --delete > rec
 
 ★ 状态 ✓：★ 本机归档已停 ✓；★ 工具已入库 ✓；★ **211 后台执行中** 🔄。
 
+### D7.34 2026-10-29 ★★★ "采满了会打印一行" —— **它确实打印了，但被淹没、而且之后不再提醒**
+
+**(a) ★ 核查结论（`w2_harq_QPSK_iperf_1029d`）**
+
+| 项 | 结果 |
+|---|---|
+| `[ul_capture] budget exhausted` 是否存在 | ★ **存在**（`fprintf(stderr, …)`，代码在 `ul_capture.cpp:260`）|
+| 在哪个流 | ★ **`.log.stderr`**（Runner 用 `tee` 同时送到控制台）|
+| 位置 | ★ **第 508 行 / 共 597 行** |
+| 上下文 | ★ 第 507 行与第 509 行都是 `[sched-mcs] PUSCH grant MCS: …` |
+
+**⇒ 所以不是"没打印"，而是：**
+1. ★ **只有一行**，夹在 **482 行 `[sched-mcs]`** 中间；
+2. ★ **之后不再提醒**，而调度器的 `[sched-mcs]` **继续刷** ⇒ 控制台看起来**还在忙** ⇒ 操作者无法判断"采满了"还是"在采"。
+
+**(b) ★★★ 修法（脚本层，未改 gNB 行为）**
+
+`run_collect_leg.sh` 现在**每分钟**在控制台打印一行**Runner 自己的**状态：
+
+```
+[capture] 63 512 file(s) -- writing
+[capture] 100 000 file(s) -- BUDGET SPENT: the leg is still running but nothing more will be written. Restart it to continue.
+[capture] 0 file(s) -- NOTHING IS BEING WRITTEN (check the capture plan above and the phone).
+```
+
+| 状态 | 含义 |
+|---|---|
+| `writing` | 正常在采 |
+| ★ **`BUDGET SPENT`** | ★ **已达上限，腿还在跑但不再写盘** |
+| ★ **`0 file(s)`** | ★ **一条都没写**（配置/手机/路径问题）|
+
+**(c) ★ 为什么不在 gNB 里改得更醒目**
+
+★ 用户要求"**没有充足理由不改 gNB 代码**"。这里的根因是**提醒机制不足**，而**Runner 每分钟说话**是零风险的脚本改动，
+既能解决"看不见"，也不动采集逻辑本身。
+
+★ 状态 ✓：★ 一行确实打印过（有行号为证）✓；★ 淹没原因已查明 ✓；★ Runner 心跳已加 ✓。
+
