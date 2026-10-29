@@ -1469,3 +1469,21 @@ find /Volumes/CORPUS/corpus -name 'cap_*.txt' ! -name '*_ce.txt' | wc -l
 
 ★ 状态 ✓：★ 盘已就绪 ✓；★ 目录已建 ✓；★ 复制进行中 ⏳；★ 系统盘已腾出 435 G ✓。
 
+### D7.31 2026-10-29 ★★★ 已建库的**逐箱明细表**（落在采集/建库文档 §10）
+
+**位置**：★ **`corpus_capture_and_new_datasets_build.md` §10**（§10.2 是完整的 112 格表）
+
+| 项 | 值 |
+|---|---|
+| ★ 表格 | **4 调制 × 4 宽度 × 7 SNR ＝ 112 格**，每格 ★ **`self / harq`** |
+| `self` | **本身 crc=OK（rv=0）** |
+| `harq` | ★ **rv=0 时 crc=KO、靠后续 HARQ 捞回** |
+| 总量 | ★ **self 88 518 ＋ harq 7 437 ＝ 95 955** |
+| 空箱 | **15 / 112** |
+| 工具 | `ai_train/inventory_datasets.py` |
+| 原始数据 | `work_tmp/built_dataset_inventory_2026-10-29.csv`（112 行）|
+
+**⇒ 本文件不再复制那张表**（避免两处数字不同步）；要看逐箱明细**打开 §10.2**。
+
+★ 状态 ✓：★ 明细表已入文档 ✓；★ CSV 已入库 ✓；★ 主文档只留指针 ✓。
+
