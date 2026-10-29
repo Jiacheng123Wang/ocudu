@@ -1685,5 +1685,29 @@ ssh jwang@192.168.31.211 'ls datasets_bin/*.npz | wc -l; du -sh datasets_bin'
 ssh jwang@192.168.31.211 'grep -c "^---- built" build_qpsk.log'
 ```
 
-★ 状态 ✓：★ 回收完成 ✓；★ 搬运进行中 🔄；★ 建库将在搬运后自动启动（后台，离线）⏳。
+**(e) ★★ 2026-10-29 20:20 进度**
+
+| 项 | 值 |
+|---|---|
+| 已到 211 | **8 / 14 条腿**（`mcs02_ping_1028`、`a`、`b`、`c`、`d`、`de`、`e`、`f`，共约 **57 G**）|
+| 正在传 | `mcs02_ping_1028g`（23 G）|
+| 剩余 | **6 条 ≈ 99 G**（含 `QPSK_iperf_1029c/d`、`QPSK_ping_1029e/f/clip_g`）|
+| 实测吞吐 | ≈ **19 MB/s**（瓶颈仍是**小文件 tar**，不是 91 MB/s 的链路）|
+| ETA | **≈60–90 分钟** |
+| 建库 | ★ **尚未启动**（脚本设计为**搬完全部才启动**）|
+| 211 可用 | **301 G** ✓ |
+
+**⚠ ★ 一个遗漏**：★ **`w2_harq_QPSK_ping_1029h` 不在本次搬运清单里**（它是 19:53 才开始采的，晚于脚本 19:29 的清单）。
+★ 而它正是 **`≥30 dB` 样本所在的那条腿**（§7.3p）⇒ **采集结束后必须单独补传并建库**：
+
+```bash
+# 1029h 采满后
+C=doc_chinese/llr_ai_detection/work_tmp/corpus
+tar -cf /tmp/push_1029h.tar -C $C w2_harq_QPSK_ping_1029h
+scp /tmp/push_1029h.tar jwang@192.168.31.211:/tmp/
+ssh jwang@192.168.31.211 'tar -xf /tmp/push_1029h.tar -C ~/work/ai_phy_train/corpus/ && rm /tmp/push_1029h.tar'
+ssh jwang@192.168.31.211 'cd ~/work/ai_phy_train && setsid nohup ./queue_build_datasets.sh w2_harq_QPSK_ping_1029h >> build_qpsk.log 2>&1 < /dev/null &'
+```
+
+★ 状态 ✓：★ 回收完成 ✓；★ 搬运 8/14 🔄；★ 建库待搬运完成自动启动 ⏳；★ **`1029h` 需补传**（已记）。
 
