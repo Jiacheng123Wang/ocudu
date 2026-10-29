@@ -1487,3 +1487,52 @@ find /Volumes/CORPUS/corpus -name 'cap_*.txt' ! -name '*_ce.txt' | wc -l
 
 ★ 状态 ✓：★ 明细表已入文档 ✓；★ CSV 已入库 ✓；★ 主文档只留指针 ✓。
 
+### D7.32 2026-10-29 ★★★★ 外置盘拷贝慢的真相：**exFAT 的小文件元数据**，不是硬件
+
+**(a) 现象与测量**
+
+| 方式 | 速率 |
+|---|---|
+| ★ **逐文件 `rsync`** | ★ **≈4.8 MB/s**（20 G 用了 70 多分钟）|
+| ★ **单文件 500 MB `dd`** | ★ **88 MB/s**（5.67 s）|
+| ★ **`tar` 每腿一个归档** | ★ **≈64 MB/s**（实测，13× 于逐文件）|
+
+**⇒ 盘和接口都没问题；慢在**每个文件的元数据操作**（十万个 68 KB 小文件 ＋ exFAT ＋ USB）。**
+
+**(b) ★★★ 正确做法：**每腿一个 tar**
+
+```bash
+# 工具已入库
+ai_train/archive_legs_to_drive.sh /Volumes/CORPUS/tarballs
+# 排除正在采集的腿
+EXCLUDE="w2_harq_QPSK_iperf_1029d" ai_train/archive_legs_to_drive.sh /Volumes/CORPUS/tarballs
+```
+
+**为什么写 `.part` 再改名**：归档可能**与采集同时进行**（会被暂停/中断），半个 `.tar` 若被下次当成"已完成"就是**静默数据丢失**；
+所以先写 `<leg>.tar.part`，**tar 退出码 0 且条目数与源目录一致**才改名。
+
+**(c) ★★ 采集期间不要同时归档**
+
+采集与归档**共用同一块盘**（`iostat` 实测 I/O 饱和度很高）。2026-10-29 的决定：
+★ **新腿 `w2_harq_QPSK_iperf_1029d` 开始采集时，归档暂停**（`kill -STOP <tar pid>`），采完再 `kill -CONT` 继续。
+
+**(d) 已归档（暂停前）**
+
+| 腿 | 归档大小 |
+|---|---|
+| `mcs02_ping_1028` | 13.2 GB |
+| `mcs02_ping_1028a` | 16.3 GB |
+| `mcs02_ping_1028b` | 0.2 GB |
+| `mcs02_ping_1028c` | 1.6 GB |
+| `mcs02_ping_1028d` | 0.6 GB |
+
+★ **`1028de` 的半个归档已删除**（3.2 GB，SIGSTOP 时中断）。
+
+**(e) Ubuntu 侧解包**
+
+```bash
+cd /mnt/corpus/tarballs && tar -xf w2_harq_mcs02_ping_1028.tar -C /mnt/corpus/
+```
+
+★ 状态 ✓：★ 慢因已查明（不是硬件）✓；★ tar 方案已入库并验证 ✓；★ 采集期间暂停归档 ✓。
+
