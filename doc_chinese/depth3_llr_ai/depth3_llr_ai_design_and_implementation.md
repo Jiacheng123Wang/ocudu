@@ -1269,6 +1269,10 @@ wc -l $L/tb_live/dd_meta.csv               # 有行，且 head -1 是 6 列
 
 ★ 状态 ✓：★ 脚本已代劳 TB 目录与条数 ✓；★ 启动横幅会打印四个旋钮 ✓；★ 起飞清单已固化 ✓。
 
+**★ 代价已经产生过一条腿**：`w2_harq_QPSK_iperf_1029` 用旧命令起飞（没设 `OCUDU_HELENA_DUMP_DIR`）⇒
+**117 135 条捕获但没有一个 `.bits`** ⇒ ★ **只能用 replay 重建 `self` 样本，HARQ 回溯完全没有料**（`harq_backfill` 需要活体 TB 作供体）。
+**⇒ 结论：这类腿不要指望 HARQ；要 HARQ 就得重新飞。**
+
 ### D7.27 2026-10-29 ★★ 工具：`run_iperf_ladder.sh`（上行速率梯度，地址自动找）
 
 **位置**：`doc_chinese/llr_ai_detection/wip/run_iperf_ladder.sh`（香港 211 上也放了一份）

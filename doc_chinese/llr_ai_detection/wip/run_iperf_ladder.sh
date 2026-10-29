@@ -35,10 +35,14 @@ phone_candidates() {
     sed 's/^IPv4\[//; s/\]$//' | tac | awk '!seen[$0]++' | head -6
 }
 
+# PING IS NOT ENOUGH TO IDENTIFY THE PHONE. A session that has ended can leave an address that the UPF still answers for, so a candidate
+# chosen on ping alone produced a phase that failed with "Connection reset by peer" while the phone was in fact on a newer address
+# (measured 2026-10-29). Require the iperf port to answer too: that is the service this ladder is about to use.
 find_phone() {
   local ip
   for ip in $(phone_candidates); do
-    if ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then
+    ping -c 1 -W 1 "$ip" >/dev/null 2>&1 || continue
+    if (exec 3<>"/dev/tcp/$ip/$PORT") 2>/dev/null; then
       echo "$ip"
       return 0
     fi
@@ -73,13 +77,34 @@ if ! (exec 3<>"/dev/tcp/$UE/$PORT") 2>/dev/null; then
 fi
 command -v iperf3 >/dev/null || { echo "REFUSING: iperf3 is not installed here." >&2; exit 2; }
 
+# A PHASE MUST NOT BE ABLE TO HANG, AND ITS OUTPUT MUST BE VISIBLE AS IT ARRIVES.
+# Two complaints from the first flight, both fair: piping iperf through grep left the console silent for the whole ladder, so a phone that
+# dropped mid-phase looked like a script that had hung; and nothing bounded the phase, so when the link died iperf waited forever and the
+# script sat there. So: print iperf's own per-second line (--forceflush makes it arrive per line, not per buffer), and give each phase a wall
+# clock a little longer than its own duration, after which it is interrupted and the ladder stops.
+TIMEOUT_BIN=""
+command -v timeout >/dev/null 2>&1 && TIMEOUT_BIN="timeout --signal=INT --kill-after=5"
+
 echo "phone $UE, port $PORT, ${DURATION}s per phase, rates: $RATES"
 for b in $RATES; do
   # The markers carry EPOCH SECONDS so the captures can be binned per phase afterwards (the corpus side does exactly that).
   echo "===PHASE b=$b START $(date +%s) $(date +%T)"
-  iperf3 -c "$UE" -p "$PORT" -R -u -b "$b" -t "$DURATION" --omit "$OMIT" 2>&1 |
-    grep -E "sender|receiver" | tail -2
-  echo "===PHASE b=$b END $(date +%s) $(date +%T)"
+  # shellcheck disable=SC2086
+  $TIMEOUT_BIN $((OMIT + DURATION + 15)) \
+    iperf3 -c "$UE" -p "$PORT" -R -u -b "$b" -t "$DURATION" --omit "$OMIT" --forceflush
+  rc=$?
+  echo "===PHASE b=$b END $(date +%s) $(date +%T) rc=$rc"
+  if [ "$rc" -ne 0 ]; then
+    echo "!! phase b=$b failed (rc=$rc). If this is a connection error the phone re-attached with a new address:" >&2
+    echo "   re-run the ladder without arguments and it will find the new one." >&2
+    exit 3
+  fi
+  # AND ASK BETWEEN PHASES, rather than trusting the next iperf to fail quickly: a dropped attach produces a phase that hangs until the
+  # timeout, and five of those is most of a leg spent on a phone that is not there.
+  if ! ping -c 2 -W 2 "$UE" >/dev/null 2>&1; then
+    echo "!! $UE stopped answering after b=$b -- the phone dropped. Stopping the ladder." >&2
+    exit 3
+  fi
   sleep 3
 done
-echo "ladder done. Bin the captures by the PHASE markers, or by each cap file's mtime."
+echo "ladder done (rc=0). Bin the captures by the PHASE markers, or by each cap file's mtime."
