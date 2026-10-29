@@ -1647,3 +1647,43 @@ setsid nohup ./archive_and_reclaim.sh --dest /mnt/corpus/tarballs --delete > rec
 
 ★ 状态 ✓：★ 一行确实打印过（有行号为证）✓；★ 淹没原因已查明 ✓；★ Runner 心跳已加 ✓。
 
+### D7.35 2026-10-29 ★★★★ QPSK 语料搬 211 并**离线建库**（全后台）
+
+**(a) 前置（已完成）**
+
+| 项 | 值 |
+|---|---|
+| 211 归档回收 | ★ **reclaimed 238 GB**（18:37 完成）|
+| 211 可用 | **357 G**（盘上再腾出后 340 G）|
+| 外置盘 | **3.4 T 可用** |
+
+**(b) ★★ 搬运方式：**每腿一个 tar**（`tar -cf` → `scp` → 远端 `tar -xf`）**
+
+| 观察 | 值 |
+|---|---|
+| ★ 链路实测 | ★ **200 MB / 2.20 s ≈ 91 MB/s** ✓（LAN 不是瓶颈）|
+| 实际瓶颈 | ★ **tar 打包 7 万个小文件**（本地 I/O），不是网络 |
+| 腿数 | **14 条 QPSK**（`mcs02_ping_1028*` 9 条 ＋ `QPSK_*_1029c/d/e/f/clip_g` 5 条）|
+| 总量 | **≈148 G** |
+| 脚本 | `/tmp/push_qpsk_and_build.sh`（逐腿：跳过已有 → 打包 → scp → 解包 → 报远端条数）|
+
+**(c) ★★★ 建库：远端 `setsid nohup` 脱离会话**
+
+```bash
+ssh jwang@192.168.31.211 "cd ~/work/ai_phy_train && setsid nohup ./queue_build_datasets.sh \
+  <14 条腿> > build_qpsk.log 2>&1 < /dev/null &"
+```
+
+★ 队列内部：**先 dump��重放每条腿的全部捕获）→ 再按 bin 选择 → 再构建 → 最后自检**（`check_depth3_dataset.py`）。
+★ 预计：**dump 是主要耗时**（14 条腿 × 8–10 万捕获的重放），**数小时量级**，正好当**离线任务**。
+
+**(d) ★★ 观察方式（不需要等我）**
+
+```bash
+ssh jwang@192.168.31.211 'cd ~/work/ai_phy_train && tail -5 build_qpsk.log'
+ssh jwang@192.168.31.211 'ls datasets_bin/*.npz | wc -l; du -sh datasets_bin'
+ssh jwang@192.168.31.211 'grep -c "^---- built" build_qpsk.log'
+```
+
+★ 状态 ✓：★ 回收完成 ✓；★ 搬运进行中 🔄；★ 建库将在搬运后自动启动（后台，离线）⏳。
+
