@@ -1304,3 +1304,46 @@ wc -l $L/tb_live/dd_meta.csv               # 有行，且 head -1 是 6 列
 
 ★ 状态 ✓：★ 工具已入库 ✓；★ 地址自动发现 ✓；★ 预检与 `-R` 已固化 ✓。
 
+### D7.28 2026-10-29 ★★★★ `OCUDU_HELENA_DUMP_DIR` **被 shell 继承** ⇒ 两条腿的 TB 混在一个目录里
+
+**(a) 现象**
+
+| 检查 | 值 |
+|---|---|
+| 腿 `w2_harq_QPSK_iperf_1029b`（14:02 起飞）| 捕获 **39 223**，★ **`tb_live` 不存在** |
+| 腿 `w2_harq_mcs06_ping_1029a`（13:36 起飞，已停）| `.bits` **86 042**，★ 其中 **16 503 个是 14:00 之后写的** |
+| ★ 该腿 stderr 里的 knob | ★ `OCUDU_HELENA_DUMP_DIR=…/w2_harq_mcs06_ping_1029a/tb_live` |
+
+**⇒ 新腿的 TB 写进了**上一条腿**的目录**：shell 里上一个腿 `export` 的变量**没有清掉**，被新腿继承。
+
+**(b) ★★★ 修法（脚本已改）**
+
+```bash
+TB_DIR_DEFAULT=$COLLECT_CORPUS/$LABEL/tb_live
+if [ -n "${LEG_TB_DIR:-}" ]; then …            # 显式指定才采纳
+elif [ 继承值 != 默认 且 其父目录名 != $LABEL ]; then
+  echo "note: ignoring inherited OCUDU_HELENA_DUMP_DIR=… (it names another leg)"
+  export OCUDU_HELENA_DUMP_DIR=$TB_DIR_DEFAULT
+fi
+```
+
+**⇒ 规则**：★ **TB 目录永远由 `LABEL` 推导**；要覆盖只能用 **`LEG_TB_DIR=…`**（新变量），**不再看继承的 `OCUDU_HELENA_DUMP_DIR`**。
+
+**⇒ 已实测三种情况**：空 ⇒ 用默认；`/tmp/other/tb_live` ⇒ **忽略**；本腿路径 ⇒ 采纳 ✓
+
+**(c) ★★ 已产生数据的处置**
+
+`mcs06_ping_1029a/tb_live` 里 **14:00 之后**的 16 503 个 `.bits` 属于 QPSK 腿。
+★ **不要盲目 mv**：先按下条命令确认，再整体搬到 `QPSK_iperf_1029b/tb_live`；`dd_meta.csv` 是追加式的，两腿的行混在一起，搬完要在文档里注明。
+
+```bash
+C=doc_chinese/llr_ai_detection/work_tmp/corpus
+mkdir -p $C/w2_harq_QPSK_iperf_1029b/tb_live
+find $C/w2_harq_mcs06_ping_1029a/tb_live -name '*.bits' -newermt '2026-10-29 14:02' \
+  | wc -l                                     # 先看数量
+find $C/w2_harq_mcs06_ping_1029a/tb_live -name '*.bits' -newermt '2026-10-29 14:02' \
+  -exec mv {} $C/w2_harq_QPSK_iperf_1029b/tb_live/ \;
+```
+
+★ 状态 ✓：★ 继承问题已修 ✓；★ 判断逻辑已实测 ✓；★ 已产生的数据待搬（命令已给）⏳。
+

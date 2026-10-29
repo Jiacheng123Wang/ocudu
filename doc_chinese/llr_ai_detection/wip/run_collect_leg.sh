@@ -98,7 +98,23 @@ export OCUDU_UL_DUMP_COUNT=${OCUDU_UL_DUMP_COUNT:-100000}
 # depended on the caller remembering two lines -- export the path and mkdir it -- and forgetting either produced a leg with
 # captures and no transport blocks, which is only noticed when the recovery stage finds nothing to recover.
 # It now defaults beside the captures and is created here; both can still be overridden.
-export OCUDU_HELENA_DUMP_DIR=${OCUDU_HELENA_DUMP_DIR:-$COLLECT_CORPUS/$LABEL/tb_live}
+# ★ AN INHERITED PATH IS NOT A CHOICE. The shell keeps OCUDU_HELENA_DUMP_DIR exported after a leg finishes, so the next leg inherits the
+# PREVIOUS leg's directory and writes its transport blocks there -- measured 2026-10-29: leg w2_harq_QPSK_iperf_1029b put its bits inside
+# w2_harq_mcs06_ping_1029a/tb_live because that export was still in the shell, and the new leg's own tb_live was never created. A leg's
+# bits must live with the leg or the provenance is a lie.
+# So the path is DERIVED from the label unless the caller asks for something else by name (LEG_TB_DIR), and an inherited variable that
+# does not name this leg is reported and overridden rather than obeyed.
+TB_DIR_DEFAULT=$COLLECT_CORPUS/$LABEL/tb_live
+if [ -n "${LEG_TB_DIR:-}" ]; then
+  export OCUDU_HELENA_DUMP_DIR=$LEG_TB_DIR
+elif [ -n "${OCUDU_HELENA_DUMP_DIR:-}" ] && [ "$OCUDU_HELENA_DUMP_DIR" != "$TB_DIR_DEFAULT" ]; then
+  if [ "$(basename "$(dirname "$OCUDU_HELENA_DUMP_DIR")")" != "$LABEL" ]; then
+    echo "note          : ignoring inherited OCUDU_HELENA_DUMP_DIR=$OCUDU_HELENA_DUMP_DIR (it names another leg)" >&2
+    export OCUDU_HELENA_DUMP_DIR=$TB_DIR_DEFAULT
+  fi
+else
+  export OCUDU_HELENA_DUMP_DIR=$TB_DIR_DEFAULT
+fi
 mkdir -p "$OCUDU_HELENA_DUMP_DIR"
 # ★ THE RV FILTER IS DELIBERATE WHEN SET, AND MUST BE SAID OUT LOUD. Unset captures every redundancy version, which is what a
 # HARQ-recovery corpus wants; setting it keeps only that one, which is occasionally the point. Either way the console has to
