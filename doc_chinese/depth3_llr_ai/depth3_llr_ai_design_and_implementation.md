@@ -1709,5 +1709,26 @@ ssh jwang@192.168.31.211 'tar -xf /tmp/push_1029h.tar -C ~/work/ai_phy_train/cor
 ssh jwang@192.168.31.211 'cd ~/work/ai_phy_train && setsid nohup ./queue_build_datasets.sh w2_harq_QPSK_ping_1029h >> build_qpsk.log 2>&1 < /dev/null &'
 ```
 
-★ 状态 ✓：★ 回收完成 ✓；★ 搬运 8/14 🔄；★ 建库待搬运完成自动启动 ⏳；★ **`1029h` 需补传**（已记）。
+**(f) ★★★★ 建库启动**失败了两次**（已修，22:09 起正常运行）
+
+| # | 失败 | 原因 | 修法 |
+|---|---|---|---|
+| 1 | `nohup: failed to run command './queue_build_datasets.sh': No such file or directory` | 脚本只在**仓库**里（`~/work/ocudu/.../ai_train/`），**不在** `~/work/ai_phy_train` | 从仓库路径调用 |
+| 2 | `can't open file '.../ai_phy_train/harq_backfill.py'`（phase 2 与 audit 立刻失败）| 脚本用 `TOOLS=$(cd "$(dirname "$0")" && pwd)` ⇒ **把它复制到 `ai_phy_train` 后，`TOOLS` 就指向那里**，而工具在仓库 | ★ **从仓库路径运行**，并用 ★ **`TRAIN=~/work/ai_phy_train`** 指定数据树 |
+
+**★ 正确启动方式（已生效）**：
+
+```bash
+ssh jwang@192.168.31.211
+cd ~/work/ai_phy_train
+TRAIN=$HOME/work/ai_phy_train setsid nohup \
+  $HOME/work/ocudu/lib/phy/upper/ai_signal_processors/depth3/ai_train/queue_build_datasets.sh \
+  <14 条腿> > build_qpsk.log 2>&1 < /dev/null &
+```
+
+**★ 验证点**：日志首行必须是 `===== phase 1 (dumps)`，且 `pgrep ul_chain_replay` 有进程（22:09 已确认 ✓）。
+
+**⇒ 教训**：★ **工具与数据分居两处**（工具在仓库、数据在 `ai_phy_train`）⇒ 一律**从仓库调用**，用 `TRAIN` 指数据。
+
+★ 状态 ✓：★ 回收完成 ✓；★ 14 条腿已到 211 ✓；★ **建库 22:09 起正常运行** 🔄；★ `1029h` 排队在其后 ⏳。
 
