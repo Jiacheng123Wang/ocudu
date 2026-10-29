@@ -546,3 +546,20 @@ dmrs_bitmap, sigma2_over_r2, rnti, n_id, pilot_ls_ratio, source, unit
 
 ★ 状态 ✓：★ 精度核查通过 ✓；★ 两次度量错误已记录 ✓；★ 键清单已固化 ✓。
 
+### 9.7 ★★ 入库的两个工具（2026-10-29）
+
+| 工具 | 位置 | 用途 |
+|---|---|---|
+| ★ **`check_depth3_dataset.py`** | `lib/phy/upper/ai_signal_processors/depth3/ai_train/` | 建库后**自检**：形状/dtype 一致、**按 `nof_bits` 截断的比特平衡**、每文件单一 `qm`、SNR 是否在该调制的合理区间；★ **有发现时退出码 1**，可直接给流水线当闸门 |
+| ★ **`queue_build_datasets.sh`** | 同上 | 两段式建库队列：**先 dump**（可复用），再**按 bin 选择＋构建**；带磁盘守卫（`MIN_FREE_KB` 默认 15 GiB）、配额参数化、★ **结束时自动跑一次自检** |
+
+**实测**（211，121 个数据集）：
+
+```
+QPSK   files 24  samples 18681  bit1 0.499  median-SNR -0.4..23.9 dB
+16QAM  files 30  samples 32106  bit1 0.499  median-SNR  0.6..22.2 dB
+64QAM  files 34  samples 28427  bit1 0.500  median-SNR  7.7..23.3 dB
+256QAM files 33  samples 16741  bit1 0.499  median-SNR  5.6..27.6 dB
+--- findings --- none
+```
+
