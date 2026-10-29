@@ -1447,5 +1447,25 @@ rsync -a --info=progress2 <repo>/doc_chinese/llr_ai_detection/work_tmp/corpus/ /
 find /Volumes/CORPUS/corpus -name 'cap_*.txt' ! -name '*_ce.txt' | wc -l
 ```
 
-★ 状态 ✓：★ 盘为空、可重建 ✓；★ 格式选型与命令已定 ✓；★ 注意事项与迁移顺序已记录 ✓。
+**(g) ★★★ 已完成（2026-10-29 15:27）**
+
+| 项 | 值 |
+|---|---|
+| 卷 | ★ **`CORPUS`**，`/dev/disk4s2`，**ExFAT**，**4.0 TB** |
+| 挂载点 | `/Volumes/CORPUS`，**3.6 Ti 可用** |
+| 写测试 | ✓（写入/读回/删除均正常）|
+| 大小写 | ★ **不区分**（exFAT 预期，我们的文件名不受影响）|
+| 目录 | `/Volumes/CORPUS/corpus`、`/Volumes/CORPUS/datasets` |
+| ★ **系统盘** | ★ 快照已清 ⇒ **可用 435 G**（原 42 G）|
+
+**(h) ★★ macOS 上复制语料的两个坑（已踩）**
+
+| 坑 | 现象 | 对策 |
+|---|---|---|
+| ★ **`rsync --info=progress2` 不支持** | macOS 自带的是 **rsync 2.6.9（2006 年）**，直接打 usage 退出 | 用 `-a`（要进度就 `brew install rsync`）|
+| ★ **exFAT 的 mtime 精度 2 秒** | 不加 `--modify-window`，**每次重跑都会判定"已变更"而全量重拷** | 一律 ★ **`rsync -a --modify-window=2`** |
+
+**正在执行**：`rsync -a --modify-window=2 <corpus>/ /Volumes/CORPUS/corpus/`（133 G，后台）
+
+★ 状态 ✓：★ 盘已就绪 ✓；★ 目录已建 ✓；★ 复制进行中 ⏳；★ 系统盘已腾出 435 G ✓。
 
