@@ -1593,5 +1593,19 @@ cd ~/work/ai_phy_train
 ⑤ 新腿建库
 ```
 
-★ 状态 ✓：★ 本机归档已停 ✓；★ 工具已入库并 dry-run 通过 ✓；★ 211 待挂盘执行 ⏳。
+**(f) ★ 已在 211 后台执行（2026-10-29 17:29 起）**
+
+```bash
+setsid nohup ./archive_and_reclaim.sh --dest /mnt/corpus/tarballs --delete > reclaim.log 2>&1 < /dev/null &
+```
+
+| 项 | 值 |
+|---|---|
+| 盘挂载 | 用户手动：`mount -t exfat -o uid=…,gid=…,umask=0022 /dev/sdb2 /mnt/corpus`（★ **sudo 需密码，我不代跑**）|
+| 盘容量 | **3.7 T 可用**；已有 Mac 带来的 5 个 tar（**32 G**，`1028` 系列唯一离机副本，别覆盖）|
+| 首腿结果 | `w2_harq_1027`：归档 **3.6 G**、**143 308 条目校验通过** ⇒ 删除原始捕获、**回收 3.9 G** ✓ |
+| 观察点 | `reclaim.log`、`ls /mnt/corpus/tarballs/*.tar | wc -l`、`df -h ~` |
+| ★ 用户要求 | ★ **后台跑，不要等待**（不轮询）|
+
+★ 状态 ✓：★ 本机归档已停 ✓；★ 工具已入库 ✓；★ **211 后台执行中** 🔄。
 
