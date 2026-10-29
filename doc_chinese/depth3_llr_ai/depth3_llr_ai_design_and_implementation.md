@@ -1384,3 +1384,68 @@ sudo tmutil disable        # 如果不需要 Time Machine
 
 ★ 状态 ✓：★ 语料已从 471 G 降到 133 G ✓；★ 快照待删（命令已给）⏳。
 
+### D7.30 2026-10-29 ★★★ 4 TB 移动硬盘：**exFAT**（macOS 与 Ubuntu 共用），用于存放语料
+
+**(a) 现状（`diskutil list` 实测）**
+
+| 项 | 值 |
+|---|---|
+| 设备 | `/dev/disk4`，**4.0 TB 外置（USB，Fixed）** |
+| 分区 | EFI 209 MB ＋ **APFS 容器 1.0 TB**（只有 Preboot/Recovery/VM）＋ **APFS 容器 3.0 TB**（★ **无任何卷**）|
+| 挂载 | ★ **没有挂载任何卷** ⇒ **盘上没有用户数据** |
+| Time Machine | 目标只有 `lenovoHDDBuckup` / `Eaget_HD`，**都不是这块盘** |
+
+**⇒ 这块盘是空的（只有一次未完成的 APFS 布局），可以整盘重建。**
+
+**(b) ★★★ 为什么选 **exFAT**
+
+| 文件系统 | macOS | Ubuntu | 结论 |
+|---|---|---|---|
+| **exFAT** | 读写 ✓ | 读写 ✓（内核 5.7+ 原生）| ★ **唯一实用选择** |
+| APFS | ✓ | ✗ | 不能共用 |
+| ext4 | ✗（需第三方驱动）| ✓ | 不能共用 |
+| NTFS | 默认只读 | ✓ | macOS 写不了 |
+| HFS+ | ✓ | 只读/不稳 | 不能共用 |
+
+**(c) ★★ 格式化命令（需要 sudo，由用户执行）**
+
+```bash
+# 整盘重建：GPT + exFAT，卷名 CORPUS
+sudo diskutil eraseDisk ExFAT CORPUS GPT /dev/disk4
+
+# 验证
+diskutil list | sed -n "/disk4/,+4p"     # 应看到 ExFAT 卷 CORPUS
+df -h /Volumes/CORPUS                     # 应显示约 4.0 Ti
+```
+
+**(d) ★★ Ubuntu 侧挂载（106 / 221 / 211）**
+
+```bash
+sudo mkdir -p /mnt/corpus
+sudo mount -t exfat /dev/sdX1 /mnt/corpus        # 内核 exfat 原生驱动
+# 若提示不支持：sudo apt install exfat-fuse && sudo mount -t exfat-fuse /dev/sdX1 /mnt/corpus
+```
+
+**(e) ★★★ 用它存语料的注意事项（exFAT 的特性，不是缺陷但要知道）**
+
+| 特性 | 影响 | 应对 |
+|---|---|---|
+| **不区分大小写** | 我们的命名本来就唯一 ⇒ 无影响 | — |
+| **mtime 精度 2 秒** | 按 mtime 分相位会**粗 2 秒** | 相位窗口留 ≥5 秒余量 |
+| **无权限位** | ★ **不能放 git 仓库／可执行文件／符号链接** | **只放语料**（`corpus/`、`datasets*/`）|
+| ★ **非正常拔出易损坏** | exFAT 无日志 | ★ **一律 `diskutil eject` 后再拔** |
+| 机械盘 ＋ USB 3 | 顺序 ~100–150 MB/s，但 **10 万小文件很慢** | 用 `rsync -a` **后台**跑，别交互式等 |
+
+**(f) ★ 迁移顺序（空间腾出来之后）**
+
+```bash
+# 1) 先确认快照已清（见 §D7.29），否则本地没有空间周转
+df -h / | tail -1
+# 2) 把语料整体搬到外置盘（后台，带进度日志）
+rsync -a --info=progress2 <repo>/doc_chinese/llr_ai_detection/work_tmp/corpus/ /Volumes/CORPUS/corpus/
+# 3) 校验文件数一致后再删本地
+find /Volumes/CORPUS/corpus -name 'cap_*.txt' ! -name '*_ce.txt' | wc -l
+```
+
+★ 状态 ✓：★ 盘为空、可重建 ✓；★ 格式选型与命令已定 ✓；★ 注意事项与迁移顺序已记录 ✓。
+
