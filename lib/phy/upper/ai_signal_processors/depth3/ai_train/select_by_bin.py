@@ -77,14 +77,33 @@ def main():
 
     state = json.load(open(args.state)) if os.path.exists(args.state) else {}
     rng = random.Random(args.seed)
-    legs = [l.strip() for l in open(args.legs) if l.strip()]
+    # A PATH OR A LIST. The offline queue passed the leg name through a process substitution -- --legs <(echo "$LEG") -- and read as an
+    # empty list, because the descriptor the shell handed over was not readable by the time this process opened it. The queue then
+    # built nothing for twenty-two legs and reported "state bins: 0" for each, which is the shape of a silent failure: no error, no
+    # datasets, and a log that looks like the work was done. Accepting a literal name (or a comma-separated list) as well as a file
+    # means the caller cannot express it wrongly.
+    if os.path.exists(args.legs):
+        legs = [l.strip() for l in open(args.legs) if l.strip()]
+    else:
+        legs = [l.strip() for l in args.legs.split(",") if l.strip()]
+    if not legs:
+        print(f"REFUSING: --legs {args.legs!r} names no leg (neither a file nor a list).")
+        return 2
 
     for leg in legs:
         tb = os.path.join(args.tb_root, leg)
-        corpus = os.path.join(args.corpus, leg)
+        # THE DUMP DIRECTORY IS tb_<leg> IN EVERY QUEUE THAT HAS RUN, and this tool used to join the leg name straight onto the root, so it
+        # looked for a directory that never exists, printed "no dump" for all twenty-two legs, and the caller's grep for "selected|state"
+        # hid every one of those lines: the queue built nothing and looked like it had finished. Accept both layouts and say which one was
+        # used, so the next reader does not have to infer it from an empty directory.
         if not os.path.isdir(tb):
-            print(f"{leg}: no dump, skipped")
-            continue
+            prefixed = os.path.join(args.tb_root, "tb_" + leg)
+            if os.path.isdir(prefixed):
+                tb = prefixed
+            else:
+                print(f"{leg}: no dump (neither {tb} nor {prefixed} exists), skipped")
+                continue
+        corpus = os.path.join(args.corpus, leg)
         # Candidates per population, then per bin, shuffled so the choice is not the first N in time order.
         picked = {"self": collections.defaultdict(list), "harq": collections.defaultdict(list)}
         for pop, fname in (("self", "index_self.csv"), ("harq", "index_harq_only.csv")):
