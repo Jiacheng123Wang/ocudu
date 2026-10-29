@@ -1223,3 +1223,49 @@ done
 
 ★ 状态 ✓：★ 香港配置已就位 ✓；★ 加扰/标签的区别已澄清并记录 ✓。
 
+### D7.26 2026-10-29 ★★★ 起飞命令的**完整清单**（脚本已代劳 3 项，只剩 2 项要人给）
+
+**(a) ★★★ 一条腿要跑对，四个"采集旋钮"必须正确**
+
+| 旋钮 | 默认值 | 错了会怎样 |
+|---|---|---|
+| `OCUDU_UL_DUMP_COUNT` | ★ **代码里是 8**（`ul_capture.cpp`），脚本原本补到 20 000 | 只采 8 条就停，**看起来像"腿很短"** |
+| `OCUDU_HELENA_DUMP_DIR` | ★ **不设＝完全不 dump TB**（`dump_en = getenv() != nullptr`）| 有捕获、**没有活体 TB** ⇒ 后续 HARQ 回溯无料可捞 |
+| ★ `mkdir` 该目录 | 无 | ★ **`fopen` 失败是静默的** ⇒ 整条腿没有 `.bits`，日志不报错 |
+| `OCUDU_UL_DUMP_RV` | 不设＝全部 rv | 设了只留一个 rv ⇒ 表面看像"没有重传" |
+
+**(b) ★★★ 脚本现在代劳（2026-10-29 起）**
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| TB dump 目录 | 要人 `export` ＋ `mkdir -p` | ★ **脚本默认 `<leg>/tb_live` 并自动创建** |
+| 采集条数 | 脚本默认 **20 000** | ★ **默认 100 000** |
+| rv 过滤 | 不显示 | ★ 启动时打印 `capture : N receptions, rv all rv / rv=X ONLY, tb dump …` |
+
+**(c) ★★ 所以现在起飞只要给三样**
+
+```bash
+cd <repo>
+LABEL=w2_harq_<用途>_<日期>
+LEG_CONFIG=$PWD/configs/pinned_mcsXX.yml \
+  sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu $LABEL
+```
+
+**启动 5 秒内必须看到这两行**（否则停腿重来）：
+
+```
+cell config   : configs/pinned_mcsXX.yml
+capture       : 100000 receptions, rv all rv, tb dump <…>/<LABEL>/tb_live
+```
+
+**(d) ★★ 30 秒后的三条验证**
+
+```bash
+L=doc_chinese/llr_ai_detection/work_tmp/corpus/$LABEL
+ls $L/cap_*.bin 2>/dev/null | wc -l        # 应 > 0 且在增长
+find $L/tb_live -name '*.bits' | wc -l     # ★ 必须有（否则 TB dump 没生效）
+wc -l $L/tb_live/dd_meta.csv               # 有行，且 head -1 是 6 列
+```
+
+★ 状态 ✓：★ 脚本已代劳 TB 目录与条数 ✓；★ 启动横幅会打印四个旋钮 ✓；★ 起飞清单已固化 ✓。
+

@@ -91,7 +91,23 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 COLLECT_CORPUS=${COLLECT_CORPUS:-$ROOT/doc_chinese/llr_ai_detection/work_tmp/corpus}
 export LEG_LOGDIR=${LEG_LOGDIR:-$COLLECT_CORPUS/$LABEL/logs}
 export OCUDU_UL_DUMP=${OCUDU_UL_DUMP:-$COLLECT_CORPUS/$LABEL/cap}
-export OCUDU_UL_DUMP_COUNT=${OCUDU_UL_DUMP_COUNT:-20000}
+export OCUDU_UL_DUMP_COUNT=${OCUDU_UL_DUMP_COUNT:-100000}
+# ★ THE TRANSPORT-BLOCK DUMP DIRECTORY, AND WHY THIS LINE EXISTS. helix's dump is armed by the PRESENCE of the variable
+# (port_channel_estimator_helena_impl.cpp: dump_en = getenv(...) != nullptr), and its fopen is not checked: a directory that
+# is not there means no .bits for the whole leg and no complaint about it. Nothing in this script created it, so every leg
+# depended on the caller remembering two lines -- export the path and mkdir it -- and forgetting either produced a leg with
+# captures and no transport blocks, which is only noticed when the recovery stage finds nothing to recover.
+# It now defaults beside the captures and is created here; both can still be overridden.
+export OCUDU_HELENA_DUMP_DIR=${OCUDU_HELENA_DUMP_DIR:-$COLLECT_CORPUS/$LABEL/tb_live}
+mkdir -p "$OCUDU_HELENA_DUMP_DIR"
+# ★ THE RV FILTER IS DELIBERATE WHEN SET, AND MUST BE SAID OUT LOUD. Unset captures every redundancy version, which is what a
+# HARQ-recovery corpus wants; setting it keeps only that one, which is occasionally the point. Either way the console has to
+# say which it is, because a leg that captured only rv=0 looks exactly like a leg where the retransmissions never happened.
+if [ -n "${OCUDU_UL_DUMP_RV:-}" ]; then
+  RV_NOTE="rv=${OCUDU_UL_DUMP_RV} ONLY (filtered on purpose)"
+else
+  RV_NOTE="all rv"
+fi
 # OFF BY DEFAULT SINCE 2026-10-27. The soft-bit dump answers a question we no longer ask during collection: it records
 # the LLRs ONE arm produced at capture time, which cannot stand in for another arm and is not read by the dataset
 # builder (it opens the grid, the channel estimate, the estimator sidecar, the PDU and the transsport block). It was on
@@ -514,6 +530,7 @@ echo "log (stderr)  : $LOG.stderr   <- [phy_pipeline] contract / [ul_host] / [me
 echo "log (stdout)  : $LOG.stdout   <- the app's banner, the cell line, radio/AMF messages, validator refusals" >&2
 echo "gNB options   : ${CLI_ARGS[*]:-<none>}   <- these reach argv, not the environment" >&2
 env | grep -E '^OCUDU_[A-Z0-9_]+=' | sort | sed 's/^/knob          : /' >&2 || true
+echo "capture       : ${OCUDU_UL_DUMP_COUNT} receptions, rv ${RV_NOTE}, tb dump ${OCUDU_HELENA_DUMP_DIR}" >&2
 echo >&2
 
 # The same provenance is repeated INTO the leg's own stderr file once the tees are up (see below), so a
