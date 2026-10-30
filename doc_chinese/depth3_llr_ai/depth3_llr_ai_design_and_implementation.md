@@ -2109,3 +2109,30 @@ TRAIN=$HOME/work/ai_phy_train setsid nohup \
 
 ★ 状态 ✓：★ 并行实测数据已记 ✓；★ Spotlight 旧条目的影响已量化 ✓；★ 已改回单 worker ✓。
 
+**(d5) ★★★ `bash -c one_unit` 是什么：dump 的**每单元一个 shell**，也是慢的根源**
+
+`dump_tb.sh` 的分发方式是：
+
+```bash
+tr '\n' '\0' < "$OUT/units.txt" | xargs -0 -n 1 -P "$JOBS" bash -c 'one_unit "$1"' _
+```
+
+**⇒ 每个捕获单元**（`cap_<frame>_<slot>_<rnti>`）交给一个**独立的 `bash -c one_unit`**，同时跑 `JOBS` 个。
+
+`one_unit` 每个单元要做：`mkdir raw/<unit>/` → 拷贝网格与信道 → 调 `ul_chain_replay_cpu` 解码 → 写 `.bits` 与一行 row。
+
+**⇒ 一条 10 万捕获的腿 ＝ 10 万次 fork ＋ 10 万次 mkdir/rm/cp** ⇒ ★ **这就是磁盘 3 000 tps、速率只有 100–240 条/s 的根源**（CPU 只用 1–2%）。
+
+**★ 并行度由 `JOBS` 决定**：队列默认 **14**，我的 worker 设 **5**（配合单 worker）。
+
+**(d6) ★★ 我在这上面犯的两个错**
+
+| 错 | 后果 | 改正 |
+|---|---|---|
+| `pkill -f worker.sh` | ★ **把自己这条命令也匹配上了**（命令行里含 "worker.sh"）⇒ **先杀了自己，worker 一个没死** | ★ 用方括号：`pkill -f "[w]orker.sh"` |
+| 用 `[w]orker.sh` 统计"我的 worker" | ★ 匹配到 **`mdworker_shared`**（Spotlight 的进程）⇒ 显示 28 个"worker"，其实一个都不是我的 | ★ 用**完整路径**：`pgrep -af "[/]tmp/worker.sh"` |
+
+**⇒ 教训**：★ **`pgrep/pkill -f` 的 pattern 越短越危险**，它匹配**整条命令行**（包括你自己、包括名字相似的无关进程）。
+
+★ 状态 ✓：★ `one_unit` 机制已解释 ✓；★ 两个匹配错误已记录 ✓；★ 单 worker 现以 108 条/s 运行 ✓。
+
