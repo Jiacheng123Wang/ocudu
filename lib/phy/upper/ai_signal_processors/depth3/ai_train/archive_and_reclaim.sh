@@ -50,7 +50,16 @@ for leg in "${LEGS[@]}"; do
   fi
   size_kb=$(du -sk "$src" | awk '{print $1}')
   if [ -f "$DEST/$leg.tar" ]; then
-    echo "have $leg.tar ($(du -h "$DEST/$leg.tar" | cut -f1))"
+    # AN EXISTING ARCHIVE IS VERIFIED TOO, because "it is there" is not the same as "it holds this leg". Measured 2026-10-30: five tars had been made on
+    # the other machine and carried over, so this script found them, skipped its own verification, and deleted the sources on the strength of the file
+    # name alone. The content happened to be the same leg, but nothing had compared the archive with it.
+    want=$(find "$src" | wc -l | tr -d ' ')
+    got=$(tar -tf "$DEST/$leg.tar" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$want" != "$got" ]; then
+      echo "REFUSE $leg: existing archive holds $got of $want entries, nothing deleted" >&2
+      continue
+    fi
+    echo "have $leg.tar ($(du -h "$DEST/$leg.tar" | cut -f1)), verified $got entries"
   else
     echo "---- archiving $leg ($(du -sh "$src" | cut -f1)) $(date +%T)"
     if [ "$DRY" -eq 1 ]; then echo "     (dry-run)"; continue; fi
