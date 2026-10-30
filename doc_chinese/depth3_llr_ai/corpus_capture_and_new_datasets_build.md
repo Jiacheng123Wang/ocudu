@@ -1667,3 +1667,45 @@ files on disk: 169384   budget: 100000
 
 ★ 状态 ✓：★ 4 条腿的真实调制已核实（按 PDU）✓；★ 两条 iperf 已改名（目录＋账本键）✓；★ §7.2 计数无需改动（按 PDU 归箱）✓。
 
+### 7.3aa 2026-10-30 ★★★★ 证实：`64QAM_ping_1030a/b` 确实是"两次运行、两种调制"
+
+**(a) 按运行切分后的调制（实测）**
+
+| 腿 | run 1 | ★ run 2 |
+|---|---|---|
+| `1030a` | **99 657** 条：**64QAM 99 419**（99.8%）| **69 727** 条：★ **256QAM 68 071**（97.6%）|
+| `1030b` | **99 994** 条：**64QAM 99 877**（99.9%）| **45 532** 条：★ **256QAM 44 775**（98.3%）|
+
+**⇒ 用户的判断正确**：忘了改语料目录，**256QAM 那一次写进了 64QAM 的文件夹**（配置也印证：两次分别用 `pinned_mcs12` 与 `pinned_mcs20`）。
+
+**(b) ★★★ 但拆分会撞上一个更根本的问题：**帧号在每个进程里重新计数**
+
+| 观察 | 含义 |
+|---|---|
+| ★ run 2 的 **最小帧号 = 1002** | ★ `extended_frame` 是**进程内**计数器 ⇒ **重启后从 0 重新开始** |
+| 两条 run 的帧号区间**重叠** | ★ 同名文件 `cap_<frame>_<slot>_<rnti>` 会**互相覆盖** |
+| 实测条数 = 两段**恰好相加**（145 526 = 99 994 ＋ 45 532）| 说明**重叠有限**（同 frame＋同 slot＋同 rnti 的组合不常撞），但**不能假设为零** |
+
+**⇒ 影响**：
+1. ★ **同一"腿"里的帧号不能跨运行比较** ⇒ **HARQ 链重建必须按运行切开**（否则会把两次运行的链混在一起）；
+2. ★ 重启时若发生同名，**后写的覆盖先写的** ⇒ 有**少量丢失**，且无法事后分辨。
+
+**(c) ★★ 拆分工具已入库，但**需要 sudo**
+
+`ai_train/split_leg_by_run.py`：按运行边界切分（捕获 ＋ `logs/` ＋ `tb_live` 的 `dd_meta`／`rx_*`／`tb_*`／`record.jsonl`，全部按 **idx／frame** 对齐，只用 `os.rename`）。
+
+★ **第一次尝试因权限失败**：捕获文件是 **root 所有**（gNB 在 sudo 下写）⇒ **需要你执行**：
+
+```bash
+cd /Users/jiachengwang/dev/ocudu
+C=doc_chinese/llr_ai_detection/work_tmp/corpus
+sudo python3 lib/phy/upper/ai_signal_processors/depth3/ai_train/split_leg_by_run.py \
+  $C/w2_harq_64QAM_ping_1030a $C/w2_harq_256QAM_ping_1030a "2026-10-30 07:59:50"
+sudo python3 lib/phy/upper/ai_signal_processors/depth3/ai_train/split_leg_by_run.py \
+  $C/w2_harq_64QAM_ping_1030b $C/w2_harq_256QAM_ping_1030b "2026-10-30 08:33:25"
+```
+
+**⇒ 切完之后**：对四条腿各跑一次 `census_bins.py --force`（幂等），`§7.2` 的总数**不变**（样本只是换了文件夹）。
+
+★ 状态 ✓：★ "两次运行、两种调制"已证实 ✓；★ 帧号跨运行重叠的风险已量化并记录 ✓；★ 拆分工具已入库、待 sudo 执行 ⏳。
+
