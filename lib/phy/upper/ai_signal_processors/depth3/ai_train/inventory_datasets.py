@@ -58,7 +58,10 @@ def main():
         if modulation is None:
             unknown_mod += 1
             continue
-        population = "harq" if name.endswith("_harq.npz") else "self"
+        # TWO NAMES FOR THE SAME POPULATION: the 1027 batch was built before the suffix was settled and its recovered samples are "_harq_only.npz",
+        # later builds use "_harq.npz". Testing only the short one reported four hundred and twenty-six thousand decoded samples and zero recovered,
+        # which is impossible for that batch -- the older files were being counted as decoded.
+        population = "harq" if (name.endswith("_harq.npz") or name.endswith("_harq_only.npz")) else "self"
         data = np.load(path, allow_pickle=True)
         prb = np.asarray(data["alloc_nof_prb"])
         snr = np.asarray(data["snr_nominal"], dtype=float)
