@@ -2053,3 +2053,14 @@ TRAIN=$HOME/work/ai_phy_train setsid nohup \
 
 ★ 状态 ✓：★ 全部坑已集中记录（7 类 25 条）✓；★ 每条都有"现象→原因→做法"✓。
 
+**(d2) ★★ 2026-10-30 在 Mac 上建库踩的两个新坑（都表现为"静默成功"）**
+
+| 现象 | 原因 | ★ 正确做法 |
+|---|---|---|
+| `phase 2` **瞬间完成**、`---- built` 也打印了，**但一个 npz 都没产出** | `queue_build_datasets.sh` 里 **`PY=$TRAIN/.venv/bin/python` 是写死的**，我传的 `PY=` 被覆盖；`$TRAIN` 下没有 `.venv` ⇒ 解释器不存在，`harq_backfill` 与 `check` 静默失败 | ★ **在 `$TRAIN` 下建 `.venv`**（软链到真 venv 即可）；★ **日志里出现 `---- built` 不代表真的有产物**，要 `ls <DATASETS_DIR>/*.npz` 核对 |
+| `harq_backfill` 报 `units with a HARQ process: 0  chains: 0`，写出**空**的 `index_self.csv` | 我手工调用时把 `--leg` 传成**腿名**，而它要的是**捕获目录路径**（`read_pdu(os.path.join(args.leg, name+".txt"))`）| ★ **`--leg corpus/<leg>`**；改正后立刻得到 `75 424 self / 4 466 harq` |
+
+**⇒ 两个坑的共同点**：★ **工具没报错，产出为空**。判据：**任何"建库"步骤之后，先 `ls` 产物，别看日志说 built**。
+
+★ 状态 ✓：★ 两个坑已记录并修正 ✓；★ Mac 侧建库已产出 npz ✓。
+
