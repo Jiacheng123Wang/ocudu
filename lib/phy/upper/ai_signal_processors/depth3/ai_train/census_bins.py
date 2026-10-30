@@ -133,6 +133,15 @@ def main():
         print(f"wrote {args.csv}")
 
     if args.ledger:
+        # --force MUST BE IDEMPOTENT. A recount used to ADD to the running total, so re-counting a leg that had grown -- which happens whenever a
+        # leg's gNB restarts and keeps capturing under the same label -- counted its old samples twice. Subtracting what the ledger already holds
+        # for the legs being recounted makes a forced run replace rather than accumulate.
+        if args.force:
+            for leg in {leg for leg, _ in per_leg}:
+                for key, n in ledger["legs"].get(leg, {}).items():
+                    if key in ledger["bins"]:
+                        ledger["bins"][key] = max(0, ledger["bins"][key] - n)
+                ledger["legs"].pop(leg, None)
         for (leg, (mod, width, snr)), n in per_leg.items():
             entry = ledger["legs"].setdefault(leg, {})
             key = f"{mod}|{width}|{snr}"
