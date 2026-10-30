@@ -91,7 +91,10 @@ mkdir -p "$OUT/rows"
 for dir in "${DIRS[@]}"; do
   # A GLOB WOULD DIE ON ARG_MAX HERE: a leg holds tens of thousands of files, and the shell silently hands `ls` an
   # empty list once the expansion is too long (measured: "attempted 0 units" on a 27k-file leg). `find` does not.
-  find "$dir" -maxdepth 1 -name '*.txt' ! -name '*_ce.txt' 2>/dev/null | LC_ALL=C sort >> "$OUT/units.txt"
+  # APPLE DOUBLE FILES ARE NOT UNITS. A corpus packed on a Mac carries "._cap_....txt" resource-fork stubs beside every real capture, and they match
+  # "*.txt", so every index came out with as many junk rows as real ones -- measured 2026-10-30: 99 821 of 199 643 on one leg. They carry no crc and are
+  # never selected, so the datasets were clean, but the index was twice the size it should be.
+  find "$dir" -maxdepth 1 -name '*.txt' ! -name '*_ce.txt' ! -name '._*' 2>/dev/null | LC_ALL=C sort >> "$OUT/units.txt"
 done
 if [ "$LIMIT" -gt 0 ]; then
   head -n "$LIMIT" "$OUT/units.txt" > "$OUT/units.limited"; mv "$OUT/units.limited" "$OUT/units.txt"

@@ -1867,3 +1867,87 @@ sudo python3 lib/phy/upper/ai_signal_processors/depth3/ai_train/split_leg_by_run
 
 ★ 状态 ✓：★ 单次运行、纯度 99.8% ✓；★ 高 SNR 定位明确（重传 1.1%）✓；★ 256QAM 的 ≥30 档翻倍 ✓；★ §7.2 已更新到 59 腿 / 3 965 084 ✓。
 
+### 11.1 ★★★ 211 上 `~/work/ai_phy_train` 的目录结构（`tb_*` 与 `datasets*`）
+
+**(a) 两大类各是什么**
+
+| 类 | 是什么 | 何时产生 | 能不能删 |
+|---|---|---|---|
+| ★ **`tb_<leg>/`** | **一条腿的解码产物**（重放捕获 → TB 比特 ＋ 索引）| `dump_tb.sh`（queue 的 phase 1）| ★ **不能**：删了就得重新重放（数十分钟/腿）|
+| ★ **`datasets_bin/*.npz`** | ★ **训练用的张量**（每个"腿 × 调制 × 群体"一个文件）| `build_depth3_dataset.py`（phase 2）| ★ **能**：可从 `tb_*` 重建（几分钟）|
+
+**(b) `tb_<leg>/` 的内部结构**
+
+```
+tb_w2_harq_16QAM_ping_1029a/
+├── index.csv               全部单元（7 列）
+├── index_self.csv          crc=OK 且 rv=0（自己就解出来了）
+├── index_harq.csv          参与 HARQ 回溯的全部
+├── index_harq_only.csv     crc=KO 但靠重传捞回
+├── index_sel_self.csv      ★ 按 bin 配额抽中的 self 单元
+├── index_sel_harq.csv      ★ 按 bin 配额抽中的 harq 单元
+├── tb/                     <unit>.bits  ← 解码出的 TB 比特（标签本体）
+├── rows/                   <unit>.row   ← 每单元整理后的行
+├── raw/                    重放时的即时输出
+└── stage/                  构建 npz 时的暂存
+```
+
+**`index.csv` 的 7 列**：
+
+| 列 | 含义 |
+|---|---|
+| `unit` | 单元名（= 捕获文件名去掉扩展名）|
+| `tb_bits` | TB 比特数 |
+| `crc` | `ok` / `no`（是否解出）|
+| `sinr_db` | 重放时的 SINR 估计 |
+| `iterations` | LDPC 迭代次数 |
+| `slot` | 时隙号 |
+| `tbs_bytes` | TB 字节数 |
+
+**(c) `datasets_bin/*.npz` 的内部结构**（每个文件 **N 个样本 × 19 个数组**）
+
+| 键 | 形状 | dtype | 含义 |
+|---|---|---|---|
+| `X` | (N, **612**, **64**) | float16 | ★ 接收网格（14 符号 × …）|
+| `H` | (N, 612, 14, 2) | float16 | ★ 信道估计 |
+| `bits` | (N, 1440) | uint8 | 原始比特（LLR 侧）|
+| `tb_bits` | (N, 528) | uint8 | ★ TB 比特（标签）|
+| `nof_bits` / `nof_tb_bits` | (N,) | int32 | 有效长度（**必须按它截断**）|
+| `alloc_first_prb` / `alloc_nof_prb` | (N,) | uint8 | ★ 频域位置与宽度 |
+| `dmrs_bitmap` | (N,) | uint16 | DM-RS 符号位图 |
+| `qm` | (N,) | uint8 | 调制阶数（2/4/6/8）|
+| `snr_nominal` | (N,) | float32 | 名义 SNR |
+| `rnti` / `n_id` | (N,) | uint16 | 标识 |
+| `rv` | (N,) | uint8 | 冗余版本 |
+| `source` | (N,) | uint8 | ★ self / harq |
+| `r` / `sigma2_over_r2` / `pilot_ls_ratio` | (N,) | float32 | 噪声与导频统计 |
+
+**文件命名**：`<leg>_<MODULATION>_<self|harq>.npz`，例 `w2_harq_1027_16QAM_self.npz`。
+
+**(d) 其它同类目录（历史遗留，可区分）**
+
+| 目录 | 说明 |
+|---|---|
+| `datasets/`、`datasets_new/`、`datasets_w2/` | 早期命名，内容与 `datasets_bin` 同构 |
+| `tb_new_legs/`、`tb_speed/`、`tb_verify1k/`、`tb_verify200/` | 试验性 dump，非正式腿 |
+| `split_w2/`、`data/`、`lib/`、`logs/`、`runs/` | 切分／脚本／日志／训练输出 |
+| `bins_state.json` | ★ 配额账本（`<群体>:<调制>|<宽度>|<SNR>` → 已用样本数）|
+
+**(e) ⚠ 一个已发现的杂质：`index.csv` 里有一半是 macOS 的 `._` 文件**
+
+| 腿 | `index.csv` 总行 | ★ 其中 `._` 垃圾 |
+|---|---|---|
+| `16QAM_ping_1029a` | 199 643 | ★ **99 821** |
+| `16QAM_ping_1030a` | 200 001 | ★ **100 000** |
+| `QPSK_ping_1029h` | 199 401 | ★ **99 700** |
+| `mcs02_ping_1028` | 142 817 | ★ **71 408** |
+
+**原因**：`dump_tb.sh` 用 `find … -name '*.txt' ! -name '*_ce.txt'` 枚举单元，而 macOS 打包时带出的 **`._cap_*.txt`**（AppleDouble 资源叉）也匹配 `*.txt` ⇒ 被当成单元。
+
+**⇒ 影响**：★ **只污染 `index.csv`**（这些行 `crc` 为空）；
+★ **`index_sel_*.csv` 一条 `._` 都没有** ⇒ ★ **数据集是干净的** ✓
+
+**⇒ 已修**：`dump_tb.sh` 的 `find` 加上 **`! -name '._*'`**，后续腿不再产生。
+
+★ 状态 ✓：★ 两类目录的格式已完整记录 ✓；★ `._` 杂质已定位（不影响数据集）并修复 ✓。
+
