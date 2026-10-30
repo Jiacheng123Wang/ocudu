@@ -1958,3 +1958,26 @@ TRAIN=$HOME/work/ai_phy_train setsid nohup \
 
 ★ 状态 ✓：★ 清单已更正为 11 条 ✓；★ 旧任务已 kill、新任务已排 ✓；★ 本机删除的正确时机已界定 ✓。
 
+**(t) ★★★ 2026-10-30 16:46 两件事：DSH 的 `duplicate message_start` ＋ 归档等待者的 bug
+
+**(a) DSH 报错 `MALFORMED_RESPONSE: duplicate message_start`（与本工作无关）**
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 界面：**"本轮运行失败 DeepSeek Messages stream: duplicate message_start"**，已重试 5/5 |
+| ★ 代码位置 | `packages/llm/llm-deepseek/src/translate.ts:110`：`if (started) return malformed('duplicate message_start')` |
+| 含义 | ★ **同一路 SSE 流里出现了两个 `message_start`** ⇒ 违反 Anthropic 流协议 ⇒ 被**正确**判为畸形 |
+| ★ 不是谁的 bug | 每次 HTTP 尝试都会**新建 translator**（`adapter.ts:165`）⇒ 重试不会产生重复 ⇒ ★ **重复来自上游网关的流本身** |
+| 影响 | ★ **只影响那一轮的回复**；★ **211 上的后台任务不受影响**（已验证）|
+| 处置 | **重试即可**（瞬时故障）；若频繁出现，属网关问题，可上报 |
+
+**(b) ★★ 归档等待者**没触发**：`pgrep -f queue_build_datasets` 会误匹配外部 ssh 命令**
+
+| 现象 | 16:24 构建已 `all 4 done`，但到 16:46 等待者**仍未触发** |
+|---|---|
+| ★ 原因 | `pgrep -f "queue_build_datasets"` **也匹配任何提到该字符串的 ssh 命令行**（包括我在另一台机器上敲的监控命令）⇒ 计数器被不断清零 |
+| ★ 修法 | 改判**只在构建时才存在的进程**：`pgrep -f "dump_tb.sh\|ul_chain_replay"` ✓（已改）|
+| 当时处置 | 杀掉旧等待者，**直接**用 13 条腿启动 `archive_and_reclaim.sh`（16:46:10 起）✓ |
+
+★ 状态 ✓：★ DSH 报错已定性（上游流重复，非本仓库问题）✓；★ 归档等待者的误匹配已修 ✓；★ 归档已实际启动（13 腿）✓。
+
