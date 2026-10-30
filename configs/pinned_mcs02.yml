@@ -95,8 +95,8 @@ ru_sdr:
   device_args: type=b200,num_recv_frames=512,num_send_frames=64,clock_source=gpsdo,time_source=gpsdo,gpsdo=1
   srate: 23.04
   otw_format: sc12
-  tx_gain: 80
-  rx_gain: 70
+  tx_gain: 60
+  rx_gain: 50
   clock: gpsdo
   sync: internal
 
