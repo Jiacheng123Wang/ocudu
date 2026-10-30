@@ -2064,3 +2064,24 @@ TRAIN=$HOME/work/ai_phy_train setsid nohup \
 
 ★ 状态 ✓：★ 两个坑已记录并修正 ✓；★ Mac 侧建库已产出 npz ✓。
 
+**(d3) ★★ 2026-10-30 Mac 端把两个目录排除出 Time Machine（正确做法，附后果）**
+
+| 目录 | 排除理由 | ★ 后果 |
+|---|---|---|
+| `…/work_tmp/corpus`（原始捕获）| 几百 GB、几十万小文件，TM 备份它纯属浪费 | ★ **从此只有一份本地副本 ＋ USB 归档** ⇒ 64/256QAM 那 11 条**必须尽快归档到 U 盘** |
+| `~/ai_depth3`（建库工作树）| `tb_*/stage` 每腿 33 万临时文件、建完即删 | ★ **npz 也只在本地** ⇒ **尽快传到 211**（那里成为第二份）|
+
+**★ 好处（重要）**：★ **删除文件后 `df` 会真的变小**。
+之前 211 上"`du` 小了、`df` 不变"就是 TM 本地快照**钉住已删块**所致 ⇒ 排除后不再发生。
+
+**★ 已有的快照仍会钉住排除前捕获的块**：`tmutil listlocalsnapshots /` 可查；
+要立刻回收可 `sudo tmutil deletelocalsnapshots <日期>`（⚠ 会失去最近的本地恢复点）。
+
+**★ 验证方法**：`tmutil isexcluded <path>` 应返回 `[Excluded]`。
+
+**⚠ 注意 `mdutil` 与 TM 是两件事**：
+- **Spotlight（`mds`）** 用 `.metadata_never_index` 排除（`mdutil -i` 只认卷，不认目录）
+- **Time Machine** 用 `tmutil addexclusion` 或图形界面
+
+★ 状态 ✓：★ 两个目录已排除并验证 ✓；★ 后果与补救已记录 ✓。
+
