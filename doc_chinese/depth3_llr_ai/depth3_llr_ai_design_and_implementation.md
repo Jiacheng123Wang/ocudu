@@ -2244,3 +2244,29 @@ want=$(wc -l < "$O/units.txt"); got=$(($(wc -l < "$O/index.csv") - 1))
 
 ★ 状态 ✓：★ 重复构建已停 ✓；★ 分工与 35 条清单已固化 ✓；★ 211 已按列表起跑 ✓。
 
+**(d10) ★★★ 2026-10-30 21:55 查证：**建库的重放用的是 CPU 版，GPU 负载不是我们引起的****
+
+| 项 | 事实 |
+|---|---|
+| `dump_tb.sh` 选二进制 | `build/lib/.../ul_chain_replay_cpu`（**默认就是 CPU**）|
+| 只有 CPU 版缺失时才回退 | `build/lib/.../metal/ul_chain_replay` —— ★ **这个文件根本不存在**（`metal/` 里只有一个 `channel_equalizer_metal_unit_test`）|
+| 当前跑的进程 | `…/ul_chain_replay_cpu` ✓ |
+| 建库的 python | 纯 numpy ＋ StandardScaler 类运算 ⇒ **不用 GPU** |
+
+**⇒ 所以"改 CPU 模式会更快"这件事不需要做：它本来就是 CPU。**
+
+**★ GPU 负载的真实来源**（实测）：
+
+| 进程 | CPU |
+|---|---|
+| `Google Chrome … Framework` | **43.7% ＋ 9.3%** |
+| `WindowServer` | **20.2%** |
+| `MTLCompilerService` | 0.0%（Metal 编译器，被调起过）|
+
+**⇒ 是**浏览器渲染**（Chrome 的 Metal 后端 ＋ 窗口合成），与建库无关。**
+
+**★ 补充知识（为什么即使有 Metal 版也不该用在这里）**：
+重放每个单元是**小矩阵、短内核**，Metal 的**启动/同步开销**远大于计算本身 ⇒ 这类工作 **CPU 更快**，GPU 只在"大批量同构张量"上才有优势。
+
+★ 状态 ✓：★ 重放是 CPU 版已证实 ✓；★ GPU 负载归因到 Chrome/WindowServer ✓；★ 无需改动 ✓。
+
