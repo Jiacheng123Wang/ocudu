@@ -36,7 +36,16 @@ echo "===== phase 1 (dumps) $(date +%T) free=$(df -h "$TRAIN" | tail -1 | awk '{
 for LEG in $LEGS; do
   L=$TRAIN/corpus/$LEG; O=$TRAIN/tb_$LEG
   [ -d "$L" ] || { echo "absent $LEG"; continue; }
-  if [ -s "$O/index.csv" ]; then echo "have $LEG ($(($(wc -l < "$O/index.csv") - 1)))"; continue; fi
+  # A NON-EMPTY INDEX IS NOT A FINISHED DUMP. A dump killed part way leaves the header and nothing else, or a handful of rows out of a hundred thousand,
+  # and the old test ("-s") treated both as done -- so those legs were skipped for ever and the batch reported success with a third of its captures missing
+  # (measured 2026-10-30: six legs stuck with a one-row index). A dump counts as done only when it has a row for every unit it enumerated.
+  if [ -s "$O/index.csv" ] && [ -f "$O/units.txt" ]; then
+    want=$(wc -l < "$O/units.txt")
+    got=$(($(wc -l < "$O/index.csv") - 1))
+    if [ "$got" -ge "$want" ]; then echo "have $LEG ($got)"; continue; fi
+    echo "partial $LEG ($got of $want rows) -- dumping again"
+    rm -rf "$O"
+  fi
   echo "---- dump $LEG $(date +%T)"
   mkdir -p "$O"
   "$TOOLS/dump_tb.sh" --out "$O" --jobs "${JOBS:-14}" "$L" 2>&1 | tail -1
