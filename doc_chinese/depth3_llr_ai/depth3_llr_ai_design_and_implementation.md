@@ -1839,3 +1839,21 @@ TRAIN=$HOME/work/ai_phy_train setsid nohup \
 
 ★ 状态 ✓：★ 4 腿全部到位 ✓；★ 建库两段接力中 🔄；★ 空间 173 G ✓。
 
+**(n) ★★ 2026-10-30 14:10 `ai_phy_train` 目录整理完成**
+
+| 项 | 结果 |
+|---|---|
+| 脚本 → `tools/` | ★ **15 个**（`*.sh` 与 `*.py`）|
+| 日志 → `logs/` | ★ **19 个**（含 `build_qpsk.log`）|
+| 顶层只剩 | `bins_state.json`、`README.md`、★ **`build_qpsk.log`（软链）** |
+
+**★★ 关键技巧：先移走、再软链回来**
+
+构建链执行 `echo … >> build_qpsk.log` 时**每次都重新打开该路径** ⇒ 若直接移走，**新的 `build_qpsk.log` 会在顶层重新出现**，日志一分为二。
+⇒ 已做 `ln -sfn logs/build_qpsk.log build_qpsk.log` ⇒ 后续写入**自动落到 `logs/`** ✓
+★ **这个软链不要删**（删了日志会分裂回顶层）。
+
+**验证**：整理后写一行测试 ⇒ 落在 `logs/build_qpsk.log` ✓；构建进程未受影响（`1030b` 的 bits 已 **71 081**）✓；README 里的 `setup_env.sh` 已改为 `tools/setup_env.sh` ✓。
+
+★ 状态 ✓：★ 脚本与日志已归位 ✓；★ 软链保住运行中的日志 ✓；★ README 已同步 ✓。
+
