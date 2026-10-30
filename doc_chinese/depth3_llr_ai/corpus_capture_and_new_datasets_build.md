@@ -1974,3 +1974,36 @@ tb_w2_harq_16QAM_ping_1029a/
 
 ★ 状态 ✓：★ 3 个真试验目录已删（7 MB）✓；★ `tb_new_legs` 已保留并记录原因 ✓；★ 先前清单的判断已更正 ✓。
 
+### 11.3 ★★★ 2026-10-30 用户整理 `data/`：**文件一件没丢，全部可读**
+
+**(a) 整理后的 `data/`（18 G）**
+
+| 子目录 | 内容 | npz | 样本 |
+|---|---|---|---|
+| ★ `data/datasets_build_E17/` | `col_1025_*`（原 `datasets_new/`）| **40** | **16 079** |
+| ★ `data/datasets_train_E17/` | `e17_*` 的 12 个切分（原 `datasets/`）| **12**（各 `depth3.npz`）| **172 985** |
+| ★ `data/datasets_train_old/` | 老样本：`llr_only_{train,val}`、`d3_dmrs2711h_train`、`d3_modcond_val`、`depth3`、`e9_{train,monitor}` | **7** | 28 729＋ |
+
+**(b) ★ 核查结果：全部通过**
+
+| 检查 | 结果 |
+|---|---|
+| 文件数是否守恒 | ★ `datasets_new` **40 → 40** ✓；`datasets/` **16 → 16** ✓ |
+| 是否可读 | ★ **40/40、12/12、2/2** 全部 `np.load` 成功 ✓ |
+| `datasets_bin`（153）/ `datasets_w2`（91）| ★ **原样未动** ✓ |
+| 代码是否引用旧路径 | ★ **仓库里的 depth3 工具全部用参数传路径**，无硬编码 ⇒ **没有断链** ✓ |
+| 构建是否受影响 | ★ **不受影响**（只读 `corpus/`、`tb_*`、`datasets_bin`）✓ |
+
+**(c) ★ 两处需要记住的对应关系**
+
+| 源 | 产物 |
+|---|---|
+| `tb_new_legs/col_1025_*`（167 M dump）| ★ **`data/datasets_build_E17/*.npz`** |
+| `data/datasets_train_E17/*/depth3.npz` | 由上面的 build 切分而来（`split_depth3_stratified.py`）|
+
+**⇒ 删任何一端之前，先确认另一端不是它的来源**（§11.2 的教训）。
+
+**(d) README 已同步**：`data/` 的三组、`datasets_bin`／`datasets_w2`／`tb_*`／`tb_new_legs` 的关系都写进去了。
+
+★ 状态 ✓：★ 整理未丢文件、全部可读 ✓；★ 构建与代码不受影响 ✓；★ README 已更新 ✓。
+
