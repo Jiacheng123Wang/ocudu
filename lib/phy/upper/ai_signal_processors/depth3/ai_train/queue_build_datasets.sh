@@ -24,7 +24,11 @@ MIN_FREE_KB=${MIN_FREE_KB:-$((15*1024*1024))}
 LEGS=${*:-}
 
 [ -n "$LEGS" ] || { echo "usage: $0 <leg> [<leg> ...]" >&2; exit 2; }
-mkdir -p "$TRAIN/datasets_bin"
+# THE OUTPUT DIRECTORY AND THE QUOTA LEDGER ARE SEPARATE KNOBS, so that one can build the same legs under different sampling policies without the second
+# build inheriting the first one's accounting. The default keeps the historical layout; DATASETS_DIR=... STATE=... gives an independent, unlimited build.
+DATASETS_DIR=${DATASETS_DIR:-$TRAIN/datasets_bin}
+STATE=${STATE:-$TRAIN/bins_state.json}
+mkdir -p "$DATASETS_DIR"
 
 free_kb() { df -k "$TRAIN" | tail -1 | awk '{print $4}'; }
 
@@ -55,7 +59,7 @@ for LEG in $LEGS; do
     for qm in QPSK 16QAM 64QAM 256QAM; do
       [ "$(free_kb)" -lt "$MIN_FREE_KB" ] && { echo "STOP (guard)"; break 3; }
       "$PY" "$TOOLS/build_depth3_dataset.py" --units "$F" --tb "$O/tb" --corpus "$L" \
-          --out "$TRAIN/datasets_bin" --name "${LEG}_${qm}_${pop}" --source real --modulation "$qm" \
+          --out "$DATASETS_DIR" --name "${LEG}_${qm}_${pop}" --source real --modulation "$qm" \
           --min-prb 1 --max-units 0 2>&1 | tail -1
     done
   done
@@ -63,5 +67,5 @@ for LEG in $LEGS; do
 done
 
 echo "===== audit"
-"$PY" "$TOOLS/check_depth3_dataset.py" --dir "$TRAIN/datasets_bin" 2>&1 | tail -12
+"$PY" "$TOOLS/check_depth3_dataset.py" --dir "$DATASETS_DIR" 2>&1 | tail -12
 echo "===== done $(date +%T)"
