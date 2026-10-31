@@ -3581,3 +3581,40 @@ jwang@192.168.31.211 : ~/work/savedWork/
 
 ★ 状态 ✓：★ 47 包全部内容级校验通过 ✓；★ 46/47 与原清单逐字节一致 ✓；★ 红线目录零改动 ✓；★ 8.56 GB 的丢失已确认并记录 ✓。
 
+### 12.12 ★★★★ 2026-10-31 21:20 **抽样工具 `sample_train_by_bin.py`：两个自作自受的 bug**
+
+**(a) 第一个：`bits`/`tb_bits` 宽度随文件不同**
+
+**⇒ 报错**：
+```
+ValueError: all the input array dimensions except for the concatenation axis must match exactly,
+but along dimension 1, the array at index 0 has size 3312 and the array at index 1 has size 3672
+```
+
+**⇒ 原因**：这两个字段是**按文件打包的字节行** ⇒ 第二维 ＝ **该文件里最大的码字** ⇒ **不同文件不同** ✗
+**⇒ 修法**：**按最大宽度补零** ✓（有效长度由 `nof_bits` 逐样本给出 ⇒ 补零不改语义 ✓）
+
+**(b) ★★ 第二个（更危险）：静默丢了一个键**
+
+**⇒ 子代理比对发现**：母集 **19 个键**，输出只有 **18 个** ✗ ⇒ **丢了 `pilot_ls_ratio`** ✗
+**⇒ 原因**：我手写的 `FIELD_ORDER` 列表只列了 18 个 ✗ ⇒ **不报错、文件也"能用"** ⇒ **直到有人要用这一列才发现** ✗
+
+**⇒ 修法（两道）**：
+1. 补上 `pilot_ls_ratio` ✓
+2. ★★ **加自检**：
+```python
+unknown = [k for k in z.files if k not in FIELD_ORDER]
+if unknown:
+    raise SystemExit("input key(s) not in FIELD_ORDER, refusing to drop them silently: "
+                     + ", ".join(sorted(unknown)))
+```
+
+**(c) ★ 教训**
+
+> ★ **凡是"按固定字段表复制数据"的脚本，都必须先比对输入实际的键集，不一致就报错。**
+> ★ **否则"少一列"是不会被任何一次成功运行暴露出来的。**
+
+**⇒ 同类风险点**：`merge_depth3_datasets.py`（它检查键集 ✓）、`slice_depth3_dataset.py`、任何"字段白名单"实现。
+
+★ 状态 ✓：★ 两个 bug 已修 ✓；★ 自检已加 ✓；★ 重跑中 ✓。
+

@@ -36,9 +36,12 @@ MODS = {2: "QPSK", 4: "16QAM", 6: "64QAM", 8: "256QAM"}
 WIDTH_EDGES = [3, 8, 24]
 SNR_EDGES = [0.0, 6.0, 10.0, 14.0, 20.0, 30.0]
 
+# EVERY KEY THE BUILDER WRITES. An earlier version of this list omitted pilot_ls_ratio and silently dropped it from
+# every output file -- the kind of omission that is invisible until someone needs the column. When the builder gains a
+# key this list has to gain it too; the loader below refuses to run if it meets an input key that is not copied.
 FIELD_ORDER = ["X", "H", "r", "sigma2_over_r2", "bits", "nof_bits", "tb_bits", "nof_tb_bits",
                "rnti", "n_id", "rv", "alloc_first_prb", "alloc_nof_prb", "dmrs_bitmap",
-               "qm", "snr_nominal", "source", "unit"]
+               "qm", "snr_nominal", "source", "pilot_ls_ratio", "unit"]
 
 
 def width_band(prb):
@@ -143,6 +146,10 @@ def main(argv):
         parts = {k: [] for k in FIELD_ORDER}
         for f in sorted(by_file):
             z = np.load(os.path.join(args.dir, f), allow_pickle=True)
+            unknown = [k for k in z.files if k not in FIELD_ORDER]
+            if unknown:
+                raise SystemExit("input key(s) not in FIELD_ORDER, refusing to drop them silently: "
+                                 + ", ".join(sorted(unknown)))
             idx = np.array(sorted(by_file[f]), dtype=np.int64)
             for k in FIELD_ORDER:
                 if k not in z.files:
@@ -158,6 +165,16 @@ def main(argv):
                 for c in chunks:
                     merged.extend(list(c))
                 out[k] = np.array(merged, dtype=object)
+            elif k in ("bits", "tb_bits"):
+                # WIDTH VARIES BY FILE. These are packed byte rows whose second dimension is the widest codeword
+                # in THAT file, so two files disagree as soon as their largest transport block differs (measured:
+                # 3312 against 3672 bytes). Pad the narrow ones with zeros -- the valid length is nof_bits, which is
+                # carried per sample, so padding never changes what a reader sees.
+                width = max(c.shape[1] for c in chunks)
+                chunks = [c if c.shape[1] == width else
+                          np.pad(c, ((0, 0), (0, width - c.shape[1])), mode="constant")
+                          for c in chunks]
+                out[k] = np.concatenate(chunks, axis=0)
             else:
                 out[k] = np.concatenate(chunks, axis=0)
         name = "{}_{}_{}.npz".format(args.name_prefix, mod, pop)
