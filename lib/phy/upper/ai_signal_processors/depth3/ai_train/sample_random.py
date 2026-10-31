@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
-"""Draw random sample sets out of the mother set, guaranteeing they do not overlap each other or the training set.
+"""Draw random sample sets out of the mother set, optionally excluding samples by capture name.
 
-WHY DISJOINTNESS IS THE WHOLE JOB. A test set drawn independently from the same pool overlaps the training set by
-construction -- at ten thousand out of two and a half million the expected overlap is about forty samples, and those
-forty are memorised, not measured. Worse, draws made in sequence from one another must also be disjoint, or test1 and
-test2 stop being independent measurements of the same thing. So this tool takes an exclusion set of sample identities
-and removes them before drawing, then adds its own draw to the exclusion set before the next draw.
+WHAT THE DISJOINTNESS GUARANTEE ACTUALLY COVERS. Rows are drawn without replacement, so two sets made in one call never
+share a row. They can still share a CAPTURE: the mother set holds 2,526,019 rows but only 1,914,144 distinct capture
+names, because one reception can appear more than once -- as a first-transmission success and again as a recovered
+sample, or in files built at different times. Drawing 20,000 rows and splitting them in half therefore yields about
+forty captures present in both halves; measured 40 on the w2 draw against a null of 43.8. That is chance, not a fault,
+but it means the guarantee is ROW-LEVEL and must not be described as capture-level.
 
-IDENTITY is the capture name in `unit`. Every row of every dataset is one reception, and the capture name carries its
-frame, slot and RNTI, so it identifies the reception across files. The same capture can legitimately appear twice --
-once as a first-transmission success and once as a recovered sample -- which is exactly why the identity has to be
-checked rather than assumed unique.
-
-Usage:
-  sample_random.py --dir <mother dir> --out-dir <dir> --sets 2 --count 10000 \
-                   [--exclude <npz-or-dir> ...] [--seed 20261031] [--name-prefix w2_test]
-Writes <prefix>1.npz, <prefix>2.npz, ... and manifest_<prefix>.json.
+The `--exclude` argument buys the stronger property for the training set: every row whose capture name appears there is
+removed before drawing. Note what it costs. A bin whose whole population went into training then has no test samples at
+all, so the test set goes blind to exactly the rare bins that most need measuring -- on the w2 corpus that cost was
+judged too high and the flag was left off. It is here for corpora rich enough to afford it.
 """
 import argparse
 import json
