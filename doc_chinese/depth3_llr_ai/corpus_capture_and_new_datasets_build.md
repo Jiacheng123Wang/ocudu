@@ -1133,3 +1133,51 @@ sudo mkfs.exfat -c 32K -L T7_Corpus /dev/sda3
 
 ★ 状态 ✓：★ 首条 T7 采集数据正常 ✓；★ 簇放大问题已量化（11.4×）✓；★ 两个修法已给出 ✓。
 
+## 11.15 ★★★★★ 2026-10-31 14:55 **T7 改成 APFS：一条腿从 11 GB 降到 1.5 GB**
+
+**(a) 决定**
+
+用户拍板：★ **T7 直接格式化成 APFS**，采集仍放 T7，**传文件走网络**（APFS 在 Linux 上不可读 ⇒ 这是必然的取舍）。
+
+**(b) 执行**
+
+```bash
+# ① 先把已采的一条腿转存到本机（11 GB）
+rsync -a /Volumes/T7_Corpus/corpus/s2_QPSK_ping_1031a /Users/jiachengwang/t7_stage/
+
+# ② 把 exFAT 分区原地改成 APFS（★ 改的是文件系统，不是 GPT ⇒ 不受 macOS 26 的 GPT 锁限制）
+sudo diskutil eraseVolume APFS T7_Corpus disk8s3
+
+# ③ 拷回并清掉从 exFAT 带过来的 ._* 垃圾
+rsync -a /Users/jiachengwang/t7_stage/s2_QPSK_ping_1031a /Volumes/T7_Corpus/corpus/
+find /Volumes/T7_Corpus/corpus/s2_QPSK_ping_1031a -name '._*' -delete
+```
+
+**(c) ★ 结果：同一批数据，两种文件系统的对比**
+
+| 项 | exFAT | ★ **APFS** |
+|---|---|---|
+| 分配块（簇）| **128 KB** | ★ **4 KB** ✓ |
+| ★ 一条腿占用 | ★ **11.7 GB** | ★ **1.5 GB** ✓ |
+| ★ 放大倍数 | **11.4×** | ★ **1.0×** ✓ |
+| ★ `._*` 垃圾 | ★ **31 099 个 / 3.9 GB** | ★ **0 个** ✓ |
+| 693 GB 可放 | ~60 条 | ★ **~460 条** ✓ |
+| Linux 可读 | ✓ | ★ **✗ ⇒ 走网络传** |
+
+**⇒ 数据无损**：捕获 **7 777**、活体 TB **7 540**，与转存前**完全一致** ✓
+
+**(d) ★ 一个已验证的关键点：APFS 上不会产生 `._*`**
+
+实测：在 APFS 卷上给文件设置 `com.apple.provenance` 属性 ⇒ **不产生任何 `._` 文件** ✓
+**⇒ 因为 APFS 原生支持扩展属性** ✓ ⇒ exFAT 才需要 AppleDouble 来模拟 ✓
+
+**(e) 新的数据流**
+
+```
+① 采集          → /Volumes/T7_Corpus/corpus/s2_<腿>/     （APFS，零浪费）
+② 传 211/107    → 走网络：tar -cf - … | ssh 211 'tar -xf - …'   （带 md5 校验）
+③ 归档          → 211 的 4 T USB（exFAT，Linux 可写）
+```
+
+★ 状态 ✓：★ T7 已改为 APFS（4 KB 簇）✓；★ 一条腿 11.7 GB → 1.5 GB ✓；★ `._*` 归零 ✓；★ M2 备份完好 ✓。
+
