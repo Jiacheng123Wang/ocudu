@@ -69,8 +69,12 @@
 # than as root, so it cannot leave root-owned objects in build/ for the next ordinary build to trip over.
 set -u
 MODE=${1:?pipeline mode: cpu, cpu_gpu or gpu}
-LABEL=${2:?leg label such as col_1025_ping, which is also the corpus folder name}
-shift 2 || true
+# ★ THE LEG CAN BE NAMED BY ENVIRONMENT INSTEAD OF BY POSITION (2026-10-31). The leg name is one value that must be identical in the
+# folder, the logs and the later build, so it is carried in LEG_NAME and may be exported once per leg instead of being retyped on the
+# command line every time. A positional label still works and still wins if both are given, so nothing that already calls this breaks.
+LABEL=${2:-${LEG_NAME:-}}
+[ -n "$LABEL" ] || { echo "need a leg: pass a label as the second argument or export LEG_NAME" >&2; exit 2; }
+shift $(( $# > 1 ? 2 : 1 )) || true
 
 case "$MODE" in
   cpu|cpu_gpu|gpu) ;;

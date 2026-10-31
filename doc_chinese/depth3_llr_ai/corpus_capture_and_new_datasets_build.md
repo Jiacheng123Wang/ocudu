@@ -1008,14 +1008,18 @@ unset OCUDU_UL_DUMP_RV
 export OCUDU_UL_DUMP_COUNT=100000
 ```
 
-**(b) 每条腿（起飞前，只此一条）**
+**(b) 每条腿（起飞前，两条：先设腿名，再起飞）**
 
 ```bash
-sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu w2_harq_<新腿>
+# ★ 腿名走环境变量，不再写在命令行里
+export LEG_NAME=s2_16QAM_ping_1030a
+
+# 起飞（命令里不再出现腿名）
+sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu
 ```
 
-**⇒ 腿名可以给旧的 `w2_harq_*` 形式，脚本自动映射成 `s2_*`** ✓
-**⇒ 若要显式指定：** `LEG_NAME=s2_16QAM_ping_1030a sudo -E bash …`（显式值优先 ✓）
+**⇒ 老写法仍然可用**（位置参数优先）：`… run_collect_leg.sh cpu w2_harq_16QAM_ping_1030a` ✓
+**⇒ 给旧的 `w2_harq_*` 会被自动映射成 `s2_*`** ✓
 
 **(c) 每条腿（降落后核对，30 秒）**
 
