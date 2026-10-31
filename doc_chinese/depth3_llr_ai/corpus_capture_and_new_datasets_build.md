@@ -1013,24 +1013,26 @@ export OCUDU_UL_DUMP_COUNT=50000
 **(b) 每条腿（起飞前，一条）**
 
 ```bash
-# ★ 按腿的调制选 gnb 配置（见下表），再起飞
-export LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_<调制>_p0default.yml
+# ★ `LEG_CONFIG` 用【固定的 pinned 配置】——调制由它决定，不由腿名决定
+export LEG_CONFIG=configs/pinned_mcs02.yml
 
 sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu <label>
 ```
 
-**★ `LEG_CONFIG` 必须与腿的调制匹配** —— 它是**这次采集的 gNB 配置**（带宽、调制表、调度器策略都在里面）：
+**★ 四个 `pinned` 配置对应四种调制**（每个都是 `min_ue_mcs = max_ue_mcs`，把调度器钉死在一种调制上）：
 
-| 腿的类型 | ★ 配置 |
-|---|---|
-| QPSK | `configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_qpsk.yml` |
-| 16QAM | `configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_16qam_p0default.yml` |
-| 64QAM | `configs/gnb_rf_b200_tdd_n78_20mhz_llr_collect_64qam_p0default.yml` |
-| mcs8 / mcs12 | `…_llr_collect_mcs8.yml` / `…_llr_collect_mcs12.yml` |
-| ★ **不指定**（默认）| `…_llr_collect_p0default.yml` |
+| ★ 配置 | 钉住的 MCS | 调制 | 实测验证 |
+|---|---|---|---|
+| ★ `configs/pinned_mcs02.yml` | **`min/max_ue_mcs: 2`** | ★ **QPSK** | ✓ `modulation=QPSK, target_code_rate=308` |
+| `configs/pinned_mcs06.yml` | 6 | 16QAM | — |
+| `configs/pinned_mcs12.yml` | 12 | 64QAM | — |
+| `configs/pinned_mcs20.yml` | 20 | 256QAM | — |
 
-**⇒ 默认值是 `p0default`**（`bind_addrs: 192.168.31.204`，即本机 LAN 口 ✓）
-**⇒ 若配置的 `bind_addrs` 与本机 IP 不符，脚本会**拒绝起飞并打印实际 IP** ✓（不会盲跑）
+**⇒ 腿名里的调制前缀（`QPSK_` / `16QAM_` …）只是**提示**，真正起作用的是 `LEG_CONFIG`** ✓
+**⇒ 两者应保持一致**，否则语料名会说谎 ✓
+
+**⇒ `pinned_mcs02.yml` 的 `bind_addrs: 192.168.31.204`**（本机 LAN 口 ✓）、`dl_arfcn: 627264`、`channel_bandwidth_MHz: 20` ✓
+**⇒ 若 `bind_addrs` 与本机 IP 不符，脚本会**拒绝起飞并打印实际 IP** ✓（不会盲跑）
 
 **⇒ `<label>` 就是腿名** ✓（也可以给旧形式 `w2_harq_*`，脚本自动映射成 `s2_*` ✓）
 **⇒ 也可以用环境变量 `LEG_NAME` 代替位置参数**：`LEG_NAME=s2_… sudo -E bash … cpu` ✓（位置参数优先 ✓）
