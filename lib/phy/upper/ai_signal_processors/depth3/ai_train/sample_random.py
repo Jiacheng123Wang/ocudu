@@ -55,6 +55,8 @@ def main(argv):
     ap.add_argument("--exclude", nargs="*", default=[])
     ap.add_argument("--seed", type=int, default=20261031)
     ap.add_argument("--name-prefix", default="w2_test")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="ignore and do not write the per-file unit-name cache")
     args = ap.parse_args(argv)
 
     excluded = set()
@@ -68,14 +70,39 @@ def main(argv):
     print("{} file(s) in {}".format(len(files), args.dir))
 
     # ---- pass 1: index every row that is not excluded -----------------------------------------
+    # THE UNIT COLUMN IS THE EXPENSIVE PART, so it is cached. It is a pickled object array, and unpickling two and a
+    # half million strings out of 220 npz files took about fifteen minutes per pass (measured: a two-thousand-sample
+    # draw ran thirty-one minutes). The cache is one npy per source file holding just the names, keyed by the source's
+    # size and mtime so a rebuilt dataset invalidates it rather than serving stale names.
+    cache_dir = os.path.join(args.out_dir, ".unit_cache")
+    if not args.no_cache:
+        os.makedirs(cache_dir, exist_ok=True)
     rows = []      # (file, row)
     for f in files:
-        z = np.load(os.path.join(args.dir, f), allow_pickle=True)
-        units = [str(u) for u in z["unit"]]
+        src = os.path.join(args.dir, f)
+        st = os.stat(src)
+        cache = os.path.join(cache_dir, f.replace(".npz", ".npy"))
+        units = None
+        if not args.no_cache and os.path.exists(cache):
+            try:
+                cached = np.load(cache, allow_pickle=False)
+                if int(cached[0]) == st.st_size and int(cached[1]) == int(st.st_mtime):
+                    units = [str(u) for u in cached[2:]]
+            except Exception:
+                units = None
+        if units is None:
+            z = np.load(src, allow_pickle=True)
+            units = [str(u) for u in z["unit"]]
+            z.close()
+            if not args.no_cache:
+                try:
+                    np.save(cache, np.array([st.st_size, int(st.st_mtime)] + units, dtype=object),
+                            allow_pickle=True)
+                except Exception:
+                    pass
         for i, u in enumerate(units):
             if u not in excluded:
                 rows.append((f, i))
-        z.close()
     print("available after exclusion: {:,} sample(s)".format(len(rows)))
     need = args.sets * args.count
     if len(rows) < need:
