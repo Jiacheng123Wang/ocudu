@@ -2863,3 +2863,58 @@ sudo newfs_exfat -v T7_Corpus /dev/diskN sX
 
 ★ 状态 ✓：★ 744 G 已抢回为独立分区（692.9 GiB）✓；★ 备份分区零改动 ✓；★ 格式化待执行 ✓。
 
+**(d25) ★★★★★ 2026-10-31 13:35 **续行中间插注释，把命令尾巴整段吃掉** —— 211 五小时白跑的真因**
+
+**(a) 症状**
+
+211 上三条腿（`mcs02_ping_1028de/f/g`）跑了 **5 小时 18 分**、CPU **500%+**、只读了 1.8–2.2 GB、产出为 0 ✗
+
+**(b) 真因**
+
+我写的 `build_parallel_211.sh` 里有这段：
+
+```bash
+  if OMP_NUM_THREADS=... OPENBLAS_NUM_THREADS=... MKL_NUM_THREADS=... \
+     TRAIN=$TRAIN DATASETS_DIR=$DEST STATE=$TRAIN/bins_state_full.json \
+     # THE REPLAY POOL IS WHAT SATURATES THE CORES, ...     ← ★ 注释插在续行中间
+     Q_SELF=100000000 Q_HARQ=100000000 JOBS=${JOBS_PER_LEG:-6} \
+     "$TOOLS/queue_build_datasets.sh" "$leg" >> "$LOG" 2>&1; then
+```
+
+**⇒ 实测（用 `bash -c` 复现）**：★ **`#` 在续行里**不是注释**，而是**一个普通词** ⇒
+**⇒ `Q_SELF` / `Q_HARQ` / `JOBS` 和**真正的命令**都变成了参数** ✗ ⇒
+**⇒ 结果**：队列**用了默认配额 2500/250**（不是 1e8）⇒ 选样极少 ⇒ 但**跑了 5 小时** ✗
+
+**⚠ 更糟**：`DATASETS_DIR` 在那段**之前**，理论上是生效的 —— 但实测**进程环境里根本没有它** ✗
+⇒ 说明 bash 对"续行 + 注释"的解析比想象的更混乱 ⇒ ★ **结论：续行里绝对不能有注释**。
+
+**(c) 修复**
+
+把注释**全部移到赋值列表之前**：
+
+```bash
+  # 所有解释写在这里
+  if OMP_NUM_THREADS=${BLAS_THREADS:-4} ... \
+     TRAIN=$TRAIN DATASETS_DIR=$DEST STATE=... \
+     Q_SELF=100000000 Q_HARQ=100000000 JOBS=${JOBS_PER_LEG:-6} \
+     "$TOOLS/queue_build_datasets.sh" "$leg" >> "$LOG" 2>&1; then
+```
+
+**(d) 修复后实测（进程环境）**
+
+| 变量 | 值 |
+|---|---|
+| ★ `DATASETS_DIR` | ★ **`/home/jwang/work/ai_phy_train/data/datasets_full_w2`** ✓ |
+| ★ `Q_SELF` / `Q_HARQ` | ★ **100000000** ✓ |
+| `OMP_NUM_THREADS` | **4** ✓ |
+| ★ 构建进程的 `--out` | ★ **`data/datasets_full_w2`** ✓✓ |
+
+**(e) ★ 教训**
+
+★★★ **shell 的续行（`\` + 换行）里不要放注释**。要解释就在**整条命令之前**写，
+或者用 **`$(...)`/数组/函数**把命令组装好再执行 ✓
+
+**⇒ 代价**：211 上 **3 × 5 小时**的算力白费 ✗（并且这 3 条腿还得重跑 ✓ 已经在跑 ✓）
+
+★ 状态 ✓：★ 真因已定位并修复 ✓；★ 修复后 `DATASETS_DIR`／`Q=1e8`／`--out` 全部正确 ✓；★ 教训已入档 ✓。
+

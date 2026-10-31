@@ -28,13 +28,16 @@ run_one() {
     tar -xf "$TARS/$leg.tar" -C "$CORPUS" 2>/dev/null || { echo "extract failed $leg" >> "$LOG"; return 1; }
   fi
   echo "---- build $leg (local=$local_corpus) $(date +%T)" >> "$LOG"
-  # THE LINEAR ALGEBRA LIBRARY SPWNS A THREAD PER CORE PER PROCESS unless told otherwise, so three legs on sixteen cores ask for forty-eight threads and the
-  # load average reads forty-four while each build crawls. Four threads each leaves room for the replay pools and for the rest of the machine.
+  # THE LINEAR ALGEBRA LIBRARY SPWNS A THREAD PER CORE PER PROCESS unless told otherwise, so several legs on sixteen cores ask for forty-eight threads and the
+  # load average reads forty-four while each build crawls. Four threads each leaves room for the replay pools and the rest of the machine.
+  #
+  # NO COMMENTS INSIDE THE CONTINUATION. A "#" that begins a word in a backslash-continued command starts a comment in the middle of it, which silently
+  # commented out the quota variables and the command itself; the assignment prefixes still ran, the if-branch then saw success, and the stamp was written for a
+  # build that never happened. Comments go above the assignment list, never between its lines.
+  #
+  # THE REPLAY POOL is what saturates the cores, not the build: one leg's dump runs JOBS unit-shells at once, so legs x JOBS is the real thread count.
   if OMP_NUM_THREADS=${BLAS_THREADS:-4} OPENBLAS_NUM_THREADS=${BLAS_THREADS:-4} MKL_NUM_THREADS=${BLAS_THREADS:-4} \
      TRAIN=$TRAIN DATASETS_DIR=$DEST STATE=$TRAIN/bins_state_full.json \
-     # THE REPLAY POOL IS WHAT SATURATES THE CORES, not the build. One leg's dump runs JOBS unit-shells at once, so N legs x JOBS is the real thread count.
-     # Measured 2026-10-31: two legs with six each already put the load at thirteen on sixteen threads, and a third leg without lowering JOBS would only queue
-     # behind the same cores. Twelve threads split three ways keeps the total while letting three legs advance instead of two.
      Q_SELF=100000000 Q_HARQ=100000000 JOBS=${JOBS_PER_LEG:-6} \
      "$TOOLS/queue_build_datasets.sh" "$leg" >> "$LOG" 2>&1; then
     touch "$DEST/.done_$leg"
