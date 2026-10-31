@@ -2557,3 +2557,42 @@ sudo rm -rf /Users/jiachengwang/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/
 
 ★ 状态 ✓：★ 20 条重复构建已查明（数据无误、时间浪费）✓；★ 两条 sudo 清理命令已给出 ✓。
 
+**(d18) ★★★★★ 2026-10-31 08:35 又一个**"默认值写成赋值"**的坑：`STATE` 与 `PY` 的 env 覆盖从未生效**
+
+**(a) 病灶**
+
+```bash
+PY=$TRAIN/.venv/bin/python                     # ← 无条件赋值
+STATE=$TRAIN/bins_state.json                   # ← 无条件赋值
+…
+PY=${PY:-$TRAIN/.venv/bin/python}              # ← 永远走不到默认分支
+STATE=${STATE:-$TRAIN/bins_state.json}         # ← 同上
+```
+
+**⇒ 先赋值、后用 `${VAR:-default}`** ⇒ ★ **环境变量永远被覆盖** ✗
+
+**(b) 已经造成的两个后果**
+
+| 事 | 影响 |
+|---|---|
+| ★ Mac 上 `PY` 指向不存在的 `$TRAIN/.venv/bin/python` | `harq_backfill`／审计**静默失败**，`phase 2` 秒退、`built` 照打 ✗（§D7.36(d2)）|
+| ★ 211 上所有"全量"构建都用了**抽样账本** `bins_state.json` | 因为 `Q_SELF=1e8` 极大 ⇒ **选样仍是全部**（数据没问题 ✓），但 ★ **配额账本被灌满** ⇒ 将来做**限额建库**会选不到东西 ✗ |
+
+**(c) 已修**
+
+```bash
+PY=${PY:-$TRAIN/.venv/bin/python}
+STATE=${STATE:-$TRAIN/bins_state.json}
+```
+
+**⇒ 已部署到 211** ✓
+
+**(d) ★ 待办（等构建结束后）**
+
+| # | 动作 |
+|---|---|
+| 1 | ★ **按 `datasets_bin` 的实际内容重算 `bins_state.json`**（同 §D7.36(d11) 的做法）|
+| 2 | 若之后还要做"限额"构建，确认 `--state` 指向独立文件 |
+
+★ 状态 ✓：★ 病灶定位（赋值 vs 默认）✓；★ 两个后果已量化 ✓；★ 已修并部署 ✓；★ 账本重算待办已记 ✓。
+

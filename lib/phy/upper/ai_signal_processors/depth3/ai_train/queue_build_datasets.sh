@@ -15,9 +15,11 @@
 #   Q_SELF (2500), Q_HARQ (250), MIN_FREE_KB (15 GiB) and LEG_TB_PREFIX are the knobs.
 set -u
 TRAIN=${TRAIN:-$HOME/work/ai_phy_train}
-PY=$TRAIN/.venv/bin/python
+# THESE TWO MUST BE DEFAULTS, NOT ASSIGNMENTS. Written as plain assignments they ran before the "${VAR:-default}" lines further down, so the environment
+# could never override them: an "unlimited" build silently used the quota ledger of the sampled build, and on the Mac the interpreter could not be pointed
+# at the right virtualenv. Both cost hours before anyone noticed, because neither produced an error.
+PY=${PY:-$TRAIN/.venv/bin/python}
 TOOLS=$(cd "$(dirname "$0")" && pwd)
-STATE=$TRAIN/bins_state.json
 Q_SELF=${Q_SELF:-2500}
 Q_HARQ=${Q_HARQ:-250}
 MIN_FREE_KB=${MIN_FREE_KB:-$((15*1024*1024))}
