@@ -2511,3 +2511,49 @@ PATTERNS='build_parallel_211|queue_build_datasets\.sh|build_depth3_dataset\.py|d
 
 ★ 状态 ✓：★ 根因（xargs 池）已定位并入库工具 ✓；★ 母集无 16QAM 污染 ✓；★ 单份重启 ✓。
 
+**(d17) ★★★★ 2026-10-31 08:25 夜间僵尸的**真实代价**：20 条本属 Mac 的腿被 211 建了**
+
+**(a) 证据**
+
+`data/datasets_full_w2/.done_*` 的构成（与 22 条清单比对）：
+
+| 类别 | 数量 |
+|---|---|
+| 在 22 条清单内 | **7** |
+| 不在清单、但属 **1027 批**（合理）| **15** |
+| ★ **不在清单、也不属 1027 批** | ★ **20** |
+
+那 20 条正是**划给 Mac 的**：`16QAM_ping_1029a–g`、`16QAM_ping_1030b/c/d`（10）、
+`256QAM_ping_1030a/b/e`、`256QAM_iperf_1030c/d`（5）、`64QAM_ping_1029a/b`、`64QAM_ping_1030a/b`（4）、`mcs20_ping_1028`（1）。
+
+**⇒ 僵尸 `xargs` 用**旧清单**把它们在本机建了一遍**（夜间 5 小时）。
+
+**(b) 影响评估**
+
+| 项 | 结论 |
+|---|---|
+| 数据本身 | ★ **没问题**：同一批捕获、同一份代码 ⇒ 与 Mac 建的**同名校验一致**，后写的覆盖先写的，只留一份有效 ✓ |
+| 浪费 | ★ **211 白跑 5 小时** ＋ **Mac 又重跑了一遍**（重复劳动）✗ |
+| stamp | 这 20 个 stamp **不是错的**（腿确实建过）⇒ 保留即可，重跑会被跳过 ✓ |
+
+**(c) 两条**需要 sudo** 的清理（我无权执行）
+
+**① 回收 46 G：Time Machine 本地快照钉住了已删块**
+
+```bash
+# 本机（Mac）—— 列出快照后逐个删，或直接瘦身
+tmutil listlocalsnapshots /
+sudo tmutil thinlocalsnapshots / 50000000000 4      # 瘦身到只剩 4 个，约回收 46 G
+```
+
+**② 删除 10 条 root 所有的 16QAM 采集（111 G）**
+
+```bash
+sudo rm -rf /Users/jiachengwang/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/w2_harq_16QAM_ping_1029{a,b,c,d,e,f,g}
+sudo rm -rf /Users/jiachengwang/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/w2_harq_16QAM_ping_1030{b,c,d}
+```
+
+★ 前置已由子代理核实：**这 10 条在 211 上各有 2–4 个 npz** ✓，且 U 盘上有 tar ✓
+
+★ 状态 ✓：★ 20 条重复构建已查明（数据无误、时间浪费）✓；★ 两条 sudo 清理命令已给出 ✓。
+
