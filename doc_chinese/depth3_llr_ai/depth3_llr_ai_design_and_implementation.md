@@ -3493,3 +3493,47 @@ ARCHIVE_COUNT=0
 
 ★ 状态 ✓：★ 事故已完整记录 ✓；★ 46/47 已确认可由保存副本恢复 ✓；★ `oran` 的代码完好、仅输出丢失 ✓；★ 空清单教训已入档 ✓。
 
+### 12.10 ★★★★★ 2026-10-31 19:40 **受保护目录清单（RED LINE）**
+
+**(a) ★ 用户明令：211 上的备份**绝对不许动****
+
+```
+jwang@192.168.31.211 : ~/work/savedWork/
+├── repo_save/
+│   ├── flexRAN_github/       59 GB / 48 个顶层条目  ← ★ 107 那次事故后唯一的幸存副本
+│   ├── ngs_private_repo_save/
+│   └── sionna/
+└── tmp.m
+```
+
+| 项 | 值 |
+|---|---|
+| ★ 总量 | ★ **79 GB** |
+| ★ 状态 | ★ **只许读，不许写/删/移/改权限/改 mtime** ✓ |
+| ★ 当前 mtime | **Oct 27 08:56**（未被触碰 ✓）|
+
+**(b) ★ 规矩**
+
+> ★ **`~/work/savedWork/` 下的一切，任何脚本、任何子代理、任何"清理"动作，一律不得修改。**
+> ★ **只允许 `cat`/`tar`/`rsync --dry-run` 这类**只读**操作** ✓
+
+**⇒ 已把这条**作为 STOP 级约束**发给正在运行的归档子代理** ✓
+（它只能从 `repo_save/flexRAN_github` **读**、往 `/mnt/corpus/flexRAN_github_tarballs` **写** ✓）
+
+**(c) ★ 这条规矩的由来**
+
+**⇒ §12.9 的事故里，正是因为**没有"哪些目录绝对不许碰"的清单**，一个空清单 bug 就删掉了唯一的工作副本 ✗
+**⇒ 事故后 `savedWork/repo_save/flexRAN_github` 成了**唯一幸存的那份**（59 GB，46/47 条目完整 ✓）⇒
+**⇒ 它现在比任何"工作副本"都重要** ✓
+
+**(d) ★ 顺带确认**
+
+| 目录 | 状态 |
+|---|---|
+| `savedWork/repo_save/flexRAN_github` | ✅ 59 GB，48 顶层条目，mtime **Oct 27 08:56**（未动 ✓）|
+| `savedWork/repo_save/ngs_private_repo_save` | ✅ 存在，**不许动** ✓ |
+| `savedWork/repo_save/sionna` | ✅ 存在，**不许动** ✓ |
+| `savedWork/tmp.m` | ✅ 存在，**不许动** ✓ |
+
+★ 状态 ✓：★ 受保护清单已入档 ✓；★ 约束已下发给运行中的子代理 ✓；★ 备份未被修改（mtime 仍是 Oct 27）✓。
+
