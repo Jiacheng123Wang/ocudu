@@ -817,3 +817,42 @@ Mac 与 211 直连需要：插线 ＋ 两端各配一个**同网段 IP**（不�
 
 ★ 状态 ✓：★ 第一条 64QAM 腿建成且审计通过 ✓；★ 产物 36 KB/样本 ⇒ 全库 ≈18 G ✓；★ 单腿 ~50 分钟 ✓。
 
+## 11.9 ★★★ 2026-10-31 08:42 **空腿审计**：两条目录没有任何离线捕获
+
+**(a) 审计结果（用 `find`，不用 `ls dir/*.txt` —— 后者在 10 万文件时会因 ARG_MAX 静默返回 0）**
+
+| 目录 | 离线捕获 | 体积 | 内容 | 判定 |
+|---|---|---|---|---|
+| ★ `w2_harq_mcs06_ping_1029a` | ★ **0** | **7.6 G** | 只有 `tb_live/`（237 620 个 `rx_*.f32` ＋ `dd_meta`）| ★ **空腿，可删** |
+| ★ `tb_probe_1029g` | ★ **0** | **1.3 G** | 探测/试验残留 | ★ **可删** |
+
+**(b) ★ 为什么 `mcs06_ping_1029a` 建不出东西**
+
+| 事实 | 后果 |
+|---|---|
+| 没有 `cap_*.txt` / `.bin`（离线捕获）| `dump_tb.sh` 找到 **0 个单元** |
+| 只有 `tb_live/`（**实时**接收流）| 它是**给"有离线捕获的腿"做 HARQ 供体**用的 ⇒ **单独无意义** ✗ |
+| 队列仍然"成功"返回 | 写出 **0 npz ＋ 一个假 stamp**（已删）|
+
+**⇒ `tb_live` 不能单独建库**：`build_depth3_dataset` 需要 `corpus/<leg>/cap_*.bin` 里的**接收网格**，
+而 `tb_live` 只有**软合并后的 TB 比特** ⇒ 没有 `X` 就没有样本 ✓
+
+**(c) 处置**
+
+```bash
+# 需要 sudo（root 所有）
+sudo rm -rf /Users/jiachengwang/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/w2_harq_mcs06_ping_1029a
+sudo rm -rf /Users/jiachengwang/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/corpus/tb_probe_1029g
+```
+
+**⇒ 释放 8.9 G**；★ **U 盘上那个 7.3 G 的 tar 也可以删**（同样的无用内容）
+
+**(d) ★ 账目**
+
+| 项 | 修正 |
+|---|---|
+| 可建腿数 | ★ **61 → 60**（`mcs06_ping_1029a` 不算）|
+| Mac 的 24 条 | ★ **23 可建 ＋ 1 空** |
+
+★ 状态 ✓：★ 两条空目录已查明并给出删除命令 ✓；★ `tb_live` 为何不能单独建库已解释 ✓；★ 账目已修正 ✓。
+
