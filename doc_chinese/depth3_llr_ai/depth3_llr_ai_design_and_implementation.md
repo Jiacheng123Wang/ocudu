@@ -3845,3 +3845,52 @@ if unknown:
 
 ★ 状态 ✓：★ "150 epoch"的来源已查清并更正 ✓；★ 真实做法（40 ＋ 早停）已确认 ✓；★ 107 的 GPU 现状已实测（有卡、无 CUDA）✓。
 
+### 12.17 ★★★★★ 2026-11-01 07:40 **查证："以前训练用 GPU"到底是哪一段 GPU**
+
+**(a) ★ 四台机器都实测了一遍：没有一台的 TensorFlow 能用 GPU**
+
+| 机器 | 硬件 | `tf.config.list_physical_devices("GPU")` | 结论 |
+|---|---|---|---|
+| **211** | 无独显 | — | ✗ |
+| **66** | Intel UHD 630 / 2 GB | — | ✗ 无 CUDA |
+| ★ **107** | ★ **RTX 3060 Laptop 6 GB，驱动 580** | ★ **`[]`** | ✗ **无 CUDA toolkit、无 cuDNN**（`nvcc` 不存在、`libcudart/cudnn` 0 条目）|
+| ★ **Mac** | ★ **M4 Pro 20 核 GPU** | ★ **`[]`** | ✗ **没装 `tensorflow-metal`** |
+
+**⇒ 结论**：★ **所有模型训练一直是 CPU** ✓ —— **没有任何一次是 GPU 训练** ✓
+
+**(b) ★★★ 那"以前用 GPU"指的是什么**
+
+**⇒ 查文档第 284 行**：
+> 部署配置（★ **`--phy_pipeline gpu --pusch_receiver_backend ai`**，解码器默认 CPU）
+
+**⇒ 这是** gNB 的 PHY 流水线用 GPU** ✓ —— 即**部署时的模型推理** ✓，**不是训练** ✓
+**⇒ 而 gNB 跑在**接了 USRP 的那台 Mac** 上 ✓ ⇒ **用的是 M4 的 GPU** ✓
+
+**⇒ 所以"GPU 工作"= 推理（部署）✓，不是训练 ✓**
+
+**(c) ★ 107 的 RTX 3060 一直没被 TensorFlow 用过**
+
+**⇒ 证据**：
+- `nvcc` 不存在 ✗
+- `ldconfig -p | grep libcudart\|libcudnn` ⇒ **0 条** ✗
+- `/usr/local/cuda*` 不存在 ✗
+- TF 2.21 明确打印 `Skipping registering GPU devices...` ⇒ **`GPU: []`** ✗
+
+**⇒ 卡在、驱动在（`nvidia-smi` 正常，驱动 580.178.04）✓，缺的是 CUDA 运行时与 cuDNN** ✗
+
+**(d) ★ 要真正启用 GPU 训练，两条路**
+
+| 机器 | 命令 | 说明 |
+|---|---|---|
+| ★ **107**（RTX 3060）| `~/work/ai_phy_train/.venv/bin/python -m pip install "tensorflow[and-cuda]==2.21.*"` | ★ pip 会自带 CUDA 12 ＋ cuDNN 9 ✓，无需系统级安装 ✓ |
+| ★ **Mac**（M4 Pro）| `pip install tensorflow-metal` | ★ Apple 官方 Metal 插件 ✓ |
+
+**⚠ 两条都需要联网下载约 2–3 GB** ✓；**装完用** `tf.config.list_physical_devices("GPU")` 验证 ✓
+
+**(e) ★ 我原先的说法需要更正**
+
+**⇒ §12.15 我写"107 的 6 GB GPU 能用，但要看三个条件"** ✓ —— 这没错 ✓
+**⇒ 但我没说清**：★ **它从来没被用过** ✓ ⇒ **不是"配置退化了"，而是"从未配置过"** ✓
+
+★ 状态 ✓：★ 四台机器实测完毕（全无 TF-GPU）✓；★ "GPU"的真实含义（gNB 推理）已查证 ✓；★ 启用命令已给出 ✓。
+
