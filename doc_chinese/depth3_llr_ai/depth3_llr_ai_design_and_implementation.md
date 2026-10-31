@@ -3792,3 +3792,56 @@ if unknown:
 
 ★ 状态 ✓：★ 内存占用已实测（单调制 4.85 GiB）✓；★ 32 GB 的可行性已确认 ✓；★ 三台机器的 GPU 现状已核实 ✓。
 
+### 12.16 ★★★★★ 2026-11-01 07:30 **更正：150 epoch 不是依据，它只是脚本的默认值**
+
+**(a) ★ 150 是哪来的**
+
+| 项 | 值 |
+|---|---|
+| `--epochs` 的 argparse 默认 | ★ **150** ✓ |
+| `--patience` 的 argparse 默认 | ★ **0** ⇒ **默认根本不早停** ✗ |
+
+**⇒ 我在 §12.15 里拿这个默认值当"规划数字"用，这是错的** ✗ —— 它不是依据，只是脚本给的一个宽上限 ✓
+
+**(b) ★★ 脚本自己的注释写着真实情况**
+
+`train_depth3.py` 第 1226–1227 行的原文：
+
+> "EARLY TERMINATION, the way the LDPC decoder has it (design section 19.437). The validation curve is flat long before the
+> epoch budget is spent -- **E4's minimum is at epoch 18 of 40**, and the remaining twenty-two epochs are five-thousandths of…"
+
+**⇒ 也就是说**：★ **用户的做法（40 epoch ＋ 早停，20–30 就停）才是实际经验** ✓，
+**⇒ 而 150 只是"允许跑到 150"** ✗
+
+**(c) ★ 修正后的训练时长估算**
+
+| 项 | 150 epoch（我原先）| ★ 30 epoch（实际）|
+|---|---|---|
+| 样本步数 | 24.1 M | ★ **4.8 M** |
+| CPU 上估计 | 20–30 h | ★ **2–4 h** |
+
+**⇒ 结论**：★ **原估算夸大了 5–6 倍** ✗
+
+**(d) ★ 建议的训练参数**
+
+```bash
+--epochs 40 --patience 6
+```
+**⇒ `--patience` 必须显式传** ✓（默认 0 ＝ 不早停 ✗）
+
+**(e) ★★ 107 的 GPU：硬件可用，但 TensorFlow 现在看不到它**
+
+| 项 | 值 |
+|---|---|
+| GPU | ★ **NVIDIA RTX 3060 Laptop，6 GB，compute capability 8.6** ✓ |
+| 驱动 | **580.178.04** ✓ |
+| ★ **CUDA toolkit（nvcc）** | ★ **没有** ✗ |
+| ★ **TF 2.21 看到的 GPU** | ★ **`[]`（空）** ✗ ⇒ 日志 `Skipping registering GPU devices...` |
+| 内存 | ★ **15 GiB（13 GiB 可用）** ⇒ **只能跑单调制** ✓ |
+| 核数 | 16 ✓ |
+
+**⇒ 要启用 GPU**：装 **CUDA 12.x ＋ cuDNN 9.x**（TF 2.21 需要这两个）✓，或 `pip install "tensorflow[and-cuda]"` ✓
+**⇒ 装好之后**：★ **单调制训练 ＋ 6 GB 显存绰绰有余** ✓
+
+★ 状态 ✓：★ "150 epoch"的来源已查清并更正 ✓；★ 真实做法（40 ＋ 早停）已确认 ✓；★ 107 的 GPU 现状已实测（有卡、无 CUDA）✓。
+
