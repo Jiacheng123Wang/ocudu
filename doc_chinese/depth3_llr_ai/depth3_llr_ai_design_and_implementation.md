@@ -2630,3 +2630,44 @@ STATE=${STATE:-$TRAIN/bins_state.json}
 
 ★ 状态 ✓：★ 事故原因（bash 增量读）已定位 ✓；★ 损失仅记账一行 ✓；★ 安全做法已记 ✓；★ 后续由子代理补审计与 stamp ✓。
 
+**(d20) ★★★★ 2026-10-31 11:10 Time Machine 诊断：不是索引问题，是**USB 机械盘 + 深扫 + 残骸****
+
+**(a) 现象**
+
+Time Machine 自 **2026-10-26** 起没有成功备份。用户怀疑是**关闭 Spotlight 索引**导致。**⇒ 不是** ✓
+（`mdutil -s /` 显示 Indexing enabled；TM 的备份与恢复都不依赖索引，索引只影响在 TM 里**搜索**文件。）
+
+**(b) 真正的三层原因**
+
+| # | 原因 | 证据 |
+|---|---|---|
+| ★ 1 | **目的地是外置 USB 机械盘** | `iostat`：**120–140 次/秒的 4 KB 小操作 ≈ 0.5 MB/s** |
+| ★ 2 | **走 deep scan 路径** | `EventCollection: Using a deep scan for want of a better EventCollectionStrategy` |
+| ★ 3 | **20 个 `.interrupted` 残骸** | `TMStructure: Expected SnapshotInProgressContainer metadata type but found APFSBackup metadata type`，**每分钟约 18 次** |
+
+**⇒ 结果**：90 分钟只完成 **26.5%**，`tmutil` 的 ETA 从 19 分钟一路涨到 **245 分钟** ✗
+
+**(c) ★ 一个正面的发现：pnpm 的修复生效了**
+
+| 指标 | 结果 |
+|---|---|
+| ★ `non-OSS` / `paramErr` | ★ **90 分钟内 0 次** ✓ |
+| 原因 | 已把 `~/Library/pnpm`、`~/Library/Caches`、`~/.cache`、`~/.npm` 加入排除 ✓ |
+
+**⇒ 所以**卡死的老问题解决了**，剩下的是**纯性能问题** ✓
+
+**(d) ★ 建议的处置**
+
+1. **停掉当前备份**（4 小时 ETA 且残骸持续刷错）；
+2. **删掉 `*.interrupted` 与 `*.previous`**（未完成的备份，TM 不会使用）；
+3. **重启**，观察 deep scan 是否消失（残骸正是 `EventCollectionStrategy` 的污染源）。
+
+**⚠ 不删**：最新的完整备份 `2026-10-26-074446.backup` ✓；正在写的 `.inprogress` ✓
+
+**(e) ★ 附带发现**
+
+目的地可用空间在 90 分钟内从 **179 GiB 涨到 217 GiB**（**不是 TM 瘦身**，27 个备份未变）⇒
+更可能是 **APFS 可清除空间/克隆回收** ⇒ **96% 满的紧迫性已缓解** ✓
+
+★ 状态 ✓：★ 三层原因已定位（机械盘/深扫/残骸）✓；★ 索引假设已排除 ✓；★ pnpm 修复已验证生效 ✓；★ 处置建议已给出 ✓。
+
