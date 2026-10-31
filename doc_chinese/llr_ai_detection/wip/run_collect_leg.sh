@@ -89,8 +89,26 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 # is what makes them land inside the folder. run_leg.sh creates the parent below, which matters because ul_capture checks
 # the directory once and latches the answer -- a leg started with it missing captures nothing for its whole duration.
 COLLECT_CORPUS=${COLLECT_CORPUS:-$ROOT/doc_chinese/llr_ai_detection/work_tmp/corpus}
-export LEG_LOGDIR=${LEG_LOGDIR:-$COLLECT_CORPUS/$LABEL/logs}
-export OCUDU_UL_DUMP=${OCUDU_UL_DUMP:-$COLLECT_CORPUS/$LABEL/cap}
+# ★★★ THE LEG NAME IS ITS OWN VARIABLE, AND IT IS NOT THE LABEL VERBATIM (2026-10-31).
+# The old names carried three parts that say nothing about the capture: "w2" (every leg of this workstream), "harq_"
+# (every leg -- all of them exist to recover HARQ donors), and the business word ("ping"/"iperf"), which stopped being a
+# reliable description once legs started mixing both. What identifies a capture is the batch, the modulation and the
+# leg's own suffix: w2_harq_16QAM_ping_1030a becomes s2_16QAM_ping_1030a.
+#   w2        -> s2      the second batch/session
+#   harq_     -> (gone)  every leg has it
+#   ping_     -> kept, but only as a hint -- a leg may carry both ping and iperf
+#   1030a     -> kept
+# LEG_NAME can be given explicitly; otherwise it is derived from the label so both spellings name the same capture.
+LEG_NAME=${LEG_NAME:-$LABEL}
+if [ "$LEG_NAME" = "$LABEL" ] && [ "${LABEL#w2_harq_}" != "$LABEL" ]; then
+  LEG_NAME="s2_${LABEL#w2_harq_}"
+fi
+export LEG_NAME
+# Say the mapping out loud: the folder that appears on disk is the leg name, not the label the caller typed, and a silent
+# rename is exactly the kind of thing that makes a corpus unexplainable six weeks later.
+[ "$LEG_NAME" != "$LABEL" ] && echo "leg           : $LEG_NAME (label $LABEL)" >&2
+export LEG_LOGDIR=${LEG_LOGDIR:-$COLLECT_CORPUS/$LEG_NAME/logs}
+export OCUDU_UL_DUMP=${OCUDU_UL_DUMP:-$COLLECT_CORPUS/$LEG_NAME/cap}
 export OCUDU_UL_DUMP_COUNT=${OCUDU_UL_DUMP_COUNT:-100000}
 # ★ THE TRANSPORT-BLOCK DUMP DIRECTORY, AND WHY THIS LINE EXISTS. helix's dump is armed by the PRESENCE of the variable
 # (port_channel_estimator_helena_impl.cpp: dump_en = getenv(...) != nullptr), and its fopen is not checked: a directory that
@@ -104,11 +122,11 @@ export OCUDU_UL_DUMP_COUNT=${OCUDU_UL_DUMP_COUNT:-100000}
 # bits must live with the leg or the provenance is a lie.
 # So the path is DERIVED from the label unless the caller asks for something else by name (LEG_TB_DIR), and an inherited variable that
 # does not name this leg is reported and overridden rather than obeyed.
-TB_DIR_DEFAULT=$COLLECT_CORPUS/$LABEL/tb_live
+TB_DIR_DEFAULT=$COLLECT_CORPUS/$LEG_NAME/tb_live
 if [ -n "${LEG_TB_DIR:-}" ]; then
   export OCUDU_HELENA_DUMP_DIR=$LEG_TB_DIR
 elif [ -n "${OCUDU_HELENA_DUMP_DIR:-}" ] && [ "$OCUDU_HELENA_DUMP_DIR" != "$TB_DIR_DEFAULT" ]; then
-  if [ "$(basename "$(dirname "$OCUDU_HELENA_DUMP_DIR")")" != "$LABEL" ]; then
+  if [ "$(basename "$(dirname "$OCUDU_HELENA_DUMP_DIR")")" != "$LEG_NAME" ]; then
     echo "note          : ignoring inherited OCUDU_HELENA_DUMP_DIR=$OCUDU_HELENA_DUMP_DIR (it names another leg)" >&2
     export OCUDU_HELENA_DUMP_DIR=$TB_DIR_DEFAULT
   fi

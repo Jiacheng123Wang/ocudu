@@ -856,3 +856,52 @@ sudo rm -rf /Users/jiachengwang/dev/ocudu/doc_chinese/llr_ai_detection/work_tmp/
 
 ★ 状态 ✓：★ 两条空目录已查明并给出删除命令 ✓；★ `tb_live` 为何不能单独建库已解释 ✓；★ 账目已修正 ✓。
 
+## 11.10 ★★★★ 2026-10-31 14:10 **新增 `LEG_NAME` 环境变量：腿名与 label 分离**
+
+**(a) 用户的要求**
+
+腿名要**去掉没有区分度的部分**，改成一个**独立的环境变量**：
+
+| 旧 | 新 | 理由 |
+|---|---|---|
+| ★ `w2_` | ★ **`s2_`** | 批次标识 |
+| ★ `harq_` | ★ **去掉** | **每条腿都有**，没有区分度 |
+| `16QAM_` | **保留** | 有区分度 ✓ |
+| `ping_` | **保留，但只作参考** | ★ 同一腿可能**混有 ping/iperf** |
+| `1030a` | **保留** | 腿的序号 ✓ |
+
+**⇒ 例**：`w2_harq_16QAM_ping_1030a` ⇒ ★ **`s2_16QAM_ping_1030a`**
+
+**(b) 实现（`wip/run_collect_leg.sh`）**
+
+```bash
+LEG_NAME=${LEG_NAME:-$LABEL}
+if [ "$LEG_NAME" = "$LABEL" ] && [ "${LABEL#w2_harq_}" != "$LABEL" ]; then
+  LEG_NAME="s2_${LABEL#w2_harq_}"
+fi
+export LEG_NAME
+[ "$LEG_NAME" != "$LABEL" ] && echo "leg           : $LEG_NAME (label $LABEL)" >&2
+export LEG_LOGDIR=${LEG_LOGDIR:-$COLLECT_CORPUS/$LEG_NAME/logs}
+export OCUDU_UL_DUMP=${OCUDU_UL_DUMP:-$COLLECT_CORPUS/$LEG_NAME/cap}
+TB_DIR_DEFAULT=$COLLECT_CORPUS/$LEG_NAME/tb_live
+```
+
+**⇒ 三条落盘路径全部改由 `LEG_NAME` 派生** ✓ ⇒ ★ **新采集的目录名就是新腿名** ✓
+
+**(c) 行为（自测通过）**
+
+| 输入 label | ★ 得到的 LEG_NAME |
+|---|---|
+| `w2_harq_16QAM_ping_1030a` | ★ **`s2_16QAM_ping_1030a`** |
+| `w2_harq_QPSK_iperf_1029c` | `s2_QPSK_iperf_1029c` |
+| `col_1025_ping`（无前缀）| **原样保留** ✓ |
+| `s2_16QAM_ping_1030a` | **原样保留**（幂等 ✓）|
+| 显式 `LEG_NAME=…` | ★ **不被覆盖** ✓ |
+
+**(d) 注意**
+
+★ **已有的 60 条腿仍叫 `w2_harq_*`**（不追溯改名）⇒ **库里会新旧并存** ✓
+★ 但**新采集一律 `s2_*`** ✓ ⇒ 从 2026-10-31 起的新腿用新命名 ✓
+
+★ 状态 ✓：★ `LEG_NAME` 已加入并生效 ✓；★ 映射自测通过 ✓；★ 落盘路径已全部改造 ✓。
+
