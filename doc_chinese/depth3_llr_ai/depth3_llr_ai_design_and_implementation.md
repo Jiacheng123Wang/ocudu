@@ -2813,3 +2813,53 @@ df -h /System/Volumes/Data | tail -1
 
 ★ 状态 ✓：★ 107 两批共 5 腿、14 npz 全部 md5 校验通过 ✓；★ "覆盖"已核实为正确分工 ✓。
 
+**(d24) ★★★★ 2026-10-31 13:10 **T7 的 744 G 用 Linux 分区抢回来了**（macOS 做不到）**
+
+**(a) 问题**
+
+T7（1 TB）的布局是 `EFI → 744 G 空闲 → 256 G APFS（M2 备份）` —— ★ **空闲在容器【前面】**。
+
+| 在 macOS 上尝试 | 结果 |
+|---|---|
+| `diskutil addPartition` | ✗ 只会**追加到末尾**（备份后面没空间）|
+| `diskutil apfs resizeContainer` | ✗ APFS 容器**只能向后扩**，前面的洞用不了 |
+| `gpt add`（两台机器都试） | ✗ **macOS 26 在系统运行时锁住分区表**：`operation not permitted: add` |
+
+**⇒ 结论：macOS 无法在"容器前面的空隙"里建分区。**
+
+**(b) ★ 解决办法：把盘插到 Ubuntu，用 `parted`**
+
+```bash
+# ① 精确边界（从 /sys 读，不用 sudo）：EFI 结束 409640，APFS 起始 1453525128
+sudo parted --script /dev/sda unit MiB mkpart T7_Corpus fat32 201 709729
+```
+
+**★ 两个关键点**：
+
+| # | 要点 |
+|---|---|
+| ★ 1 | `parted` 的 **`fs类型` 只设置 GPT 类型 GUID，不建文件系统** ⇒ 这个版本不认 `exfat` 这个词，★ **用 `fat32` 即可**（映射到同一 GUID `EBD0A0A2-…`）|
+| ★ 2 | 对齐警告（`411648s % 65535s != 0s`）★ **无害** —— 411 648 扇区 = **201 MiB ⇒ 已按 1 MiB 对齐**，SSD 关心的就是 1 MiB |
+
+**(c) 结果（实测）**
+
+| 分区 | start | size | 状态 |
+|---|---|---|---|
+| `sda1` EFI | 40 | 409 600 | ✓ 未变 |
+| ★ `sda2` **备份** | **1 453 525 128** | **500 000 000** | ★ **完全未变** ✓ |
+| ★ `sda3` 新建 | **411 648** | **1 453 113 344** | ★ **692.9 GiB** ✓（距备份还有 136 扇区余量）|
+
+**(d) 剩下的格式化**
+
+**⇒ Linux 上没有 `mkfs.exfat`**（107 只有 `parted`）⇒ 两条路：
+
+```bash
+# A) 在 107 上装了再格式化
+sudo apt install -y exfatprogs && sudo mkfs.exfat -n T7_Corpus /dev/sda3
+
+# B) 把盘插回 Mac，用 diskutil 格式化（Mac 自带 exFAT ✓）
+sudo newfs_exfat -v T7_Corpus /dev/diskN sX
+```
+
+★ 状态 ✓：★ 744 G 已抢回为独立分区（692.9 GiB）✓；★ 备份分区零改动 ✓；★ 格式化待执行 ✓。
+
