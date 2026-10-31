@@ -989,3 +989,50 @@ TB_DIR_DEFAULT=$COLLECT_CORPUS/$LEG_NAME/tb_live
 
 ★ 状态 ✓：★ **全部 60 条腿的语料已归档** ✓；★ "已建必有 tar" 已验证 ✓；★ 账目 55+5=60 闭合 ✓。
 
+## 11.13 ★★★★ 2026-10-31 14:25 **采集起飞清单：一次性设置 vs 每腿重复**
+
+**(a) 一次性（每开一个终端会话设一次，之后所有腿共用）**
+
+```bash
+# ★ 语料根目录（唯一必须设的：cap / tb_live / logs 三个路径都由它派生）
+export COLLECT_CORPUS=/Volumes/T7_Corpus/corpus
+
+# ★ 清掉旧习惯：以前要手动 export OCUDU_HELENA_DUMP_DIR，现在由脚本从 COLLECT_CORPUS 派生。
+#   留着它会让"上一个腿的 tb_live"被下一个腿继承 —— mcs06_ping_1029a 就是这样变成空腿的。
+unset OCUDU_HELENA_DUMP_DIR
+
+# 重传也要采（不按 rv 过滤）
+unset OCUDU_UL_DUMP_RV
+
+# 捕获预算（要能容纳重传）
+export OCUDU_UL_DUMP_COUNT=100000
+```
+
+**(b) 每条腿（起飞前，只此一条）**
+
+```bash
+sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu w2_harq_<新腿>
+```
+
+**⇒ 腿名可以给旧的 `w2_harq_*` 形式，脚本自动映射成 `s2_*`** ✓
+**⇒ 若要显式指定：** `LEG_NAME=s2_16QAM_ping_1030a sudo -E bash …`（显式值优先 ✓）
+
+**(c) 每条腿（降落后核对，30 秒）**
+
+```bash
+L=/Volumes/T7_Corpus/corpus/s2_<新腿>
+find $L -maxdepth 1 -name 'cap_*.txt' ! -name '*_ce.txt' ! -name '._*' | wc -l   # 捕获数
+find $L/tb_live -maxdepth 1 -name 'tb_*.bits' 2>/dev/null | wc -l                 # 活体 TB 数
+sync
+```
+
+**★ 两个数任一为 0 ⇒ 这条腿白跑** ✓（`tb_live` 为 0 就是 §6 说的"捕获有、供体无"，判不过回收）
+
+**(d) 为什么 `unset OCUDU_HELENA_DUMP_DIR` 归到"一次性"**
+
+`run_collect_leg.sh` **导出**的变量**不会**回传给父 shell（它是子进程）✓
+⇒ 唯一会污染的来源是**用户自己 export 过**（旧流程 §6 要求手动 export ✓）
+⇒ **一次性 unset 清掉旧习惯即可** ✓；脚本本身已从 `COLLECT_CORPUS` 派生，且有"继承路径不属于本腿就忽略"的防呆 ✓
+
+★ 状态 ✓：★ 一次性与每腿命令已分开 ✓；★ 降落后核对命令已补 ✓。
+
