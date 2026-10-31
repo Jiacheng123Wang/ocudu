@@ -28,7 +28,10 @@ run_one() {
     tar -xf "$TARS/$leg.tar" -C "$CORPUS" 2>/dev/null || { echo "extract failed $leg" >> "$LOG"; return 1; }
   fi
   echo "---- build $leg (local=$local_corpus) $(date +%T)" >> "$LOG"
-  if TRAIN=$TRAIN DATASETS_DIR=$DEST STATE=$TRAIN/bins_state_full.json \
+  # THE LINEAR ALGEBRA LIBRARY SPWNS A THREAD PER CORE PER PROCESS unless told otherwise, so three legs on sixteen cores ask for forty-eight threads and the
+  # load average reads forty-four while each build crawls. Four threads each leaves room for the replay pools and for the rest of the machine.
+  if OMP_NUM_THREADS=${BLAS_THREADS:-4} OPENBLAS_NUM_THREADS=${BLAS_THREADS:-4} MKL_NUM_THREADS=${BLAS_THREADS:-4} \
+     TRAIN=$TRAIN DATASETS_DIR=$DEST STATE=$TRAIN/bins_state_full.json \
      # THE REPLAY POOL IS WHAT SATURATES THE CORES, not the build. One leg's dump runs JOBS unit-shells at once, so N legs x JOBS is the real thread count.
      # Measured 2026-10-31: two legs with six each already put the load at thirteen on sixteen threads, and a third leg without lowering JOBS would only queue
      # behind the same cores. Twelve threads split three ways keeps the total while letting three legs advance instead of two.
