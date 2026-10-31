@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
 # SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
+# ★★★ GENERATED VARIANT -- READ THIS BEFORE EDITING.
+# This file pins uplink MCS to 2 (min_ue_mcs = max_ue_mcs = 2) so that a capture leg has ONE
+# modulation and ONE code rate. It is a copy of pinned_mcs02.yml with only those two lines changed.
+# Comments elsewhere in this file talk about the MCS values of the ORIGINAL and do NOT describe this file.
+# The authoritative statement about this file is this header and the two pinning lines.
+
 
 # =====================================================================================================
 # COLLECTION CONFIG for the depth-3 LLR corpus (llr_ai_detection design document section 19.22 / 19.34).

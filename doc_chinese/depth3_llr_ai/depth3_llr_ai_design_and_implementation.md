@@ -3081,3 +3081,52 @@ sudo newfs_exfat -v T7_Corpus /dev/diskN sX
 
 ★ 状态 ✓：★ 用户的质疑成立，我的观察来自旧腿 ✓；★ 实测对比已入档 ✓；★ 四个 pinned 配置的码率已给出 ✓；★ 补码率的方案已列 ✓。
 
+### 12.2 ★★★★★ 2026-10-31 16:20 **已生成 12 个 pinned 配置（MCS 0–22，步长 2）；腿名改用 MCS**
+
+**(a) 生成的配置**
+
+**⇒ `configs/pinned_mcs00.yml` … `pinned_mcs22.yml`**（偶数 MCS，共 **12** 个）✓
+**⇒ 每个都是 `pinned_mcs02.yml` 的副本，只改 `min_ue_mcs`/`max_ue_mcs`** ✓
+**⇒ 每个文件顶部有**生成标记**，声明"本文件的权威描述就是这段 header 和那两行 pinning"** ✓
+**⇒ SPDX 许可证头保持在最前** ✓；**12 个文件 YAML 语法全部校验通过** ✓
+
+**(b) ★★★ 权威 MCS → 调制 / 码率（UL Table 2，取自 `pusch_mcs_table_test.cpp` 的 `qam256` 段）**
+
+| 配置 | MCS | Qm | 调制 | rate×1024 | 码率 |
+|---|---|---|---|---|---|
+
+
+**(c) ★ 覆盖率评价（对 depth4 很好）**
+
+| 调制 | 覆盖的码率 |
+|---|---|
+| QPSK | **0.12 / 0.30 / 0.59** |
+| 16QAM | **0.42 / 0.54 / 0.64** |
+| 64QAM | **0.51 / 0.60 / 0.70 / 0.80** |
+| 256QAM | **0.67 / 0.74** |
+
+**⇒ 每种调制 2–4 档码率** ✓ ⇒ 比原来的"每调制一档"强得多 ✓
+
+**(d) ★ 腿名改用 MCS**
+
+| 旧 | ★ 新 |
+|---|---|
+| `s2_QPSK_ping_1031a` | ★ **`s2_mcs02_ping_1031a`** |
+| `s2_16QAM_ping_1030a` | ★ **`s2_mcs06_ping_1030a`** |
+| `s2_64QAM_ping_1029a` | ★ **`s2_mcs12_ping_1029a`** |
+
+**⇒ 理由**：调制由 MCS 唯一决定 ✓ ⇒ 名字里写 MCS 信息量更大 ✓（调制可反推 ✓）
+
+**⇒ 起飞示例**：
+```bash
+export LEG_CONFIG=configs/pinned_mcs08.yml
+sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu s2_mcs08_ping_1031a
+```
+
+**(e) ⚠ 一处需要说明**
+
+`LEG_NAME` 的自动映射规则（`w2_harq_` → `s2_`）**只对旧式 label 生效** ✓
+**⇒ 新腿名 `s2_mcs08_ping_1031a` 原样使用** ✓（不含 `w2_harq_` 前缀 ⇒ 不会被改写 ✓）
+
+★ 状态 ✓：★ 12 个 pinned 配置已生成并校验 ✓；★ MCS→码率表已从源码取证 ✓；★ 腿名规则已更新 ✓。
+
