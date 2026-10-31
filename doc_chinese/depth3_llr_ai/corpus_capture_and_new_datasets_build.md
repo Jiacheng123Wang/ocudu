@@ -1005,21 +1005,29 @@ unset OCUDU_HELENA_DUMP_DIR
 unset OCUDU_UL_DUMP_RV
 
 # 捕获预算（要能容纳重传）
-export OCUDU_UL_DUMP_COUNT=100000
+# ★ 50000 而不是 100000：每腿约 6 GB（捕获 3.7 GB + CE/文本 1.1 GB + tb_live 1 GB + dump 0.2 GB），
+# ★ 这样 107（29 GB 可用）也能完整跑一条腿；100000 要约 11 GB，小腿机器放不下。
+export OCUDU_UL_DUMP_COUNT=50000
 ```
 
-**(b) 每条腿（起飞前，两条：先设腿名，再起飞）**
+**(b) 每条腿（起飞前，一条）**
 
 ```bash
-# ★ 腿名走环境变量，不再写在命令行里
-export LEG_NAME=s2_16QAM_ping_1030a
-
-# 起飞（命令里不再出现腿名）
-sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu
+sudo -E bash doc_chinese/llr_ai_detection/wip/run_collect_leg.sh cpu <label>
 ```
 
-**⇒ 老写法仍然可用**（位置参数优先）：`… run_collect_leg.sh cpu w2_harq_16QAM_ping_1030a` ✓
-**⇒ 给旧的 `w2_harq_*` 会被自动映射成 `s2_*`** ✓
+**⇒ `<label>` 就是腿名** ✓（也可以给旧形式 `w2_harq_*`，脚本自动映射成 `s2_*` ✓）
+**⇒ 也可以用环境变量 `LEG_NAME` 代替位置参数**：`LEG_NAME=s2_… sudo -E bash … cpu` ✓（位置参数优先 ✓）
+
+**★ 不需要手动 `mkdir`**：脚本在起飞前已经建好三处目录 ✓
+| 行 | 建什么 |
+|---|---|
+| 140 | `tb_live/`（活体 TB 落盘）|
+| 187 / 300 | `logs/` |
+| ★ 310 | ★ **`cap` 的父目录**（`OCUDU_UL_DUMP` 是**文件名前缀**，父目录必须在起飞前存在）|
+
+**⇒ 这一条很重要**：`ul_capture` **只检查一次目录是否存在并记住结果** ⇒ 起飞时目录不在，
+**整条腿一条都采不到，而且不报错** ✗ —— 脚本的 310 行就是为这个加的 ✓
 
 **(c) 每条腿（降落后核对，30 秒）**
 
