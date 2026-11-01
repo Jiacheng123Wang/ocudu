@@ -94,7 +94,11 @@ add_test(port_channel_estimator_metal_mmse_unit_test port_channel_estimator_meta
 # this second entry is what the hand gate used to be, so "make test" now covers it too.
 add_test(port_channel_estimator_metal_mmse_unit_test_ta_chain port_channel_estimator_metal_mmse_unit_test)
 set_tests_properties(port_channel_estimator_metal_mmse_unit_test_ta_chain PROPERTIES
-    ENVIRONMENT "OCUDU_CE_TA_CHAIN=1")
+    ENVIRONMENT "OCUDU_CE_TA_CHAIN=1"
+    # 77 is the binary's "everything that ran passed, some case was not exercisable on this device" code. Without
+    # this property the runner would call that a failure, and a machine whose DFT pipeline simply has no
+    # 2048-point kernel would look like a machine with a broken estimator.
+    SKIP_RETURN_CODE 77)
 
 # Apple-only test binaries live under lib/, and lib/ is EXCLUDE_FROM_ALL by upstream's design ("do not build by
 # default"), so `cmake --build build` never produced them and `--target test` reported them as "Not Run" -- a

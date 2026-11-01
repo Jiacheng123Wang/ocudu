@@ -291,6 +291,12 @@ static bool s12_device_idft_profile_matches(unsigned size, std::mt19937& rng)
 /// of the circular profile, advanced ones at its END) and the parabolic refinement - by running the
 /// host's TA estimator and the device-side computation on the SAME pilot data, for delays across the
 /// window the estimator can resolve.
+/// Set when a case was not exercised because THIS device cannot dispatch it -- a DFT size, say. It is not a
+/// failure and must not be reported as one: an operator reading "the device-side timing does not reproduce the
+/// host's" has been told the estimator is broken, when all that happened is that the hardware has no such kernel.
+/// The runner turns this into a skip so the log says so.
+static bool s12_capability_skip = false;
+
 static bool s12_device_ta_matches_host()
 {
   // The geometry the air path runs, taken from the estimator's own print (S12_batch5b_ta.md 4.5):
@@ -318,6 +324,15 @@ static bool s12_device_ta_matches_host()
   auto ta_host = make_ta_estimator();
   metal::dft_metal_engine engine;
   if (!engine.init(size, /*inverse=*/true)) {
+    // A size this machine's DFT pipeline cannot dispatch is a DELEGATION, not a failure (same rule as the
+    // profile case above). Without this the M2 -- whose DFT pipeline cannot dispatch 2048 -- reported a
+    // capability limit as a broken estimator, which is the one reading an operator must never be given:
+    // "the device-side timing does not reproduce the host's" is a defect report, and there was no defect.
+    if (!metal::dft_metal_engine::is_size_runnable(size)) {
+      std::printf("S12 TA [%u]: SKIPPED - this device's DFT pipeline cannot dispatch that size\n", size);
+      s12_capability_skip = true;
+      return true;
+    }
     std::fprintf(stderr, "S12 TA [%u]: device IDFT init failed\n", size);
     return false;
   }
@@ -551,6 +566,11 @@ static bool s12_device_ta_kernel_matches_host()
   auto ta_host = make_ta_estimator();
   metal::dft_metal_engine engine;
   if (!engine.init(size, /*inverse=*/true)) {
+    if (!metal::dft_metal_engine::is_size_runnable(size)) {
+      std::printf("S12 TA-K6 [%u]: SKIPPED - this device's DFT pipeline cannot dispatch that size\n", size);
+      s12_capability_skip = true;
+      return true;
+    }
     std::fprintf(stderr, "S12 TA-K6 [%u]: device IDFT init failed\n", size);
     return false;
   }
@@ -3630,6 +3650,14 @@ int main()
                 static_cast<unsigned long long>(nof_hops));
   }
 
+  // A run whose only gap was a case this device cannot dispatch is reported as a SKIP, not as a pass and not as
+  // a failure: the cases that DID run all passed, and there is nothing here for anyone to fix. The exit code
+  // tells the runner that (see SKIP_RETURN_CODE on this test's ctest entry).
+  if (s12_capability_skip) {
+    std::printf("All tests PASSED; at least one case SKIPPED because this device cannot dispatch it "
+                "(reported as NOT RUN)\n");
+    return 77;
+  }
   std::printf("All tests PASSED\n");
   return 0;
 }
