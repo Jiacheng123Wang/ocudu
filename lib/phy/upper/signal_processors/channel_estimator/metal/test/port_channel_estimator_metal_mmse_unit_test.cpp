@@ -1182,36 +1182,13 @@ int main()
 
   // S12 (batch 5b): the device IDFT must reproduce the power delay profile the TA estimator reads.
   // Placed first because every later step of the TA port assumes it.
-  if (run_chain) {
-    // The sizes this machine can actually dispatch are named in the PASS line: a machine whose pipeline
-    // caps below one of them covers the rest, and the log has to say which, or "PASS" would claim more
-    // than was checked.
-    bool                  s12_ok = true;
-    std::vector<unsigned> s12_covered;
-    for (unsigned size : {128U, 256U, 2048U}) {
-      if (metal::dft_metal_engine::is_size_runnable(size)) {
-        s12_covered.push_back(size);
-      }
-      s12_ok = s12_device_idft_profile_matches(size, rng) && s12_ok;
-    }
-    if (!s12_ok) {
-      std::fprintf(stderr, "S12 FAIL: the device IDFT does not reproduce the host profile\n");
-      return 1;
-    }
-    std::printf("S12 PASS: the device IDFT reproduces the host power delay profile (of 128/256/2048, this "
-                "device dispatched:");
-    for (unsigned covered : s12_covered) {
-      std::printf(" %u", covered);
-    }
-    std::printf(")\n");
-    // THESE THREE ARE DEFERRED TO THE END OF main(), AND THAT IS THE FIX FOR A TEST-ISOLATION DEFECT
-    // (2026-11-01). Each of them constructs an engine and warms it up, and that warm-up perturbs the ordering
-    // the strict-mode checks later in this file assert: with OCUDU_CE_TA_CHAIN set, Test 11 reported that the
-    // merged batch does not estimate the edge block on a machine where the same test passes with the variable
-    // unset, and the binary's own capability predicate already documents the same class of interference. Running
-    // them last means nothing they touch can reach a test that has not run yet.
-    defer_s12_ta_tail = true;
-  }
+  // THE WHOLE S12 CHAIN BLOCK IS DEFERRED TO THE END OF main(), AND THAT IS A TEST-ISOLATION FIX
+  // (2026-11-01). It constructs a DFT engine per size and warms each one up, and that warm-up perturbs the
+  // ordering the strict-mode checks later in this file assert: with OCUDU_CE_TA_CHAIN set, Test 11 said the
+  // merged batch does not estimate the edge block on a machine where the same binary passes that test with
+  // the variable unset. Deferring the three TA cases alone was not enough -- the profile sweep above them
+  // warms an engine too -- so the entire block moves.
+  const bool defer_s12_chain = run_chain;
 
   unsigned n_bad = 0;
   // Engine inversion of every matrix size the estimator can ask for: the same kernel serves the
@@ -3657,6 +3634,30 @@ int main()
                 alloc_limit,
                 real_limit,
                 static_cast<unsigned long long>(nof_hops));
+  }
+
+  if (defer_s12_chain) {
+      // The sizes this machine can actually dispatch are named in the PASS line: a machine whose pipeline
+      // caps below one of them covers the rest, and the log has to say which, or "PASS" would claim more
+      // than was checked.
+      bool                  s12_ok = true;
+      std::vector<unsigned> s12_covered;
+      for (unsigned size : {128U, 256U, 2048U}) {
+        if (metal::dft_metal_engine::is_size_runnable(size)) {
+          s12_covered.push_back(size);
+        }
+        s12_ok = s12_device_idft_profile_matches(size, rng) && s12_ok;
+      }
+      if (!s12_ok) {
+        std::fprintf(stderr, "S12 FAIL: the device IDFT does not reproduce the host profile\n");
+        return 1;
+      }
+      std::printf("S12 PASS: the device IDFT reproduces the host power delay profile (of 128/256/2048, this "
+                  "device dispatched:");
+      for (unsigned covered : s12_covered) {
+        std::printf(" %u", covered);
+      }
+      std::printf(")\n");
   }
 
   // The deferred TA tail (see the note where it is set): run last, so its engine warm-up cannot perturb any
