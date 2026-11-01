@@ -1797,3 +1797,64 @@ w2_harq_16QAM_ping_1029a_QPSK_self.npz
 ★ 状态 ✓：★ 母集已建成（39 100 ＋ 3）✓；★ **harq=3 是正确的（193 条为空接收）**✓；
 ★ **43 PRB 的 99.8% 拒绝率是一个跨批次的真实缺陷** ✓；★ **`select_by_bin.py` 会静默产出空集** ✓；
 ★ **`harq_backfill.py` 的坐标缺陷也影响 w2 的历史计数** ✓；★ 归属有四条独立证据 ✓。
+
+---
+
+## 15. ★★★★★ 2026-11-02 01:05 **全量母集**不需要** `select_by_bin.py`（用户指出）**
+
+**(a) ★★ 问题**
+
+> 用户问："我们现在是跑全量母集建库，为什么还需要 `select_by_bin.py`？"
+
+**⇒ 答**：★ **不需要** ✓ —— **母集应当直接调 `build_depth3_dataset.py`** ✓
+
+**(b) ★★★ `select_by_bin.py` 的职责是"**按箱抽配额**"，不是"建库的必经步骤"**
+
+**⇒ 它的输入**：`--quota-self`（默认 **2 500**）、`--quota-harq`（默认 **250**）✓
+**⇒ 它的产出**：`index_sel_<pop>.csv` ✓（**按 (调制 × 宽度 × SNR) 的箱子，每箱最多取配额条** ✓）
+**⇒ ⇒ 它是为**小库／抽样库**设计的** ✓
+
+**⇒ 而 `queue_build_datasets.sh`（那条抽样流水线）自己的注释就写明**：
+> "**QUOTAS. Self 2500 and harq 250 per bin**: ten to one, which keeps a base library large enough to draw a small
+> experiment… **A bin smaller than its quota gives what it has; the quota is a ceiling, not a promise**"
+
+**⇒ ⇒ 所以**：★ **`queue_build_datasets.sh` 是**抽样**流水线** ✓，**不是母集流水线** ✗
+
+**(c) ★★★★★ 更重要的：这条路**以前就坑过人****
+
+**⇒ `queue_build_datasets.sh` 的另一段注释**：
+> "**THESE TWO MUST BE DEFAULTS, NOT ASSIGNMENTS.** Written as plain assignments they ran before the `${VAR:-default}`
+> line could never override them: **an "unlimited" build silently used the quota ledger of the sampled build**, and on the
+> Mac … **Both cost hours before anyone noticed, because neither produced an error**."
+
+**⇒ ⇒ 即**：★ **"设成无限配额"这个做法**本身**就是已知的坑** ✓ —— **它会**静默地沿用抽样那份账本**，而且**不报错** ✗✗
+
+**⇒ ⇒ 所以**：★ **用 `select_by_bin` ＋ 无限配额去建母集，不只是"多余"，它正好是**这条路上已经翻过车的地方**** ✓
+
+**(d) ★★ 这次为什么仍然是对的**
+
+**⇒ 子代理确实走了 `select_by_bin --quota-self 100000000 --quota-harq 100000000`** ✓
+**⇒ 但它**核对了输出**：★ **`self: selected 42806 of 42806` / `harq: selected 173 of 173`** ✓
+**⇒ ⇒ 所以**结果等价于"不筛"** ✓ ⇒ **这批数据是干净的** ✓
+
+**⇒ 但**流程不该这样** ✓ —— **下一次应当直接**：
+
+```bash
+# 母集：不加 select_by_bin，直接把全部 crc=OK 的单元喂给 builder
+build_depth3_dataset.py --units <dump>/index.csv --tb <dump>/tb --corpus <采集> \
+    --out datasets_full_s2 --name <leg>_<MOD>_<self|harq> --source real --modulation <MOD> \
+    --min-prb 1 --max-units 0
+```
+**⇒ ★ 前提**：`index.csv` 里要能区分 self / harq ✓ ⇒ **那由 `harq_backfill.py` 打标** ✓（`index_self.csv` / `index_harq.csv` ✓）
+
+**(e) ★ 所以正确的分工是**
+
+| 步骤 | 用什么 | 用途 |
+|---|---|---|
+| ★ **打标（self / harq）** | **`harq_backfill.py`** | ★ **必需** ✓（母集和抽样都要 ✓）|
+| ★★ **建母集（全量）** | ★ **`build_depth3_dataset.py` 直接调** | ★ **不要 `select_by_bin`** ✓ |
+| ★ **抽小库（按箱配额）** | **`select_by_bin.py` ＋ `queue_build_datasets.sh`** | ★ **这才是它的用武之地** ✓ |
+
+★ 状态 ✓：★ **"母集不需要 `select_by_bin`"已确认并记录** ✓；★ **它是抽样工具**已说明（配额 2500/250 ✓）；
+★ **"无限配额"是已知的静默陷阱**已引原文记录 ✓；★ **本次结果仍然干净**（42 806/42 806 核对过 ✓）✓；
+★ **母集的正确调用方式**已写出 ✓。
