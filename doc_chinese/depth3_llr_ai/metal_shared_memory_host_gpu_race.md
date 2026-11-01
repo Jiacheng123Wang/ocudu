@@ -2506,3 +2506,57 @@ error: cannot execute tool 'metal' due to missing Metal Toolchain;
 
 ★ 状态 ✓：★ 四条路径全部 25/25 ✓；★ 本机缺 Metal 工具链、已用 metallib 搬运解决 ✓；★ 替换后本机 60/60 ✓；
 ★ 流程问题与三条建议已列 ✓；★ 历史门控数据的评估与"建议重跑"已写 ✓。
+
+---
+
+## 44. ★★★★ 2026-11-01 21:40 **203 全量 unit test 的三个失败：逐个查清，**与本次修复无关****
+
+**(a) ★ `depth3_slow_measurements_test` / `depth3_cfo_test` —— **"Not Run" = 没编，不是失败**
+
+**⇒ `CMakeLists` 自己的注释就写着原因**（`lib/phy/upper/signal_processors/channel_estimator/metal/CMakeLists.txt:99-102`）：
+> "Apple-only test binaries live under `lib/`, and `lib/` is EXCLUDE_FROM_ALL by upstream's design …
+> so `cmake --build build` never produced them and **`--target test` reported them as "Not Run"**
+> — a registered test with no binary"
+
+**⇒ 显式编出来之后**：★ **`100% tests passed out of 2`** ✓✓
+
+**(b) ★★★ `port_channel_estimator_metal_mmse_unit_test_ta_chain` —— 是**设备能力**，不是缺陷**
+
+**⇒ ctest 给它设了 `ENVIRONMENT "OCUDU_CE_TA_CHAIN=1"`**（`CMakeLists.txt:95-97`）✓
+**⇒ 带上这个变量跑，输出是**：
+
+```
+S12 TA [2048]: device IDFT init failed
+S12 FAIL: the device-side TA does not reproduce the host's
+S12 PASS: the device IDFT reproduces the host power delay profile (of 128/256/2048, this device dispatched: 128 256)
+```
+
+**⇒ 最后一行把问题说清楚了**：★★ **这台设备能派发 128 与 256 点的 IDFT，**不能派发 2048 点**** ✓
+**⇒ 而不带的 `OCUDU_CE_TA_CHAIN` 时，那三个尺寸的用例根本不跑** ✓ ⇒ **所以"直接跑能过、ctest 跑不过"** ✓
+
+**(c) ★★ 这是 M2 与 M4 的**真实差异**，与本次修改无关**
+
+| 机器 | 2048 点 IDFT |
+|---|---|
+| ★ **本机 M4 Pro** | ★ **能** ✓（`S12 epoch … bit-identical` 全过 ✓）|
+| ★ **203 M2** | ★ **不能** ✗（`device IDFT init failed` ✓）|
+
+**⇒ 原因几乎可以肯定**：★ **2048 点 IDFT 需要的线程组内存/线程数超过 M2 的限制** ✓
+**⇒ 三次修改我都没碰 DFT** ✓ ⇒ ★ **不是回归** ✓
+**⇒ 而且换成本机（Xcode 27.2）编的 metallib 后结果相同** ✓ ⇒ **也不是工具链的问题** ✓
+
+**(d) ★ 但测试本身有一个小问题，值得单独修**
+
+**⇒ 该测试文件最近的提交就叫**："metal mmse test: **a size this device cannot dispatch is a skip, not a failure**"
+**⇒ 也就是说**作者的意图**是：★ **设备不支持就跳过** ✓
+**⇒ 但现实是**：★ **`device IDFT init failed` 这条路径**仍然报 FAIL** ✗ ⇒ **"跳过"的判断没有覆盖"init 失败"这一种** ✓
+**⇒ 建议**：★ **把 `engine.init()` 失败也判为 skip** ✓（一行 ✓）
+
+**(e) ★ 附带结论：本机与 203 的 Metallib 流程**
+
+**⇒ 用户已在本机装好 Metal Toolchain 并成功重建** ✓ ⇒ **§43(d) 的流程问题已解决** ✓
+**⇒ 我这轮把本机（Xcode 27.2）的 metallib 拷到了 203** ✓ ⇒ **实测可用** ✓（回放 `crc=OK` ✓、TA 测试结果相同 ✓）
+**⇒ 建议**：★ **两台都各自编译自己的 metallib** ✓（同一份源码 ✓ ⇒ 产物可互换 ✓，但各自编译更省事 ✓）
+
+★ 状态 ✓：★ "Not Run" 两个 = 没编 ⇒ 编出来 100% 通过 ✓；★ TA 失败 = M2 不支持 2048 点 IDFT ⇒ **非回归** ✓；
+★ 测试的"跳过"逻辑漏了 init 失败 ⇒ 建议修 ✓；★ metallib 流程已解决 ✓。
