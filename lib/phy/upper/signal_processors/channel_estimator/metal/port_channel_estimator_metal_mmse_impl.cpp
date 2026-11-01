@@ -623,11 +623,27 @@ bool edge_build_on_device()
   return value;
 }
 
+/// \brief Whether the host may read the scalars the device reduced (noise variance, RSRP, timing, CFO).
+///
+/// ON BY DEFAULT, and that is the correction of a defect rather than a preference. These values are
+/// produced by the device inside the extraction's command buffer. Reading them costs one synchronisation,
+/// which is why a switch exists to take the host copy out of an A/B leg.
+///
+/// But a consumer that reads them off the host cannot do without them: the AI arm, whose network takes the
+/// channel estimate as an input and therefore sits on the host side already, and the mixed path whose
+/// equaliser runs on the CPU. The code that published them answered with a hard ZERO when the switch was
+/// off, and zero noise variance divides the signal-to-noise into infinity and poisons whatever asked.
+///
+/// Found the expensive way (2026-11-01): one reception in four decoded to a failed block on one machine and
+/// none on another, with nothing to distinguish them but a NaN where the noise variance should have been.
+/// The switch's default produced the zero, so the default is what changed. \c OCUDU_CE_HOST_SCALARS=0 still
+/// selects the old behaviour for the A/B legs that wanted the host copy out of the measurement - but that
+/// arm now has to be asked for instead of being what every run gets.
 bool host_reads_device_scalars()
 {
   static const bool value = []() {
     const char* env = std::getenv("OCUDU_CE_HOST_SCALARS");
-    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
   }();
   return value;
 }
