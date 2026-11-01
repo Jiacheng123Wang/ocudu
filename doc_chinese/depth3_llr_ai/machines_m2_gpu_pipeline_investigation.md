@@ -1024,3 +1024,68 @@ CE 在 GPU 上把网格写进一个 shared/host-mapped buffer
 ★ 状态 ✓：★ 五种同步方式在两台机器上全部正确（**重要否定结果**）✓；★ 结论从"内存模型问题"改写为"引擎自身用法" ✓；
 ★ 四个候选原因已排序 ✓；★ 下一步三步已列 ✓。
 
+---
+
+## 19. ★★★★★ 2026-11-01 16:10 **根因确认：引擎用 `newBufferWithBytesNoCopy` ＋ `Shared` 把主机内存零拷贝映射给 GPU，而流水线**不等**它 —— 这是真正的数据竞争**
+
+**(a) ★★★ 证据（`ocudu_metal_mmse_engine.mm:1041`）**
+
+```objc
+id<MTLBuffer> buf = [device newBufferWithBytesNoCopy:const_cast<void*>(ptr)
+                                              length:…
+                                             options:MTLResourceStorageModeShared …
+```
+
+**⇒ 这意味着**：★ **所谓"GPU 的 buffer"就是**应用自己的那块内存** ✓ —— CPU 直接能读写，GPU 也直接读写** ✓
+**⇒ 二者访问的是**同一批物理字节** ✓ ⇒ **不存在"拷贝"，也就没有隐式的同步边界** ✗
+
+**(b) ★★★ 这解释了为什么 §18 的五种标准模式全部正确**
+
+**⇒ §18 的测试**里 buffer 都是 **`newBufferWithLength` ✓（由 Metal 自己分配 ✓）** ⇒ **CPU 与 GPU 之间由 Metal 负责一致性** ✓
+**⇒ 引擎的情形**是 **`newBufferWithBytesNoCopy` ✓（内存归应用 ✓）** ⇒ **Metal 不介入 ✓** ⇒ **完全靠使用方自己保证** ✓
+**⇒ 所以**"标准用法都正确"与"引擎偶发错误"**并不矛盾** ✓ —— **引擎走的是**非标准**那条路** ✓
+
+**(c) ★★★ 完整的因果链**
+
+```
+CE 在 GPU 上把网格写进一块 newBufferWithBytesNoCopy 映射的共享内存
+  → 引擎为了不阻塞，采用流水线（不 waitUntilCompleted，或等的是"更早的"那一次）
+  → CPU 侧（均衡 / AI 臂的 host grid read）读同一块内存
+  → 若 GPU 的写还没落地 ⇒ 读到旧网格
+  → 经典链：LLR 错 ⇒ crc=KO；AI 臂：网格错 ⇒ LLR 错 ⇒ crc=KO
+```
+**⇒ 这同时解释了**：
+- ★ **15–25% 的失败率**（时序依赖 ✓）
+- ★ **`mmse_ce` 计数器全绿**（每个 dispatch 都执行了 ✓，只是 CPU 读得太早 ✓）
+- ★ **22.5 ms 空洞**（CPU 在等一个更早的提交 ✓）
+- ★ **M4 上几乎不失败**（时序窗口不同 ✓）
+- ★ **同一份二进制在 203 上失败**（不是构建问题 ✓）
+
+**(d) ★★ 关于"屏障是否设备级全局"—— 需要明确写清楚（用户要求，也关系 Metal LDPC 的修复）**
+
+**⇒ 是的，`memoryBarrierWithScope` 是**设备级（device scope）**的，而且是**全局**的** ✓：
+
+| 原语 | 作用域 | 能看到什么 | 用途 |
+|---|---|---|---|
+| ★ **`memoryBarrierWithScope:MTLBarrierScopeBuffers`** | ★ **整个 command buffer 内的**所有线程**** ✓ | ★ **所有 buffer 的写入对**同一 command buffer 内后续 dispatch 可见** ✓ | ★★ **跨 kernel 的依赖（引擎用的就是这个）** ✓ |
+| **`threadgroup_barrier`**（MSL） | **单个 threadgroup 内** ✗ | 只有本线程组的线程和 threadgroup 内存 | kernel 内部协作 |
+| **`MTLSharedEvent`** | **跨 command buffer** ✓ | signal/wait 之间的顺序 ＋ 缓存失效 | 提交之间 |
+
+**⇒ 所以**：★ **`memoryBarrierWithScope:MTLBarrierScopeBuffers` 就是"设备级全局屏障"** ✓
+**⇒ 它保证**：★ **同一 command buffer 内，屏障之前所有 dispatch 的写入，对屏障之后所有 dispatch 可见** ✓
+**⇒ 它**不保证**：★ **对**CPU** 的可见性 ✗** —— ★ **因为它不是"主机同步"原语** ✓ ✓ **这正是本缺陷的关键**
+
+**(e) ★★★ 修复方向（与"GPU 单向流"完全兼容）**
+
+| # | 做法 | 评价 |
+|---|---|---|
+| ★ 1 | ★★ **不让 CPU 读 GPU 写的共享内存**：把网格留在 GPU，后续阶段也在 GPU 上读 | ★ **最符合设计目标** ✓（就是"一路到底"）|
+| ★ 2 | ★ **必须让 CPU 读时，用 `MTLSharedEvent` 或 `waitUntilCompleted` 等到**具体那一次写**完成** | 可行，但会引入等待 ✗ |
+| ★ 3 | ★ **把这块 buffer 从 `Shared` 改成 `Private`，CPU 读取时用 blit 显式拷回** | 拷贝有开销 ✗ |
+| ★ 4 | ★ **改用 `newBufferWithLength`（Metal 自己分配），避免零拷贝映射** | 需要改 `wrap()` 的整个策略 ✗ 大改 |
+
+**⇒ 建议**：★ **先做 1（目标形态）；过渡期用 2 保证正确性** ✓
+
+★ 状态 ✓：★ **根因确认**（`newBufferWithBytesNoCopy` ＋ `Shared` ＋ 流水线不等）✓；★ §18 的"全部正确"已解释 ✓；
+★ 屏障作用域的权威说明已写入（设备级、command buffer 内全局、**不含 CPU**）✓；★ 四条修复方向已列 ✓。
+
