@@ -4424,6 +4424,23 @@ void port_channel_estimator_metal_mmse_impl::run_pending_corr_checks()
         const std::size_t h_off    = static_cast<std::size_t>(c.sys_offset + sys) * h_stride;
         std::fprintf(stderr, "[chain_map] group=%s sys=%u | A:", c.which, sys);
         scan(gpu_a + a_off, static_cast<std::size_t>(c.a_stride) * c.a_stride);
+        // WHERE the NaNs sit, not just how many (2026-11-01). A whole row points at that row's elimination or
+        // write-back; a block at the tail points at the last block, where the order is thirty-six and the block
+        // size eight, leaving a final block of only four rows. The count alone cannot tell those apart.
+        {
+          const float*      a_base = gpu_a + a_off;
+          const std::size_t n_side = c.a_stride;
+          unsigned          listed = 0;
+          for (std::size_t idx = 0; (idx != n_side * n_side) && (listed != 12); ++idx) {
+            if (std::isnan(a_base[idx])) {
+              std::fprintf(stderr, "%s(%zu,%zu)", (listed == 0) ? " at" : ",", idx / n_side, idx % n_side);
+              ++listed;
+            }
+          }
+          if (listed != 0) {
+            std::fprintf(stderr, " (n=%zu)", n_side);
+          }
+        }
         std::fprintf(stderr, " | W:");
         scan(gpu_w + w_off, static_cast<std::size_t>(c.r_stride) * c.a_stride);
         std::fprintf(stderr, " | h:");
