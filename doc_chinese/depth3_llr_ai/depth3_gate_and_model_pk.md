@@ -865,3 +865,64 @@ attach__cap_0_17_17930.txt -> …/work_tmp/corpus/col_1025_attach/cap_0_17_17930
 
 ★ 状态 ✓：★ **§17(f) 的错误已更正** ✓；★ 捕获已丢失的六处核查已列 ✓；★ "attach/test 都跑不了"已明确 ✓；
 ★ 幸存物与"喂不了回放"已说明 ✓；★ §16 的"test 集要自足"在这里被事实验证 ✓；★ 两个替代语料与做法已给 ✓。
+
+---
+
+## 19. ★★★★★ 2026-11-02 01:00 **203 上那次门控是怎么跑的（详细）**
+
+**(a) ★★★ 命令**
+
+```bash
+~/venv_tf312/bin/python doc_chinese/llr_ai_detection/work_tmp/probe/gate_e17.py \
+    --model ~/gate_data/E4.keras  或  E17.keras \
+    --data  ~/gate_data/w2_test1.npz | w2_test2.npz | attach/e17_attach_depth3.npz
+```
+
+**(b) ★★ 它内部做了什么（`gate_e17.py` 的实际代码路径）**
+
+| 步 | 代码 | 说明 |
+|---|---|---|
+| ★ 1 | `model = tf.keras.models.load_model(args.model, compile=False)` | ★ **把 `.keras` 加载进 TensorFlow** ✓ |
+| ★ 2 | `val = T.Batches(args.data, modulation="QPSK", cond=True, layout="spatial")` | ★ **从 npz 取样本，直接读 `X`** ✓ |
+| ★ 3 | `outputs = model(x, training=False)` | ★ **前向推理** ✓ |
+| ★ 4 | LLR 反归一化 ＋ reshape | 头部通道数按 `COND_STRIDE` 还原 ✓ |
+| ★ 5 | ★ **`T.CodedBler(val, max_iterations=6)`** | ★ **带缓存**的真正 LDPC 解码器（**Python 实现** ✓）|
+| ★ 6 | 判据 | ★ **"重新编码后能复现发送比特"** ⇒ 等价于 codeblock CRC ✓ |
+| ★ 7 | 输出 | ★ **`transport-block crcOK X% over N samples`** ✓ |
+
+**(c) ★★★ 实测：它**跑在 CPU 上****
+
+**⇒ 203 的 venv 里**没有 `tensorflow-metal`、也没有 `coremltools`** ✗
+**⇒ `tf.config.list_physical_devices()` 返回**：
+```
+设备: ['CPU']
+```
+**⇒ ⇒ 所以那六个数是**纯 CPU 的 TensorFlow** 算出来的 ✓ —— **既没有 ANE，也没有 GPU** ✓
+
+**(d) ★★★★★ 与原门控的逐项对比**
+
+| 维度 | ★ **原门控**（寄存器的 69.2% / 91.1%）| ★ **203 这一次** |
+|---|---|---|
+| 模型形态 | ★ **`.mlmodelc`**（编译后的 Core ML）| ★ **`.keras`** ✗ |
+| 推理引擎 | ★ **CoreML** ⇒ **可用 ANE** ✓ | ★ **TensorFlow** ⇒ **只用 CPU** ✗ |
+| 输入 | ★ **原始捕获**（接收网格 ✓）| ★ **npz 的 `X`**（已算好的网络输入 ✗）|
+| ★ **是否经过 CE/均衡** | ★ **经过**（驱动整条接收机 ✓）| ★ **不经过**（直接喂网络 ✗）|
+| LDPC 解码器 | ★ **C++ 解码器**（快、与实链一致 ✓）| ★ **Python 解码器**（语义对等、速度慢 ✓）|
+| 单元数 | 6 430（attach）／2 476（test）| **9 217 / 10 000 / 10 000** ✓ |
+
+**(e) ★★★★ 一句话概括差别**
+
+> ★ **原门控测的是**"整条接收机 ＋ 网络"**（从接收网格一路到 TB CRC ✓）
+> ★ **203 这一次测的是**"网络本身"**（从网络输入面到 TB CRC ✓）—— **CE、均衡、ANE 都被绕过了** ✗
+
+**⇒ 所以那六个数（E4 85.9/85.9/76.4、E17 86.0/85.8/81.3）**：
+- ★ **作为"网络质量"的横向比较是有效的** ✓（同语料、同工具 ✓）
+- ★ **作为门控表的数字则**口径不对**** ✗
+
+**(f) ★ 它们仍有一个用处**
+
+**⇒ 因为它**绕过了 CE 与 ANE** ✓ ⇒ ★ **它把"网络本身的好坏"与"链路的实现"分开了** ✓
+**⇒ 所以它可以当作**诊断量**：★ **若同一模型在网络层面差距很大、而在链路层面差距很小 ⇒ 问题在链上而不是网络上** ✓
+
+★ 状态 ✓：★ 命令与七步内部流程已写明 ✓；★ **实测只用 CPU**（`['CPU']` ✓）已记录 ✓；
+★ **与原门控的六维对比**已给 ✓；★ **"测网络"vs"测整条链"**的一句话概括已写 ✓；★ 那六个数的正确用途已界定 ✓。
