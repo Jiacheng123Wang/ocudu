@@ -5804,21 +5804,7 @@ std::optional<float> port_channel_estimator_metal_mmse_impl::get_device_rsrp_sum
   if (!device_rsrp_valid || (i_layer >= device_rsrp_sums_.size())) {
     return std::nullopt;
   }
-  // A NON-FINITE SUM IS NOT A SUM, and must not be published as one (2026-11-01). The reduction that
-  // fills this runs on the device; on one machine, on roughly a quarter of receptions, it produces a NaN.
-  // Nothing downstream can tell that apart from a real measurement: it travels into the layer's RSRP, then
-  // the average over layers, then the minimum noise variance derived from that average, and finally into
-  // the published noise variance -- which is how a quarter of receptions came to decode to a failed block
-  // with an infinite SINR, while EPRE beside them stayed correct.
-  //
-  // Refusing the value makes the caller take the host route it already has for every hop the device does not
-  // cover. That costs a host accumulation, but only on the hops that were about to fail completely, and it
-  // keeps the receiver correct while the kernel itself is investigated.
-  const float sum = device_rsrp_sums_[i_layer];
-  if (!std::isfinite(sum)) {
-    return std::nullopt;
-  }
-  return sum;
+  return device_rsrp_sums_[i_layer];
 }
 
 std::optional<ch_est_device_view> port_channel_estimator_metal_mmse_impl::get_device_ch_estimates(
