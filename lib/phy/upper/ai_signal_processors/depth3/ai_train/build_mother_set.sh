@@ -26,6 +26,11 @@ set -u
 
 TRAIN=${TRAIN:-$HOME/work/ai_phy_train}
 OUT=${OUT:-$TRAIN/datasets_full_s2}
+# WHERE THE INPUTS ACTUALLY LIVE. The dumps and the captures need not sit under $TRAIN, and on a machine that
+# only builds from a corpus drive they do not: the dump goes wherever dump_tb.sh put it and the captures stay
+# on the drive. Both default to the $TRAIN layout so the common case needs no arguments.
+DUMP_ROOT=${DUMP_ROOT:-$TRAIN}
+CORPUS_ROOT=${CORPUS_ROOT:-$TRAIN}
 # The backfill tool orders receptions by frame*20 + slot, but `slot` is a system-slot counter wrapping at
 # 20480, so a threshold measured in "slots" is not measured in slots and short gaps cut real chains. The
 # documented rule has no gap guard at all, so this is made wide enough to be inert rather than tuned.
@@ -43,8 +48,8 @@ PY=${PY:-$TRAIN/.venv/bin/python}
 status=0
 
 for LEG in "$@"; do
-  DUMP="$TRAIN/tb_$LEG"
-  CAP="$TRAIN/$LEG"
+  DUMP="$DUMP_ROOT/tb_$LEG"
+  CAP="$CORPUS_ROOT/$LEG"
   echo "=== $LEG  $(date +%H:%M:%S)"
 
   if [ ! -f "$DUMP/index.csv" ]; then
@@ -62,7 +67,10 @@ for LEG in "$@"; do
   #    index_harq_only.csv (whose rows carry crc=OK already, which is what the builder wants) and a combined
   #    index_harq.csv carrying the label as a column.
   echo "  marking sources (gap guard inert at $GAP_SLOTS)"
-  "$PY" "$TOOLS/harq_backfill.py" --leg "$LEG" --index "$DUMP/index.csv" \
+  # --leg is a PATH, not a name: the tool reads each PDU sidecar as os.path.join(args.leg, name + ".txt"),
+  # so a bare leg name resolves against the working directory and silently labels nothing when that is not
+  # the corpus root. Pass the capture directory itself.
+  "$PY" "$TOOLS/harq_backfill.py" --leg "$CAP" --index "$DUMP/index.csv" \
       --live-tb "$CAP/tb_live" --out "$DUMP" --max-gap-slots "$GAP_SLOTS" 2>&1 | sed 's/^/    /'
   for f in index_self.csv index_harq_only.csv; do
     [ -f "$DUMP/$f" ] || { echo "  SKIP: backfill did not write $DUMP/$f" >&2; status=1; continue 2; }
