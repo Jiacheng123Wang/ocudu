@@ -227,3 +227,60 @@ OCUDU_REPLAY_MODEL=…/depth3_modcond_r7/d3_modcond_r7.mlmodelc \
 
 ★ 状态 ✓：★ 用户的关键提示已入档 ✓；★ 11 条已确证事实已列 ✓；★ 逐模块测试矩阵已列 ✓；★ DSP 加速的开放问题已记录 ✓。
 
+---
+
+## 5. ★★★★★ 2026-11-01 13:15 **查文档得到 DFT 后端的旋钮，并已实测 —— 但它不是原因**
+
+**(a) ★ 文档里已经有答案（`ocudu_env_knobs_inventory_and_leg_whitelist.md` §2 第 52 行）**
+
+| 旋钮 | 默认 | 读取点 | 说明 |
+|---|---|---|---|
+| ★ **`OCUDU_DFT_BACKEND`** | ★ **`= "vdsp"`** | `lib/phy/generic_functions/generic_functions_factories.cpp:195` | ★ **Apple 上不设就是 `vdsp`（Accelerate/vDSP，即"CPU 的 DSP 硬件加速"）** ✓；`=generic` 是 A/B 对照臂 ✓；**非 Apple 平台根本不编这条分支** ✓ |
+
+**⇒ 所以用户说的"默认用 CPU 的 DSP 硬件加速"就是 `OCUDU_DFT_BACKEND=vdsp`** ✓ —— **文档里早有记载** ✓（无需查代码 ✓）
+
+**(b) ★★ 实测：三种后端在 203 上**结果一样 KO****
+
+| `OCUDU_DFT_BACKEND` | 结果 |
+|---|---|
+| 不设（即 `vdsp`）| ✗ `crc=KO iterations=6 sinr=inf` |
+| `vdsp` | ✗ 同上 |
+| `generic` | ✗ 同上 |
+
+**⇒ 所以 DFT 的后端选择**不是**原因** ✗
+
+**(c) ★★★ 为什么 DFT 后端不影响 —— 文档自己写着**
+
+**⇒ 同一文档 §2 第 81 行**：
+> "★ **6.215 起交付车道的网格由 **host** 写，所以 `OCUDU_DFT_BATCH_SYMBOLS` / `OCUDU_DFT_OPEN_BLOCK` /
+> `OCUDU_DFT_RELEASE_BLOCK` 对交付腿是 MOOT（那个引擎根本不在路上）**"
+
+**⇒ 而回放的合同行也证实**：★ **`depth3: host grid read for the input plane 16 read(s)`**
+⇒ ★ **AI 臂读的是**host 上的网格副本** ✓ —— **不是 DFT 引擎的输出** ✓
+
+**(d) ★★ 结论：嫌疑落在"网格从设备搬回主机"这一步**
+
+**⇒ 回放里 AI 臂的输入链路是**：
+```
+捕获文件 → （--metal 时）Metal CE/均衡在 GPU 上算 → 网格写回设备
+        → ★ 设备到主机的网格物化（host grid materialized from the device）
+        → AI 臂读 host 网格 → CoreML → LLR → LDPC
+```
+**⇒ 合同行明确有这一步** ✓：`ce: host grid materialized from the device 1 read(s)`
+**⇒ 而 §2 已证明**：★ **CE 的算术是对的**（`max_rel=2.4e-07` ✓）、**CoreML 是对的**（探针逐值相同 ✓）
+**⇒ 那么唯一没被单独验证过的环节，就是**这次设备→主机的拷贝** ✓
+
+**(e) ★ 下一步（具体）**
+
+| # | 测试 | 判据 |
+|---|---|---|
+| ★ 1 | 用 `--cpu` 与 `--metal` 各跑同一单元，**把 AI 臂实际读到的网格 dump 出来**（若能；否则用 `OCUDU_UL_DUMP=…` 的 `_dft.bin`）| 两份网格应当等价 |
+| ★ 2 | 若网格相同而结果不同 ⇒ **问题在 AI 臂读网格之后的环节**（但 CoreML 已证明是对的 ✗）| — |
+| ★ 3 | 若网格不同 ⇒ ★ **确认是设备→主机拷贝在 M2 上出错** ✓ | — |
+
+**⇒ 一个更省事的判据**：★ **`--metal` 时把 CE 挪回 CPU（`--phy_pipeline cpu`）网格就对了** ✓（事实 3 ✓）
+⇒ **说明"CPU 路线的网格"是对的** ✓ ⇒ **差异就出在 GPU 路线上** ✓
+
+★ 状态 ✓：★ 文档已给出 `OCUDU_DFT_BACKEND` 的权威说明（vdsp/generic）✓；★ 实测两种后端结果相同 ⇒ 排除 DFT 后端 ✓；
+★ 已用文档第 81 行说明"DFT 引擎不在 AI 臂的输入路上"✓；★ 嫌疑收敛到"设备→主机网格物化"✓。
+
