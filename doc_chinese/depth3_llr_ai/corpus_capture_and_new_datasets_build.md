@@ -2540,3 +2540,64 @@ harq_backfill.py --leg "$CAP" --index "$DUMP/index.csv" --live-tb "$CAP/tb_live"
 
 ★ 状态 ✓：★ **完整登记 15 项缺陷** ✓；★ **三项计划只覆盖 P1–P5** ✓；★ **8 项遗漏已列明并分级** ✓；
 ★ **最要紧的两项遗漏（P6 实链标定、P7 静默空集）已标为阶段 0** ✓。
+
+---
+
+## 28. ★★★★★ 2026-11-02 08:20 **阶段 1 开始：pilot 门（P1）的代码路径已摸清，交给子代理做决定性对比**
+
+**(a) ★★ 检查函数的原文（`build_depth3_dataset.py:262`）**
+
+```python
+def pilot_ls_consistency(ls, channel, alloc_prb, dmrs_symbols, dmrs_type, sigma2, scaling,
+                         window_subcarriers=None):
+    mask = D3.pilot_ls_mask(alloc_prb, dmrs_symbols, dmrs_type)
+    if window_subcarriers is not None:
+        ls = ls[:, window_subcarriers]; mask = mask[:, window_subcarriers]
+    pilot = ls[mask]; data = channel[mask]
+    denominator = sqrt(mean(|pilot|^2) * mean(|data|^2))
+    return abs(mean(pilot * conj(data))) / denominator
+```
+
+**⇒ 它的意图（docstring 原文）**：
+> "The pilot LS is built from the DM-RS sequence **this module generates**, while the channel comes from the **DATA
+> REs**, so the two are **independent**. Their agreement is therefore a **test of the DM-RS conventions** against the
+> capture itself: a **wrong PRG start**, a **wrong slot reduction** or a **wrong sign** would make the correlation
+> collapse, and none of those is visible in the shapes."
+
+**⇒ ⇒ 这条说明很关键**：★ **它本来就是**为抓这类缺陷而设计的**** ✓ —— **现在它抓到了一个** ✓（**只是我们还没定位到是哪一条约定** ✓）
+
+**(b) ★★★ 掩码的生成（`depth3.py:225`）**
+
+```python
+def pilot_ls_mask(alloc_prb, dmrs_symbols, dmrs_type):
+    pilots = DV.pilot_subcarriers(sorted(int(r) for r in alloc_prb), dmrs_type=int(dmrs_type))
+    mask = zeros((NOF_SYMBOLS, NOF_SUBCARRIERS), dtype=bool)     # [14, 612] 全带
+    for symbol in dmrs_symbols:
+        mask[int(symbol), pilots] = True
+    return mask
+```
+
+**⇒ ⇒ 所以**：★ **`pilot_subcarriers(alloc_prb, dmrs_type)` 是**唯一按分配宽度变化的东西**** ✓
+**⇒ 而** `pilot_ls`（生成 DM-RS 的那侧）用的是 `nslot`／`n_id`／`n_scid`／`dmrs_type` ✓ —— **与宽度无关** ✓
+**⇒ ⇒ 因此**：★ **嫌疑集中在 `pilot_subcarriers` 对**窄分配**算出的**绝对子载波位置**** ✓✓
+
+**(c) ★★★ 交给子代理的决定性对比**
+
+**⇒ 任务**：★ **取一个**通过的 2 PRB 单元**和一个**失败的 2 PRB 单元**（同腿），跑同一条代码路径，**把 `ls[mask]` 与
+`channel[mask]` 两个向量 dump 出来**，连幅度、相位、子载波索引一起比** ✓
+**⇒ 再加一组对照**：★ **一个 51 PRB 单元在 PRB 0–1 上的值** —— **它应当与 2 PRB 单元的导频**一致**** ✓
+**⇒ 判据**：★ **0.23 与 0.99 的差别就藏在两个向量的差异里** ✓
+
+**⇒ 明确要求**：★ **只定位、不修** ✓ —— **说清是哪一行算错了什么** ✓；**若必须改 DM-RS 生成才能修，也要明说** ✓
+
+**(d) ★ 已排除的（不让子代理重做）**
+
+| 假设 | 结论 |
+|---|---|
+| ★ **阈值太紧** | ✗ 双峰（0.99 或 0.2），压到 <0.3 才有效 ⇒ 会放进真的对不上的宽分配 |
+| ★ **PRB 偏移** | ✗ 窗口滑过全带，最高 0.56 |
+| ★ **DM-RS 序列生成** | ✗ 51 PRB 覆盖 PRB 0–1 且 0.998 |
+| ★ **43/44 PRB 的 `start` 缺陷** | ★ **另一个已诊断的问题** ⇒ **不在此任务范围** |
+
+★ 状态 ✓：★ **`pilot_ls_consistency` 与 `pilot_ls_mask` 的机制已摸清** ✓；★ **嫌疑锁定 `pilot_subcarriers` 的窄分配位置** ✓；
+★ **决定性对比（通过 vs 失败 vs 51 PRB 对照）已交给子代理** ✓；★ **四个已排除的假设已交代，避免重复** ✓。
