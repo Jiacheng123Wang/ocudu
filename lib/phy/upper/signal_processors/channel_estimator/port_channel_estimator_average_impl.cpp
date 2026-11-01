@@ -617,8 +617,19 @@ bool port_channel_estimator_average_impl::compute_hop_finish(const dmrs_symbol_l
   // REPORTING value. Both routes accumulate the SAME quantity - the sum of |h|^2 over the hop's
   // DM-RS REs, times the same normalization - so the published rsrp does not depend on which one
   // ran, up to floating-point summation order.
-  float power_normalization_factor =
-      beta_scaling * beta_scaling * static_cast<float>(nof_dmrs_symbols) / static_cast<float>(nof_lse_symbols);
+  //
+  // THE DIVISION IS GUARDED, because nof_lse_symbols is zero whenever the hop's LSE was built on the
+  // device and the host unpacked nothing. The factor then came out as infinity, and a device-provided
+  // sum of zero multiplied by it is NaN rather than zero -- which propagated into rsrp, then into the
+  // rsrp average, then into min_noise_variance, and finally into the published noise variance as NaN.
+  // The visible symptom was one reception in six failing to decode on one machine and none on another,
+  // with an infinite SINR and a negative timing advance, while every device-side scalar probed normal.
+  // Zero is the honest factor when the host has no symbols to normalize: the host loop it multiplies
+  // is empty anyway, and the device route contributes nothing rather than infinity.
+  const float power_normalization_factor = (nof_lse_symbols == 0)
+                                               ? 0.0F
+                                               : beta_scaling * beta_scaling * static_cast<float>(nof_dmrs_symbols) /
+                                                     static_cast<float>(nof_lse_symbols);
   for (unsigned i_layer = 0; i_layer != nof_tx_layers; ++i_layer) {
     if (const std::optional<float> device_sum = get_device_rsrp_sum(i_layer); device_sum.has_value()) {
       rsrp[i_layer] += *device_sum * power_normalization_factor;
