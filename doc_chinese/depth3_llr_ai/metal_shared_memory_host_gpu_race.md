@@ -1555,3 +1555,65 @@ port=0 noise_variance=nan snr=0.000000 rsrp=nan epre=2.504021525e-01 ta_us=-1.17
 
 ★ 状态 ✓：★ 三种方案的取舍已列表 ✓；★ "常量更糟"的理由（LLR 尺度、可能静默通过 CRC）已写明 ✓；
 ★ 第三条路（读 4 字节设备标量）的代码依据与代价已给 ✓；★ P0/P1 已分 ✓。
+
+---
+
+## 27. ★★★★★ 2026-11-01 18:30 **确认：这个 CPU 读**只有"消费方在主机上"时才发生** —— AI 臂需要，纯 GPU 路径不需要**
+
+**(a) ★★★ 代码证据（`pusch_demodulator_impl.cpp:573-584`）**
+
+```cpp
+// Extract the Rx port noise variances. When the equalizer reads the estimates off the device
+// and the estimator produced the variance there too, it is handed the device address instead:
+// the host copy is what costs a synchronization, so it is read only when it is the source
+// (a backend that does not use device estimates, or an estimator that did not produce one).
+const bool device_noise_vars = use_device_noise_vars && (&ch_estimates == &device_ch_estimates);
+const float* dev_nv = device_noise_vars ? est_results.get_device_noise_variance(i_port) : nullptr;
+if (dev_nv != nullptr) {
+  device_ch_estimates.set_device_noise_variance(i_port, dev_nv);   // ★ 设备指针，直接传下去
+} else {
+  noise_var_estimates[i_port] = est_results.get_noise_variance(i_port);  // ★ 主机读（触发了那段 0.0F）
+}
+```
+
+**⇒ 所以代码本身就把两条路分开得很清楚**：
+
+| 消费方 | 用哪个接口 | 是否发生主机读 |
+|---|---|---|
+| ★ **均衡器在 GPU 上**（纯 `--phy_pipeline gpu`）| ★ **`get_device_noise_variance()`** ⇒ **设备指针** | ★ **否** ✓ |
+| ★ **均衡器在 CPU 上**（`--metal-cpu-demod`）| **`get_noise_variance()`** | ★ **是** ✓ |
+| ★ **AI 臂**（`pusch_depth3_receiver_impl.cpp:1629`）| ★ **`est_results.get_noise_variance(port)`** | ★ **是** ✓ |
+
+**(b) ★★★ 所以用户的判断**完全正确**** ✓✓
+
+**⇒ 结论**：
+1. ★ **纯 GPU 路径**（经典均衡也在 GPU 上）⇒ ★ **用设备指针，**不做主机读** ✓ ⇒ **根本不会走到那个 `0.0F`** ✓
+2. ★★ **AI 臂** ⇒ ★ **网络的输入是 CE，本来就在主机侧 ✓ ⇒ 必须拿主机的 sigma2 ✓ ⇒ 会走到 `0.0F`** ✓
+3. ★ **`--metal-cpu-demod`**（我们做诊断时用的混合路径）⇒ **CPU 均衡也需要主机 sigma2** ✓ ⇒ **也会走到** ✓
+
+**(c) ★★★ 这对修法的影响（关键）**
+
+**⇒ 因为**：★ **AI 臂本来就要读**68 KB 的网格** ✓ ⇒ **再读 **4 字节**的 sigma2 **不增加任何新的"回到 CPU"** ✓✓
+**⇒ 而纯 GPU 路径**根本不读 ✓ ⇒ **修它也不影响纯 GPU 路径的形态** ✓✓
+
+**⇒ 所以正确的修法应当是**：
+
+| 项 | 内容 |
+|---|---|
+| ★ **改哪里** | ★ **`get_noise_variance()` 这个**主机入口**（不是 `host_reads_device_scalars()` 的全局默认）** |
+| ★ **怎么改** | ★ **当设备算过（`device_sigma2_valid`）但主机还没拿到时，从设备缓冲**读那 4 个字节**，而不是回 `0.0F`** |
+| ★ **影响面** | ★ **只影响"消费方在主机上"的路径** ✓ ⇒ **纯 GPU 路径**完全不动** ✓ |
+| ★ **是否需要新开关** | ★ **不必** ✓ —— 它只是把"本来该给的值"给对 ✓ |
+
+**(d) ★★ 同族的其他问题**
+
+**⇒ `ta_us < 0`、`rsrp = nan`、`cfo_hz = na`** 也是**主机读的设备标量** ✓ ⇒ **同一类问题** ✓
+**⇒ 所以这几个 getter 应当**一起检查** ✓：`get_noise_variance` / `get_snr` / `get_rsrp` / `get_time_alignment` / `get_cfo_Hz` ✓
+
+**(e) ★ 一个必须说明的边界**
+
+**⇒ 但即使把 getter 全部改对，**设备 kernel 算出的 `gpu_ls_sigma2` 本身仍是 NaN**（§25(b)）✗
+**⇒ 那时 getter **忠实地返回 NaN** ⇒ **仍然是 KO** ✗ ⇒ **所以 P1（修上游）仍然必须做** ✓
+
+★ 状态 ✓：★ 用户判断已由代码确认（纯 GPU 路径用设备指针、不做主机读）✓；★ AI 臂确实走主机读 ✓；
+★ 修法调整为**改 getter**而不是改全局默认（不影响纯 GPU 路径）✓；★ 同族 getter 已列出 ✓；★ P1 仍必要 ✓。
