@@ -48,6 +48,10 @@ def main():
     parser.add_argument("--data", required=True)
     parser.add_argument("--modulation", default="256QAM")
     parser.add_argument("--layout", choices=("folded", "spatial", "probe8"), default="spatial")
+    parser.add_argument("--cond", action="store_true",
+                        help="the model takes every modulation in one graph, so its input carries the "
+                             "four one-hot planes: the batch must be built the conditioned way or the "
+                             "input is twelve channels wide where the model wants sixteen")
     parser.add_argument("--samples", type=int, default=96)
     parser.add_argument("--scales", default="2.5,5,10,20,40,80,160")
     parser.add_argument("--current", type=float, default=20.0,
@@ -61,11 +65,11 @@ def main():
 
     tf.get_logger().setLevel("ERROR")
     data = T.Batches(args.data, args.modulation, max_samples=args.samples, layout=args.layout,
-                     seed=20261013)
+                     cond=args.cond, seed=20261013)
     model = tf.keras.models.load_model(args.model, compile=False,
                                        custom_objects={"FoldedScaleConv": T.FoldedScaleConv})
     print(f"{os.path.basename(args.model)} on {data.n} samples of {os.path.basename(args.data)} "
-          f"({args.modulation}, layout {args.layout})")
+          f"({args.modulation}, layout {args.layout}{', conditioned' if args.cond else ''})")
 
     # One forward pass per sample, cached: the sweep must not pay for the network again per scale,
     # and every scale must see exactly the same head output.
