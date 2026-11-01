@@ -165,7 +165,16 @@ kernel void mmse_inv(device float*       a             [[buffer(0)]],  // [nof_s
       const uint c = be + (idx % (2 * n - be));
       const uint r = (i < bs) ? i : (i + blk);
       float      acc = gj[r][c];
-      for (uint l = 0; l < BLK; ++l) {
+      //  BLK IS THE ARRAY WIDTH,  blk IS THIS ITERATION'S HEIGHT (2026-11-01). The last block of a
+      // system whose order is not a multiple of BLK is shorter than BLK -- thirty-six gives a final block
+      // of four -- and the rows past it do not exist. Reading them anyway multiplied a multiplier that was
+      // correctly zeroed (step B writes 0 for l >= blk) by whatever the threadgroup memory happened to hold
+      // there, and zero times a NaN is NaN. The damage was a single column of the inverse, NaN over exactly
+      // the rows outside that last block, which is what the chain map showed: column five, rows nought to
+      // thirty-one, with rows thirty-two to thirty-five clean. On one GPU the untouched memory happened to
+      // hold finite bytes and on the other it did not, which is why the same binary failed a quarter of
+      // receptions on one machine and none on the other.
+      for (uint l = 0; l < blk; ++l) {
         acc -= mult[i][l] * gj[bs + l][c];
       }
       gj[r][c] = acc;
@@ -291,7 +300,16 @@ kernel void mmse_inv_memnone(device float*  a           [[buffer(0)]],
       const uint c = be + (idx % (2 * n - be));
       const uint r = (i < bs) ? i : (i + blk);
       float      acc = gj[r][c];
-      for (uint l = 0; l < BLK; ++l) {
+      //  BLK IS THE ARRAY WIDTH,  blk IS THIS ITERATION'S HEIGHT (2026-11-01). The last block of a
+      // system whose order is not a multiple of BLK is shorter than BLK -- thirty-six gives a final block
+      // of four -- and the rows past it do not exist. Reading them anyway multiplied a multiplier that was
+      // correctly zeroed (step B writes 0 for l >= blk) by whatever the threadgroup memory happened to hold
+      // there, and zero times a NaN is NaN. The damage was a single column of the inverse, NaN over exactly
+      // the rows outside that last block, which is what the chain map showed: column five, rows nought to
+      // thirty-one, with rows thirty-two to thirty-five clean. On one GPU the untouched memory happened to
+      // hold finite bytes and on the other it did not, which is why the same binary failed a quarter of
+      // receptions on one machine and none on the other.
+      for (uint l = 0; l < blk; ++l) {
         acc -= mult[i][l] * gj[bs + l][c];
       }
       gj[r][c] = acc;
