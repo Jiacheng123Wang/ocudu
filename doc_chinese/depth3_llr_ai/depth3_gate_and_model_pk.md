@@ -926,3 +926,63 @@ attach__cap_0_17_17930.txt -> …/work_tmp/corpus/col_1025_attach/cap_0_17_17930
 
 ★ 状态 ✓：★ 命令与七步内部流程已写明 ✓；★ **实测只用 CPU**（`['CPU']` ✓）已记录 ✓；
 ★ **与原门控的六维对比**已给 ✓；★ **"测网络"vs"测整条链"**的一句话概括已写 ✓；★ 那六个数的正确用途已界定 ✓。
+
+---
+
+## 20. ★★★★★ 2026-11-02 01:20 **答：203 那次门控**拿不到**时延列（但时延列**可以**单独补）**
+
+**(a) ★★★ 203 那次确实**报了一个时延**，但不是表里的那个**
+
+**⇒ `gate_e17.py` 第 115 行**：
+```
+model <name>  samples N  forward p50 <中位数> ...
+```
+**⇒ 那是**TensorFlow 在 CPU 上的前向 p50**（单位 ms ✓）✗
+**⇒ 而表里的时延是**CoreML 引擎在 ANE/GPU 上的 `forward` 段 p50/p90/p99/max（单位 µs）** ✓
+**⇒ ⇒ 两者**引擎不同、单位不同、含义不同** ✗ ⇒ ★ **不可混用** ✓
+
+**(b) ★★ 表里的时延是怎么来的**
+
+**⇒ 工具**：★ **`gate_timing.py --model <.mlmodelc> [--capture <base>] [--repeat 700]`** ✓
+**⇒ 它做什么**（脚本自己的说明）：
+> "The replay already prints one `[depth3-timing]` line per report with **p50, p90, p99 and max** for each segment;
+> this runs the replay for enough repetitions to reach the warm report and **prints those percentiles**, so the fourth
+> gate comes out …"
+**⇒ 即**：★ **跑 `ul_chain_replay` 700 次 ✓ ⇒ 读引擎自己打的 `[depth3-timing]` ✓ ⇒ 取 `forward` 段的四个分位** ✓
+
+**⇒ ⇒ 所以时延列**必须有 `.mlmodelc`** ✓ —— **Keras 路径给不出来** ✗
+
+**(c) ★★★ 但好消息：时延列**不依赖丢掉的语料****
+
+**⇒ `--capture` 只是一个**捕获单元**（默认值指向 `work_tmp/corpus/col_1025_ping6/…`，**那个也已经没了** ✗）
+**⇒ 但它只是一个参数 ✓ ⇒ ★ **任何一个捕获都能用** ✓ ⇒ **s2 的捕获（T7 上 ✓）完全可以** ✓✓
+
+**⇒ ⇒ 所以时延列**现在就能补** ✓：★ **导出 `.mlmodelc` ＋ 拿一个 s2 捕获** ✓
+
+**(d) ★★★ 本机具备完整的导出能力**
+
+| 组件 | 状态 |
+|---|---|
+| ★ **`coremltools`** | ★ **9.0** ✓ |
+| ★ **`coremlcompiler`** | ★ **`/Applications/Xcode.app/…/coremlcompiler`** ✓ |
+| ★ **导出入口** | ★ **`train_depth3.py --export-only <keras> --export-probe <mlpackage>`** ✓ |
+| ★ **编译命令** | ★ **`xcrun coremlcompiler compile <mlpackage> <out>`** ✓ |
+
+**⇒ 而且 `finish_run.sh` 已经把这三步串好了** ✓：
+```
+$PY train_depth3.py --export-only "$KERAS" --export-probe "$OUT/$NAME.mlpackage" …
+xcrun coremlcompiler compile "$OUT/$NAME.mlpackage" "$OUT"
+```
+**⇒ ⇒ 所以**：★ **E4 / E17 / W2-cond 三个都能在本机导出成 `.mlmodelc`** ✓✓
+
+**(e) ★ 小结：PK 表四列现在各是什么状态**
+
+| 列 | 需要什么 | 现状 |
+|---|---|---|
+| ★ **`s2_test1` TB CRC** | 捕获语料 | ★ **需重建**（见 §18(f) ✓）|
+| ★ **`s2_test2` TB CRC** | 同上 | ★ **需重建** ✓ |
+| ★ **attach TB CRC** | 原 attach 捕获 | ★ **✗ 已丢失**（§18 ✓）；历史值 E4 69.2% 保留 ✓ |
+| ★ **时延 p50/p90/p99/max** | ★ **`.mlmodelc` ＋ 一个捕获** | ★ **现在就能补** ✓✓ |
+
+★ 状态 ✓：★ **203 的 Keras 路径拿不到表里的时延**已说明 ✓；★ **时延的真正来源（`gate_timing.py` ＋ `.mlmodelc`）**已写明 ✓；
+★ **时延不依赖丢失的语料**（只要一个捕获 ✓）已指出 ✓；★ **本机具备完整导出能力**已核实（coremltools 9.0 ＋ coremlcompiler ✓）✓。
