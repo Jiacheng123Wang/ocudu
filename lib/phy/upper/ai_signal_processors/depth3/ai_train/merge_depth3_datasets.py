@@ -52,6 +52,8 @@ def main():
     # caller knows the imbalance is the point -- a training set whose populations are deliberately uneven.
     parser.add_argument("--no-balance", action="store_true",
                         help="merge inputs at their own sizes instead of capping every one at the smallest")
+    parser.add_argument("--allow-single", action="store_true",
+                        help="permit a merged set that covers fewer than four modulations, for per-modulation models")
     parser.add_argument("--seed", type=int, default=20261016)
     parser.add_argument("inputs", nargs="+")
     args = parser.parse_args()
@@ -138,8 +140,14 @@ def main():
 
     counts = collections.Counter(int(v) for v in merged["qm"].tolist())
     missing = [qm_ for qm_ in (2, 4, 6, 8) if qm_ not in counts]
-    if missing:
-        print(f"REFUSING: the merged set has no Qm={missing} sample: a conditioned set must cover all four",
+    # THE FOUR-MODULATION CHECK BELONGS TO THE CONDITIONED USE. It exists because a "mixed" set that lost a modulation
+    # trains a conditioned model wearing the contract's name while serving fewer modulations than it claims -- a silent
+    # failure this workstream has paid for. But a PER-MODULATION model wants exactly one modulation, and there the same
+    # check is a wall: merging that modulation's two files (first-transmission and recovered) was refused because the
+    # other three were absent. --allow-single says the caller knows the set is one modulation on purpose.
+    if missing and not args.allow_single:
+        print(f"REFUSING: the merged set has no Qm={missing} sample: a conditioned set must cover all four"
+              f" (pass --allow-single to merge a per-modulation set on purpose)",
               file=sys.stderr)
         return 2
 
