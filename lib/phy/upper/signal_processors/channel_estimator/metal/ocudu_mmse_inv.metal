@@ -71,11 +71,25 @@ kernel void mmse_inv(device float*       a             [[buffer(0)]],  // [nof_s
   threadgroup float gj[MAX_N][MAX_N2];
   // Elimination multipliers: the pivot columns of the rows outside the current block.
   threadgroup float mult[MAX_N][BLK];
+  // THE SMALLEST PIVOT THIS SYSTEM SEES, AND WHETHER IT WENT SINGULAR (2026-11-01). The host reference
+  // (gauss_jordan_invert) rejects a pivot below 1e-12 and its caller substitutes the identity, where this
+  // kernel divided by whatever it found. A pivot that rounds to zero makes the reciprocal infinite, and the
+  // elimination then spreads it through the whole matrix -- which is how a quarter of receptions came to
+  // decode with a channel estimate that was NaN in four thousand and ninety of four thousand and ninety-six
+  // sampled values, while the same receptions never failed on the host path. Mirroring the host is the
+  // repair, and it costs nothing on the GPU: no extra submission, no host round trip.
+  threadgroup float min_abs_pivot;
+  threadgroup uint  singular;
 
   device float* src = a + tgid.x * n * n;
 
   const uint tid_lin = tid.y * tgs.x + tid.x;
   const uint nthr    = tgs.x * tgs.y;
+
+  if (tid_lin == 0) {
+    min_abs_pivot = INFINITY;
+    singular      = 0;
+  }
 
   // Load [A | I]: every thread covers a stripe of the block.
   for (uint r = tid.y; r < n; r += tgs.y) {
@@ -95,7 +109,16 @@ kernel void mmse_inv(device float*       a             [[buffer(0)]],  // [nof_s
       // zero in the pivot rows: the unit pattern left by the previous blocks puts their diagonal
       // inside the block, so every entry to the left is zero).
       if (tid.y == 0) {
-        const float inv_pivot = 1.0F / gj[p][p];
+        // THE PIVOT IS CHECKED BEFORE IT IS DIVIDED BY, against the same threshold the host reference uses.
+        // A singular system keeps its working matrix finite -- it is not repaired here, only prevented from
+        // poisoning the threadgroup memory that the next system in this threadgroup shares -- and the
+        // identity is emitted for it below, exactly as the host's caller does when its routine returns false.
+        const float abs_pivot = fabs(gj[p][p]);
+        if (tid.x == 0) {
+          min_abs_pivot = (abs_pivot < min_abs_pivot) ? abs_pivot : min_abs_pivot;
+          singular      = (abs_pivot < 1e-12F) ? 1U : singular;
+        }
+        const float inv_pivot = 1.0F / ((abs_pivot < 1e-12F) ? 1.0F : gj[p][p]);
         for (uint c = p + tid.x; c < 2 * n; c += tgs.x) {
           gj[p][c] *= inv_pivot;
         }
@@ -150,10 +173,17 @@ kernel void mmse_inv(device float*       a             [[buffer(0)]],  // [nof_s
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
 
-  // Write back the inverse.
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  // A singular system emits the IDENTITY, which is what the host's caller substitutes when its routine
+  // reports failure. That keeps this kernel's contract with its caller identical on both routes: a system
+  // the hardware cannot invert degrades to "no interpolation", which fails loudly at the transport block,
+  // rather than to a matrix of NaN, which fails the same way but also poisons everything downstream of it.
+  const bool is_singular = (singular != 0);
+
+  // Write back the inverse, or the identity for a system that went singular.
   for (uint r = tid.y; r < n; r += tgs.y) {
     for (uint c = tid.x; c < n; c += tgs.x) {
-      src[r * n + c] = gj[r][n + c];
+      src[r * n + c] = is_singular ? ((r == c) ? 1.0F : 0.0F) : gj[r][n + c];
     }
   }
 }
