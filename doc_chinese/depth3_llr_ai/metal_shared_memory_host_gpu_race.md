@@ -1418,3 +1418,73 @@ if (s.cb.status != MTLCommandBufferStatusCompleted || s.cb.error != nil) return 
 
 ★ 状态 ✓：★ 本机 14/14 无 NaN ✓；★ 两台"正常值"相差 ~5e-9～3e-5 ✓；★ **`epre` 逐位相同（输入一致）** ✓；
 ★ **"除以接近 0 的量"这一假设**能同时解释双峰与机器相关 ✓；★ 下一步的四处排查点已列 ✓。
+
+---
+
+## 25. ★★★★★ 2026-11-01 18:00 **查计算链：发现一个**真实的 bug**（`sigma2` 被置 0），但 NaN 的源头在更上游**
+
+**(a) ★★ 代码里找到一处明确的可疑逻辑（引擎 2163–2167 行）**
+
+```cpp
+const bool take_device_sigma2 = device_sigma2_valid && device_sigma2_enabled && host_reads_device_scalars();
+…
+float sigma2 = take_device_sigma2 ? gpu_ls_sigma2[sigma2_base_ + kSigma2]
+             : (device_sigma2_valid && device_sigma2_enabled) ? 0.0F          // ← 这里
+                                                              : estimate_sigma2(args);
+```
+
+**⇒ 而 `host_reads_device_scalars()`（626 行）是**：
+
+```cpp
+const char* env = std::getenv("OCUDU_CE_HOST_SCALARS");
+return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);   // ★ 默认未设 ⇒ false
+```
+
+**⇒ 所以默认情况下**：★ **`take_device_sigma2 = false`** ✓
+**⇒ 于是只要 `device_sigma2_valid && device_sigma2_enabled` 成立** ⇒ ★★ **`sigma2 = 0.0F`** ✗
+**⇒ 噪声方差为 0 ⇒ `snr = epre / sigma2` 发散 ⇒ 后续 NaN** ✗
+
+**⇒ 这是一个**明确的逻辑缺陷**：★ **"设备算了但我不能读"被处理成**零**，而不是**回退到主机的估计** ✓
+**⇒ 正确写法应当是**：★ **那个 `0.0F` 改成 `estimate_sigma2(args)`** ✓
+
+**(b) ★★ 但实测表明它不是 NaN 的唯一来源**
+
+**⇒ 20 次对照**：
+
+| 配置 | OK | KO | 失败率 |
+|---|---|---|---|
+| 默认 | 14 | 6 | ★ **30%** |
+| `OCUDU_CE_HOST_SCALARS=1` | 18 | 2 | ★ **10%** |
+
+**⇒ 打开之后失败率从 30% 降到 10%** ✓ ⇒ **`sigma2=0` 那条路确实是一部分原因** ✓
+**⇒ 但没有归零** ✗ ⇒ **还有第二个源头** ✓
+
+**⇒ 再看 KO 的那次 `_ce.txt`（`HOST_SCALARS=1` 时）**：
+```
+port=0 noise_variance=nan snr=0.000000 rsrp=nan epre=2.504021525e-01 ta_us=-1.171875 cfo_hz=-19.620522
+```
+**⇒ 注意两点**：
+- ★ **`cfo_hz` 从 `na` 变成了一个数值（-19.62）** ✓ ⇒ **说明 `OCUDU_CE_HOST_SCALARS=1` 确实生效了** ✓
+- ★★ **但 `noise_variance` 仍然是 `nan`** ✗ ⇒ ★ **这个 NaN 来自**设备侧的 `gpu_ls_sigma2` 本身**** ✓✓
+
+**(c) ★★★ 所以缺陷分两层**
+
+| 层 | 缺陷 | 性质 |
+|---|---|---|
+| ★ **上游** | ★ **设备 kernel 算出的 `gpu_ls_sigma2` 是 NaN**（同时 `ta_us` 为负、`rsrp` 为 NaN）| ★ **这是主因** ✓ |
+| ★ **下游** | ★ **`0.0F` 那段回退逻辑**：设备算了但不能读时，把噪声方差置 0 | ★ **真实 bug** ✓，但只是**放大器**（把"读不到"变成"除以零"）|
+
+**(d) ★★ 下一步（明确）**
+
+| # | 动作 |
+|---|---|
+| ★ 1 | ★ **先修下游的 `0.0F`**（一个 token，风险极低）：`0.0F` → `estimate_sigma2(args)` |
+| ★ 2 | ★★ **再查上游**：为什么 kernel 的 sigma2 会是 NaN —— 看那个 kernel 里求残差/归一化的分母 |
+| ★ 3 | ★ **`ta_us < 0` 是同一段的上游**（定时超前量估计），可作为第二个诊断点 |
+| ★ 4 | ★ **用 1 000 次重复验证**（判据同 §20.5）|
+
+**⇒ 注意**：★ **§24 里"两台机器数值差 5e-9"的推论仍然成立** ✓ ——
+★ **它说明 NaN 极可能来自"除以一个在 M2 上恰好舍入为 0 的量"** ✓ ⇒ **(d)-2 就是去找那个量** ✓
+
+★ 状态 ✓：★ 找到并定位了一处**真实 bug**（`sigma2` 置 0，是放大器）✓；★ 实测证明另有上游源头 ✓；
+★ `ta_us<0` 与 `rsrp=nan` 同源，可作第二个诊断点 ✓；★ 下一步四步已列 ✓。
