@@ -1168,7 +1168,8 @@ int main()
     std::printf("L2: OCUDU_CE_TA_ONLY set, stopping after K7\n");
     return 0;
   }
-  const bool run_chain = (std::getenv("OCUDU_CE_TA_CHAIN") != nullptr);
+  const bool run_chain      = (std::getenv("OCUDU_CE_TA_CHAIN") != nullptr);
+  bool       defer_s12_ta_tail = false;
 
   // Batch 5g FIRST, and unconditionally: it is the cheapest check in this file (one dispatch of one
   // threadgroup), it needs nothing but the engine, and what it judges - the shader's symbol start
@@ -1203,18 +1204,13 @@ int main()
       std::printf(" %u", covered);
     }
     std::printf(")\n");
-    if (!s12_device_ta_matches_host()) {
-      std::fprintf(stderr, "S12 FAIL: the device-side TA does not reproduce the host's\n");
-      return 1;
-    }
-    if (!s12_device_ta_kernel_matches_host()) {
-      std::fprintf(stderr, "S12 FAIL: the K6 kernel does not reproduce the host's TA\n");
-      return 1;
-    }
-    if (!s12_device_ta_chain_matches_host()) {
-      std::fprintf(stderr, "S12 FAIL: the K7 + IDFT + K6 chain does not reproduce the host's TA\n");
-      return 1;
-    }
+    // THESE THREE ARE DEFERRED TO THE END OF main(), AND THAT IS THE FIX FOR A TEST-ISOLATION DEFECT
+    // (2026-11-01). Each of them constructs an engine and warms it up, and that warm-up perturbs the ordering
+    // the strict-mode checks later in this file assert: with OCUDU_CE_TA_CHAIN set, Test 11 reported that the
+    // merged batch does not estimate the edge block on a machine where the same test passes with the variable
+    // unset, and the binary's own capability predicate already documents the same class of interference. Running
+    // them last means nothing they touch can reach a test that has not run yet.
+    defer_s12_ta_tail = true;
   }
 
   unsigned n_bad = 0;
@@ -3661,6 +3657,23 @@ int main()
                 alloc_limit,
                 real_limit,
                 static_cast<unsigned long long>(nof_hops));
+  }
+
+  // The deferred TA tail (see the note where it is set): run last, so its engine warm-up cannot perturb any
+  // test above it.
+  if (defer_s12_ta_tail) {
+    if (!s12_device_ta_matches_host()) {
+      std::fprintf(stderr, "S12 FAIL: the device-side TA does not reproduce the host's\n");
+      return 1;
+    }
+    if (!s12_device_ta_kernel_matches_host()) {
+      std::fprintf(stderr, "S12 FAIL: the K6 kernel does not reproduce the host's TA\n");
+      return 1;
+    }
+    if (!s12_device_ta_chain_matches_host()) {
+      std::fprintf(stderr, "S12 FAIL: the K7 + IDFT + K6 chain does not reproduce the host's TA\n");
+      return 1;
+    }
   }
 
   // A run whose only gap was a case this device cannot dispatch is reported as a SKIP, not as a pass and not as
