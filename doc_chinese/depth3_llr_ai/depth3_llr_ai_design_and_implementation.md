@@ -4174,3 +4174,51 @@ python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU')
 
 ★ 状态 ✓：★ 参数与 E4/E17 对齐 ✓；★ 107 的内存约束已用 `--max-train` 绕开 ✓；★ 划分与对照关系已写清 ✓。
 
+### 12.24 ★★★★★ 2026-11-01 08:10 **实测：107 的 6 GB 显存放得下条件化模型**
+
+**(a) ★ 一个必须分开的两个"内存"**
+
+| 名称 | 装什么 | `w2_train` 全量需要 | 107 有多少 |
+|---|---|---|---|
+| ★ **显存（VRAM）** | 模型权重 ＋ 一个 batch 的张量 ＋ 激活 | ★ **≈1 GB** | **6 GB** ✓ |
+| ★ **主机内存（RAM）** | ★ **整个语料数组** | ★ **≈18 GiB** | **15 GB** ✗ |
+
+**⇒ 所以"6 GB 显存不能跑条件化"是个误会** ✗ —— **6 GB 是显存，条件化模型根本用不完** ✓
+**⇒ 真正卡住的是**主机内存** ✓（18 GiB 的语料 ✗）⇒ **用 `--max-train 40000` 解决** ✓（≈4.7 GiB ✓）
+
+**(b) ★★ 实测证据（107，RTX 3060，`--modcond`）**
+
+```
+train 100 samples, val 32 samples, MODULATION-CONDITIONED (head stride 8, 4 conditioning channels, modulations from the dataset)
+layout spatial, 16 input channels
+Created device ... GPU:0 with 4136 MB memory: name: NVIDIA GeForce RTX 3060 Laptop GPU, compute capability: 8.6
+parameters 26185  heads ['llr', 'post_eq_noise']
+Loaded cuDNN version 92700
+epoch 1  train 3.43060  val 2.29838  uncoded BER 0.4950  coded BLER 1.0000  (13s)
+```
+
+| 关键点 | 值 |
+|---|---|
+| ★ **参数量** | ★ **26 185**（与 E4/E17 完全相同 ✓）|
+| ★ **输入通道** | **16**（12 ＋ 4 个调制 one-hot ✓）|
+| ★ **头部 stride** | **8**（四调制各占一段 ✓）|
+| ★ **TF 分配的显存** | ★ **4 136 MB**（其中大部分是 TF 的默认预留，实际模型+batch 约 1 GB ✓）|
+| ★ **显存总量** | 6 144 MB ✓ |
+| **跑完后的占用** | **15 MiB**（已释放 ✓）|
+
+**(c) ★ 结论**
+
+> ★ **107 完全能跑条件化模型** ✓ —— 只要把**语料切成能装进 15 GB 主机内存**的大小 ✓
+
+**⇒ 所以计划不变**：★ **107 上跑 `--modcond` ＋ `--max-train 40000`** ✓
+**⇒ 显存不是问题 ✓，主机内存靠切片解决 ✓**
+
+**(d) ★ 顺带修掉的两个环境问题**
+
+1. ★ **107 的 `ocudu` 源码树是旧的** ✗ ⇒ `ModuleNotFoundError: No module named 'train_refiner'`
+   **⇒ 已用 rsync 同步两个 `ai_train` 树** ✓（`depth3/ai_train` 与 `channel_estimator/metal/ai_train` ✓）
+2. ★ **合并工具的默认行为把语料裁到最小** ✗ —— `merge_depth3_datasets.py` 默认**把每个文件裁到最小的那个**（870 条 ✗）
+   **⇒ 已加 `--no-balance`** ✓ ⇒ 按各自大小合并 ✓
+
+★ 状态 ✓：★ "6 GB 显存放不下条件化"已用实测否证 ✓；★ 真正约束（主机内存）已定位并给出切片方案 ✓；★ 两个环境问题已修 ✓。
+

@@ -47,6 +47,11 @@ def main():
     parser.add_argument("--out", required=True)
     parser.add_argument("--per-modulation", type=int, default=0,
                         help="cap each input file at this many samples, so the merged set is balanced")
+    # BALANCING IS THE RIGHT DEFAULT FOR A MIXED-MODULATION SET and the wrong thing here. It caps every input at the
+    # smallest one, which is how a 160,603-sample corpus became 6,960: the smallest file held 870. This flag says the
+    # caller knows the imbalance is the point -- a training set whose populations are deliberately uneven.
+    parser.add_argument("--no-balance", action="store_true",
+                        help="merge inputs at their own sizes instead of capping every one at the smallest")
     parser.add_argument("--seed", type=int, default=20261016)
     parser.add_argument("inputs", nargs="+")
     args = parser.parse_args()
@@ -105,7 +110,7 @@ def main():
             pass
         pieces.append((path, data, keys, order, modulations[0]))
 
-    if len(pieces) > 1 and not args.per_modulation:
+    if len(pieces) > 1 and not args.per_modulation and not args.no_balance:
         smallest = min(order.size for _, _, _, order, _ in pieces)
         pieces = [(p, d, k, order[:smallest], qm_) for p, d, k, order, qm_ in pieces]
 
