@@ -1028,3 +1028,47 @@ xcrun coremlcompiler compile "$OUT/$NAME.mlpackage" "$OUT"
 
 ★ 状态 ✓：★ **203 的 Keras 路径拿不到表里的时延**已说明 ✓；★ **时延的真正来源（`gate_timing.py` ＋ `.mlmodelc`）**已写明 ✓；
 ★ **时延不依赖丢失的语料**（只要一个捕获 ✓）已指出 ✓；★ **本机具备完整导出能力**已核实（coremltools 9.0 ＋ coremlcompiler ✓）✓。
+
+---
+
+## 21. ★★★★ 2026-11-02 07:45 **P6 完成：三个在役模型的 `depth3_scales.txt` 都补齐了**
+
+**(a) ★★★ 为什么以前一直缺 —— 找到了根因**
+
+**⇒ `calibrate_depth3.py` **加载不了这些模型**** ✗：
+- ★ **它按**非条件化**方式建 batch（12 通道）** ✗
+- ★ **而在役模型全是条件化的（16 通道）** ✗ ⇒ **第一次前向就报**
+  `expected shape=(None, 612, 14, 16), found shape=(1, 612, 14, 12)` ✓
+- ★★ **⇒ 架构改成条件化之后，**没人再跑过这个工具**} ⇒ **所以每个 bundle 都没有 sidecar** ✓✓
+
+**(b) ★ 修法**
+
+**⇒ 给 `calibrate_depth3.py` 加了一个 `--cond` 开关** ✓ ⇒ **按条件化方式建 batch** ✓
+**⇒ 用 `T.Batches(..., cond=args.cond)`** ✓ —— 与 `gate_e17.py` 同一套机制 ✓
+
+**(c) ★★★ 三个模型的结果（全部一致）**
+
+| 模型 | sidecar 位置 | ★ 结果 |
+|---|---|---|
+| ★ **E4** | `lib/…/ai_assets/depth3_e4_real_1023/depth3_scales.txt` | ★ **`s_llr=20  a_noise=4  b_noise=-1`** ✓ |
+| ★ **E17** | `~/ai_depth3/runs/e17_c32_b18/depth3_scales.txt` | ★ **同** ✓ |
+| ★ **W2-cond** | `~/ai_depth3/runs/w2_cond_c32_b18/depth3_scales.txt` | ★ **同** ✓ |
+
+**⇒ 三者都报**：★ **"the model was trained with S_llr = 20, which is on the plateau -- KEPT"** ✓
+**⇒ 即**：★ **`S_llr` 的合理区间是 `[2.5, 20]` 一大片平台 ⇒ **20 就在平台上** ✓ ⇒ **对语料不敏感** ✓✓
+**⇒ 量化代价**：★ **quantised BLER ＝ unquantised BLER（差 +0.0000）** ✓ ⇒ **60 块分辨率下量化无损** ✓
+
+**(d) ★ 两个键的现状（值得知道）**
+
+**⇒ `a_noise=4`、`b_noise=-1`** ✓ —— ★ **它们**不是拟合值**，而是训练器里的常量**（`NOISE_SCALE_DECADES=4.0`、`NOISE_SCALE_CENTER=-1.0` ✓）
+**⇒ 而引擎的默认值**也是 `4.0F` / `-1.0F`** ✓ ⇒ ★ **所以这两个键**今天写不写都一样**** ✓
+**⇒ ★★ 但**：它们是**两种语言里的两个独立字面量** ✓ ⇒ **改一边就会让发布的噪声差几个数量级，而且**没有任何症状** ✓
+（**引擎代码自己的注释就是这么说的** ✓）⇒ **所以把 sidecar 补齐的价值在于**把巧合变成约定**** ✓
+
+**(e) ★ 真正的价值在 `s_llr`**
+
+**⇒ 没有 sidecar 时，引擎用 `range_limit` 作为 `s_llr`** ✓
+**⇒ 有了 sidecar，才用**标定值** ✓ ⇒ **这才是补齐的实际收益** ✓
+
+★ 状态 ✓：★ **根因查明**（`calibrate_depth3.py` 不支持条件化 ✓）；★ **加了 `--cond`** ✓；
+★ **三个在役模型的 sidecar 全部生成且一致**（`s_llr=20`，在平台上 ✓）；★ **噪声对的"巧合 vs 约定"已说明** ✓。
