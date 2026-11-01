@@ -1674,3 +1674,50 @@ if (dev_nv != nullptr) {
 
 ★ 状态 ✓：★ P0 已改、已提交、已验证生效 ✓；★ **失败率未变（16% → 16%）** ✓；★ "30%→10%"结论撤回 ✓；
 ★ 设备 kernel 是 NaN 源头，已由 `_ce.txt` 确认 ✓；★ P1 的下一步（`OCUDU_CE_SIGMA2_CHECK`）明确 ✓。
+
+---
+
+## 29. ★★★★ 2026-11-01 19:00 **`OCUDU_CE_SIGMA2_CHECK` 的结果：设备值与主机参考**恒定不一致**，但**不区分 KO 与 OK**
+
+**(a) ★★ 实测（12 次：2 KO、10 OK）**
+
+```
+crc=KO [sigma2_check] dev=0.000799661 host=0.25252 rel=-9.968e-01 device=1
+crc=OK [sigma2_check] dev=0.000799661 host=0.25252 rel=-9.968e-01 device=1
+…（12 条**完全相同**）
+```
+
+**⇒ 两个观察**：
+1. ★★ **`dev` 与 `host` 相差约 300 倍**（`rel=-0.9968`）✓ —— 但这**12 次全部一样** ✓，包括 KO ✓
+2. ★★ **因此这个探针**不能区分 KO 与 OK** ✗ ⇒ **NaN 不产生在这一步** ✓
+
+**(b) ★★★ 这排除了 `sigma2` 本身**
+
+**⇒ 结合 §28**：★ **KO 的 `_ce.txt` 里 `noise_variance=nan`** ✓，而 **`sigma2_check` 的 `dev` 是有限值** ✓
+**⇒ 所以**：★ **NaN 出现在 `sigma2` **之后**、被发布为 `noise_variance` 之前的那一段** ✓✓
+**⇒ 那一段里有什么**（`_ce.txt` 的字段顺序给了线索）：
+- ★ **`noise_variance`** ⇒ 归一化后的噪声（**除以 `pilots_power`** ✓）
+- ★ **`snr`** ⇒ `epre / noise_variance` ✓ ⇒ **若 noise_variance=0 会发散** ✓
+- ★ **`rsrp`** ⇒ **nan** ✓
+- ★ **`ta_us`** ⇒ **-1.171875**（负值）✓
+
+**⇒ 结论**：★ **`pilots_power` 很可能是那个"接近 0 的量"** ✓ ——
+★ **`noise_variance = sigma2 / max(pilots_power, 1e-30F)`**（引擎 2194 行这样发布 ✓）
+**⇒ 若 `pilots_power` 在 M2 上被算成 0** ⇒ **除以 1e-30F ⇒ 得到一个巨大的数** ✗ ⇒ **后续 `snr` / `rsrp` 溢出成 nan** ✓✓
+
+**(c) ★★ 下一步：查 `pilots_power`**
+
+**⇒ 引擎 2106–2131 行就是它**（`gpu_ls_sigma2[sigma2_base_ + kPowerSum] / nof_power_pilots` ✓）
+**⇒ 而 §28 的 `_ce.txt` 里 `epre` 两组**完全相同**（2.504021525e-01）** ✓ ⇒ **发射功率侧是对的** ✓
+**⇒ 所以嫌疑集中在 `kPowerSum`（设备侧的 `|LS pilot|^2` 之和）** ✓
+
+**⇒ 可以用同一个探针思路**：★ **加一个 `OCUDU_CE_PP_CHECK`（引擎 2108 行提到过这个名字）** ✓
+⇒ **它已经在代码里** ✓ ⇒ **直接打开它** ✓
+
+**(d) ★ 修正一下 §24 的一个说法**
+
+**⇒ §24 说"两台机器正常值差 ~5e-9 ⇒ 可能是除以一个在 M2 上恰好为 0 的量"** ✓
+**⇒ 现在更具体了**：★ **那个量**不是 `sigma2` 本身** ✓（它恒定且有限 ✓），**而是 `pilots_power`（或其归一化因子）** ✓
+
+★ 状态 ✓：★ `sigma2_check` 已跑，`dev`/`host` 恒定不一致但**不区分 KO/OK** ✓；★ NaN 定位到 `sigma2` 之后、
+发布 `noise_variance` 之前 ✓；★ 嫌疑量改为 `pilots_power` / `kPowerSum` ✓；★ 下一步是打开已有的 `OCUDU_CE_PP_CHECK` ✓。
