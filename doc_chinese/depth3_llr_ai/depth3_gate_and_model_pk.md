@@ -605,3 +605,70 @@ started from /Users/jiachengwang/ai_depth3/w2_models/w2_cond_init.weights.h5
 **⇒ 训练已结束 ✓、门控已全部移到 203 ✓ ⇒ **本机没有计算任务在跑** ✓（用户 2026-11-01 询问时确认 ✓）
 
 ★ 状态 ✓：★ 条件化模型训练完成、best 0.10662 ✓；★ 与 E17 的对比已注记"跨语料不可比、要用 TB CRC 判" ✓；★ 本机已空闲 ✓。
+
+---
+
+## 15. ★★★★★ 2026-11-01 23:40 **重要更正：`gate_e17.py` 测的**不是 ANE 路径****
+
+**(a) ★★★ 用户指出的链条（完全正确）**
+
+```
+.keras  →（coremltools 导出，任何机器）→  .mlpackage  →（xcrun coremlcompiler，仅 macOS）→  .mlmodelc
+                                                                                        ↓
+                                                              ul_chain_replay ＋ 捕获 ⇒ 真正的接收机 ⇒ ANE
+```
+
+**⇒ 依据**：★ **`finish_run.sh` 自己的注释**：
+> "carry it through **export, compile and the three gates**"
+> "**`coremltools` makes a `.mlpackage` anywhere, but compiling it to `.mlmodelc` needs `xcrun coremlcompiler`,
+> which only exists on macOS**"
+> "**`ul_chain_replay` driving the real receiver over the captured grids**"
+
+**⇒ 所以**：★ **ANE 路径**必然**需要 `.mlmodelc`** ✓，**而 `.mlmodelc` 确实由 `.keras` 生成** ✓（经 `.mlpackage` ＋ `coremlcompiler` ✓）
+
+**(b) ★★★★ 但我刚才跑的 `gate_e17.py` **不是这条路** ✗**
+
+**⇒ 它的第 65 行**：
+```python
+model = tf.keras.models.load_model(args.model, compile=False)
+```
+**⇒ 它是**把 `.keras` 直接喂给 TensorFlow** ✓ ⇒ ★ **没有 CoreML、没有 `.mlmodelc`、**没有 ANE**** ✗
+**⇒ 而且它吃的是 **npz** ✓ —— **实链吃的是**捕获** ✗
+
+**⇒ 所以我已经跑完的六个数字（见 §15(c)）是**"Keras-on-npz"**的 TB CRC，**不是门控定义的 ANE 路径**** ✗
+
+**(c) ★ 已跑完的六个数字（保留作参考，但**不进 PK 表**）**
+
+| 模型 | s2_test1 | s2_test2 | attach |
+|---|---|---|---|
+| ★ **E4** | **85.9%** | **85.9%** | **76.4%** |
+| ★ **E17** | **86.0%** | **85.8%** | **81.3%** |
+
+**⇒ 它们是有用的**模型质量**指标** ✓（同语料、同工具、可比 ✓），但 ★ **与寄存器里 E4 69.2% / E17 91.1% 的口径不同** ✗
+**⇒ 寄存器那组是**回放**出来的** ✓（`e17_attach.csv` 的列是 `capture,slot,rnti,modulation,nof_prb,sinr_db,crc,...` ⇒ **那是 `ul_chain_replay` 的输出** ✓）
+
+**(d) ★★★★ 好消息：真正的门控**可以**跑，因为 npz 里带 unit 名**
+
+**⇒ 实测 `w2_test1.npz` / `w2_test2.npz` 都有 `unit` 字段** ✓：
+```
+cap_13563_5027_17923@natural
+cap_21691_3747_17923@natural
+```
+**⇒ ⇒ 每个样本都能映射回**一个捕获单元** ✓ ⇒ **而那些捕获就在 T7 的 60 条腿里** ✓✓
+
+**⇒ 所以真正的 ANE 门控流程是**：
+1. ★ **从三个 npz 各导出 `unit` 列表** ✓
+2. ★ **在 T7 的 60 条腿里找到这些捕获** ✓
+3. ★ **把 E4 / E17 的 `.keras` 导出成 `.mlpackage` ⇒ 再编译成 `.mlmodelc`** ✓（本机已有 `coremlcompiler` ✓）
+4. ★ **`ul_chain_replay` ＋ `.mlmodelc` 逐单元回放** ✓ ⇒ **ANE 路径** ✓
+5. ★ **统计 TB CRC** ✓
+
+**⇒ 这条流程比"喂 npz"长得多，但它是**门控的定义**** ✓
+
+**(e) ★ 已停掉 203 上的 Keras 路径**
+
+**⇒ 六个数字已跑完（23:19 DONE ✓）⇒ 203 已释放** ✓
+
+★ 状态 ✓：★ 用户指出的 `.keras → .mlpackage → .mlmodelc → ul_chain_replay → ANE` 链条已确认 ✓；
+★ **`gate_e17.py` 测的是 Keras/TF 路径、不是 ANE 路径**已更正 ✓；★ 已跑的六个数字保留作参考、不进 PK 表 ✓；
+★ **真正的门控流程（含 npz→unit→捕获 的映射）已写明** ✓。
