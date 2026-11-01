@@ -700,3 +700,68 @@ OCUDU_REPLAY_MODEL=…/depth3_modcond_r7/d3_modcond_r7.mlmodelc \
 ★ 状态 ✓：★ 明确了"额外提交/回 CPU"这条路应放弃 ✓；★ 根因定为 **MTLBuffer 别名（同一内存两个对象）** ✓；
 ★ 修法与 GPU 单向流原则一致（只改映射，不加同步）✓；★ 诊断可先用现有计数器做 ✓。
 
+---
+
+## 13. ★★★★★ 2026-11-01 15:20 **外部调研：Apple silicon 上屏障的适用范围比 NVIDIA 窄 —— 但我们的情形仍在"有效"那一侧**
+
+**(a) ★★ 公开报告一：**Apple 的跨提交缓存不失效**（ggml / llama.cpp 的实地调查）**
+
+来源：[crispasr 的 ggml-metal 上游报告](https://github.com/crispstrobe/crispasr/blob/934908d2a90fdceec12e05a0e6be979398aa5c9a/tools/upstream-prs/12-sched-parallel-shared-storage-docs.md)（M1 Metal）
+
+**⇒ 原文关键段**：
+> "`waitUntilCompleted` blocks for the prior command buffer's completion but **does NOT invalidate the GPU's L1/L2 cached
+> view of a shared-storage `MTLBuffer`** whose system memory was overwritten by a host-side `memcpy` between consecutive
+> `commandBuffer` submissions. The CPU memcpy lands in system memory through SLC, but **the GPU caches retain their warm
+> view** from the prior compute submission's reads, and **the next dispatch reads stale data**."
+
+**⇒ 另一段（正面结论）**：
+> "On Metal the events are backed by `MTLSharedEvent` whose `encodeSignalEvent` / `encodeWaitForEvent` commands **carry
+> GPU-cache-invalidation semantics** for the buffer they apply to."
+
+**⇒ 含义**：
+- ★★ **在 Apple silicon 上，"命令缓冲区完成"**不**保证 GPU 看到主机新写的数据** ✗（缓存是脏的 ✓）
+- ★★ **真正带缓存失效语义的是 `MTLSharedEvent`** ✓（`encodeSignalEvent`/`encodeWaitForEvent` ✓）
+
+**(b) ★★ 这印证了用户的印象：**Apple 上的同步语义确实比 N 卡弱**
+
+| 平台 | 跨提交/主存可见性 |
+|---|---|
+| **NVIDIA/CUDA** | `cudaDeviceSynchronize` 级别的语义强 ✓ |
+| ★ **Apple silicon** | ★ **`waitUntilCompleted` 不失效 GPU 缓存** ✗；要 `MTLSharedEvent` ✓ |
+
+**(c) ★★★ 但我们的情形**不同**，仍在屏障有效的一侧**
+
+**⇒ 关键区别**：
+
+| 项 | ggml 报告的情形 | ★ 我们的情形 |
+|---|---|---|
+| 谁写的数据 | ★ **CPU（memcpy）** ✗ | ★ **GPU（前缀 kernel）** ✓ |
+| 内存类型 | ★ **shared-storage（主机可写）** ✗ | ★ 引擎的暂存缓冲（多为 private / 设备侧）✓ |
+| 跨不跨提交 | **跨两次提交** ✗ | ★ **同一 command buffer 内** ✓ |
+| 屏障 | 不适用 ✗ | ★ **`memoryBarrierWithScope:MTLBarrierScopeBuffers`** ✓ |
+
+**⇒ 而且**：★ **引擎自己的实测（注释里写着，200 次重复、双向）**：
+> "**writer and reader on ONE object PASS, on an aliased pair FAIL every time.**"
+
+**⇒ 所以**：★ **同一对象 + 同一 command buffer 的 GPU→GPU 情形，屏障是有效的** ✓（200/200 ✓）
+**⇒ 失效的是**别名对象** ✓（两个 `MTLBuffer` 覆盖同一内存 ✓）—— 与 §12 的结论一致 ✓
+
+**(d) ★★★ 综合后的修复方案（三重保险，全部符合"GPU 单向流"）**
+
+| # | 措施 | 作用 |
+|---|---|---|
+| ★ **1** | ★ **一区域一 `MTLBuffer` 对象**（扩展 `wrap()` 的覆盖 / warm-up）| ★ **让屏障能生效** ✓ —— 根因修复 |
+| ★ **2** | ★ **该缓冲用 `MTLStorageModePrivate`**（不回主机、不 shared）| ★ **避开 ggml 报告的那类缓存脏读** ✓ |
+| ★ **3** | ★ **万一必须跨提交**：用 **`MTLSharedEvent`**（signal/wait）而不是 `waitUntilCompleted`| ★ 唯一带缓存失效语义的跨提交手段 ✓ |
+
+**⇒ 三者都不需要"把数据搬回 CPU"** ✓ ⇒ **与高层的单向流原则一致** ✓
+
+**(e) ★ 立即可做的验证（不改代码）**
+
+**⇒ 引擎已有 `wrap_cover` / `wrap_cover_off` 两个计数器** ✓ ⇒ 在 203 上打开统计跑一次：
+- **`wrap_cover_off != 0`** ⇒ ★ **还有别名** ⇒ 措施 1 就够 ✓
+- **为 0** ⇒ ★ **没有别名** ⇒ 那么问题可能在**共享内存/跨提交** ⇒ 措施 2 或 3 ✓
+
+★ 状态 ✓：★ 已调研并引用公开报告（ggml 的 M1 实地调查）✓；★ 区分了"主机写 vs GPU 写"两种情形 ✓；
+★ 修复方案给出三重保险且均不违背单向流 ✓；★ 下一步（读计数器）明确 ✓。
+
