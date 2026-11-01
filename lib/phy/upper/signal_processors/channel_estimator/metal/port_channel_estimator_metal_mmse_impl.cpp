@@ -5804,6 +5804,31 @@ std::optional<float> port_channel_estimator_metal_mmse_impl::get_device_rsrp_sum
   if (!device_rsrp_valid || (i_layer >= device_rsrp_sums_.size())) {
     return std::nullopt;
   }
+  if (std::getenv("OCUDU_CE_RSRP_ROUTE") != nullptr) {
+    // IS THE ESTIMATE ITSELF BROKEN, OR ONLY THE SUM OF IT? (2026-11-01.) The reduction kernel contains no
+    // division, so a NaN sum means one of two things: the estimates it summed already held a NaN, or it read a
+    // slot that was never written. Those have different repairs, and this scan separates them by looking at the
+    // estimates the engine is about to hand on.
+    unsigned       bad_re      = 0;
+    unsigned       seen        = 0;
+    const auto*    est         = reinterpret_cast<const cbf16_t*>(gpu_ce);
+    const unsigned total_re    = gpu_ce_total_re;
+    const unsigned layers      = gpu_ce_layers;
+    for (unsigned i = 0; (i != total_re * layers) && (seen != 4096); ++i, ++seen) {
+      // bfloat16 is the top half of a float32, so widening it is a shift and the finiteness test is exact.
+      const uint32_t re_bits = static_cast<uint32_t>(est[i].real.value()) << 16;
+      const uint32_t im_bits = static_cast<uint32_t>(est[i].imag.value()) << 16;
+      float          re      = 0.0F;
+      float          im      = 0.0F;
+      std::memcpy(&re, &re_bits, sizeof(re));
+      std::memcpy(&im, &im_bits, sizeof(im));
+      if (!std::isfinite(re) || !std::isfinite(im)) {
+        ++bad_re;
+      }
+    }
+    std::fprintf(stderr, "[rsrp_route] h total_re=%u layers=%u scanned=%u non_finite=%u\n", total_re, layers, seen,
+                 bad_re);
+  }
   return device_rsrp_sums_[i_layer];
 }
 
