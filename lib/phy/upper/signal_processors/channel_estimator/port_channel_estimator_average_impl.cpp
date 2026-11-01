@@ -652,13 +652,32 @@ bool port_channel_estimator_average_impl::compute_hop_finish(const dmrs_symbol_l
   for (unsigned i_layer = 0; i_layer != nof_tx_layers; ++i_layer) {
     if (const std::optional<float> device_sum = get_device_rsrp_sum(i_layer); device_sum.has_value()) {
       rsrp[i_layer] += *device_sum * power_normalization_factor;
+      if (std::getenv("OCUDU_CE_RSRP_ROUTE") != nullptr) {
+        // WHERE THE RSRP TURNS INTO NaN (2026-11-01). The published rsrp is the only reporting value that
+        // goes wrong on the failing receptions -- EPRE beside it stays correct -- so the question is which of
+        // the two routes fed it and what the two multiplicands were. Printed per layer and per route rather
+        // than once, because a single hop can take both.
+        std::fprintf(stderr, "[rsrp_route] device layer=%u dev_sum=%.9e factor=%.9e product=%.9e\n", i_layer,
+                     static_cast<double>(*device_sum), static_cast<double>(power_normalization_factor),
+                     static_cast<double>(*device_sum) * static_cast<double>(power_normalization_factor));
+      }
       continue;
     }
     for (unsigned i_symbol = 0; i_symbol != nof_lse_symbols; ++i_symbol) {
       float avg = ocuduvec::average_power(filtered_pilots_lse.get_symbol(i_symbol, i_layer)) *
                   filtered_pilots_lse.get_symbol(i_symbol, i_layer).size();
       rsrp[i_layer] += avg * power_normalization_factor;
+      if (std::getenv("OCUDU_CE_RSRP_ROUTE") != nullptr) {
+        std::fprintf(stderr, "[rsrp_route] host layer=%u symbol=%u avg=%.9e factor=%.9e product=%.9e\n", i_layer,
+                     i_symbol, static_cast<double>(avg), static_cast<double>(power_normalization_factor),
+                     static_cast<double>(avg) * static_cast<double>(power_normalization_factor));
+      }
     }
+  }
+  if (std::getenv("OCUDU_CE_RSRP_ROUTE") != nullptr) {
+    std::fprintf(stderr, "[rsrp_route] context layers=%u lse_symbols=%u dmrs_symbols=%u beta=%.9e factor=%.9e\n",
+                 nof_tx_layers, nof_lse_symbols, nof_dmrs_symbols, static_cast<double>(beta_scaling),
+                 static_cast<double>(power_normalization_factor));
   }
 
   // ---- The hop's EPRE contribution and the pilots the host may still need ------------------------
