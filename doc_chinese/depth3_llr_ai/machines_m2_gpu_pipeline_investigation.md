@@ -631,3 +631,72 @@ OCUDU_REPLAY_MODEL=…/depth3_modcond_r7/d3_modcond_r7.mlmodelc \
 ★ 状态 ✓：★ 失败率复测为 15–20%（比先前 5% 更严重）✓；★ 实链同引擎已确认 ✓；★ `hold_for_weights` 不覆盖该对已实测 ✓；
 ★ 回答"是否只能靠 HARQ"（PHY 层面是、但可修）✓；★ 损失与建议已列 ✓。
 
+---
+
+## 12. ★★★★★ 2026-11-01 15:00 **解决方案：不需要额外提交、不需要回 CPU —— 根因是**MTLBuffer 别名**，修法与 GPU 单向流原则完全一致**
+
+**(a) ★★ 用户提出的约束（完全正确）**
+
+> ★ **GPU 路径的设计原则：数据进了 GPU 就不再回 CPU**（目前还没做到"一路到底"，因为 Metal LDPC 还要优化）
+
+**⇒ 所以我先前提的"拆成两次提交"与这个原则冲突** ✗ ⇒ **应当放弃那条路** ✓
+
+**(b) ★★★ 引擎里**早就有**同一 command buffer 内的设备级屏障**
+
+**⇒ `ocudu_metal_mmse_engine.mm` 里 `memoryBarrierWithScope:MTLBarrierScopeBuffers` 出现 **12 次** ✓**
+**⇒ 所以"同步"本身不需要额外提交** ✓ —— 引擎已经在用 ✓
+
+**(c) ★★★ 那么真正的根因是什么（代码里写得很清楚，第 996 行）**
+
+> ★★ **"`memoryBarrierWithScope:MTLBarrierScopeBuffers` orders a write and a later read **only when both go
+> through the same MTLBuffer object**. Two objects over the same bytes - whatever their bases and lengths - carry
+> no ordering at all: the writer and the reader are free to run in either order, no matter how they were encoded
+> or where the barrier sits between them."**
+
+**⇒ 也就是说**：★ **根因不是"缺屏障"，而是"同一块内存被两个不同的 `MTLBuffer` 对象包着"** ✗
+**⇒ 屏障对**别名对象**完全无效** ✓ ⇒ **写入与读取的顺序完全由硬件调度决定** ✓ ⇒ **竞态** ✓✓
+
+**(d) ★★★ 代码里还记了**同一类 bug 曾经怎么把结果算成 NaN
+
+**⇒ 同一段注释**：
+> "That is what kept the fused route (OCUDU_CE_EDGE_FUSE) computing NaN: a merged batch rides its edge group in the
+> STANDARD group's slots, so its correlation prefix starts `sys_offset` strides into gpu_a / gpu_r_hp and asked for
+> an **interior pointer**. Keyed by pointer, the cache answered with a **second MTLBuffer over memory the batch's own
+> mapping already covered**, so the inversion - reading the slots through the FIRST object, in the same command
+> buffer, after a barrier - read them BEFORE that prefix's writes landed."
+
+**⇒ 逐句对应**：
+- ★ **某阶段请求一个**内指针**（interior pointer）** ✓
+- ★★ **缓存按指针 key，于是新建了**第二个 MTLBuffer**（覆盖同一块内存）** ✗
+- ★★ **于是"屏障之后"的读取仍然读到**前缀写入之前**的值** ✗
+- ★ **NaN 就是这样产生的** ✓
+
+**⇒ 这次的竞态是**同一类问题的另一个实例** ✓（只是没到 NaN，而是坏网格 ✓）
+
+**(e) ★★★ 正确的修法（与"GPU 单向流"完全一致）**
+
+| 步 | 动作 | 是否符合设计原则 |
+|---|---|---|
+| ★ **1** | ★ **让"前缀写入的那块内存"与"K1 读取的那块内存"通过**同一个 MTLBuffer 对象**访问** | ★ **完全符合** ✓ —— **不提交、不回 CPU、不加同步** |
+| ★ **2** | 具体做法：**把该区域纳入 `wrap()` 的"一区域一对象"规则**（必要时扩展构造期 warm-up：`reserve_buffer()` / `run_weights_only()` 覆盖到该内指针）| ★ 符合 ✓ |
+| ★ **3** | **验证**：`wrap_cover` / `wrap_cover_off` 两个计数器 + **1 000 次重复** | ★ 符合 ✓ |
+
+**⇒ 为什么这是最优解**：
+- ★ **不加任何提交** ✓ ⇒ **不破坏单向流** ✓
+- ★ **不加 CPU 同步** ✓ ⇒ **不加延迟** ✓
+- ★ **复用已有机制** ✓（`wrap()` 缓存 ＋ warm-up ✓）⇒ **改动面小** ✓
+- ★ **同时修好"屏障排不了序"这一类问题** ✓
+
+**(f) ★ 立即可做的诊断（不改代码）**
+
+**⇒ 引擎已经暴露了两个计数器** ✓：
+- ★ **`wrap_cover`** = 有多少次"内指针"被**已有映射**覆盖了 ✓
+- ★ **`wrap_cover_off`** = 其中**偏移非零**的子集 ✓ ⇒ 注释说：**"A run that shows 0 there has nothing left to fix in this cache; a run that shows a number is a route the barrier cannot order."**
+
+**⇒ 所以**：★ **在 203 上打开 `OCUDU_CE_WRAP_MAP`（统计开关）跑一次** ✓
+- **若 `wrap_cover_off != 0`** ⇒ ★ **缓存里还有未覆盖的内指针** ✓ ⇒ **就是它** ✓
+- **若为 0** ⇒ ★ **还有**没走 `wrap()`**的通路**（例如直接 `newBufferWithBytes`）⇒ **接着找那条路** ✓
+
+★ 状态 ✓：★ 明确了"额外提交/回 CPU"这条路应放弃 ✓；★ 根因定为 **MTLBuffer 别名（同一内存两个对象）** ✓；
+★ 修法与 GPU 单向流原则一致（只改映射，不加同步）✓；★ 诊断可先用现有计数器做 ✓。
+
