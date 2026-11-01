@@ -55,58 +55,74 @@
 | **W2-256QAM**（同上）| — | — | — | — |
 | **W2-cond**（四主干平均热启动）| 待测 | 待测 | 待测 | 待测 |
 
+**⇒ 三个模型的 `.keras` 现在都在 `~/ai_depth3/runs/<模型>/depth3_best.keras`** ✓（见 §4.2 ✓）
+
 **读法**：`—` ＝ 该模型不适用于这一列（例如单调制模型没有条件化的验收集口径）；**待测** ＝ 尚未测量。
 
 ---
 
-## 4. ★ 模型从哪来（2026-11-01 用户指明）
+## 4. ★ 模型从哪来
 
-**⇒ 门控要跑的是**权重文件**，而权重分散在两处** ✓
+### 4.1 ★★★ 先说清一件事：**`.keras` 不是实链要的产物**
 
-### 4.1 ★ 历史模型库（E4 与 E17）
+**⇒ 实链（gNB）加载的是 **Core ML 编译产物**，不是 Keras 权重** ✓ —— 代码里写得很明确：
+
+| 实链要找的东西 | 位置（`pusch_depth3_receiver_impl.cpp:560-570`）|
+|---|---|
+| ★ **主模型** | ★ **`.mlmodelc`**（编译后的 Core ML ✓）|
+| ★ **分宽度的 8 个桶** | ★ **同目录下的 `buckets/base_w{108,180,252,324,396,468,540,612}.mlmodelc`** ✓（**按宽度探测**，缺一个只是窄一点 ✓ 不报错 ✓）|
+| 默认绑定（编译期）| `OCUDU_DEPTH3_DEFAULT_MODEL` = `…/ai_assets/depth3_e4_real_1023/d3_e4.mlmodelc` ✓ |
+
+**⇒ 所以**：
+- ★ **`.keras` ＝ **训练产物** ✓** —— 用来**再导出**、**跑门控（算 TB CRC）**、**继续训** ✓
+- ★★ **`.mlmodelc` ＋ `buckets/` ＝ **部署产物** ✓** —— 实链真正加载的就是它们 ✓
+- ★ **只放 `.keras` 进 `ai_assets/` ⇒ 实链**用不了**** ✗
+
+**⚠ 还缺一件东西**：★ **`depth3_scales.txt`（标定 sidecar）** ✗ —— **现有所有 bundle 都没有它** ✓
+**⇒ 后果**：★ **噪声映射退回默认值 `A_n=4`、`B_n=-1`** ✓（引擎每次启动都会警告 ✓）⇒ **LLR 的绝对尺度没有标定** ✓
+**⇒ 建议**：★ **导出模型时一并生成它** ✓（`calibrate_depth3.py --write-scales` ✓）
+
+### 4.2 ★★ 集中后的模型目录（2026-11-01 统一）
+
+**⇒ 三个模型现在都在** `~/ai_depth3/runs/`**，每个目录一个 `depth3_best.keras` ＋ 一个 `SOURCE.txt`（记来源与 md5 ✓）：
+
+| 目录 | 模型 | 大小 | md5（前 12）|
+|---|---|---|---|
+| ★ **`~/ai_depth3/runs/e4_1023/`** | ★ **E4**（现役默认）| 397 KB | **845a11766bed** |
+| ★ **`~/ai_depth3/runs/e17_c32_b18/`** | ★ **E17** | 397 KB | **cfe8a7c866e2** |
+| ★ **`~/ai_depth3/runs/w2_cond_c32_b18/`** | ★ **W2-cond**（2026-11-01 训完）| 397 KB | **776f62671500** |
+
+**⚠ 这三个文件**参数完全相同（26 185 / 26 057），大小也相同（397 KB）** ✗
+**⇒ ⇒ 只能靠 **md5** 分辨 ✓ —— 这就是为什么每个目录都放一个 `SOURCE.txt` ✓（§13 的教训 ✓）
+
+### 4.3 ★ 其他地方的副本（可以有，且需要保留）
+
+| 位置 | 内容 | 为什么保留 |
+|---|---|---|
+| ★ **`lib/…/ai_assets/depth3_e4_real_1023/`** | E4 的 **`.keras` ＋ `.mlmodelc` ＋ `.mlpackage` ＋ `buckets/`** | ★ **实链的默认绑定 ✓、入库 ✓** |
+| ★ **`doc_chinese/llr_ai_detection/work_tmp/artifacts/buckets/e4/`** | E4 的**逐宽度 `.mlpackage`** | ★ **历史模型库 ✓（§4.4）** |
+| ★ **`…/artifacts/buckets/e17_c32_b18/`** | E17 的**逐宽度 `.mlpackage`** | ★ **同上 ✓** |
+| ★ **107：`~/work/ai_phy_train/runs/e17_c32_b18/`** | E17 的**训练现场**（含 `history.json` ✓）| ★ **训练记录 ✓** |
+
+### 4.4 ★ 历史模型库（Core ML 形态）
 
 | 项 | 值 |
 |---|---|
 | ★ **目录** | ★ **`doc_chinese/llr_ai_detection/work_tmp/artifacts/buckets/`** |
-| ★ **E4 的子目录** | ★ **`e4/`**（11 个条目：`buckets/` ＋ 逐宽度 `d3_e4_w<width>.mlpackage`）|
-| ★ **E17 的子目录** | ★ **`e17_c32_b18/`**（11 个条目：`buckets/` ＋ 逐宽度 `e17_c32_b18_w<width>.mlpackage`）|
-| 形态 | ★ **`.mlpackage`（未编译的 Core ML 包）＋ `buckets/`（分宽度的子集）** |
-| ★ **没有 `.keras`** | ★ **该目录里**不含** Keras 权重** ✗ ⇒ **做"跑数据集算 TB CRC"这类门控时另有来源**（见 4.2 / 4.3）|
+| ★ **E4** | `e4/`（11 个条目：`buckets/` ＋ 逐宽度 `d3_e4_w<width>.mlpackage`）|
+| ★ **E17** | `e17_c32_b18/`（11 个条目 ✓）|
 | 体积 | **45 MB** |
-| ★ **其他模型** | ★ **暂不关心**（用户 2026-11-01 明确 ✓）|
+| ★ **没有 `.keras`** | ★ **该目录里**不含 Keras 权重** ✗ ⇒ **要跑门控就去 §4.2 那三个目录取** ✓ |
 
-**⚠ 一个风险**：★ **`work_tmp/` 是**gitignored** 的** ✗ ⇒ ★ **这份历史模型库**不在版本库里**** ✓
-**⇒ 建议**：★ **把 `artifacts/buckets/`（45 MB）单独归档或入库** ✓ —— **否则它只存在于本机** ✓
+**⚠ 风险**：★ **`work_tmp/` 是 gitignored 的** ✗ ⇒ **这份 45 MB 的历史库**不在版本库里** ✓ ⇒ **建议归档或入库** ✓
 
-### 4.2 ★ E4：现役默认模型，仓库里也有一份
+### 4.5 ★ 小结：每种用途该取哪个文件
 
-| 项 | 值 |
+| 用途 | 取什么 |
 |---|---|
-| ★ **目录** | ★ **`lib/phy/upper/ai_signal_processors/depth3/ai_assets/depth3_e4_real_1023/`** |
-| ★ **内容** | ★ **`depth3_best.keras`（Keras 权重 ✓）＋ `d3_e4.mlmodelc`（已编译 ✓）＋ `d3_e4.mlpackage` ＋ `buckets/` ＋ `README.md`** |
-| ★ **地位** | ★ **E4 是**当前默认模型**（`OCUDU_DEPTH3_DEFAULT_MODEL` 指向它 ✓）|
-| ★ **在版本库里** | ★ **是** ✓（`ai_assets/` 入库 ✓）|
-
-**⇒ 所以 E4 有两个来源** ✓：
-- ★ **做门控（跑数据集）** ⇒ 用 `ai_assets/…/depth3_best.keras` ✓
-- ★ **做部署/时延** ⇒ 用 `ai_assets/…/d3_e4.mlmodelc` 或 `buckets/` ✓
-
-### 4.3 ★ E17：权重在训练机上，Core ML 在历史库里
-
-| 项 | 位置 |
-|---|---|
-| ★ **`.keras`** | ★ **107：`~/work/ai_phy_train/runs/e17_c32_b18/depth3_best.keras`**（397 KB ✓）|
-| ★ **`.mlpackage`** | ★ **`artifacts/buckets/e17_c32_b18/`**（见 4.1 ✓）|
-
-**⇒ 本机为跑门控已把它取到**：★ **`~/ai_depth3/gate_data/E17.keras`** ✓
-**⇒ 203 上同样有一份**：★ **`~/gate_data/E17.keras`** ✓
-
-### 4.4 ★ 小结：每种门控该用哪个文件
-
-| 门控类型 | 用什么 |
-|---|---|
-| ★ **跑数据集算 TB CRC**（本表前两列 ＋ attach 列）| ★ **`.keras`** ⇒ E4 用 `ai_assets/…/depth3_best.keras` ✓、E17 用 `runs/e17_c32_b18/depth3_best.keras` ✓ |
-| ★ **测时延**（本表最后一列）| ★ **`.mlmodelc`** ⇒ E4 用 `ai_assets/…/d3_e4.mlmodelc` ✓ |
+| ★ **跑数据集算 TB CRC**（本表前三列）| ★ **`.keras`** ⇒ `~/ai_depth3/runs/<模型>/depth3_best.keras` ✓ |
+| ★ **测时延**（本表最后一列）| ★ **`.mlmodelc`** ⇒ 各 bundle 的 `*.mlmodelc` ＋ `buckets/` ✓ |
+| ★ **实链部署** | ★ **`.mlmodelc` ＋ `buckets/` ＋ `depth3_scales.txt`** ✓ |
 
 ---
 
