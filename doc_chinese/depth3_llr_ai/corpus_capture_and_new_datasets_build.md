@@ -1858,3 +1858,51 @@ build_depth3_dataset.py --units <dump>/index.csv --tb <dump>/tb --corpus <采集
 ★ 状态 ✓：★ **"母集不需要 `select_by_bin`"已确认并记录** ✓；★ **它是抽样工具**已说明（配额 2500/250 ✓）；
 ★ **"无限配额"是已知的静默陷阱**已引原文记录 ✓；★ **本次结果仍然干净**（42 806/42 806 核对过 ✓）✓；
 ★ **母集的正确调用方式**已写出 ✓。
+
+---
+
+## 16. ★★★★ 2026-11-02 01:20 **母集直调脚本 `build_mother_set.sh`（供后续腿复用）**
+
+**(a) ★ 位置**
+
+★ **`lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh`** ✓（**已入库 ✓**）
+
+**(b) ★★ 用法**
+
+```bash
+TRAIN=~/work/ai_phy_train ./build_mother_set.sh <leg> [<leg> ...]
+# 可选：GAP_SLOTS（默认 200）、MODS（默认四种调制）、OUT（默认 $TRAIN/datasets_full_s2）、PY
+```
+
+**(c) ★★★ 它做的四步**
+
+| 步 | 内容 | 为什么 |
+|---|---|---|
+| ★ **1** | ★ **`harq_backfill.py --max-gap-slots 200`** | 给每个单元打 `self` / `harq` 标 ✓（写出 `index_self.csv`、`index_harq_only.csv` ✓）|
+| ★ **2** | ★ **一次 pass 统计 `modulation=`** | ★ **调制从数据数出来，不从腿名推** ✓（§13 ✓）|
+| ★ **3** | ★ **每个 (调制, self\|harq) 直接调 `build_depth3_dataset.py`** | ★ **不走 `select_by_bin`** ✓（§15 ✓）|
+| ★ **4** | ★ **`check_depth3_dataset.py --dir` 审计** | 应输出 `findings: none` ✓ |
+
+**(d) ★★ 脚本里写进注释的四个坑（都来自实际踩过）**
+
+| 坑 | 脚本怎么处理 |
+|---|---|
+| ★ **`select_by_bin` ＋"无限配额"会静默沿用抽样账本** | ★ **根本不调它** ✓ |
+| ★★ **`build_depth3_dataset.py` 要求仓库根**（同时有 `build/` 和 `lib/`）| ★ **自动 `mkdir -p $TRAIN/build`** ✓ |
+| ★★ **`harq_backfill.py` 的间隔坐标是错的**（`slot` 是 20 480 回绕的系统槽号）| ★ **`GAP_SLOTS` 默认 200（实际上不设限）** ✓ |
+| ★★★ **a leg 的捕获可达六位数 ⇒ shell glob 会溢出** | ★ **改用 `grep -rh --include=…` 一次 pass** ✓（实测 44 609 个文件 **21 秒** ✓）|
+
+**(e) ★ 实测验证**
+
+**⇒ 在 s2 腿上试跑 census 一步**：
+```
+44609 modulation=QPSK
+real 0m21s
+```
+**⇒ 与全量统计（§12 的 44 609 ✓）完全一致** ✓ ⇒ **census 步骤正确** ✓
+
+**(f) ★ 输出命名（与 w2 一致 ✓）**
+
+★ **`<leg>_<MOD>_<self|harq>.npz`** ✓ —— 例如 **`s2_mcs00_ping_1031a_QPSK_self.npz`** ✓
+
+★ 状态 ✓：★ 母集直调脚本已入库并提供给后续腿使用 ✓；★ 四个已知坑都写进了注释 ✓；★ census 步骤已实测（21 秒 / 44 609 ✓）✓。
