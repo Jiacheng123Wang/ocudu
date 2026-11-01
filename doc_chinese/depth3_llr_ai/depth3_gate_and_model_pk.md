@@ -106,3 +106,66 @@
 | 日期 | 变更 |
 |---|---|
 | **2026-11-01** | 建立本文档；按用户定下的列口径（编号 / s2_train1 / s2_train2 / attach / 时延）；**三维分箱列暂缓**；attach 数据集确认在 211 并有本机备份（9 217 条）；E4 的 attach 与时延填入历史值；s2 两列待 s2 建库后填 |
+
+---
+
+## 6. ★★★★ 2026-11-01 12:20 **M2 MacBook（203）上的门控环境搭建与首个问题**
+
+**(a) ★ 目的**
+
+**⇒ 门控测量必须走** `ul_chain_replay` 的 **GPU 路径 ＋ AI 后端** ✓（建库时用的是 CPU 路径 ✗）
+**⇒ 而 GPU 路径只在 **Apple Silicon 的 macOS** 上可用 ✓ ⇒ 目标是 **M2 MacBook Pro（192.168.31.203）** ✓
+
+**(b) ★ 已完成**
+
+| 步 | 结果 |
+|---|---|
+| ★ **代码同步** | ★ **GitHub pull 成功**（`ecffd04d9f` → **`a20e3df4b4`**）✓，本地 0 改动 ✓ |
+| ★ **构建** | ★ **两个目标都建成**：`ul_chain_replay_cpu`（3.1 MB，CPU 版）＋ ★ **`ul_chain_replay`（3.2 MB，Metal 版）** ✓ |
+| ★ **GPU 路径** | ★ **可用**（`--metal` ＋ `--phy_pipeline gpu` 都能跑 ✓）|
+| ★ **AI 后端** | ★ **能绑定模型**（`OCUDU_REPLAY_MODEL=<*.mlmodelc>` ✓，日志确认 "depth-3 receiver model: …" ✓）|
+| 测试语料 | 从 T7 的 `s2_mcs00_ping_1031a` 取 **40 个单元**送到 203 ✓ |
+
+**(c) ★ 机器**：M2 / macOS 26.6.2 / **8 GB 内存** ⚠ / 221 Gi 可用 ✓
+
+**(d) ★★ 发现的问题：AI 臂能绑模型，但解码全 KO**
+
+**⇒ 5 个单元对比**：
+
+| 单元 | CPU（经典）| ★ GPU ＋ AI |
+|---|---|---|
+| `cap_10139_18477_17971` | crc=**OK** | ★ crc=**KO** |
+| `cap_10215_19997_17971` | OK | **KO** |
+| `cap_1025_27_17921` | OK | **KO** |
+| `cap_1035_227_17921` | OK | **KO** |
+| `cap_10381_2837_17971` | OK | **KO** |
+
+**⇒ 换过三种模型都一样**：`d3_modcond_r7` ✓、`d3_e4.mlmodelc` ✓、`buckets/base_w612.mlmodelc` ✓ ⇒ **全部 KO** ✗
+
+**(e) ★★ 已经定位的两条线索**
+
+**① `sinr=inf` 是**预期的**** ✓ —— AI 臂的日志说：
+> "the bound bundle carries neither reporting head; RSRP, EPRE and the SINR will be published from the shared
+> measurement layer instead of from a head"
+**⇒ 所以 SINR 印 inf 不代表模型坏** ✓（它不发布 SINR ✓）
+
+**② ★ 所有 bundle 都缺 `depth3_scales.txt`** ✗ —— AI 臂反复警告：
+> "there is no sidecar at all, so the noise map falls back to the receiver's defaults (**A_n=4 B_n=-1**).
+>  Regenerate it with `calibrate_depth3.py --write-scales`"
+**⇒ LLR 的噪声映射退回了默认值** ✓ ⇒ **这很可能就是解码失败的原因** ✓
+
+**(f) ★ 下一步（未做）**
+
+```bash
+# 1) 生成标定 sidecar（需要 val.npz）
+calibrate_depth3.py --model <run>/depth3_best.keras --data <val.npz> --write-scales <bundle目录>
+# 2) 重跑同一个单元
+OCUDU_REPLAY_MODEL=<bundle>/<name>.mlmodelc \
+  ul_chain_replay <unit> --out /tmp/x --metal --phy_pipeline gpu --pusch_receiver_backend ai
+```
+
+**⇒ 若生成 sidecar 后仍 KO**，则问题在**输入布局 / 模型与 C++ 侧的契约** ✓ ⇒ 下一步用 gNB 的门控脚本
+（`probe/check_ai_arm_binding.sh`，走 `--expert_phy.pusch_receiver_model`）做对照 ✓
+
+★ 状态 ✓：★ 203 的 GPU 门控环境已搭好并跑通 ✓；★ AI 臂能绑模型 ✓；★ 但解码全 KO 已定量记录 ✓；★ 两条线索与下一步已列 ✓。
+
