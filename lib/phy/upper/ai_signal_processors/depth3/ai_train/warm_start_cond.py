@@ -47,9 +47,14 @@ def main(argv):
     ap.add_argument("sources", nargs="+", help="the per-modulation .keras models")
     args = ap.parse_args(argv)
 
+    # THE CONDITIONED GRAPH TAKES SIXTEEN CHANNELS, NOT TWELVE. The trainer's --in-channels defaults to 0, meaning
+    # "take it from the batches", and a conditioned batch carries the twelve plane channels plus the four modulation
+    # one-hots. Building here with twelve produced a graph whose entry convolution was (1,1,12,32) while the trainer's
+    # was (1,1,16,32), and the warm start was rejected with a shape mismatch on exactly that layer.
+    in_ch = D3.NOF_CHANNELS_SPATIAL + (len(D3.COND_QM_ORDER) if True else 0)
     dst = T.build(width=D3.NOF_SUBCARRIERS, blocks=args.blocks, qm=D3.BITS_PER_SYMBOL["256QAM"],
                   aux_heads=True, c_hid=args.c_hid, dtype=args.dtype, layout="spatial",
-                  in_channels=D3.NOF_CHANNELS_SPATIAL, cond=True, reporting_heads=False)
+                  in_channels=in_ch, cond=True, reporting_heads=False)
     print(f"conditioned graph: {len(dst.weights)} weight tensor(s), "
           f"{int(sum(np.prod(w.shape) for w in dst.weights))} parameter(s)")
 
@@ -61,8 +66,22 @@ def main(argv):
         copied = 0
         for w in dst.weights:
             v = src_w.get(w.path)
-            if v is not None and tuple(v.shape) == tuple(w.shape):
+            if v is None:
+                continue
+            if tuple(v.shape) == tuple(w.shape):
                 acc[w.path].append(v)
+                copied += 1
+                continue
+            # THE ENTRY CONVOLUTION IS WIDER ONLY IN THE CONDITIONED GRAPH. `cond=True` appends the four modulation
+            # one-hot channels to the input plane, so the conditioned entry kernel is (1,1,16,32) against the
+            # per-modulation (1,1,12,32). The first twelve are the same twelve channels and are worth copying; the four
+            # one-hot channels have no counterpart and start at zero, which is exactly what a fresh initialisation would
+            # have given them without perturbing what was learned.
+            if w.path.endswith("entry_1x1/kernel") and v.ndim == 4 and v.shape[:2] == w.shape[:2] \
+                    and v.shape[3] == w.shape[3] and v.shape[2] < w.shape[2]:
+                padded = np.zeros(tuple(w.shape), dtype=v.dtype)
+                padded[:, :, :v.shape[2], :] = v
+                acc[w.path].append(padded)
                 copied += 1
         if copied_paths is None:
             copied_paths = copied
