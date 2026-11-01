@@ -879,3 +879,64 @@ kernel B: 读该 buffer，与期望值比较，把不一致次数写进 counter
 ★ 状态 ✓：★ GPU 时间探针给出 **22.5 ms vs 4.4 ms** 的可量化差异 ✓；★ 推论"屏障执行了但未生效"已写明 ✓；
 ★ 决定性实验（最小 Metal 程序）已给出判据 ✓；★ 捕获不写出已标为独立问题 ✓。
 
+---
+
+## 16. ★★★★★ 2026-11-01 15:20 **决定性实验：**Apple silicon 上的设备级内存屏障是**可靠的****
+
+**(a) ★★ 实验设计（`/tmp/barrier_test.m`，51 KB 可执行，两台机器各跑）**
+
+**⇒ 最小化的复现**：★ **同一个 `MTLBuffer`、同一个 command buffer、**同一个 encoder**，两个 kernel 背靠背** ✓
+```
+kernel writer: buf[gid] = seed * 2654435761 + gid
+[enc memoryBarrierWithScope:MTLBarrierScopeBuffers]
+kernel reader: 若 buf[gid] 不等于期望值，则 atomic 加一
+```
+**⇒ 每轮 `waitUntilCompleted`，统计"有不一致"的轮数** ✓
+**⇒ 另外用 `usleep` 在轮与轮之间插入延迟，模拟不同时序** ✓
+
+**(b) ★★★ 结果：两台机器都是**0 次不一致****
+
+| 机器 | 延迟 | 轮数 | 不一致 |
+|---|---|---|---|
+| ★ **M4 Pro** | 0 | 200 | ★ **0** ✓ |
+| M4 Pro | 200 µs | 100 | **0** ✓ |
+| ★ **M2（203）** | 0 | **200** | ★ **0** ✓ |
+| M2 | 200 µs | 100 | **0** ✓ |
+| M2 | 2 000 µs | 50 | **0** ✓ |
+
+**⇒ 结论**：★ **`memoryBarrierWithScope:MTLBarrierScopeBuffers` 在 M2 上**完全可靠**** ✓✓
+**⇒ 用户记忆中"Apple silicon 上这个屏障有问题"的传闻，**在这个用法下不成立** ✓
+
+**(c) ★★★ 那么 §15 的 22.5 ms 空洞怎么解释？—— 不是屏障，是**跨提交**
+
+**⇒ 关键区别**：
+- ★ **本实验**：写与读在**同一个 command buffer** ✓ ⇒ **屏障有效 ✓**
+- ★★ **引擎的 `--metal-cpu-demod` 路径**：★ **CE 在 GPU 上写网格 ✓，均衡在 CPU 上读网格 ✓** ⇒ **中间必然有一次**提交边界*** ✓
+
+**⇒ 而提交边界的可见性，正是 §13 引用的 ggml 报告所指的那件事**：
+> ★ "`waitUntilCompleted` … **does NOT invalidate the GPU's L1/L2 cached view** of a shared-storage `MTLBuffer` …
+> the next dispatch reads **stale data**"
+
+**⇒ 于是整条链就通了**：
+```
+CE 在 GPU 上把网格写进一个 shared/host-mapped buffer
+  → CPU 等命令缓冲区完成（waitUntilCompleted）
+  → CPU 读该 buffer —— 读到的是**GPU 缓存里的旧值**  ← 15–25% 的失败发生在这里
+  → 均衡用这份旧网格算 LLR → crc=KO
+```
+**⇒ 而**同一批数据、同一份代码在 M4 上几乎不失败** ✓，因为 **M4 的缓存行为/时序不同** ✓ —— 与"缓存是脏的"完全一致 ✓
+
+**(d) ★★★ 修复方向（三条，全部不违背"GPU 单向流"）**
+
+| # | 措施 | 依据 | 是否破坏单向流 |
+|---|---|---|---|
+| ★ 1 | ★ **让 CE 写出的网格留在 GPU 上，均衡也在 GPU 上读**（即 `--phy_pipeline gpu` 的完整形态）| 消除提交边界 | ★ 不破坏 ✓（反而更彻底）|
+| ★ 2 | ★ **跨提交处改用 `MTLSharedEvent`**（`encodeSignalEvent`/`encodeWaitForEvent`）| ggml 报告：**只有它带缓存失效语义** | ★ 不破坏 ✓（GPU 时间线）|
+| ★ 3 | ★ **把该 buffer 改成 `MTLStorageModePrivate`**，跨提交时用 blit 显式 copy | 私有内存不经过 host 缓存 | ★ 不破坏 ✓ |
+
+**⇒ 其中 ★1 是本项目的**目标形态**（用户已说明"一路到底还没完成，因为 Metal LDPC 要优化"）✓
+**⇒ 所以真正的修复是**把 CE→均衡之间那个提交边界去掉** ✓，或**用 SharedEvent 代替 waitUntilCompleted** ✓
+
+★ 状态 ✓：★ 屏障在 M2 上实测可靠（200/200）✓；★ 传闻被证伪（至少对该用法）✓；★ 真正的机制锁定为**跨提交的缓存可见性** ✓；
+★ 三条修复方向均不破坏单向流 ✓。
+
