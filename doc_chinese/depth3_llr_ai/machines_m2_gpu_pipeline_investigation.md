@@ -445,3 +445,77 @@ OCUDU_REPLAY_MODEL=…/depth3_modcond_r7/d3_modcond_r7.mlmodelc \
 
 ★ 状态 ✓：★ **根因锁定为 Metal CE** ✓；★ 与"自检通过"的矛盾已解释 ✓；★ 全部观察已能自洽 ✓；★ 修复路径已列 ✓。
 
+---
+
+## 9. ★★★★★ 2026-11-01 14:15 **答案：这是一个**隐藏的竞态**（代码里早有"地雷"的记载），不是 M2 独有的缺陷**
+
+**(a) ★★★ 关键发现：失败是**间歇性**的**
+
+**⇒ 同一命令、同一单元、同一台 203，**连续跑 20 次**：
+
+| 机器 | OK | KO | ★ 失败率 |
+|---|---|---|---|
+| ★ **203（M2）** | 19 | 1 | ★ **5%** ✗ |
+| ★ **本机（M4 Pro）** | **20** | **0** | ★ **0%** ✓ |
+
+**⇒ 所以先前"203 必挂、M4 必好"的印象**不准确** ✗ —— ★ **203 是**偶发**（5%），不是确定性失败** ✓
+**⇒ 而 5% 的偶发，正是**竞态**的典型特征** ✓✓
+
+**(b) ★★★ 代码里已经有记载：这叫 "the landmine"（地雷）**
+
+**⇒ `lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_metal_mmse_engine.mm:915` 的注释原文**：
+
+> "The two correlation kernels use dispatchThreads() (non-uniform threadgroups), while K1 and the weights use
+> dispatchThreadgroups(). **The landmine's arms leave this as the one structural difference that costs nothing:
+> a pure time increase inside the prefix takes the failure rate from 27% to 10% and never to zero, so the
+> prefix's writes are not reliably visible to K1**, and this is what changes the dispatch TYPE without changing
+> the submission, the host's blocking, or the values."
+
+**⇒ 逐句翻译过来就是**：
+- ★ **相关性 kernel 用 `dispatchThreads()`（非均匀线程组）** ✓，而 **K1（求逆）与权重 kernel 用 `dispatchThreadgroups()`** ✓
+- ★ **前缀 kernel 的写入，对 K1 **不可靠地可见** ✗** ⇒ ★ **缺少正确的同步/栅栏** ✓
+- ★ **只靠"在前缀里多花时间"，失败率从 **27% 降到 10%，但永远到不了 0** ✓
+- **⇒ 也就是说：这是一条**已知的、未被修掉的竞态** ✓✓
+
+**(c) ★★ 为什么 M4 上看不出来、M2 上就爆**
+
+**⇒ 不是"代码在 M2 上被编译错了"，而是**两台机器的时序不同** ✓**：
+
+| 因素 | M4 Pro | M2 | 影响 |
+|---|---|---|---|
+| GPU 核数 | **20** | **10** | 并行度不同 ⇒ **前缀 kernel 与 K1 的相对完成时刻不同** |
+| 单核频率/调度 | 更高 | 更低 | 窗口更窄/更宽 |
+| 内存带宽 | 更宽 | 更窄 | 写入可见延迟不同 |
+
+**⇒ 竞态窗口**在两台机器上的"命中概率"不同** ✓ ⇒ ★ **M4 上 20 次都没踩中（0%），M2 上 20 次踩中 1 次（5%）** ✓
+**⇒ 所以严格说**：★ **M4 不是"对"，而是"还没被踩到"** ✗ —— **同样的 bug 在 M4 上也存在** ✓
+
+**(d) ★★★ 一个旁证：改一个不相关的旋钮就能改变结果**
+
+| 旋钮 | 203 上结果 |
+|---|---|
+| 默认 | ★ **OK（本次运行；20 次里 1 次 KO）** |
+| `OCUDU_CE_CORR_UNIFORM=1` | OK |
+| `OCUDU_CE_WEIGHTS_TILE=1` | OK |
+| ★ **`OCUDU_CE_INV_BARRIERS=4`** | ★ **KO** ✗ |
+
+**⇒ 加栅栏反而 KO** ✓ ⇒ **说明"时序一变、结果就变"** ✓ ⇒ **进一步确认竞态** ✓（栅栏只影响时序，不改变算法 ✓）
+
+**(e) ★★★ 回答用户的两个问题**
+
+| 问题 | 答案 |
+|---|---|
+| ★ **同样的代码，为什么 M4 对、M2 爆？** | ★ **因为这是一条**时序相关**的竞态**：两台机器的 GPU 并行度/频率/带宽不同 ⇒ **踩中概率不同** ⇒ M4 约 0%、M2 约 5% |
+| ★ **是隐藏的 bug 吗？** | ★ **是** ✓ —— 而且**代码注释里已经把它命名为 "the landmine" 并记录了失败率（27%→10%）** ✓ ⇒ **这是一个已知未修的缺陷，不是 M2 特有的问题** |
+
+**(f) ★ 修复方向（供排期）**
+
+| # | 方向 | 说明 |
+|---|---|---|
+| ★ 1 | **给"前缀 → K1"之间加**真正的同步**（同一 command buffer 内的内存屏障，或拆成两次提交）| 语义正确 ✓ 代价是可能多一次提交 |
+| ★ 2 | **把相关性 kernel 改成 `dispatchThreadgroups()`（`OCUDU_CE_CORR_UNIFORM=1`）** | 注释说这是"唯一零成本的结构差异" ✓ ⇒ **可先试它** ✓ |
+| ★ 3 | **把前缀与 K1 合并进**同一个 kernel**（用线程组内存传递）| 彻底消除跨 kernel 可见性问题 ✓ |
+
+★ 状态 ✓：★ 失败被证明是**间歇性**（5%）✓；★ 代码注释已把该竞态命名为 "the landmine" ✓；★ M4 的"0%"只是没踩中 ✓；
+★ 三个修复方向已列 ✓。
+
