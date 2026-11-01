@@ -326,6 +326,12 @@ bool port_channel_estimator_average_impl::do_finish(const dmrs_symbol_list& pilo
     const bool abnormal = (band <= 0.0) || (dev_nv == nullptr) ||
                           ((*dev_nv > 0.0F) && (static_cast<double>(noise_var) / *dev_nv > band));
     if (abnormal) {
+      // THE EXTRA FIELDS EXIST BECAUSE THE FIRST FORM COULD NOT SAY WHERE THE NaN CAME FROM (2026-11-01). It
+      // reported a NaN average and a NaN published value, and stopped there: the average is taken over the
+      // per-layer rsrp, so the question is which layer holds it and whether the layer count is what the caller
+      // thinks. `max_layer` is reported alongside the values so an unset layer cannot be mistaken for a zero
+      // one, and `epre` is printed because it is the one reporting value that stayed CORRECT on the failing
+      // hops -- which is only useful if it appears next to the broken ones.
       std::fprintf(stderr,
                    "[nv_route] device=%d dev_nv=%.6e host_acc=%.6e published=%.6e rsrp_avg=%.6e "
                    "min_nv=%.3e nof_dmrs_pilots=%u nof_cdm=%u scaling=%.3f\n",
@@ -338,6 +344,19 @@ bool port_channel_estimator_average_impl::do_finish(const dmrs_symbol_list& pilo
                    nof_dmrs_pilots,
                    nof_cdm,
                    static_cast<double>(cfg_local.scaling));
+      std::fprintf(stderr, "[nv_route+] layers=%u epre=%.6e rsrp=[", nof_tx_layers, static_cast<double>(epre));
+      for (unsigned i_layer = 0; i_layer != rsrp.size(); ++i_layer) {
+        std::fprintf(stderr, "%s%.6e", (i_layer == 0) ? "" : " ", static_cast<double>(rsrp[i_layer]));
+      }
+      std::fprintf(stderr,
+                   "] datarp=%.6e snr_lin=%.6e dev_cover=%d finite(published)=%d finite(avg)=%d "
+                   "finite(epre)=%d\n",
+                   static_cast<double>(datarp),
+                   static_cast<double>(snr_linear),
+                   device_results_cover_last_estimate() ? 1 : 0,
+                   std::isfinite(noise_var) ? 1 : 0,
+                   std::isfinite(rsrp_avg) ? 1 : 0,
+                   std::isfinite(epre) ? 1 : 0);
     }
   }
 
