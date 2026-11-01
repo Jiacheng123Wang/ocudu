@@ -1072,3 +1072,76 @@ xcrun coremlcompiler compile "$OUT/$NAME.mlpackage" "$OUT"
 
 ★ 状态 ✓：★ **根因查明**（`calibrate_depth3.py` 不支持条件化 ✓）；★ **加了 `--cond`** ✓；
 ★ **三个在役模型的 sidecar 全部生成且一致**（`s_llr=20`，在平台上 ✓）；★ **噪声对的"巧合 vs 约定"已说明** ✓。
+
+**⇒ 另：★ E4 的 sidecar 在 `~/ai_depth3/runs/e4_1023/` 也留了一份** ✓（与 `depth3_best.keras`、`SOURCE.txt` 并列 ✓）
+
+---
+
+## 22. ★★★★★ 2026-11-02 07:55 **三个问题：为什么三份一样还要三份、实链怎么用、回放怎么用**
+
+**(a) ★★ 问：三个 `depth3_scales.txt` 内容完全一样，为什么还要三份？**
+
+**⇒ 因为它是**模型的属性**，不是**项目的配置**** ✓ —— ★ **引擎从**模型路径**推出它的位置**：
+
+```cpp
+// pusch_depth3_receiver_impl.cpp:113
+const std::string path = directory + "/depth3_scales.txt";   // directory = model_path 的目录
+```
+
+**⇒ 三条理由**：
+
+| # | 理由 |
+|---|---|
+| ★ **1** | ★ **`s_llr` 是**逐模型拟合**的** ✓ —— **三者今天一致，只因为它们**共享同一套训练配方**** ✓<br>**换个训练配置（损失、归一化）就会不同** ✓ |
+| ★ **2** | ★ **让 bundle **自足**** ✓ —— **模型目录拷到哪，sidecar 跟到哪** ✓<br>**若做成全局一份，就得有"安装路径"概念** ✗，**bundle 就不再自足** ✗ |
+| ★ **3** | ★ **它同时是**出处记录**** ✓ —— 第一行 `# R4.5 fit from depth3_best.keras on w2_test1.npz, 60 samples` ✓<br>**哪台机器、哪份数据、多少样本** ✓ ⇒ **天然逐模型** ✓ |
+
+**⇒ ⇒ 所以这份"重复"是设计** ✓ —— ★ **类似 jar 里的 `META-INF`** ✓
+
+**(b) ★★★ 问：实链里怎么用？**
+
+**⇒ 在**接收机初始化**时读一次** ✓（不是每个接收都读 ✓）：
+
+```cpp
+depth3_scales read_scales(const std::string& model_path, float range_limit);   // :105
+// 缺 sidecar 时：scales.a_noise=4.0F, b_noise=-1.0F, s_llr=range_limit，并往 stderr 喊一句
+```
+
+**⇒ 三个键各自用在哪**：
+
+| 键 | ★ 用在哪 | ★ 代码 |
+|---|---|---|
+| ★ **`s_llr`** | ★ **LLR 的去归一化** | ★ `const float scaled = logit * scales.s_llr;`（:1887）⇒ 再 `quantize(scaled, range_limit)` |
+| ★ **`a_noise`／`b_noise`** | ★ **噪声映射（头 2 与头 4 ⇒ 方差）** | ★ `noise_variance = exp2((a_noise * noise_shape + b_noise) * LOG2_OF_10)`（:1874）<br>★ **即 `10^(a·深 + b)`** ✓ |
+
+**⇒ ★ 一个值得注意的细节**（代码注释里写着）：★ **`a_noise`/`b_noise` 只走**噪声/SINR 路径**，**LLR 路径完全看不到它** ✓
+⇒ **所以补 sidecar **不会改变软比特** ✓（bit-identical ✓）⇒ **只改发布的 SINR** ✓
+
+**(c) ★★★ 问：回放链路里怎么用？**
+
+**⇒ 答**：★ **没有任何单独处理** ✓ —— **回放用的是**同一个接收机实现**** ✓：
+
+```cpp
+// ul_chain_replay.cpp:1318-1322
+if (const char* model_env = std::getenv("OCUDU_REPLAY_MODEL")) {
+  proc_cfg.pusch_receiver_model_path = model_env;      // 指向 .mlmodelc
+}
+std::shared_ptr<pusch_processor_factory> proc_factory = create_pusch_processor_factory_sw(proc_cfg);
+```
+
+**⇒ ⇒ 所以**：★ **实链 ＝ `ocudu` 应用建的工厂；回放 ＝ `ul_chain_replay` 建的**同一个工厂** ✓
+⇒ 两者最终都走 `pusch_depth3_receiver_impl` ✓ ⇒ **同一个 `read_scales` ✓ ⇒ 同一个 sidecar 查找 ✓**
+
+**⇒ ⇒ 因此**：★ **给回放准备的模型目录里也必须有 `depth3_scales.txt`** ✓（否则回放也会退回默认 ✓ 并打出同一句警告 ✓）
+
+**(d) ★★★★ 一个必须记住的坑**
+
+**⇒ `read_scales` 找的是**模型路径所在目录** ✓ —— **即 `.mlmodelc` 旁边的那个 `depth3_scales.txt`** ✓
+**⇒ ⇒ 所以**：
+- ★ **E4**：`ai_assets/depth3_e4_real_1023/` 里**既有 `d3_e4.mlmodelc` 又有 sidecar** ✓ **对** ✓
+- ★★ **E17 / W2-cond**：**目前只有 `.keras`，还没有 `.mlmodelc`** ✗ ⇒ **它们的 sidecar 现在放在 `runs/<模型>/` 里（紧挨 keras ✓）**
+  **⇒ ⚠ 将来导出 `.mlmodelc` 时，**必须把 sidecar 复制进 bundle 目录**** ✓ —— **放在 keras 旁边**对引擎没用**** ✗
+
+★ 状态 ✓：★ **E4 sidecar 已在本机 `runs/e4_1023/` 留档** ✓；★ **"内容相同仍要三份"的理由（逐模型拟合、bundle 自足、出处记录）已说明** ✓；
+★ **实链用法（初始化时读、`s_llr` 缩放、噪声映射）已给出代码位置** ✓；★ **回放与实链共用同一接收机、无单独处理已确认** ✓；
+★ **"sidecar 必须紧挨 `.mlmodelc`"的坑已标出** ✓。
