@@ -1647,8 +1647,20 @@ w2_harq_16QAM_ping_1029a_QPSK_self.npz
 | ★ **输出目录** | ★ **`~/work/ai_phy_train/datasets_full_s2/`** | ✓ **用户已建** |
 | 工具 | `build_depth3_dataset.py`、`classify_harq_chains.py`、`harq_backfill.py` | 在仓库里，需拷到 66 |
 
-**⇒ 这条腿是 MCS00 ⇒ **只有 QPSK** ✓ ⇒ 产出应为两个文件** ✓
-⇒ ★ **`s2_mcs00_ping_1031a_QPSK_self.npz`** 与 ★ **`s2_mcs00_ping_1031a_QPSK_harq.npz`** ✓
+**⚠ 产出文件的个数**不能从腿的名义 MCS 推出来** ✗（用户 2026-11-01 指出）**
+
+**⇒ 理由**：★ **一条腿的 PUSCH 授权虽是固定调制，但**同一个 slot 里也可能用更低的调制**传输别的业务** ✓
+（w2 上已验证：名义 256QAM 的腿里也抓到过 64QAM / 16QAM / QPSK ✓）
+**⇒ 所以**：★ **npz 的个数与调制必须**从数据里数出来**，不能假设** ✓
+
+**⇒ 正确的做法**：★ **统计该腿全部捕获的 `modulation=` 字段** ✓
+（每个 `cap_*.txt` 头部都有：`modulation=QPSK` ＋ `rv=` ＋ `harq_id=` ＋ `new_data=` ✓）
+**⇒ 然后**每个 (调制, self|harq) 组合**产出一个 npz** ✓
+
+**⇒ 这条腿（MCS00）的实测**：★ **抽样 300 个捕获，`modulation=` **全部是 QPSK**（300/300）** ✓
+**⇒ 这与"MCS00 是 QPSK、下面没有更低的调制"相符** ✓ ⇒ **本腿预计仍是两个文件** ✓：
+★ **`s2_mcs00_ping_1031a_QPSK_self.npz`** 与 ★ **`s2_mcs00_ping_1031a_QPSK_harq.npz`**
+**⇒ 但这是**数出来的**结论，不是假设** ✓ —— 换一条腿（如 MCS20）就必须重新数 ✓
 
 ★ 状态 ✓：★ 已澄清"建库"＝训练数据集 ✓；★ w2 的命名与 self/harv 拆分依据已查明 ✓；★ 66 上的输入与输出目录已确认 ✓；
 ★ 已把建库任务交给子代理（先读文档再动手，并要求用 §11.17 的 89.4%/6.7% 作合理性边界）✓。
