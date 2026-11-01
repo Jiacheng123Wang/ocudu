@@ -18,6 +18,7 @@ import argparse
 import collections
 import csv
 import json
+import sys
 import os
 import random
 
@@ -90,6 +91,12 @@ def main():
         print(f"REFUSING: --legs {args.legs!r} names no leg (neither a file nor a list).")
         return 2
 
+    # A LEG THAT PRODUCED NO SELECTION IS NOT A LEG THAT SUCCEEDED. The failure this guards is the one that made the
+    # tool print "state bins: 0" and exit 0 for twenty-two legs in a row: the dump directory resolves to something
+    # that is a directory but holds no index -- on the machine where the capture tree and the dump tree have the same
+    # name, tb_root/leg IS a directory and the real dump is tb_root/tb_leg. Nothing selects, nothing complains, and
+    # the caller reads a zero-state log as a finished build. Count them and fail at the end.
+    empty = []
     for leg in legs:
         tb = os.path.join(args.tb_root, leg)
         # THE DUMP DIRECTORY IS tb_<leg> IN EVERY QUEUE THAT HAS RUN, and this tool used to join the leg name straight onto the root, so it
@@ -102,7 +109,16 @@ def main():
                 tb = prefixed
             else:
                 print(f"{leg}: no dump (neither {tb} nor {prefixed} exists), skipped")
+                empty.append(leg)
                 continue
+        # The directory exists; does it hold a dump? harq_backfill writes both of these, so a directory with
+        # neither is not a dump directory however it is named.
+        if not (os.path.exists(os.path.join(tb, "index_self.csv")) or
+                os.path.exists(os.path.join(tb, "index_harq_only.csv"))):
+            print(f"{leg}: {tb} is a directory but holds no index_self.csv / index_harq_only.csv -- "
+                  f"this is not a dump directory, refusing to select nothing from it")
+            empty.append(leg)
+            continue
         corpus = os.path.join(args.corpus, leg)
         # Candidates per population, then per bin, shuffled so the choice is not the first N in time order.
         picked = {"self": collections.defaultdict(list), "harq": collections.defaultdict(list)}
@@ -135,6 +151,7 @@ def main():
                 state[f"{pop}:{key}"] = have + len(take)
                 rows.extend(take)
             if not rows:
+                empty.append(leg)
                 continue
             out = os.path.join(tb, f"index_sel_{pop}.csv")
             with open(out, "w", newline="") as handle:
@@ -144,6 +161,13 @@ def main():
             print(f"{leg} {pop}: selected {len(rows)} of {sum(len(v) for v in picked[pop].values())}")
         json.dump(state, open(args.state, "w"), indent=1)
     print("state bins:", len(state))
+    if empty:
+        # Distinct legs, because a leg can be counted once per population.
+        bad = sorted(set(empty))
+        print(f"REFUSING: {len(bad)} leg(s) selected nothing: {', '.join(bad)}", file=sys.stderr)
+        print("An empty selection is almost always a wrong --tb-root or a dump that has not been made; it is not "
+              "a successful build of an empty dataset.", file=sys.stderr)
+        return 3
     return 0
 
 

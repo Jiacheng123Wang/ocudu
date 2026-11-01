@@ -25,8 +25,11 @@ import numpy as np
 
 MODULATIONS = ["QPSK", "16QAM", "64QAM", "256QAM"]
 # What a modulation's nominal SNR can plausibly be. Outside these the file is either mislabelled or was built from the wrong rows; the
-# bounds are wide on purpose -- 256QAM really was collected down to 5.6 dB, which is the corner worth having.
-SNR_SANE = {"QPSK": (-12.0, 32.0), "16QAM": (-8.0, 32.0), "64QAM": (-2.0, 32.0), "256QAM": (2.0, 34.0)}
+# bounds are wide on purpose -- 256QAM really was collected down to 5.6 dB, which is the corner worth having, and
+# the high corner really does reach 39 dB: the corpus records an observed 36 to 39 dB maximum for the >=30 dB
+# recipe. The old ceiling of 32 reported those as findings, and a check that cries wolf on the strong corner is
+# one people learn to skip.
+SNR_SANE = {"QPSK": (-12.0, 40.0), "16QAM": (-8.0, 40.0), "64QAM": (-2.0, 40.0), "256QAM": (2.0, 40.0)}
 
 
 def bit_fraction(bits, nof_bits):
