@@ -933,6 +933,14 @@ static bool s12_device_ta_chain_matches_host()
   {
     const bool chain_ok = engine.ta_chain_available(s12_dft_size);
     if (!init_done || !chain_ok) {
+      // NO FUSED CHAIN OF THIS SIZE ON THIS DEVICE IS A CAPABILITY LIMIT, not a wrong answer (same rule as the
+      // other S12 cases). The size is fixed here rather than swept, so a machine that cannot dispatch it has
+      // nothing to compare and must say so instead of reporting a mismatch it never measured.
+      if (!metal::dft_metal_engine::is_size_runnable(s12_dft_size)) {
+        std::printf("S12 chain [%u]: SKIPPED - this device's DFT pipeline cannot dispatch that size\n", s12_dft_size);
+        s12_capability_skip = true;
+        return true;
+      }
       std::fprintf(stderr, "S12 chain: init=%d fused chain=%d (size=%u)\n",
                    init_done ? 1 : 0,
                    chain_ok ? 1 : 0,
@@ -942,6 +950,11 @@ static bool s12_device_ta_chain_matches_host()
   }
   metal::dft_metal_engine dft;
   if (!dft.init(s12_dft_size, /*inverse=*/true)) {
+    if (!metal::dft_metal_engine::is_size_runnable(s12_dft_size)) {
+      std::printf("S12 chain [%u]: SKIPPED - this device's DFT pipeline cannot dispatch that size\n", s12_dft_size);
+      s12_capability_skip = true;
+      return true;
+    }
     std::fprintf(stderr, "S12 chain: device IDFT init failed\n");
     return false;
   }
