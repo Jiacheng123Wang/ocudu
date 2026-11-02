@@ -123,7 +123,13 @@ def codeblock_layout(tb_bits, n_prb, n_syms, mod, dmrs_mask):
         if kb_info * z >= max_cb:
             zc = z
             break
-    kb = kb_info * zc
+    # THE BLOCK SIZE IS NOT THE LADDER VALUE. 38.212's Kb ladder (6, 8, 9, 10 for BG2) exists to
+    # pick Zc; the encoder's information block is then K = 10 * Zc for BG2 and 22 * Zc for BG1, whatever
+    # the ladder returned. Using the ladder value as the block size shortens the block, which moves the
+    # filler length and the parity start, so the whole codeword differs -- and every symbol regenerated
+    # from it is wrong. It bites when B = A + 16 <= 640, because that is where the ladder returns 6 or 9;
+    # above that it returns 10 and the two agree, which is why wide allocations looked healthy.
+    kb = (22 if bg == 1 else 10) * zc
     e_symbols = e_total // mod
     nof_short = nof_cb - (e_symbols % nof_cb)
     lengths = [(e_symbols // nof_cb) * mod if index < nof_short

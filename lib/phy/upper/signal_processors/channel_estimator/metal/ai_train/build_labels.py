@@ -62,7 +62,9 @@ def build_label(tb_bits, rx_grid, n_prb, n_syms, n_ports, mod, dmrs_mask, n_id,
         if kb_info * z >= max_cb:
             Zc = z
             break
-    K_b = kb_info * Zc
+    # See synth.py: the ladder picks Zc; the block is K = 10 * Zc (BG2) or 22 * Zc (BG1). Using the ladder
+    # value as the block size corrupts every regenerated symbol whenever B = A + 16 <= 640.
+    K_b = (22 if bg == 1 else 10) * Zc
     # Encode + rate match + bit interleave per block; the fillers sit at the
     # end of the info part and are excluded from the transmitted systematic
     # bits.  The modulation-order bit interleaver (38.212 5.4.2.2) is applied
