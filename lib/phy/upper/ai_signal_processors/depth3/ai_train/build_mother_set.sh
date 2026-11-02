@@ -36,6 +36,13 @@ CORPUS_ROOT=${CORPUS_ROOT:-$TRAIN}
 # documented rule has no gap guard at all, so this is made wide enough to be inert rather than tuned.
 GAP_SLOTS=${GAP_SLOTS:-200}
 MODS=${MODS:-"QPSK 16QAM 64QAM 256QAM"}
+# HOW MANY (MODULATION, SOURCE) BUILDS RUN AT ONCE. The pairs are independent -- each writes its own
+# npz -- and every child is one BLAS thread, so this is process-level parallelism: it changes wall
+# time, not content, and a leg's total sample memory is the same as when the pairs run serially.
+# Default 1 keeps the historical behaviour. A child's exit status is folded into `status`, so a
+# pair that dies in the background cannot make the leg look successful.
+JOBS=${JOBS:-1}
+case "$JOBS" in ''|*[!0-9]*|0) JOBS=1 ;; esac
 TOOLS=$(cd "$(dirname "$0")" && pwd)
 PY=${PY:-$TRAIN/.venv/bin/python}
 
@@ -95,18 +102,48 @@ for LEG in "$@"; do
     continue
   fi
 
-  # 3. One build per (modulation, source). No selection step: this is the mother set.
+  # 3. One build per (modulation, source). No selection step: this is the mother set. Up to
+  #    $JOBS pairs run at once; each child keeps one BLAS thread and writes a different npz, so
+  #    this is wall-clock parallelism between processes, not inside one. A child's exit code is
+  #    recorded and folded into $status below.
+  job_dir=$(mktemp -d "${TMPDIR:-/tmp}/motherset.XXXXXX") || exit 1
+  job_n=0
   for M in $present; do
     for POP in self harq; do
       UNITS="$DUMP/index_self.csv"
       [ "$POP" = "harq" ] && UNITS="$DUMP/index_harq_only.csv"
       NAME="${LEG}_${M}_${POP}"
+      job_n=$((job_n + 1))
       echo "  building $NAME"
-      "$PY" "$TOOLS/build_depth3_dataset.py" --units "$UNITS" --tb "$DUMP/tb" --corpus "$CAP" \
-          --out "$OUT" --name "$NAME" --source real --modulation "$M" --min-prb 1 --max-units 0 2>&1 \
-          | sed 's/^/    /'
+      printf '%s\n' "$POP" > "$job_dir/$job_n.pop"
+      printf '%s\n' "$NAME" > "$job_dir/$job_n.name"
+      (
+        set -o pipefail
+        "$PY" "$TOOLS/build_depth3_dataset.py" --units "$UNITS" --tb "$DUMP/tb" --corpus "$CAP" \
+            --out "$OUT" --name "$NAME" --source real --modulation "$M" --min-prb 1 --max-units 0 2>&1 \
+            | tee "$job_dir/$job_n.log" | sed 's/^/    /'
+        echo $? > "$job_dir/$job_n.rc"
+      ) &
+      while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do
+        wait -n || true
+      done
     done
   done
+  wait
+  for rc_file in "$job_dir"/*.rc; do
+    [ -e "$rc_file" ] || continue
+    n=${rc_file##*/}; n=${n%.rc}
+    [ "$(cat "$rc_file")" -eq 0 ] && continue
+    # An empty harq population is not a failure: when a modulation has no recoveries there is no
+    # retransmission to label, and build_depth3_dataset exits non-zero with this exact message.
+    # A non-empty harq pair, or any self pair, that exits non-zero is a real failure.
+    if [ "$(cat "$job_dir/$n.pop")" = "harq" ] && grep -q 'no samples produced' "$job_dir/$n.log"; then
+      continue
+    fi
+    echo "  FAILED: $(cat "$job_dir/$n.name") exited $(cat "$rc_file")" >&2
+    status=1
+  done
+  rm -rf -- "$job_dir"
 done
 
 # 4. Audit whatever landed. The checker reports sample counts, shapes, bit balance and SNR, and "findings:
