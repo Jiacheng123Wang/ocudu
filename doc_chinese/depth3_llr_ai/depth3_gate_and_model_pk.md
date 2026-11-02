@@ -1425,3 +1425,54 @@ published from the shared measurement layer instead of from a head"** ✓
 
 ★ 状态 ✓：★ **136 个降级是"低于 0 dB 拒绝走 AI"的安全行为，非失败** ✓；★ **`replay_sinr` 来自共享测量层、且比 dump 高 0.76–1.53 dB** ✓；
 ★ **失败与 SNR 反直觉（20–30 dB 最差）已用"256QAM 高码率、余量小"解释** ✓；★ **三个已核实的小事实已记** ✓。
+
+---
+
+## 27. ★★★★★★ 2026-11-02 12:40 **回放**支持** HARQ —— 但必须显式加 `--harq-chain`，否则**重传会报假的 `crc=OK`****
+
+**(a) ★★★ 答：支持**
+
+**⇒ `ul_chain_replay` 有 **`--harq-chain`** 选项** ✓（`ul_chain_replay.cpp:496` ✓）
+**⇒ 它的注释写得极清楚**（**原文**）：
+
+> `Replay every capture through ONE processor, so a retransmission meets the soft buffer its earlier transmission filled`
+> (`--harq-chain`).
+>
+> `A retransmission cannot be decoded on its own and must not be asked to be: the capture says new_data=0, the decoder
+> therefore COMBINES with its soft buffer, and **in a one-processor-per-capture replay that buffer is empty. What comes out
+> is the null word** — and **the null word passes both the LDPC syndrome and CRC-24A**, so the chain reports `crc=OK`
+> **over 5763 zero bytes** and **every comparison built on that verdict compares nothing**.`
+
+**(b) ★★★★★ 这解释了一个**很危险的陷阱****
+
+**⇒ 默认（一个单元一个进程）下**：
+- ★ **重传（`new_data=0`）的软缓冲是空的** ✓
+- ★★ **解码器因此输出**全零码字** ✓
+- ★★★ **而全零码字**能通过 LDPC 伴随式**和** CRC-24A**** ✗
+- **⇒ ⇒ 于是它**报 `crc=OK`**，**但那个 OK 是假的** ✗✗ —— **而且它"比较了 5 763 个零字节"** ✓
+
+**⇒ ⇒ 所以**：★ **任何**包含重传**的回放，**必须**加 `--harq-chain`** ✓，**否则统计出来的 CRC 率被**虚高**** ✗
+
+**(c) ★★★ 我们这次的结果**不受影响**，因为测试集里**没有重传**** ✓
+
+**⇒ 子代理明确核对过**：★ **测试集的 1 866 个单元**全部是 `rv=0/new_data=1`** ✓
+**⇒ ⇒ 所以**：★ **96.78%（AI-only 96.94%）是**干净的第一传结果**** ✓✓
+
+**(d) ★★ 但这给"harq 测试集"立了一条硬规矩**
+
+| 测试集类型 | ★ 必须 |
+|---|---|
+| ★ **只含首传（`new_data=1`）** | ★ 默认即可 ✓ |
+| ★★ **含重传（`new_data=0`）** | ★★ **必须 `--harq-chain`** ✓，**否则假 OK** ✗ |
+
+**⇒ 而且**：★ **`--harq-chain` 要求"一个进程处理整条链"** ✓ ⇒ **那与"每单元一个进程"的运行方式冲突** ✓
+**⇒ ⇒ 所以**：★ **建"harq 回放测试集"时，要**按链**组织单元（而不是按单元散列）** ✓
+
+**(e) ★ 一个待查的小疑问（记录在案）**
+
+**⇒ `dump_tb.sh` 也是**每单元一个进程** ✓ ⇒ **理论上它也可能产生那种假 OK** ✓
+**⇒ 但实测**：★ **dump 的 42 806 个 OK **全部是 `rv=0/new_data=1`**** ✓（子代理逐条核过 ✓）
+**⇒ ⇒ 所以**：★ **至少在这批数据上，重传没有被误报为 OK** ✓ —— **原因未深究，但事实已核** ✓
+
+★ 状态 ✓：★ **回放**支持** HARQ（`--harq-chain`）** ✓；★★ **不加它时重传会产出**通过 CRC-24A 的全零码字**、报假 OK，这一点已用源码注释原文记录** ✓；
+★ **本次测试集全是首传 ⇒ 结果不受影响** ✓；★ **"含重传的测试集必须按链组织并加 `--harq-chain`"已立为规矩** ✓。
