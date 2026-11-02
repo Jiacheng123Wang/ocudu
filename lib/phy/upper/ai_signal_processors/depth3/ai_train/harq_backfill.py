@@ -42,7 +42,7 @@ def read_pdu(path):
         with open(path, errors="ignore") as handle:
             for line in handle:
                 key, sep, value = line.strip().partition("=")
-                if sep and key in ("rnti", "harq_id", "rv", "slot", "scs_khz"):
+                if sep and key in ("rnti", "harq_id", "rv", "new_data", "slot", "scs_khz"):
                     fields[key] = value
     except OSError:
         return None
@@ -97,19 +97,21 @@ def main():
             key = (int(parts[1]), int(parts[2]))
         except (IndexError, ValueError):
             continue
-        # A MONOTONIC COORDINATE FOR ORDERING AND GAPS. The slot alone restarts every 10.24 s, so a chain sorted by
-        # slot breaks at every wrap and its retransmission lands before its first transmission -- which is why one leg
-        # with eight and a half thousand retransmissions recovered sixty-eight labels. Frames are already monotonic
-        # (extended_frame), so the coordinate is frame * slots_per_frame + slot.
+        # A MONOTONIC COORDINATE FOR ORDERING. Frames are monotonic (extended_frame); the slot is NOT slot-in-frame
+        # but a system-slot counter that wraps at 20480 (10.24 s at 30 kHz). Adding it unmodulated to the frame gives
+        # a 20-per-frame term plus a 20480-period sawtooth, so two receptions 5.12 s apart can land eight ord units
+        # apart and the order is aliased -- measured on one leg: 1206 inversions against the live decode record, and
+        # seventeen recoveries lost to a chain being cut before its donor arrived.
         # slots per frame from the PDU (the dump index does not carry it): 30 kHz is the deployed shape, 20 slots.
         slots_per_frame = 20 if str(pdu.get("scs_khz", "30")) == "30" else 10
         units[name] = {
             "row": row,
             "key": key,
-            "ord": key[0] * slots_per_frame + key[1],
+            "ord": key[0] * slots_per_frame + (key[1] % slots_per_frame),
             "rnti": pdu["rnti"],
             "harq": pdu["harq_id"],
             "rv": pdu.get("rv", "?"),
+            "new_data": pdu.get("new_data", "?"),
             "slot": int(pdu["slot"]),
             "tbs": row.get("tbs_bytes", ""),
         }
@@ -132,9 +134,17 @@ def main():
         members.sort()
         current = []
         for slot, name in members:
-            rv = units[name]["rv"]
-            starts = (rv == "0")
-            too_far = bool(current) and (slot - current[-1][0] > args.max_gap_slots)
+            # CHAINS START WHERE THE SCHEDULER SAYS A NEW BLOCK STARTS, not where the redundancy version happens to
+            # be zero. rv=0 usually opens a block and stops doing so inside a full progression: the fifth
+            # transmission of a 0,2,3,1,0 chain carries rv 0 again and is still the same block. This capture has 534
+            # receptions in exactly that position, and opening a chain at each of them cut the original chain before
+            # its donor arrived -- six recoveries lost.
+            starts = (units[name]["new_data"] == "1")
+            # NO GAP GUARD. It exists because a process identifier is reused once a block is acknowledged, so without
+            # a cut two blocks merge into one chain. But new_data already marks that boundary, which makes the guard
+            # redundant -- and harmful: its coordinate was not slots (see above), and the genuine intra-chain gaps in
+            # this traffic run 18 to 162 slots, so even a correct forty would cut real retransmissions.
+            too_far = False
             if starts or too_far or not current:
                 if current:
                     chains.append(current)
@@ -189,7 +199,17 @@ def main():
     # but must never enter an acceptance set that compares against that chain. Keeping them in separate files means a
     # build (and a later merge) decides which population it wants, instead of having to re-derive it from a column.
     self_rows = [r for r in rows if label_from.get(r["unit"]) == "self"]
-    harq_rows = [r for r in rows if label_from.get(r["unit"]) == "harq"]
+    # AND ONLY THE FIRST TRANSMISSIONS. A chain that recovered a block has more than one failed member: the
+    # retransmissions that did not decode before the donor did are labelled harq by the loop above, because they were
+    # failed attempts in a chain that succeeded. They are not the population this file is for. The recovered arm means
+    # "the reception whose FIRST transmission failed", and a middle member's input plane is a different reception --
+    # a later retransmission, with its own allocation and its own noise. Measured on one leg: 251 chain members, of
+    # which 196 are first transmissions and 55 are middle members. Feeding all 251 to the builder put the wrong kind
+    # in a dataset, which is a label defect, not a size one.
+    harq_rows = [r for r in rows
+                 if label_from.get(r["unit"]) == "harq"
+                 and units[r["unit"]]["new_data"] == "1"
+                 and units[r["unit"]]["rv"] == "0"]
     # BOTH FILES CARRY THE AUDIT COLUMNS. Without them a recovered row cannot be checked against the transmission it
     # came from -- the first version wrote only the plain columns and made the population unverifiable after the fact.
     cols_plain = list(rows[0].keys()) + ["label_from", "donor"]
