@@ -155,3 +155,74 @@ ssh jwang@192.168.0.106 'grep -aE "^epoch" ~/work/ai_phy_train/runs_c128_40k.log
 | **2026-10-28 20:40** | 建立本活文档。记录 `20261028_c128_e17` 已启动（19:50，221），含检查清单与精度基线；固定知识指向 `machine_compute_capability_and_model_train_memo.md` |
 | **2026-10-28 21:10** | 加第二条运行 `20261028_c128_e17_40k`（106，c128 × 43 902）：**实测峰值 8.89 GB ⇒ 16 GB 可跑**，≈4.7 h/epoch；与 221 的 c128 × 100 k 构成**语料规模对照**。新增工具 `slice_depth3_dataset.py` |
 | **2026-10-29 06:00** | 进度写入：221 完成 epoch 1（6.87 h/epoch，val 0.09401）、106 完成 epoch 2（4.42 h/epoch，val 0.09885）。★ 记录打印节奏（每 3 个 epoch 一行）与首次 BLER 时间（epoch 5）|
+
+---
+
+## 5. ★★★★★ 2026-11-02 14:05 **107 四个 c128 单调制模型训完 ⇒ 本机接手条件化 c128 热启动（按 design §12.21(e) 的计划）**
+
+**(a) ★★★ 107 的最终结果（四个 c128 全部完成）**
+
+| 模型 | ★ 轮数 | ★ best val | 结束方式 |
+|---|---|---|---|
+| ★ **QPSK c128** | **22** | **0.06966** | early stop |
+| ★ **16QAM c128** | **26** | **0.01672** | early stop |
+| ★ **64QAM c128** | **23** | **0.13868** | early stop |
+| ★★ **256QAM c128** | ★★ **24** | ★★ **0.04235** ✓ | ★ **early stop @24（best @16）** |
+
+**⇒ 107 现已**空闲** ✓（GPU 15 MiB / 0%）✓
+
+**(b) ★★★ 计划（design §12.21(e) 原文）**
+
+> 1. ★ **先在 107 上按调制各训一个**（快 ✓）
+> 2. ★★ **再在 Mac 上训条件化模型**，并**用上面四个模型的主干热启动** ✓
+> 3. **⇒ 这样既有快的迭代，又有部署用的单包模型** ✓
+
+**⇒ ⇒ 现在正好执行第 2 步** ✓
+
+**(c) ★★★ 热启动权重的生成（`warm_start_cond.py`）**
+
+**⇒ 第一次跑错了** ✗ —— **没给 `--c-hid 128`** ⇒ **它按默认 c32 建图（26 185 参数）** ⇒
+`copied 2/96 tensor(s)` ⇒ **只有 2 个张量对上** ✗（**形状不匹配** ✓）
+**⇒ ⇒ 加上 `--c-hid 128 --blocks 18` 后**：
+```
+conditioned graph: 96 weight tensor(s), 325897 parameter(s)
+  QPSK.keras:   copied 94 / 96 tensor(s)
+  16QAM.keras:  copied 94 / 96 tensor(s)
+  64QAM.keras:  copied 94 / 96 tensor(s)
+  256QAM.keras: copied 96 / 96 tensor(s)
+averaged 96 tensor(s) over 4 source(s); 0 left at their fresh initialisation
+```
+**⇒ ★★ 96/96 全部热启动** ✓ ⇒ **主干、所有 18 个残差块、两个辅助头都来自四个模型的主干平均** ✓
+
+**(d) ★★ 训练已启动**
+
+**⇒ 脚本**：★ **`~/ai_depth3/run_w2_cond_c128.sh`**（**基于 c32 那次改写 ✓**）
+**⇒ 与 c32 的三处差异**：
+| 项 | c32 | ★ c128 |
+|---|---|---|
+| `--c-hid` | 32 | ★ **128** |
+| `--batch` | 32 | ★ **8**（**c128 参数是 c32 的 12 倍，激活内存随之上升；历史 `20261028_c128_e17` 也用 batch 8** ✓）|
+| `--init` | `w2_models/w2_cond_init.weights.h5` | ★ **`c128_models/w2_cond_c128_init.weights.h5`** ✓ |
+
+**⇒ 启动确认（日志原文）**：
+```
+train 160603 samples, val 1000 samples, MODULATION-CONDITIONED (head stride 8, 4 conditioning channels, …)
+layout spatial, 16 input channels
+parameters 325897  heads ['llr', 'post_eq_noise']
+started from …/w2_cond_c128_init.weights.h5
+no checkpoint to resume from; starting fresh
+```
+**⇒ ★★ `started from …init.weights.h5` ⇒ 热启动权重**确实被读进去了** ✓
+
+**(e) ★ 运行实况（启动后 2 分 37 秒）**
+
+| 项 | 值 |
+|---|---|
+| ★ **进程内存** | ★ **6.7 GB** ✓（**远低于 64 GB ✓ 还有余量** ✓）|
+| ★ **CPU** | **752%**（**≈7.5 核 ✓，线程上限 10 ✓**）|
+| ★ **日志** | **仍在第一个 epoch 里 ✓** |
+
+**⇒ ⇒ 所以**：★ **batch 8 的内存假设成立 ✓** —— **6.7 GB，比担心的"70 GiB"小得多** ✓✓
+
+★ 状态 ✓：★ **107 四个 c128 全部完成（256QAM 0.04235）** ✓；★ **热启动权重生成成功（96/96 张量）** ✓；
+★ **本机 c128 条件化训练已启动，且确认读了热启动权重** ✓；★ **内存 6.7 GB，batch 8 的选择正确** ✓。
