@@ -562,10 +562,29 @@ def measured_snr_db(prefix):
     return 10.0 * float(np.log10(max(float(match.group(1)), 1e-9)))
 
 def assemble(samples, keys_arrays):
-    """Stack per-sample dicts into arrays, padding the packed bits to the longest sample."""
+    """Stack per-sample dicts into arrays, padding the packed bits to the longest sample.
+
+    THE OUTPUT IS ALLOCATED FIRST AND EACH SAMPLE IS RELEASED AS IT IS COPIED. The obvious
+    `np.stack([s["X"] for s in samples])` holds the whole sample list and the whole output at the
+    same time; for a 99,807-sample leg that doubled the peak and the kernel killed the build at
+    14.4 GB (measured 2026-11-02). The copy is unavoidable, but the two copies do not have to
+    coexist for every sample. The output is byte-for-byte the same: same order, same dtype, same
+    padding. A sample whose shape does not match the first one is an error, never a skipped row.
+    """
+    if not samples:
+        raise ValueError("cannot assemble an empty sample list")
     out = {}
-    out["X"] = np.stack([s["X"] for s in samples])
-    out["H"] = np.stack([s["H"] for s in samples])
+    for key in ("X", "H"):
+        first = np.asarray(samples[0][key])
+        shape, dtype = first.shape, first.dtype
+        stacked = np.empty((len(samples),) + shape, dtype=dtype)
+        for index, sample in enumerate(samples):
+            value = np.asarray(sample[key])
+            if value.shape != shape:
+                raise ValueError(f"sample {index} has {key}{value.shape}, expected {shape}")
+            stacked[index] = value
+            sample[key] = None  # release the per-sample copy now that it is in the output
+        out[key] = stacked
     out["r"] = np.array([s["r"] for s in samples], dtype=np.float32)
     out["sigma2_over_r2"] = np.array([s["sigma2_over_r2"] for s in samples], dtype=np.float32)
     out["pilot_ls_ratio"] = np.array([s["pilot_ls_ratio"] for s in samples], dtype=np.float32)
@@ -573,11 +592,13 @@ def assemble(samples, keys_arrays):
     bits = np.zeros((len(samples), max_bytes), dtype=np.uint8)
     for index, sample in enumerate(samples):
         bits[index, :len(sample["bits"])] = sample["bits"]
+        sample["bits"] = None
     out["bits"] = bits
     max_tb_bytes = max(len(s["tb_bits"]) for s in samples)
     transport = np.zeros((len(samples), max_tb_bytes), dtype=np.uint8)
     for index, sample in enumerate(samples):
         transport[index, :len(sample["tb_bits"])] = sample["tb_bits"]
+        sample["tb_bits"] = None
     out["tb_bits"] = transport
     for name in ("nof_bits", "nof_tb_bits", "alloc_first_prb", "alloc_nof_prb", "dmrs_bitmap",
                  "qm", "snr_nominal", "rnti", "n_id", "rv", "uci_nof_harq_ack", "uci_ack_re",
@@ -756,6 +777,15 @@ def main():
                              "pilots; what changes is where the sample transmits its DM-RS. Used to "
                              "manufacture a modulation x pattern cell the corpus has no transmission of")
     parser.add_argument("--max-units", type=int, default=0)
+    # CHUNKING, for the legs whose single (modulation, source) population is too large to build in
+    # one process: the candidate list is cut into contiguous slices and each slice is built on its
+    # own, then the parts are merged in order. Contiguous is deliberate -- concatenating part 0..k-1
+    # reproduces the unchunked sample order exactly. --count-only reports the list length and exits
+    # so the caller can choose k without building twice.
+    parser.add_argument("--count-only", action="store_true",
+                        help="print the candidate count and exit, without building")
+    parser.add_argument("--chunk-index", type=int, default=0)
+    parser.add_argument("--chunk-count", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20261013)
     parser.add_argument("--selfcheck", action="store_true")
     args = parser.parse_args()
@@ -797,6 +827,14 @@ def main():
         units = kept
     if args.max_units:
         units = units[:args.max_units]
+    if args.count_only:
+        print(len(units))
+        return 0
+    if args.chunk_count < 1 or not (0 <= args.chunk_index < args.chunk_count):
+        parser.error("--chunk-index must be in 0..--chunk-count-1 and --chunk-count >= 1")
+    if args.chunk_count > 1:
+        per = -(-len(units) // args.chunk_count)
+        units = units[args.chunk_index * per:(args.chunk_index + 1) * per]
     print(f"{len(units)} candidate units (CRC OK, {args.modulation}, contiguous allocation, "
           f"slot >= {args.min_slot}, width >= {args.min_prb} PRB)")
 
