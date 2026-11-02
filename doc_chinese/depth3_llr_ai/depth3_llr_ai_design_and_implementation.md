@@ -7006,3 +7006,209 @@ cap_10000_15687_17922,2976,OK,28.96,2,15687,372
 
 ★ 状态 ✓：★ **这条线**停在这里**，产出是"五条被排除的解释 ＋ 一条自洽性恒等式"，**没有得到可用的检查** ✓；
 ★★ **审计仍然不能验证标签 —— 这是**未解决的缺口** ✓**；★ **未完成的工具已移出代码树，并在文件头写明"DEAD END"与全部排除记录** ✓。
+
+---
+
+## 15. ★★★★★★ 2026-11-03 **核心网与飞手机排查（从 corpus 文档移入）**
+
+**⇒ 用户指出这一节与实际文档主题不符 ⇒ 整体移到这里** ✓
+**⇒ ★ 原文照搬，只把顶层 `## 51.` 改为 `### 15.1` 以便挂在 §15 之下** ✓
+
+### 15.1 ★★★★★★ 2026-11-03 02:50 **飞不上手机的两个原因：**启动脚本重复启动 SCP/NRF，而且**根本没启动 AMF****
+
+**(a) ★★★★ 报错本身的含义**
+
+**⇒ 用户给的错误**：★ **`bind(2) [127.0.0.200]:7777 failed (98:Address already in use)`（SCP ✓）** ＋
+★ **`bind(2) [127.0.0.10]:7777 failed (98:Address already in use)`（NRF ✓）**
+
+**⇒ ⇒ 即**：★ **SCP 与 NRF 的端口**已经被别的实例占着** ✓
+
+**(b) ★★★★★ 而查了 `~/work/open5gs/start_5gc.sh`，问题一目了然**
+
+**⇒ 脚本里去重后的启动顺序**（原文行号 ✓）：
+| 行 | ★ 启动 |
+|---|---|
+| 9 | `sudo pkill open5gs-` |
+| 12 | **`nrfd`** ✓（**第 1 次**）|
+| 14 | **`scpd`** ✓（**第 1 次**）|
+| 16–17 | `ausfd`、`bsfd` |
+| ★ **18** | ★★ **`scpd`（第 2 次）** ✗ |
+| 19–22 | `nssfd`、`pcfd`、`udmd`、`udrd` |
+| ★ **23** | ★★ **`nrfd`（第 2 次）** ✗ |
+| 24–25 | `smfd`、`upfd`（sudo）|
+| — | ★★★ **`amfd` **从未出现**** ✗ |
+
+**⇒ ⇒ ⇒ 三个问题**：
+1. ★★ **`scpd` 启了两次** ⇒ **第 2 个 bind `127.0.0.200:7777` 失败** ✓ ⇒ **正是第一条报错** ✓
+2. ★★ **`nrfd` 启了两次** ⇒ **第 2 个 bind `127.0.0.10:7777` 失败** ✓ ⇒ **正是第二条报错** ✓
+3. ★★★ **`amfd` **根本没启动**** ✓ ⇒ ★★ **没有 AMF ⇒ 手机无法注册** ✗✓
+
+**(c) ★★★ 所以"飞不上手机"的直接原因**
+
+**⇒ 现在 211 上跑的 NF**：`nrf`、`scp`、`ausf`、`bsf`、`nssf`、`pcf`、`udm`、`udr`、`smf`、`upf` ✓
+**⇒ ★★★ **没有 `amfd`** ✗** ⇒ **NGAP 38412 没有人监听** ✓ ⇒ **UE 注册无从开始** ✓
+**⇒ ★ 而 21:49 那份日志里 AMF 还在 ✓ ⇒ **它是在 21:49:32 那条断言上**死掉的** ✓ ⇒ **之后重启用这个脚本，而脚本不启动它** ✗✓
+
+**(d) ★★ 一个潜在隐患**
+
+**⇒ 第 9 行 `sudo pkill open5gs-` 之后**没有等待** ✓ ⇒ **新进程可能先于旧进程退出而启动** ✓
+**⇒ ★ 这一次的报错不是它造成的**（**是重复行** ✓），**但它是一个真实的竞态** ⚠
+
+**(e) ★★★ 建议的修法（请用户执行 —— 我不跑 sudo）**
+
+```bash
+cd ~/work/open5gs
+# 1) 全部停掉，并确认真的退出了
+sudo pkill open5gs- ; sleep 2 ; ps ax | grep -c "[o]pen5gs-"
+# 2) 手动确认端口已释放（应无输出）
+ss -ltnp | grep 7777
+# 3) 重新启动（每个 NF 只启一次，并且**加上 amfd**）
+BIN=./install/bin ; CONF=./install/etc/open5gs
+$BIN/open5gs-nrfd -c $CONF/nrf.yaml &            sleep 1
+$BIN/open5gs-scpd -c $CONF/scp.yaml &            sleep 1
+$BIN/open5gs-ausfd -c $CONF/ausf.yaml &
+$BIN/open5gs-bsfd -c $CONF/bsf.yaml &
+$BIN/open5gs-nssfd -c $CONF/nssf.yaml &
+$BIN/open5gs-pcfd -c $CONF/pcf.yaml &
+$BIN/open5gs-udmd -c $CONF/udm.yaml &
+$BIN/open5gs-udrd -c $CONF/udr.yaml &
+$BIN/open5gs-smfd -c $CONF/smf.yaml &
+sudo $BIN/open5gs-upfd -c $CONF/upf.yaml &
+$BIN/open5gs-amfd -c $CONF/amf.yaml &            # ← 这一行原脚本里没有
+# 4) 确认
+ps ax | grep "[o]pen5gs-amfd" ; ss -lunp | grep 38412
+```
+
+**⇒ ★★ 另外**：★ **若装了 systemd 单元，`sudo systemctl restart open5gs-amfd` 更稳**（**它保证等旧进程退出** ✓）
+
+★ 状态 ✓：★★ **报错"Address already in use"＝脚本把 SCP 与 NRF 各启动了两次** ✓；
+★★★ **而"飞不上手机"的直接原因＝脚本**根本没有启动 AMF**（21:49 那次是它在断言上死掉的）** ✓；
+★ **`pkill` 无等待是另一个潜在竞态** ✓；★ **修法与验证命令已给（含单独的 `amfd` 启动行）** ✓。
+
+**⇒ 2026-11-03 03:00 用户指出配置目录 `~/work/open5gs/install/etc/open5gs` —— 查了，**配置本身没问题****
+
+**(a) ★★★ `amf.yaml` 是好的**
+
+**⇒ 关键几行**：
+| 行 | ★ 内容 |
+|---|---|
+| 11–14 | ★ **`amf.sbi.server: 127.0.0.5`** ✓ |
+| 21–23 | ★★ **`amf.ngap.server: 192.168.31.211`** ✓（**NGAP 在 LAN 地址上监听 ✓**）|
+| 25–26 | **metrics/其它在 127.0.0.5** ✓ |
+
+**⇒ ★★ 而且 `open5gs-amfd --help` 能正常输出**（**`Open5GS daemon v2.7.2-156-g8715915` ✓ ＋ `Configuration ...` ✓**）⇒
+★ **二进制是好的、配置能解析** ✓
+
+**⇒ ⇒ ⇒ 所以**：★ **问题**不在配置** ✓ —— **而在**启动脚本没有调用它**** ✓✓
+
+**(b) ★★ 配置目录的实际情况**
+
+**⇒ 19 个 `.yaml` ✓** —— ★ **每个 NF 一个 ✓**（**包括 `amf.yaml` ✓**）
+**⇒ ★★ 但没有 systemd 单元** ✗（`/etc/systemd/system/open5gs*` 与 `/lib/systemd/system/open5gs*` 都没有 ✓）
+**⇒ ⇒ 所以**：★ **只能手动启 ✓ ⇒ **脚本就是唯一入口 ⇒ 脚本漏了 AMF 就是致命的** ✓
+
+**(c) ★★★★ 结论（一句话）**
+
+> ★★★ **配置是好的、二进制是好的、`amf.yaml` 能解析 —— 唯一的错是 `start_5gc.sh` 里没有 `open5gs-amfd` 那一行，
+> 同时把 `scpd` 与 `nrfd` 各写了两遍。修这两处即可。**
+
+**(d) ★ 修法（仍请用户执行，sudo 我不跑）**
+
+```bash
+cd ~/work/open5gs
+sudo pkill open5gs- ; sleep 2                      # 停干净
+BIN=./install/bin ; CONF=./install/etc/open5gs
+$BIN/open5gs-nrfd -c $CONF/nrf.yaml &   sleep 1
+$BIN/open5gs-scpd -c $CONF/scp.yaml &   sleep 1
+$BIN/open5gs-ausfd -c $CONF/ausf.yaml &
+$BIN/open5gs-bsfd  -c $CONF/bsf.yaml &
+$BIN/open5gs-nssfd -c $CONF/nssf.yaml &
+$BIN/open5gs-pcfd  -c $CONF/pcf.yaml &
+$BIN/open5gs-udmd  -c $CONF/udm.yaml &
+$BIN/open5gs-udrd  -c $CONF/udr.yaml &
+$BIN/open5gs-smfd  -c $CONF/smf.yaml &
+sudo $BIN/open5gs-upfd -c $CONF/upf.yaml &
+$BIN/open5gs-amfd  -c $CONF/amf.yaml &            # ← 原脚本缺这一行
+ps ax | grep "[o]pen5gs-amfd" ; ss -lunp | grep 38412   # ← 确认
+```
+
+★ 状态 ✓：★ **`amf.yaml` 配置正确（sbi 127.0.0.5、ngap 192.168.31.211）** ✓；★ **二进制可运行、配置可解析** ✓；
+★ **无 systemd 单元 ⇒ 脚本是唯一入口 ⇒ 漏 AMF 就是致命的** ✓；★★★ **结论：配置无误，错在脚本（缺 `amfd`、重 `scpd`/`nrfd`）** ✓。
+
+**⇒ 2026-11-03 03:15 用户："AMF 是单独启动的，重启 CN 后手机飞起来了，但错误原因仍不明" —— **读了源码，机制现在完全清楚****
+
+**(a) ★★★★★ 那条 `Expectation` 的确切来源**（源码逐行）
+
+**⇒ `src/amf/amf-sm.c:750-752`**：
+```c
+r = nas_5gs_send_gmm_reject_from_sbi(amf_ue, OGS_SBI_HTTP_STATUS_GATEWAY_TIMEOUT);
+ogs_expect(r == OGS_OK);          // ← 就是这一行打了 ERROR
+ogs_assert(r != OGS_ERROR);
+```
+**⇒ ★★ 而它调的函数在 `src/amf/nas-path.c:972`**：
+```c
+ran_ue = ran_ue_find_by_id(amf_ue->ran_ue_id);
+if (!ran_ue) {
+    ogs_error("[%s] NG context has already been removed", amf_ue->supi);   // ← 日志里那一行
+    return OGS_NOTFOUND;                                                     // ← 返回 NOTFOUND，不是 OK
+}
+```
+**⇒ ⇒ ⇒ 所以**：★ **`r == OGS_NOTFOUND` ⇒ `ogs_expect(r == OGS_OK)` 失败 ⇒ 打 ERROR** ✓
+**⇒ ★★ 而 `ogs_assert(r != OGS_ERROR)` **没有**触发（`NOTFOUND ≠ ERROR`）⇒ **这一条不是致命错** ✓✓
+
+**(b) ★★★★ 完整因果链（现在每一环都有出处）**
+
+| 步 | ★ 事件 | ★ 出处 |
+|---|---|---|
+| 1 | ★★ **SBI 对端返回 **`504 Gateway Timeout`**** ✓ | **`OGS_SBI_HTTP_STATUS_GATEWAY_TIMEOUT` 是写死在调用里的常量** ✓ |
+| 2 | ★ **AMF 想给 UE 发 **GMM Reject**（带该状态码）** ✓ | **`nas_5gs_send_gmm_reject_from_sbi(...)`** ✓ |
+| 3 | ★★★ **但 **NG 上下文已经没了**（**UE 在 21:49:26 被释放 ✓**）** ⇒ **`ran_ue_find_by_id` 返回 NULL** ✓ | **`nas-path.c:972`** ✓ |
+| 4 | ★★ **返回 `OGS_NOTFOUND` ⇒ `ogs_expect` 失败 ⇒ ERROR** ✓ | **`amf-sm.c:751`** ✓ |
+| 5 | ★★ **`SBI transaction has already been removed`** ⇒ **事务也被清了** ✓ | **`lib/sbi/path.c:108`** ✓ |
+
+**⇒ ⇒ ⇒ 即**：★ **SBI 链（AMF → SCP → AUSF → UDM ✓）**超时（504 ✓）** ⇒
+**⇒ ★★ 而 AMF 想"礼貌地拒掉这个 UE"时 ✓，发现 UE 的 NG 上下文**已经被释放了** ✓ ⇒ **于是打了一条 ERROR** ✓**
+
+**(c) ★★★ 所以"错误的原因"其实是**两层****
+
+**⇒ ① **触发层**：★ **SBI 那一跳超时失败（504）** ✓ —— **AMF → SCP → AUSF → UDM 里某一跳没在时限内答复** ✓
+**⇒ ★★ ② **表现层**：★ **AMF 的错误处理路径**假定"NG 上下文还在"** ✓ ⇒ **UE 已经被释放时，它无从发送拒绝消息** ✓ ⇒ **打 ERROR 并返回 NOTFOUND** ✓
+**⇒ ⇒ ★★★ 而这两层之间有一个**时间差**：★ **UE 在 21:49:26 就被释放了 ✓，而 504 到 21:49:32 才回来 ✓** ⇒ **晚了 6.9 秒** ✓
+
+**(d) ★★ 关键结论：**这条 ERROR 不是崩溃，是"迟到的错误处理"****
+
+**⇒ ★ `ogs_expect` 在 Open5GS 里**只记日志、不中止** ✓（**`ogs_assert` 才会** ✓）**
+**⇒ ★★ 所以 21:49 那一刻 AMF **未必**死了 ✓ —— **它更可能是之后被 `pkill open5gs-` 或重启带走的** ✓
+**⇒ ⇒ 而这与"AMF 单独启动、重启后手机能飞"**并不矛盾** ✓ ✓
+
+**(e) ★★★ 下一步该查的（要抓的是**504 的来源**，不是这条 ERROR）**
+
+| # | ★ 查什么 | ★ 为什么 |
+|---|---|---|
+| **1** | ★★ **`scpd` 的终端输出**（**22:00 前后 ✓**）| ★ **它经手每一条 SBI ✓ ⇒ 能看出 504 是**谁**回的** ✓ |
+| **2** | ★ **`ausfd` / `udmd` 的终端** | ★ **它们有没有收到认证请求** ✓ |
+| **3** | ★★ **SCP 的配置**（`scp.yaml` 里 AUSF/UDM 的目标地址 ✓）| ★ **若指向了错的/慢的地址 ⇒ 504** ✓ |
+| **4** | ★ **那 3 秒是谁释放的** | ★★ **`UE Context Release [Action:2]` 是 **gNB 发起**的 ✓ ⇒ **N2 侧先放弃** ✓ ⇒ **可能 UE 的 RRC 掉了** ✓ |
+
+**⇒ ⇒ ★★ 而若这条 ERROR **只在重启瞬间出现一次、之后不再出现** ✓，那它**就是这个机制的正常表现** ✓ ——
+**要修的是**"UE 为什么 3 秒就放弃"** 与 **"SBI 为什么 504"**，**不是这条 ERROR 本身** ✓
+
+★ 状态 ✓：★★ **`Expectation` 的确切来源已用源码定位（`amf-sm.c:751` ＋ `nas-path.c:972`）** ✓；
+★★ **因果链五步全部有出处：504 ⇒ 想发 GMM Reject ⇒ NG 上下文已释放 ⇒ NOTFOUND ⇒ ERROR** ✓；
+★★ **`ogs_expect` 只记日志不中止 ⇒ 这条 ERROR 不是崩溃** ✓；★ **下一步该抓的是 504 的来源与"3 秒释放"** ✓。
+
+### 15.2 ★★★ 分工的界线（用户 2026-11-03 指出后确立）
+
+**⇒ 用户原话**：★ **"请把最近的工作 memo 记入工作流文档 `depth3_llr_ai_design_and_implementation.md`，而不是 corpus 文档"** ✓
+
+**⇒ ★★ 判据**：★ **这一节回答的是不是**"数据从哪来、怎么变成数据集"**？** ✓
+| 内容 | ★ 该在哪 |
+|---|---|
+| ★ **采集、dump、建库工具、流水线、跨机器建库** | ★ **`corpus_capture_and_new_datasets_build.md`** ✓ |
+| ★★ **除上面之外的一切**：源码缺陷、架构决策、模型训练、门控与回放、核心网与飞手机、工具与环境的坑 | ★★ **本文件** ✓ |
+
+**⇒ ★ 已按此判据处理的一例**：★ **飞不上手机的排查（原 corpus 文档 §51）⇒ 移入本文件 §15.1** ✓
+**⇒ ★★ 理由**：★ **它讲的是 AMF/SCP/NRF/SBI/NGAP ⇒ 与"数据集怎么来的"毫无关系** ✓
+
+★ 状态 ✓：★ **§51 已移入本文件 §15.1** ✓；★ **corpus 文档留下一条明确的指引（其后内容讲的是核心网，已移走）** ✓；
+★★ **"什么该放哪"的判据已写成一句话，供以后每一节先过一遍** ✓。
