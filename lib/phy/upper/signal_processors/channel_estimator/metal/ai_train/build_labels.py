@@ -121,11 +121,16 @@ def build_label(tb_bits, rx_grid, n_prb, n_syms, n_ports, mod, dmrs_mask, n_id,
 
 
 def sidecar_index(directory):
-    """Map `(slot, rnti)` to the capture sidecar that describes that reception.
+    """Map `(slot, rnti)` to the capture sidecars that could describe that reception.
 
     The sidecar's file name is `<prefix>_<extended frame>_<slot>_<rnti>.txt`, so the key is read
     off the NAME: indexing a capture directory of six figures by opening every file would cost
     minutes, and this pipeline only needs the handful the pairs select.
+
+    A VALUE IS A LIST, because the key is not unique. `slot` is the slot index inside the frame
+    cycle and wraps every 20480 slots, so a leg longer than ten seconds holds several captures per
+    key: measured on `s2_mcs00_ping_1031d`, fifty thousand captures in twenty-one thousand five
+    hundred and eighty-five keys, up to eleven per key. The caller must not take the first one.
     """
     index = {}
     for path in glob.glob(os.path.join(directory, "*.txt")):
@@ -136,7 +141,7 @@ def sidecar_index(directory):
         if len(parts) != 4:
             continue
         try:
-            index[(int(parts[2]), int(parts[3]))] = path
+            index.setdefault((int(parts[2]), int(parts[3])), []).append(path)
         except ValueError:
             continue
     return index
@@ -152,20 +157,38 @@ def read_sidecar(path):
     return cfg
 
 
-def control_layout(path, tb_bits, n_prb, dmrs_symbols, cache):
-    """The reception's control payload, read from its sidecar and checked against the rx row."""
-    if path in cache:
-        return cache[path]
-    cfg = read_sidecar(path)
-    sidecar_dmrs = [int(x) for x in cfg["dmrs_symbols"].split(",")]
-    if sorted(sidecar_dmrs) != sorted(dmrs_symbols) or int(cfg["alloc_nof_rb"]) != n_prb:
-        raise ValueError(f"the capture sidecar describes {cfg['alloc_nof_rb']} PRB with DM-RS at "
-                         f"{sidecar_dmrs}, the rx row {n_prb} PRB with {sorted(dmrs_symbols)}: the "
-                         f"pairing is not this reception")
-    layout = pusch_uci.from_capture(cfg, tb_bits, n_prb, dmrs_symbols, int(cfg["dmrs_type"]),
-                                    int(cfg["dmrs_nof_cdm_groups_without_data"]))
-    cache[path] = layout
-    return layout
+def control_layout(paths, tb_bits, n_prb, dmrs_symbols, cache):
+    """The reception's control payload from the sidecars its key selects.
+
+    A key can name more than one capture, and only the ones whose allocation matches the rx row can
+    be this reception. If they still disagree on the control payload the association is ambiguous,
+    and an ambiguous association is refused: a sidecar from the wrong frame cycle would put the
+    label on a different element map and nothing downstream would notice.
+    """
+    key = (paths[0], n_prb)
+    if key in cache:
+        return cache[key]
+    candidates = []
+    for path in paths:
+        cfg = read_sidecar(path)
+        sidecar_dmrs = [int(x) for x in cfg["dmrs_symbols"].split(",")]
+        if int(cfg["alloc_nof_rb"]) != n_prb or sorted(sidecar_dmrs) != sorted(dmrs_symbols):
+            continue
+        candidates.append(cfg)
+    if not candidates:
+        raise ValueError(f"none of the {len(paths)} captures at this slot and RNTI carries {n_prb} "
+                         f"PRB with DM-RS at {sorted(dmrs_symbols)}: the pairing is not this "
+                         f"reception")
+    layouts = {pusch_uci.from_capture(cfg, tb_bits, n_prb, dmrs_symbols,
+                                      int(cfg["dmrs_type"]),
+                                      int(cfg["dmrs_nof_cdm_groups_without_data"]))
+               for cfg in candidates}
+    if len(layouts) != 1:
+        raise ValueError(f"{len(candidates)} captures at this slot and RNTI match the rx row and "
+                         f"disagree on the control payload: {sorted(layouts)}; the association is "
+                         f"ambiguous")
+    cache[key] = layouts.pop()
+    return cache[key]
 
 
 def metric_db(Xc, Y):
