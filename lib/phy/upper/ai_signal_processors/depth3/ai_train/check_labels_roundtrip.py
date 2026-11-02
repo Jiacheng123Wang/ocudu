@@ -97,6 +97,7 @@ def main(argv=None):
             sys.path.insert(0, path)
     import nr_ldpc as NL
     import synth as SN
+    import pusch_uci as UCI
 
     rng = np.random.default_rng(args.seed)
     findings = 0
@@ -104,7 +105,8 @@ def main(argv=None):
     print("%-46s %6s %6s %8s %s" % ("file", "n", "bad", "syndrome", "note"))
     for path in files:
         with np.load(path, allow_pickle=True) as z:
-            n = z["X"].shape[0]
+            X = z["X"].astype(np.float32)
+            n = X.shape[0]
             take = rng.choice(n, size=min(args.samples, n), replace=False)
             bad = 0
             checked = 0
@@ -119,6 +121,13 @@ def main(argv=None):
                 nof_prb = int(z["alloc_nof_prb"][i])
                 first_prb = int(z["alloc_first_prb"][i])
                 dmrs = z["dmrs_bitmap"][i]
+                dmrs_symbols = [t for t in range(NOF_SYMBOLS) if (int(dmrs) >> t) & 1]
+                # X puts the grid in channels c = 2t + {0,1} for the fourteen symbols; H is the true
+                # channel over the same grid, already divided by the reference amplitude (measured:
+                # the equalised 64QAM magnitude has a median of 0.95, so no second scaling).
+                grid_full = X[i][:, :CH_GRID].reshape(NOF_SUBCARRIERS, NOF_SYMBOLS, 2)
+                grid = (grid_full[..., 0] + 1j * grid_full[..., 1]).astype(np.complex64)
+                Htrue = (z["H"][i][..., 0] + 1j * z["H"][i][..., 1]).astype(np.complex64)
                 y = z["bits"][i]
                 nof_bits = int(z["nof_bits"][i])
                 tb = z["tb_bits"][i]
@@ -126,24 +135,51 @@ def main(argv=None):
                 checked += 1
                 # The geometry the builder used, so that a wrong geometry shows up as a syndrome
                 # failure rather than being reproduced here.
+                # The element map the builder used, so a geometry error shows up as a mismatch
+                # here rather than being reproduced. `uci` comes from the sample's own fields.
+                uci = None
+                if int(z["uci_nof_harq_ack"][i]) or int(z["uci_csi1_re"][i]):
+                    uci = UCI.UciLayout(nof_harq_ack=int(z["uci_nof_harq_ack"][i]),
+                                        csi_part1=True if int(z["uci_csi1_re"][i]) else False)
                 try:
-                    cbs, bg, zc, kb, e_total, lengths = SN.codeblock_layout(
-                        np.unpackbits(tb)[:nof_tb], nof_prb, NOF_SYMBOLS, qm, dmrs)
-                except Exception as exc:                     # noqa: BLE001 - reported, not raised
+                    layout = UCI.data_layout(nof_prb, NOF_SYMBOLS, dmrs_symbols, qm, uci)
+                    c_init = (int(z["rnti"][i]) << 15) + int(z["n_id"][i])
+                    sequence = UCI.descrambling_sequence(layout, c_init)
+                except Exception as exc:                     # noqa: BLE001
                     note = f"layout failed: {exc}"
                     break
-                # The stored label is the rate-matched codeword, not the mother codeword, so
-                # `verify` cannot be asked about it directly: it wants H @ c == 0 on the full
-                # block and a length mismatch is a False. What IS available is the comparison
-                # between the label and the signal -- the hard bits this sample's own grid
-                # implies -- and that is the comparison the docstring describes. It is not
-                # implemented yet; the flag below makes the gap explicit rather than silent.
-                # NOT IMPLEMENTED. The comparison below is the whole point of this tool and it is
-                # missing, so the tool refuses to report a clean result rather than reporting a
-                # clean result about nothing -- which is exactly the defect it exists to catch.
-                note = "NOT IMPLEMENTED: signal-vs-label comparison"
-                unimplemented = True
-                break
+                # The label, descrambled back to the codeword bits. `bits` holds what is actually
+                # transmitted, already scrambled and already stripped of the punctured elements.
+                stored = np.unpackbits(y)[:nof_bits].astype(np.uint8)
+                if stored.size != sequence.size:
+                    note = f"label {stored.size} bits vs sequence {sequence.size}"
+                    break
+                label = stored ^ sequence
+                # The signal's own bits at the elements those codeword bits land on.
+                hard = []
+                ok_bits = True
+                for (symbol, subcarrier), kept in zip(layout.ulsch_pos, layout.keep_bits):
+                    if not kept:
+                        continue
+                    h = Htrue[subcarrier, symbol]
+                    if abs(h) < 1e-6:
+                        ok_bits = False
+                        break
+                    hard.extend(hard_bits_from_symbol(grid[subcarrier, symbol] / h, qm))
+                if not ok_bits:
+                    note = "no channel at an allocated element"
+                    break
+                hard = np.asarray(hard, dtype=np.uint8)
+                m = min(hard.size, label.size)
+                if m == 0:
+                    note = "no bits to compare"
+                    break
+                agree = float((hard[:m] == label[:m]).mean())
+                if agree < 0.90:
+                    bad += 1
+                    note = f"agreement {agree:.3f}"
+                elif not note:
+                    note = f"agreement {agree:.3f}"
             print("%-46s %6d %6d %8s %s" % (os.path.basename(path)[:46], checked, bad,
                                             "OK" if bad == 0 else "FAIL", note))
             findings += bad
