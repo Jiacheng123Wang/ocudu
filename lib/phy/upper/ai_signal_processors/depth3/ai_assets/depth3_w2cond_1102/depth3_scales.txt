@@ -1,0 +1,4 @@
+# R4.5 fit from depth3_best.keras on w2_test1.npz, 60 samples
+s_llr=20
+a_noise=4
+b_noise=-1
