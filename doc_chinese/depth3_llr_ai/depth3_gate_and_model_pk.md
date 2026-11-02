@@ -1379,3 +1379,49 @@ reception DEGRADED to the classical chain: ... estimator measures < 0 dB ...
 
 ★ 状态 ✓：★ **第一份真实链路回放结果：96.78%（AI-only 96.94%）** ✓；★ **136 个降级到经典链（7.3%）已写明** ✓；
 ★★ **失败系统性集中在 `窄分配 × 高调制`，与 §24 同一病根** ✓；★ **时延是冷启动值、不可与历史 warm 值直接比较** ✓。
+
+**⇒ 2026-11-02 12:35 最终报告补记（几个**关键细节**）**：
+
+**(a) ★★★★ 那 136 个"降级"**不是失败，是**刻意的安全拒收**** ✓
+
+**⇒ 日志原文**：
+> `reception DEGRADED to the classical chain: the reception is outside the SNR range the bound model's reporting
+> heads were trained on: the estimator measures -inf dB and **the bundle was trained on 0.00 to 48.00 dB**, so this
+> reception's measurement would be an extrapolation`
+
+**⇒ 实测**：★ **53 个测得 `-inf`** ✓、**83 个是有限负值（−0.07 到 −6.46 dB）** ✓
+**⇒ ⇒ 所以**：★ **E4 的 bundle 训练范围是 **0–48 dB** ✓ ⇒ **低于 0 dB 的接收**拒绝走 AI 臂**** ✓
+**⇒ ⇒ ⇒ 这是一个**正确的安全行为** ✓ —— **不是 bug，也不是缺陷** ✓
+
+**(b) ★★ 另一个值得记的事实**
+
+**⇒ 每次运行都打**：★ **"the bound bundle carries neither reporting head; RSRP, EPRE and the SINR will be
+published from the shared measurement layer instead of from a head"** ✓
+**⇒ ⇒ 所以**：★ **`replay_sinr` 是**共享测量层**的值，不是网络头的输出** ✓
+**⇒ 而且**：★ **回放报的 SINR 比 dump 高 **+0.76 dB**（256QAM 上 **+1.53 dB**）** ✓
+**⇒ ⇒ ★ "回放在**很多随后 CRC 失败的单元上**报了更高的 SINR"** ✓ —— **这正是"网络自信但判错"的形态** ✓
+
+**(c) ★★★ 失败与 SNR 的关系是**反直觉的****
+
+| index-SNR 带 | ★ KO / 总数 | 比例 |
+|---|---|---|
+| `<0` | 2 / 149 | 1.3% |
+| `0–6` | 2 / 210 | 1.0% |
+| `6–10` | **0 / 278** ✓ | 0% |
+| `10–14` | 6 / 334 | 1.8% |
+| `14–20` | 3 / 400 | 0.8% |
+| ★★ **`20–30`** | ★★ **40 / 370** | ★★ **10.8%** ✗ |
+| `≥30` | 7 / 125 | 5.6% |
+
+**⇒ ⇒ 高 SNR 反而失败更多** ✓ —— ★ **因为 256QAM 就调度在那一带** ✓，**而高 SNR 下 256QAM 用的是**很高的码率** ⇒ **余量极小** ✓ ⇒ **网络 LLR 的不精确在那里最致命** ✓
+
+**(d) ★★ 另外三个已核实的小事实**
+
+| # | 事实 |
+|---|---|
+| ★ **1** | ★ **60 个不一致**全部是 index-OK → replay-KO**，**没有反向** ✓（**符合预期：索引来自同一族接收机** ✓）|
+| ★ **2** | ★ **推理时延与宽度基本无关**（`≤3` 3.733 ms、`≤8` 3.757、`≤24` 3.844、`>24` 3.895 ✓）|
+| ★ **3** | ⚠ **源侧 `MANIFEST.md` 在 12:02 被重写**（**晚于 11:49 的拷贝** ✓）⇒ **203 上是旧版 manifest** ✓（`index.csv`/`cells.csv` 两侧逐字节一致 ✓）|
+
+★ 状态 ✓：★ **136 个降级是"低于 0 dB 拒绝走 AI"的安全行为，非失败** ✓；★ **`replay_sinr` 来自共享测量层、且比 dump 高 0.76–1.53 dB** ✓；
+★ **失败与 SNR 反直觉（20–30 dB 最差）已用"256QAM 高码率、余量小"解释** ✓；★ **三个已核实的小事实已记** ✓。
