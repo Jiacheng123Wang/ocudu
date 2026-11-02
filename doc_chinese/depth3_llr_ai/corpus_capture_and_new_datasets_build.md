@@ -4257,3 +4257,43 @@ done
 ★ 状态 ✓：★★ **66 可用且**有 32 GB 内存**，能把 20 条大腿接过去** ✓；★ **它的环境只需 clone ＋ numpy（无 TF/CoreML）** ✓；
 ★ **三机分工（66 大腿 / 211 其余 / 107 小中腿）已下** ✓；★ **"同腿两台逐字段比"的验证要求已提** ✓；
 ★★ **E17 实为条件化模型这一更正已记（表比的是语料）** ✓。
+
+**⇒ 2026-11-02 23:30 用户更正 66 的情况：**工作目录已有、工具是旧的、不能 build 本项目（x86 macOS）****
+
+**(a) ★★★ 用户指出的三点**
+
+1. ★★ **66 的工作目录是 `/Users/jiachengwang/work/ai_phy_train`** ✓ —— **基本工具都在 ✓，以前跑过建库** ✓
+2. ★ **只需要 Python** ✓
+3. ★★★ **66 是 **x86 macOS** ⇒ **本项目的代码**不能 build**** ✓ ⇒ **也不该 clone 仓库**（**clone 了也没有能用的 `build/`** ✗）
+
+**(b) ★★★ 实测：66 的工具**旧**且**不全****
+
+| 文件 | ★ 状态 |
+|---|---|
+| ★ `build_depth3_dataset.py` | ✓ 在，但在 `lib/phy/upper/ai_signal_processors/depth3/ai_train/` 下 |
+| ★★ `harq_backfill.py` | ⚠ 在，**但日期 **11-01 23:01** ⇒ 早于今天的链规则修复** |
+| ★★★ **`pusch_uci.py`** | ✗ **完全不在** |
+| ★★★ **`build_mother_set.sh`** | ✗ **完全不在** |
+| ★★ `synth.py` | ⚠ **10-13 的版本 ⇒ `kb` 修复也没有** |
+
+**⇒ 其它已经就位的**：★ **`.venv/bin/python` 有 numpy 1.26.4** ✓；★ **`lib/`、`build/`、`corpus/`（空）、`data/`（9.9 GB）、`datasets_full_w2/`（空）** ✓
+
+**(c) ★★ 所以 66 的搭建是**拷文件**，不是 pull**
+
+**⇒ 从本机的 checkout 推到 66 的同一相对路径**：
+| 源目录 | ★ 文件 |
+|---|---|
+| ★ `lib/phy/upper/ai_signal_processors/depth3/ai_train/` | **`build_mother_set.sh`、`build_depth3_dataset.py`、`harq_backfill.py`、`check_depth3_dataset.py`** ＋ 该目录下其它被 import 的 |
+| ★ `lib/phy/upper/signal_processors/channel_estimator/metal/ai_train/` | **`synth.py`、`build_labels.py`、`nr_ldpc.py`、`pusch_uci.py`、`dmrs.py`、`dd_label.py`** |
+
+**⇒ ★★ 我给子代理的建议**：★ **两个目录下的 `.py` 与 `.sh` **整份拷**，不要挑** ✓ ——
+**⇒ ★ "挑着拷"正是让一台机器只跑**今天一半的修复**的那种做法** ✓✓
+
+**(d) ★★ 一个必须做的验证**
+
+**⇒ 66 与 211 的 **CPU 架构不同**（x86 vs ARM ✓）、numpy 版本也可能不同 ✓ ⇒ **"输出相同"是要**验证的结论**，不是假设** ✓
+**⇒ ★★ 做法**：★ **同一条小 leg 在 211 与 66 上各建一遍、逐字段 `np.array_equal`** ✓
+**⇒ ★ 若不同 ⇒ **停下来报告** —— **在 60 条腿被分到两台机器之前就该知道** ✓
+
+★ 状态 ✓：★★ **66 不能 build 本项目（x86 macOS）⇒ 不该 clone，应拷文件** ✓；★ **它的工具旧且缺 `pusch_uci.py` 与 `build_mother_set.sh`** ✓；
+★★ **"整份拷而不是挑着拷"已明确** ✓；★ **"两台各建一条腿、逐字段比"的验证已要求** ✓；★ **66 接大腿（32 GB）的定位未变** ✓。
