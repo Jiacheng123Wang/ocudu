@@ -156,8 +156,10 @@ for LEG in "$@"; do
               | tee "$job_dir/$job_n.log" | sed 's/^/    /'
           echo $? > "$job_dir/$job_n.rc"
         ) &
+        # Poll the job table instead of `wait -n`: bash 3.2 (macOS) has no `wait -n`, and this
+        # form is correct there too. The children are reaped by the `wait` below.
         while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do
-          wait -n || true
+          sleep 1
         done
       done
     done
