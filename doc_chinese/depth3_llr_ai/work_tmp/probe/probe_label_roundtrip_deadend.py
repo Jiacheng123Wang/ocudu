@@ -1,36 +1,53 @@
 #!/usr/bin/env python3
-"""Check a built dataset's LABELS against its own signal, without trusting the label path.
+"""DEAD END -- an aborted attempt to verify a dataset's labels against its own signal.
 
-WHY IT EXISTS. The audit beside this one checks shape, bit balance, a single modulation and a plausible
-SNR. All four are properties of the FILE. None of them is a property of the LABELS, and the difference
-cost two defects in one day: the codeblock information length was taken from a ladder that exists to
-pick a lifting size, which put wrong bits in about eight percent of the samples, and the control
-information multiplexed on the PUSCH was never read, which put data labels on resource elements that
-carry control. Both files passed the audit without a murmur. The block-size defect was found by a gate
--- a decoder disagreeing with the labels -- and the control defect by an audit that happened to count
-refusals. The audit was never able to find either, because it never compared a label to anything.
+STATUS: NOT A TOOL. It runs end to end and it cannot tell a correct label from an incorrect one.
+It lives here, outside the working tree, so that it cannot be mistaken for one of the tools that
+do work -- which is exactly the mistake it was written to prevent in the labels.
 
-WHAT THIS DOES INSTEAD. For each sample it takes the received grid, divides by the true channel, maps
-the result to hard bits through the modulation's constellation, descrambles with the sample's own
-parameters, and asks the LDPC syndrome whether those bits form a codeword.
+WHAT IT WAS TRYING TO DO. The dataset audit checks shape, bit balance, one modulation and a
+plausible SNR: properties of the FILE, not of the LABELS. Both label defects found on 2026-11-02 --
+a codeblock information length taken from a lifting-size ladder, and control information never
+read -- passed that audit without a murmur. So the question was whether a label can be checked
+against something that is NOT the code that produced it.
 
-The point is what is INDEPENDENT of the label path. The codeword comes from the SIGNAL. The geometry --
-base graph, lifting size, the information length that decides where parity starts, the set of resource
-elements that carry data -- comes from the same functions the builder used. So a geometry that is wrong
-produces a codeword that does not satisfy the syndrome, and the failure is visible even though both
-sides of it were computed by the same code. That is the property that would have caught the block-size
-defect: the signal says one thing, the geometry says another, and the syndrome is where they meet.
+The signal is the candidate. A sample carries the received grid and the true channel, so the
+transmitted symbols should be recoverable from them, and the label's bits should agree with what
+the signal implies.
 
-WHAT THIS DOES NOT CATCH. A scrambling error that happens to permute the bits in a way the syndrome
-tolerates -- it should not, but a syndrome is a weak test on a short block. Errors confined to samples
-this does not look at. And a label path that is wrong in a way that is ALSO wrong in the same way here,
-which is why the geometry is taken from the builder rather than recomputed.
+WHAT WAS ESTABLISHED. One circular identity, which rules a field out rather than proving anything:
 
-Usage:
-  check_labels_roundtrip.py --file <dataset.npz> [--samples N] [--seed S]
-  check_labels_roundtrip.py --dir <datasets dir> [--samples N]
+  * `bits` is reproduced EXACTLY by `synth.encode_symbols(tb_bits, ...)` -- 4752/4752 on three
+    samples of two sizes. Circular as a correctness check, since it is the same code, but it rules
+    out the field meaning something other than the codeword.
 
-Exit status is 0 when the sampled codewords satisfy their syndromes, 1 when they do not.
+WHAT WAS RULED OUT, so that nobody repeats it:
+
+  1. `bits` meaning something other than the codeword     -- no, bit-exact.
+  2. The element map's coordinates lacking the allocation offset
+                                                          -- fixed: the channel runs 96..167, which
+                                                             is first_prb*12. With the offset all
+                                                             792 elements are finite and |X/H| has
+                                                             a median of 0.948, so the equalised
+                                                             plane looks right.
+  3. `X/H` differing from the symbols by a complex scalar -- no: three combinations (X/H, X, X*H)
+                                                             all give a relative error near 1.
+  4. Pairing in `data_pos` order rather than `ulsch_pos`  -- no: same error either way.
+  5. The grid being symbol-major rather than subcarrier-major
+                                                          -- no: same error either way.
+
+WHAT REMAINS. What `X`'s grid channels actually contain. `build_clean` places the symbols at
+`data_pos`, times the channel, over a `[symbol, subcarrier]` grid; the stored plane is
+`[subcarrier, symbol]` after the reference amplitude is divided out. One of those statements is not
+what the stored array follows, and it cannot be settled by trying combinations -- it has to be read
+from the code that writes `X`, which is a few lines in `build_depth3_dataset.py`.
+
+THE HONEST SUMMARY. This line of work did not produce a working check. It produced a list of five
+things that are not the explanation, one circular identity worth keeping, and a clear statement of
+where to look next. The audit still cannot verify a label, which is where it started.
+
+Usage (it runs, it just does not conclude anything):
+  probe_label_roundtrip_deadend.py --file <dataset.npz> [--samples N]
 """
 import argparse
 import glob
