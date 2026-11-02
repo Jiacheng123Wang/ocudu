@@ -4870,3 +4870,65 @@ ps ax | grep "[o]pen5gs-amfd" ; ss -lunp | grep 38412   # ← 确认
 
 ★ 状态 ✓：★ **`amf.yaml` 配置正确（sbi 127.0.0.5、ngap 192.168.31.211）** ✓；★ **二进制可运行、配置可解析** ✓；
 ★ **无 systemd 单元 ⇒ 脚本是唯一入口 ⇒ 漏 AMF 就是致命的** ✓；★★★ **结论：配置无误，错在脚本（缺 `amfd`、重 `scpd`/`nrfd`）** ✓。
+
+**⇒ 2026-11-03 03:15 用户："AMF 是单独启动的，重启 CN 后手机飞起来了，但错误原因仍不明" —— **读了源码，机制现在完全清楚****
+
+**(a) ★★★★★ 那条 `Expectation` 的确切来源**（源码逐行）
+
+**⇒ `src/amf/amf-sm.c:750-752`**：
+```c
+r = nas_5gs_send_gmm_reject_from_sbi(amf_ue, OGS_SBI_HTTP_STATUS_GATEWAY_TIMEOUT);
+ogs_expect(r == OGS_OK);          // ← 就是这一行打了 ERROR
+ogs_assert(r != OGS_ERROR);
+```
+**⇒ ★★ 而它调的函数在 `src/amf/nas-path.c:972`**：
+```c
+ran_ue = ran_ue_find_by_id(amf_ue->ran_ue_id);
+if (!ran_ue) {
+    ogs_error("[%s] NG context has already been removed", amf_ue->supi);   // ← 日志里那一行
+    return OGS_NOTFOUND;                                                     // ← 返回 NOTFOUND，不是 OK
+}
+```
+**⇒ ⇒ ⇒ 所以**：★ **`r == OGS_NOTFOUND` ⇒ `ogs_expect(r == OGS_OK)` 失败 ⇒ 打 ERROR** ✓
+**⇒ ★★ 而 `ogs_assert(r != OGS_ERROR)` **没有**触发（`NOTFOUND ≠ ERROR`）⇒ **这一条不是致命错** ✓✓
+
+**(b) ★★★★ 完整因果链（现在每一环都有出处）**
+
+| 步 | ★ 事件 | ★ 出处 |
+|---|---|---|
+| 1 | ★★ **SBI 对端返回 **`504 Gateway Timeout`**** ✓ | **`OGS_SBI_HTTP_STATUS_GATEWAY_TIMEOUT` 是写死在调用里的常量** ✓ |
+| 2 | ★ **AMF 想给 UE 发 **GMM Reject**（带该状态码）** ✓ | **`nas_5gs_send_gmm_reject_from_sbi(...)`** ✓ |
+| 3 | ★★★ **但 **NG 上下文已经没了**（**UE 在 21:49:26 被释放 ✓**）** ⇒ **`ran_ue_find_by_id` 返回 NULL** ✓ | **`nas-path.c:972`** ✓ |
+| 4 | ★★ **返回 `OGS_NOTFOUND` ⇒ `ogs_expect` 失败 ⇒ ERROR** ✓ | **`amf-sm.c:751`** ✓ |
+| 5 | ★★ **`SBI transaction has already been removed`** ⇒ **事务也被清了** ✓ | **`lib/sbi/path.c:108`** ✓ |
+
+**⇒ ⇒ ⇒ 即**：★ **SBI 链（AMF → SCP → AUSF → UDM ✓）**超时（504 ✓）** ⇒
+**⇒ ★★ 而 AMF 想"礼貌地拒掉这个 UE"时 ✓，发现 UE 的 NG 上下文**已经被释放了** ✓ ⇒ **于是打了一条 ERROR** ✓**
+
+**(c) ★★★ 所以"错误的原因"其实是**两层****
+
+**⇒ ① **触发层**：★ **SBI 那一跳超时失败（504）** ✓ —— **AMF → SCP → AUSF → UDM 里某一跳没在时限内答复** ✓
+**⇒ ★★ ② **表现层**：★ **AMF 的错误处理路径**假定"NG 上下文还在"** ✓ ⇒ **UE 已经被释放时，它无从发送拒绝消息** ✓ ⇒ **打 ERROR 并返回 NOTFOUND** ✓
+**⇒ ⇒ ★★★ 而这两层之间有一个**时间差**：★ **UE 在 21:49:26 就被释放了 ✓，而 504 到 21:49:32 才回来 ✓** ⇒ **晚了 6.9 秒** ✓
+
+**(d) ★★ 关键结论：**这条 ERROR 不是崩溃，是"迟到的错误处理"****
+
+**⇒ ★ `ogs_expect` 在 Open5GS 里**只记日志、不中止** ✓（**`ogs_assert` 才会** ✓）**
+**⇒ ★★ 所以 21:49 那一刻 AMF **未必**死了 ✓ —— **它更可能是之后被 `pkill open5gs-` 或重启带走的** ✓
+**⇒ ⇒ 而这与"AMF 单独启动、重启后手机能飞"**并不矛盾** ✓ ✓
+
+**(e) ★★★ 下一步该查的（要抓的是**504 的来源**，不是这条 ERROR）**
+
+| # | ★ 查什么 | ★ 为什么 |
+|---|---|---|
+| **1** | ★★ **`scpd` 的终端输出**（**22:00 前后 ✓**）| ★ **它经手每一条 SBI ✓ ⇒ 能看出 504 是**谁**回的** ✓ |
+| **2** | ★ **`ausfd` / `udmd` 的终端** | ★ **它们有没有收到认证请求** ✓ |
+| **3** | ★★ **SCP 的配置**（`scp.yaml` 里 AUSF/UDM 的目标地址 ✓）| ★ **若指向了错的/慢的地址 ⇒ 504** ✓ |
+| **4** | ★ **那 3 秒是谁释放的** | ★★ **`UE Context Release [Action:2]` 是 **gNB 发起**的 ✓ ⇒ **N2 侧先放弃** ✓ ⇒ **可能 UE 的 RRC 掉了** ✓ |
+
+**⇒ ⇒ ★★ 而若这条 ERROR **只在重启瞬间出现一次、之后不再出现** ✓，那它**就是这个机制的正常表现** ✓ ——
+**要修的是**"UE 为什么 3 秒就放弃"** 与 **"SBI 为什么 504"**，**不是这条 ERROR 本身** ✓
+
+★ 状态 ✓：★★ **`Expectation` 的确切来源已用源码定位（`amf-sm.c:751` ＋ `nas-path.c:972`）** ✓；
+★★ **因果链五步全部有出处：504 ⇒ 想发 GMM Reject ⇒ NG 上下文已释放 ⇒ NOTFOUND ⇒ ERROR** ✓；
+★★ **`ogs_expect` 只记日志不中止 ⇒ 这条 ERROR 不是崩溃** ✓；★ **下一步该抓的是 504 的来源与"3 秒释放"** ✓。
