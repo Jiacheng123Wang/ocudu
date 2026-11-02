@@ -777,6 +777,15 @@ def main():
                              "pilots; what changes is where the sample transmits its DM-RS. Used to "
                              "manufacture a modulation x pattern cell the corpus has no transmission of")
     parser.add_argument("--max-units", type=int, default=0)
+    # CHUNKING, for the legs whose single (modulation, source) population is too large to build in
+    # one process: the candidate list is cut into contiguous slices and each slice is built on its
+    # own, then the parts are merged in order. Contiguous is deliberate -- concatenating part 0..k-1
+    # reproduces the unchunked sample order exactly. --count-only reports the list length and exits
+    # so the caller can choose k without building twice.
+    parser.add_argument("--count-only", action="store_true",
+                        help="print the candidate count and exit, without building")
+    parser.add_argument("--chunk-index", type=int, default=0)
+    parser.add_argument("--chunk-count", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20261013)
     parser.add_argument("--selfcheck", action="store_true")
     args = parser.parse_args()
@@ -818,6 +827,14 @@ def main():
         units = kept
     if args.max_units:
         units = units[:args.max_units]
+    if args.count_only:
+        print(len(units))
+        return 0
+    if args.chunk_count < 1 or not (0 <= args.chunk_index < args.chunk_count):
+        parser.error("--chunk-index must be in 0..--chunk-count-1 and --chunk-count >= 1")
+    if args.chunk_count > 1:
+        per = -(-len(units) // args.chunk_count)
+        units = units[args.chunk_index * per:(args.chunk_index + 1) * per]
     print(f"{len(units)} candidate units (CRC OK, {args.modulation}, contiguous allocation, "
           f"slot >= {args.min_slot}, width >= {args.min_prb} PRB)")
 
