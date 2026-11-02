@@ -36,6 +36,14 @@ Outputs, per modulation:
 Axis convention: inputs are `[symbol, subcarrier]`, as the chain and the captured files lay them
 out. Contract outputs are `[subcarrier, channel]`, as the model's spatial axes require.
 
+The data resource elements are not every element of every data symbol. A reception that
+multiplexes control information on the shared channel loses some of them to CSI Part 1 and to
+HARQ-ACK of more than two bits, and HARQ-ACK of one or two bits leaves its own elements in the
+shared channel's length but overwrites their symbols. `pusch_uci` reproduces the chain's map, and
+every function below that walks the data elements takes its `uci` layout: `label_plane` and
+`llr_gather` must scatter and gather over the SAME elements, and a label plane that disagrees with
+the symbol path trains a model against labels that are not there.
+
 Two conventions are silent failure modes, so they are stated here and asserted in `--selfcheck`:
 
 * the LLR is in the SCRAMBLING domain and positive means bit 0 (`log_likelihood_ratio.h:22-25`),
@@ -54,6 +62,7 @@ import argparse
 import numpy as np
 
 import dmrs as DV
+import pusch_uci as UCI
 
 NOF_SYMBOLS = 14
 NOF_SUBCARRIERS = 612
@@ -146,21 +155,21 @@ def llr_channel_cond(symbol, bit):
     return int(symbol) * COND_STRIDE + int(bit)
 
 
-def llr_valid_mask_cond(alloc_prb, dmrs_symbols, modulation):
+def llr_valid_mask_cond(alloc_prb, dmrs_symbols, modulation, uci=None):
     """Boolean mask of the conditioned head's channels that carry a coded bit for this modulation."""
     mask = np.zeros((NOF_SUBCARRIERS, llr_channels_cond()), dtype=bool)
-    data = data_re_mask(alloc_prb, dmrs_symbols)
+    data = data_re_mask(alloc_prb, dmrs_symbols, uci)
     qm = BITS_PER_SYMBOL[modulation]
     for symbol in range(NOF_SYMBOLS):
         mask[:, symbol * COND_STRIDE:symbol * COND_STRIDE + qm] = data[:, symbol][:, None]
     return mask
 
 
-def label_plane_cond(bits, alloc_prb, dmrs_symbols, modulation):
+def label_plane_cond(bits, alloc_prb, dmrs_symbols, modulation, uci=None):
     """`label_plane` in the conditioned layout: the same scatter with a stride of COND_STRIDE."""
     qm = BITS_PER_SYMBOL[modulation]
     bits = np.asarray(bits)
-    subcarriers, symbols = data_re_indices(alloc_prb, dmrs_symbols)
+    subcarriers, symbols = data_re_indices(alloc_prb, dmrs_symbols, uci)
     if len(bits) != subcarriers.size * qm:
         raise ValueError(f"{len(bits)} bits for {subcarriers.size * qm} data bits in this allocation")
     resource_element = np.arange(len(bits)) // qm
@@ -170,17 +179,17 @@ def label_plane_cond(bits, alloc_prb, dmrs_symbols, modulation):
     return plane
 
 
-def llr_gather_cond(plane, alloc_prb, dmrs_symbols, modulation):
+def llr_gather_cond(plane, alloc_prb, dmrs_symbols, modulation, uci=None):
     """`llr_gather` in the conditioned layout: the inverse of `label_plane_cond`, and the arm's rule."""
     qm = BITS_PER_SYMBOL[modulation]
-    subcarriers, symbols = data_re_indices(alloc_prb, dmrs_symbols)
+    subcarriers, symbols = data_re_indices(alloc_prb, dmrs_symbols, uci)
     channels = (symbols[:, None] * COND_STRIDE + np.arange(qm)[None, :]).reshape(-1)
     return np.asarray(plane[subcarriers.repeat(qm), channels], dtype=np.float32)
 
 
-def loss_weights_cond(alloc_prb, dmrs_symbols, modulation):
+def loss_weights_cond(alloc_prb, dmrs_symbols, modulation, uci=None):
     """Per-channel BCE weights for the conditioned head: zero outside this modulation's channels."""
-    return llr_valid_mask_cond(alloc_prb, dmrs_symbols, modulation).astype(np.float32)
+    return llr_valid_mask_cond(alloc_prb, dmrs_symbols, modulation, uci).astype(np.float32)
 
 # Input value mapped to LLR_MAX by the chain's quantizer, per modulation
 # (`demodulation_mapper_*.cpp`).
@@ -476,60 +485,82 @@ def llr_channel(symbol, bit, modulation):
     return int(symbol) * BITS_PER_SYMBOL[modulation] + int(bit)
 
 
-def data_re_mask(alloc_prb, dmrs_symbols):
-    """Boolean `[subcarrier, symbol]` mask of the REs that carry data.
+def data_re_mask(alloc_prb, dmrs_symbols, uci=None):
+    """Boolean `[subcarrier, symbol]` mask of the REs that carry a shared-channel symbol.
 
     A DM-RS symbol carries no data when the CDM groups without data cover the allocation, which
     is the configured case (`nof_cdm_groups_without_data = 2`): its even offsets are pilots and
-    its odd offsets are reserved.
+    its odd offsets are reserved. `uci` additionally removes the elements the control parts take,
+    including the ones HARQ-ACK of one or two bits overwrites.
     """
     allocated = allocated_subcarriers(alloc_prb)
     mask = np.zeros((NOF_SUBCARRIERS, NOF_SYMBOLS), dtype=bool)
-    for symbol in range(NOF_SYMBOLS):
-        if symbol in set(int(s) for s in dmrs_symbols):
-            continue
-        mask[:, symbol] = allocated
+    dmrs = set(int(s) for s in dmrs_symbols)
+    if uci is None or uci.is_empty:
+        for symbol in range(NOF_SYMBOLS):
+            if symbol in dmrs:
+                continue
+            mask[:, symbol] = allocated
+        return mask
+    # `pusch_uci` works in the allocation's own coordinates; the plane uses absolute subcarriers.
+    # The chain's demultiplexer indexes its elements 0..nof_prb*12-1, so the layout is only defined
+    # for a contiguous allocation.
+    prbs = sorted(int(p) for p in alloc_prb)
+    if prbs != list(range(prbs[0], prbs[0] + len(prbs))):
+        raise ValueError(f"the control layout needs a contiguous allocation, not {prbs[:3]}...")
+    absolute = np.flatnonzero(allocated)
+    _, data_pos, _, _, _ = UCI.data_positions(len(alloc_prb), NOF_SYMBOLS, sorted(dmrs), uci)
+    for symbol, subcarrier in data_pos:
+        mask[absolute[subcarrier], symbol] = True
     return mask
 
 
-def data_re_indices(alloc_prb, dmrs_symbols):
+def data_re_indices(alloc_prb, dmrs_symbols, uci=None):
     """The data resource elements in the chain's order, as `(subcarrier, symbol)` index arrays.
 
     Symbol major, then ascending allocated subcarrier, which is the order the chain maps
     rate-matched bits onto resource elements. Both `label_plane` and `llr_gather` walk this order,
-    so they stay exact inverses.
+    so they stay exact inverses. `uci` restricts the walk to the elements that carry a
+    shared-channel symbol.
     """
     dmrs = set(int(s) for s in dmrs_symbols)
     subcarriers = np.flatnonzero(allocated_subcarriers(alloc_prb))
-    symbols = np.concatenate([np.full(subcarriers.size, symbol, dtype=np.int64)
-                              for symbol in range(NOF_SYMBOLS) if symbol not in dmrs])
-    return np.tile(subcarriers, NOF_SYMBOLS - len(dmrs)), symbols
+    mask = data_re_mask(alloc_prb, dmrs_symbols, uci)
+    rows, columns = [], []
+    for symbol in range(NOF_SYMBOLS):
+        if symbol in dmrs:
+            continue
+        kept = mask[subcarriers, symbol]
+        rows.append(subcarriers[kept])
+        columns.append(np.full(int(kept.sum()), symbol, dtype=np.int64))
+    return np.concatenate(rows), np.concatenate(columns)
 
 
-def llr_valid_mask(alloc_prb, dmrs_symbols, modulation):
+def llr_valid_mask(alloc_prb, dmrs_symbols, modulation, uci=None):
     """Boolean `[subcarrier, 14 * Qm]` mask of the LLR channels that carry a coded bit."""
     mask = np.zeros((NOF_SUBCARRIERS, llr_channels(modulation)), dtype=bool)
-    data = data_re_mask(alloc_prb, dmrs_symbols)
+    data = data_re_mask(alloc_prb, dmrs_symbols, uci)
     qm = BITS_PER_SYMBOL[modulation]
     for symbol in range(NOF_SYMBOLS):
         mask[:, symbol * qm:(symbol + 1) * qm] = data[:, symbol][:, None]
     return mask
 
 
-def label_plane(bits, alloc_prb, dmrs_symbols, modulation):
+def label_plane(bits, alloc_prb, dmrs_symbols, modulation, uci=None):
     """Scatter the chain's coded bits into the contract's label plane.
 
     `bits` is the SCRAMBLED coded bit sequence, in the order the chain consumes it: symbol major
-    over the non-DM-RS symbols, then ascending allocated subcarrier, then the `Qm` bits of that
-    RE with the bit index fastest. This is the order `synth.encode_symbols` produces, because its
-    `data_pos` walk is the same walk.
+    over the elements that carry a shared-channel symbol, then ascending allocated subcarrier, then
+    the `Qm` bits of that RE with the bit index fastest. This is the order
+    `synth.encode_symbols` produces, because its `data_pos` walk is the same walk, and `uci`
+    restricts it to the same elements the control payload leaves.
 
     The plane holds `1 - b`, not `b`: the chain's convention is that a POSITIVE LLR means bit 0,
     so a network trained with `z` as the logit of label `1 - b` has `z` as the LLR directly. A
     plane holding `b` instead would invert every LLR and only look like "it does not train".
     """
     qm = BITS_PER_SYMBOL[modulation]
-    expected = int(data_re_mask(alloc_prb, dmrs_symbols).sum()) * qm
+    expected = int(data_re_mask(alloc_prb, dmrs_symbols, uci).sum()) * qm
     bits = np.asarray(bits)
     if len(bits) != expected:
         raise ValueError(f"{len(bits)} bits for {expected} data bits in this allocation")
@@ -538,7 +569,7 @@ def label_plane(bits, alloc_prb, dmrs_symbols, modulation):
     # of that resource element with the bit index fastest. Building the two index arrays that walk
     # that order keeps the operation vectorized: a training batch is tens of thousands of entries,
     # and a Python loop over them costs more than the forward pass.
-    subcarriers, symbols = data_re_indices(alloc_prb, dmrs_symbols)
+    subcarriers, symbols = data_re_indices(alloc_prb, dmrs_symbols, uci)
     nof_re = subcarriers.size
     if len(bits) != nof_re * qm:
         raise ValueError(f"{len(bits)} bits for {nof_re * qm} data bits in this allocation")
@@ -549,14 +580,15 @@ def label_plane(bits, alloc_prb, dmrs_symbols, modulation):
     return plane
 
 
-def llr_gather(plane, alloc_prb, dmrs_symbols, modulation):
+def llr_gather(plane, alloc_prb, dmrs_symbols, modulation, uci=None):
     """Gather a model's LLR plane into the chain's codeword order.
 
     This is the seam's gather rule. It is the inverse of `label_plane`, and `--selfcheck` asserts
     that, so a model scored through this function is scored in the order the LDPC decoder reads.
+    `uci` selects the same elements `label_plane` scattered into.
     """
     qm = BITS_PER_SYMBOL[modulation]
-    subcarriers, symbols = data_re_indices(alloc_prb, dmrs_symbols)
+    subcarriers, symbols = data_re_indices(alloc_prb, dmrs_symbols, uci)
     channels = (symbols[:, None] * qm + np.arange(qm)[None, :]).reshape(-1)
     return np.asarray(plane[subcarriers.repeat(qm), channels], dtype=np.float32)
 
@@ -575,13 +607,14 @@ def llr_from_logits(logits, modulation, scale=None):
     return np.rint(clipped / range_limit * LLR_MAX).astype(np.int8)
 
 
-def loss_weights(alloc_prb, dmrs_symbols, modulation):
+def loss_weights(alloc_prb, dmrs_symbols, modulation, uci=None):
     """Per-channel weights for the BCE: one on the data REs, zero everywhere else.
 
     The DM-RS symbols carry no data, so their `2 * Qm` channels hold no target. Training on them
-    would teach the network to predict noise.
+    would teach the network to predict noise, and the same holds for the elements the control
+    payload takes.
     """
-    return llr_valid_mask(alloc_prb, dmrs_symbols, modulation).astype(np.float32)
+    return llr_valid_mask(alloc_prb, dmrs_symbols, modulation, uci).astype(np.float32)
 
 
 def selfcheck():
@@ -733,6 +766,46 @@ def selfcheck():
     # A zero logit plane is one half, which the loss unit check relies on.
     zeros = np.zeros((NOF_SUBCARRIERS, llr_channels(modulation)), dtype=np.float32)
     assert llr_gather(zeros, alloc_prb, dmrs_symbols, modulation).size == nof_bits
+
+    # ---- a control payload: the same scatter, gather and mask over fewer elements ---------------
+    #
+    # The layout is what the dataset stores and what the builder derived from the capture sidecar:
+    # HARQ-ACK of four bits taking twenty elements (removed from the shared channel) and CSI Part 1
+    # taking thirty-one. A second layout places HARQ-ACK of one bit, which does NOT shorten the
+    # codeword: the thirteen elements it overwrites consume bits and carry a placeholder instead.
+    for uci in (UCI.UciLayout(nof_harq_ack=4, nof_ack_re=20, nof_ack_rvd_re=0, nof_csi1_re=31),
+                UCI.UciLayout(nof_harq_ack=1, nof_ack_re=13, nof_ack_rvd_re=26, nof_csi1_re=0)):
+        data_mask = data_re_mask(alloc_prb, dmrs_symbols, uci)
+        removed = int(data_re_mask(alloc_prb, dmrs_symbols).sum() - data_mask.sum())
+        expected_removed = uci.nof_ack_re + uci.nof_csi1_re
+        assert removed == expected_removed, (removed, expected_removed)
+        subcarriers, symbols = data_re_indices(alloc_prb, dmrs_symbols, uci)
+        assert subcarriers.size == int(data_mask.sum())
+        bits = rng.integers(0, 2, size=subcarriers.size * qm).astype(np.float32)
+        label = label_plane(bits, alloc_prb, dmrs_symbols, modulation, uci)
+        # Every scattered position is a data element with a control-free neighbour set: the plane
+        # must be empty wherever the mask is, which is the assertion a label path that ignored the
+        # control payload fails.
+        occupied = np.zeros(data_mask.shape, dtype=bool)
+        occupied[subcarriers[np.arange(bits.size) // qm],
+                 symbols[np.arange(bits.size) // qm]] = True
+        assert not np.any(occupied & ~data_mask), "a label fell on a control element"
+        assert np.array_equal(llr_gather(label, alloc_prb, dmrs_symbols, modulation, uci),
+                              1.0 - bits), "the UCI label plane does not round trip"
+        valid = np.asarray(llr_valid_mask(alloc_prb, dmrs_symbols, modulation, uci), dtype=bool)
+        assert np.array_equal(valid[:, 0::qm], data_mask), "the valid mask is not the data mask"
+        assert int(valid.sum()) == bits.size, "the valid mask does not cover the scattered bits"
+        assert loss_weights(alloc_prb, dmrs_symbols, modulation, uci).sum() == bits.size
+        conditioned = label_plane_cond(bits, alloc_prb, dmrs_symbols, modulation, uci)
+        assert llr_gather_cond(conditioned, alloc_prb, dmrs_symbols, modulation,
+                               uci).size == bits.size
+        conditioned_valid = llr_valid_mask_cond(alloc_prb, dmrs_symbols, modulation, uci)
+        assert int(conditioned_valid.sum()) == bits.size
+        # The channels the modulation does not use are masked out of the conditioned head.
+        unused = np.ones(llr_channels_cond(), dtype=bool)
+        for symbol in range(NOF_SYMBOLS):
+            unused[symbol * COND_STRIDE:symbol * COND_STRIDE + qm] = False
+        assert not conditioned_valid[:, unused].any()
 
     print(f"depth3 selfcheck: plane {plane.shape}, r={r:.4f}, {nof_bits} coded bits, "
           f"{llr_channels(modulation)} LLR channels, all fields round trip")

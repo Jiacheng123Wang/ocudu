@@ -19,6 +19,11 @@ What has to be right, and why each one was wrong at least once
   Passing the BWP width over-counts the data REs and changes the rate-matching length.
 * **The reserved REs** - with two CDM groups without data, the odd subcarrier offsets of a
   DM-RS symbol carry no data and measure ~1e-4 of the pilot power, so they stay at zero.
+* **The control elements** - a reception that multiplexes control information on the shared channel
+  does not carry the shared channel on every element of a data symbol, and it does not scramble it
+  from the sequence's own start (`pusch_uci`). Laying the shared channel over the whole allocation
+  is only right when there is no control information, which is why every unit that carried some was
+  rejected or, worse, admitted with labels that correlate with nothing.
 
 Three of those four are invisible whenever the allocation starts at PRB 0, and the slot one is
 invisible below 20 slots per frame. That coincidence has now hidden a bug three times in this
@@ -36,7 +41,7 @@ SLOTS_PER_FRAME_30KHZ = 20
 
 
 def encode_symbols(tb_bits, n_prb, n_syms, mod, dmrs_mask, n_id, rnti, rv, n_layers=1,
-                   return_bits=False):
+                   return_bits=False, uci=None):
     """Re-encode a transport block into the transmitted data symbols.
 
     Follows the same primitive chain as `build_labels.build_label` (segment -> LDPC encode ->
@@ -54,16 +59,23 @@ def encode_symbols(tb_bits, n_prb, n_syms, mod, dmrs_mask, n_id, rnti, rv, n_lay
     because modulation is not invertible from the symbols back to the bits. Callers that only
     want the symbols keep the two-value return.
 
+    `uci` is the reception's control payload (`pusch_uci.UciLayout`) or None when there is none.
+    It removes the elements the control parts take, shortens the codeword by the ones they REMOVE
+    rather than puncture, and moves the scrambling to each element's position in the full
+    allocation. `data_pos` is the elements that carry a shared-channel symbol, and the returned bits
+    are the scrambled symbols' bits in that same order.
+
     Returns (symbols, data_pos) or (symbols, data_pos, scrambled).
     """
     import build_labels as BL
+    import pusch_uci as UCI
 
-    n_sc = n_prb * NOF_SUBCARRIERS_PER_RB
     dmrs_syms = [s for s in range(NOF_SYMBOLS) if (dmrs_mask >> s) & 1]
-    data_pos = [(s, sc) for s in range(n_syms) if s not in dmrs_syms for sc in range(n_sc)]
+    layout = UCI.data_layout(n_prb, n_syms, dmrs_syms, mod, uci)
+    data_pos = layout.data_pos
 
     code_blocks, bg, zc, kb, e_total, lengths = codeblock_layout(tb_bits, n_prb, n_syms, mod,
-                                                                dmrs_mask)
+                                                                dmrs_mask, uci, layout=layout)
 
     coded = []
     for index, e_cb in enumerate(lengths):
@@ -75,15 +87,15 @@ def encode_symbols(tb_bits, n_prb, n_syms, mod, dmrs_mask, n_id, rnti, rv, n_lay
             BL.rate_match(codeword, len(code_blocks[index]), kb, zc, e_cb, rv, bg), mod))
     assert len(coded) == e_total, f"E mismatch {len(coded)} vs {e_total}"
 
-    scrambled = BL.scramble(coded, (rnti << 15) + n_id)
-    symbols = np.array(BL.modulate(scrambled, mod), dtype=np.complex64)
+    scrambled = UCI.scramble(coded, layout, (rnti << 15) + n_id)
+    symbols = np.array(BL.modulate(scrambled.tolist(), mod), dtype=np.complex64)
     assert len(symbols) == len(data_pos)
     if return_bits:
-        return symbols, data_pos, np.asarray(scrambled, dtype=np.uint8)
+        return symbols, data_pos, scrambled
     return symbols, data_pos
 
 
-def codeblock_layout(tb_bits, n_prb, n_syms, mod, dmrs_mask):
+def codeblock_layout(tb_bits, n_prb, n_syms, mod, dmrs_mask, uci=None, layout=None):
     """The codeblock segmentation and rate-matching geometry of one transmission.
 
     Returns `(code_blocks, bg, zc, kb, e_total, lengths)`:
@@ -91,7 +103,10 @@ def codeblock_layout(tb_bits, n_prb, n_syms, mod, dmrs_mask):
     * `code_blocks` are the segmented blocks, each with its own CRC, in transmission order;
     * `bg` and `zc` are the LDPC base graph and lifting size the rate matching uses;
     * `kb` is the information length INCLUDING the filler, i.e. where the parity starts;
-    * `e_total` is the number of coded bits the allocation carries;
+    * `e_total` is the number of coded bits the shared channel carries: the allocation's elements
+      less the ones the control parts remove. A control part that PUNCTURES instead (HARQ-ACK of one
+      or two bits) leaves `e_total` alone; the symbols it occupies are dropped from `data_pos`
+      rather than from the codeword (`pusch_uci`);
     * `lengths` is the rate-matched length of each code block. The short blocks absorb the
       remainder, so the split is not `e_total / nof_blocks`.
 
@@ -102,10 +117,12 @@ def codeblock_layout(tb_bits, n_prb, n_syms, mod, dmrs_mask):
     `n_prb` is the ALLOCATION width, in the allocation's own coordinates.
     """
     import build_labels as BL
+    import pusch_uci as UCI
 
-    n_sc = n_prb * NOF_SUBCARRIERS_PER_RB
     dmrs_syms = [s for s in range(NOF_SYMBOLS) if (dmrs_mask >> s) & 1]
-    e_total = (n_syms - len(dmrs_syms)) * n_sc * mod
+    if layout is None:
+        layout = UCI.data_layout(n_prb, n_syms, dmrs_syms, mod, uci)
+    e_total = layout.e_total
 
     code_blocks = BL.segment(tb_bits)
     nof_cb = len(code_blocks)

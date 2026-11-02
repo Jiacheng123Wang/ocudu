@@ -80,7 +80,7 @@ def max_log_llr(symbols, noise_variances, qm):
     return llr.reshape(-1)
 
 
-def genie_llr(plane, channel, sigma2_over_r2, alloc, dmrs_symbols, modulation):
+def genie_llr(plane, channel, sigma2_over_r2, alloc, dmrs_symbols, modulation, uci=None):
     """Zero-forcing LLRs from the true channel, in the chain's codeword order.
 
     `channel` is `[subcarrier, symbol]` complex and already divided by the reference amplitude,
@@ -90,7 +90,7 @@ def genie_llr(plane, channel, sigma2_over_r2, alloc, dmrs_symbols, modulation):
     # Either packing reads here: the folded plane is [subcarrier, 1, channel], the spatial one is
     # [subcarrier, symbol, channel], and both carry the same normalised grid.
     grid = D3.grid_from_plane(plane, alloc, dmrs_symbols)  # [symbol, subcarrier]
-    subcarriers, symbols = D3.data_re_indices(alloc, dmrs_symbols)
+    subcarriers, symbols = D3.data_re_indices(alloc, dmrs_symbols, uci)
     received = grid[symbols, subcarriers]
     estimate = channel[subcarriers, symbols]
     equalized = received / estimate
@@ -155,6 +155,7 @@ def evaluate(args):
         alloc = data.allocation_of(index)
         dmrs_symbols = data.dmrs_symbols_of(index)
         modulation = data.modulation_of(index)
+        uci = data.uci_of(index)
 
         plane = sample["x"]
         if args.input_quant == "bf16":
@@ -164,15 +165,15 @@ def evaluate(args):
         # trunk's internal layout is: the folded plane adds a degenerate spatial axis, so flattening
         # to two axes reads both layouts and the evaluation cannot drift with the trunk.
         llr_plane = np.asarray(outputs["llr"]).reshape(D3.NOF_SUBCARRIERS, -1)
-        network = D3.llr_gather(llr_plane * scale, alloc, dmrs_symbols, modulation)
+        network = D3.llr_gather(llr_plane * scale, alloc, dmrs_symbols, modulation, uci)
         channel = sample["ch"][:, :, 0] + 1j * sample["ch"][:, :, 1]
         genie = genie_llr(sample["x"], channel, sample["sigma2_over_r2"], alloc, dmrs_symbols,
-                          modulation)
-        perfect = D3.llr_gather(perfect_llr(sample), alloc, dmrs_symbols, modulation)
+                          modulation, uci)
+        perfect = D3.llr_gather(perfect_llr(sample), alloc, dmrs_symbols, modulation, uci)
 
-        labels = D3.llr_gather(sample["llr_shape"], alloc, dmrs_symbols, modulation)
+        labels = D3.llr_gather(sample["llr_shape"], alloc, dmrs_symbols, modulation, uci)
         valid = D3.llr_gather((sample["llr_weights"] > 0).astype(np.float32), alloc, dmrs_symbols,
-                              modulation) > 0
+                              modulation, uci) > 0
         bit_total["all"] += int(valid.sum())
         snr = float(data.data["snr_nominal"][index])
         for name, llr in (("network", network), ("genie", genie), ("perfect", perfect)):

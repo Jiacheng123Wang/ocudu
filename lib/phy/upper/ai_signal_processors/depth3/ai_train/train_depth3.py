@@ -45,6 +45,7 @@ import tensorflow as tf
 
 import dd_label as DL              # noqa: E402
 import depth3 as D3                # noqa: E402
+import pusch_uci as UCI            # noqa: E402
 import depth3_loss as L            # noqa: E402
 import ldpc_decode as LD           # noqa: E402
 import synth as SN                 # noqa: E402
@@ -276,6 +277,10 @@ class Batches:
     ARRAYS = ("X", "H", "bits", "nof_bits", "alloc_first_prb", "alloc_nof_prb", "dmrs_bitmap",
               "qm", "sigma2_over_r2", "snr_nominal", "tb_bits", "nof_tb_bits", "rnti", "n_id",
               "rv")
+    # The control payload a reception multiplexed on the shared channel, if the file carries it.
+    # A dataset built before those fields existed has no control information in its element map,
+    # and `uci_of` then returns the empty layout, which is the same map.
+    UCI_ARRAYS = ("uci_nof_harq_ack", "uci_ack_re", "uci_ack_rvd_re", "uci_csi1_re")
 
     def __init__(self, path, modulation, max_samples=0, seed=0, snr_min=None, snr_max=None, cond=False,
                  target="coded", layout="folded"):
@@ -283,6 +288,8 @@ class Batches:
         # `data["X"]` per sample would decompress the whole 200 MB array every time.
         archive = np.load(path, allow_pickle=True)
         self.data = {name: archive[name] for name in self.ARRAYS}
+        self.uci = ({name: archive[name] for name in self.UCI_ARRAYS}
+                    if self.UCI_ARRAYS[0] in archive.files else None)
         self.modulation = modulation
         self.qm = D3.BITS_PER_SYMBOL[modulation]
         # A CONDITIONED dataset feeds one model that serves every modulation: the samples carry their own Qm (the
@@ -323,22 +330,34 @@ class Batches:
     def modulation_of(self, index):
         return {v: k for k, v in D3.BITS_PER_SYMBOL.items()}[int(self.data["qm"][index])]
 
+    def uci_of(self, index):
+        """The control payload of one sample, or None when its element map holds no control."""
+        if self.uci is None:
+            return None
+        layout = UCI.UciLayout(int(self.uci["uci_nof_harq_ack"][index]),
+                               int(self.uci["uci_ack_re"][index]),
+                               int(self.uci["uci_ack_rvd_re"][index]),
+                               int(self.uci["uci_csi1_re"][index]))
+        return None if layout.is_empty else layout
+
     def sample(self, index):
         data = self.data
         alloc = self.allocation_of(index)
         dmrs_symbols = self.dmrs_symbols_of(index)
         modulation = self.modulation_of(index)
         bits = np.unpackbits(data["bits"][index])[:int(data["nof_bits"][index])]
+        uci = self.uci_of(index)
 
         plane = data["X"][index].astype(np.float32)
         channel = (data["H"][index][:, :, 0].astype(np.float32)
                    + 1j * data["H"][index][:, :, 1].astype(np.float32))
-        label = (D3.label_plane_cond(bits, alloc, dmrs_symbols, modulation) if self.cond
-                 else D3.label_plane(bits, alloc, dmrs_symbols, modulation))
+        label = (D3.label_plane_cond(bits, alloc, dmrs_symbols, modulation, uci) if self.cond
+                 else D3.label_plane(bits, alloc, dmrs_symbols, modulation, uci))
         if self.target == "genie":
-            label = genie_labels(plane, channel, alloc, dmrs_symbols, modulation, cond=self.cond)
-        llr_weights = (D3.loss_weights_cond(alloc, dmrs_symbols, modulation) if self.cond
-                       else D3.loss_weights(alloc, dmrs_symbols, modulation))
+            label = genie_labels(plane, channel, alloc, dmrs_symbols, modulation, cond=self.cond,
+                                 uci=uci)
+        llr_weights = (D3.loss_weights_cond(alloc, dmrs_symbols, modulation, uci) if self.cond
+                       else D3.loss_weights(alloc, dmrs_symbols, modulation, uci))
         # The channel head is only constrained where the allocation is, and the target is already
         # divided by the reference amplitude, which is what the head produces.
         subcarriers = np.flatnonzero(D3.allocated_subcarriers(alloc))
@@ -464,12 +483,17 @@ class CodedBler:
             raise ValueError(f"{llr_chain.size} LLRs for {transmitted.size} transmitted bits")
 
         dmrs_mask = sum(1 << s for s in dmrs_symbols)
+        uci = self.batches.uci_of(index)
         code_blocks, bg, zc, kb, e_total, lengths = SN.codeblock_layout(
-            tb_bits, len(alloc), NOF_SYMBOLS, qm, dmrs_mask)
+            tb_bits, len(alloc), NOF_SYMBOLS, qm, dmrs_mask, uci)
         rv = int(data["rv"][index])
-        sequence = np.asarray(DL.gold_seq((int(data["rnti"][index]) << 15)
-                                          + int(data["n_id"][index]), transmitted.size),
-                              dtype=np.uint8)
+        # The scrambling bits of the TRANSMITTED symbols, read at each element's position in the
+        # allocation. With no control information those positions are the codeword's own indices
+        # and this is the contiguous sequence the old code generated.
+        layout = UCI.data_layout(len(alloc), NOF_SYMBOLS, dmrs_symbols, qm, uci)
+        sequence = UCI.descrambling_sequence(layout, (int(data["rnti"][index]) << 15)
+                                             + int(data["n_id"][index]))
+        assert sequence.size == transmitted.size, (sequence.size, transmitted.size)
         descrambled = llr_chain * (1.0 - 2.0 * sequence.astype(np.float64))
         # The scrambling sequence covers the whole codeword, so the comparison below stays in the
         # descrambled domain. Re-scrambling one block on its own would restart the sequence at
@@ -561,7 +585,7 @@ def unfold_plane(plane, alloc, dmrs_symbols):
     return unfolded
 
 
-def genie_labels(plane, channel, alloc, dmrs_symbols, modulation, cond=False):
+def genie_labels(plane, channel, alloc, dmrs_symbols, modulation, cond=False, uci=None):
     """The bits a receiver with the TRUE channel would decide, in the contract's label layout.
 
     Equalize each data resource element by the true channel, take the nearest constellation point
@@ -575,7 +599,7 @@ def genie_labels(plane, channel, alloc, dmrs_symbols, modulation, cond=False):
     if not hasattr(genie_labels, "points"):
         genie_labels.points, genie_labels.labels = E.constellation(qm)
     grid = D3.unpack_input(plane, alloc, dmrs_symbols, 1)["grid"]
-    subcarriers, symbols = D3.data_re_indices(alloc, dmrs_symbols)
+    subcarriers, symbols = D3.data_re_indices(alloc, dmrs_symbols, uci)
     equalized = grid[symbols, subcarriers] / channel[subcarriers, symbols]
     nearest = np.argmin(np.abs(equalized[:, None] - genie_labels.points[None, :]), axis=1)
     bits = genie_labels.labels[nearest].reshape(-1)
@@ -1126,7 +1150,8 @@ def main():
             index = int(sample["index"])
             plane = perfect_llr(sample) if use_perfect else sample["llr_prediction"]
             bler.add(index, GATHER(plane, val.allocation_of(index),
-                                          val.dmrs_symbols_of(index), val.modulation_of(index)))
+                                          val.dmrs_symbols_of(index), val.modulation_of(index),
+                                          val.uci_of(index)))
         return bler.rate()
 
     if args.bler_check:
@@ -1139,7 +1164,7 @@ def main():
                 index = int(samples[index_sample]["index"])
                 bler.add(index, GATHER(perfect_llr(samples[index_sample]),
                                               val.allocation_of(index), val.dmrs_symbols_of(index),
-                                              val.modulation_of(index)))
+                                              val.modulation_of(index), val.uci_of(index)))
                 checked += 1
             break
         print(f"coded BLER on perfect LLRs: {bler.summary()}")
@@ -1434,7 +1459,8 @@ def main():
             index = int(sample["index"])
             plane = perfect_llr(sample) if use_perfect else sample["llr_prediction"]
             bler.add(index, GATHER(plane, val.allocation_of(index),
-                                          val.dmrs_symbols_of(index), val.modulation_of(index)))
+                                          val.dmrs_symbols_of(index), val.modulation_of(index),
+                                          val.uci_of(index)))
         return bler.rate()
 
     if args.bler_check:
@@ -1447,7 +1473,7 @@ def main():
                 index = int(samples[index_sample]["index"])
                 bler.add(index, GATHER(perfect_llr(samples[index_sample]),
                                               val.allocation_of(index), val.dmrs_symbols_of(index),
-                                              val.modulation_of(index)))
+                                              val.modulation_of(index), val.uci_of(index)))
                 checked += 1
             break
         print(f"coded BLER on perfect LLRs: {bler.summary()}")

@@ -36,6 +36,16 @@ What the file holds
     qm           [N] uint8              bits per resource element of this sample
     snr_nominal  [N] float32            the SNR the sample was built at
     source       [N] uint8              0 = real capture, 1 = synthetic
+    uci_nof_harq_ack, uci_ack_re, uci_ack_rvd_re, uci_csi1_re  [N] int32
+                                        the control payload's element map (`pusch_uci`): the
+                                        HARQ-ACK payload bits, the elements HARQ-ACK occupies, the
+                                        elements it reserves and the elements CSI Part 1 occupies.
+                                        All zero when the reception carried no control
+                                        information. Stored because the label plane has to walk
+                                        the same elements the symbol path used; a consumer that
+                                        assumed every data element carried a shared-channel symbol
+                                        would scatter the stored bits over elements the reception
+                                        did not carry them on.
     unit                        list of capture names, for traceability
 
 Usage
@@ -62,6 +72,7 @@ sys.path.insert(0, HERE)
 
 import depth3 as D3              # noqa: E402
 import dmrs as DV                # noqa: E402
+import pusch_uci as UCI          # noqa: E402
 import synth as SN               # noqa: E402
 
 sys.path.insert(0, HERE)
@@ -135,9 +146,14 @@ def data_aided_channel(grid, data_symbols, data_subcarriers, symbols, alloc_subc
     (about 3 percent here) of the noise, so the value is a slight underestimate, which is stated
     rather than corrected.
 
+    A symbol the control payload occupies only partly is observed only partly, and the fit is then
+    interpolated along time into the subcarriers it did not observe: the fit has no data beyond its
+    own support, and evaluating it there is extrapolation, not estimation.
+
     Returns `(channel, sigma2)` with the channel over the allocation subcarriers.
     """
     channel = np.zeros((NOF_SYMBOLS, len(alloc_subcarriers)), dtype=np.complex64)
+    observed = np.zeros((NOF_SYMBOLS, len(alloc_subcarriers)), dtype=bool)
     residuals = []
     for symbol in range(NOF_SYMBOLS):
         selected = data_symbols == symbol
@@ -147,8 +163,30 @@ def data_aided_channel(grid, data_symbols, data_subcarriers, symbols, alloc_subc
         observations = grid[symbol, subcarriers] / symbols[selected]
         coefficients = fit_tdl(observations, subcarriers)
         channel[symbol] = channel_from_tdl(coefficients, alloc_subcarriers)
+        observed[symbol, np.searchsorted(alloc_subcarriers, subcarriers)] = True
         residuals.append(observations - channel_from_tdl(coefficients, subcarriers))
     sigma2 = float(np.mean(np.abs(np.concatenate(residuals)) ** 2))
+
+    # A control payload can leave a symbol observed on only part of the allocation. The tapped-delay
+    # line is fitted on those subcarriers, and EVALUATING it beyond them is an extrapolation with no
+    # data behind it: measured on a 23 PRB reception whose HARQ-ACK punctured the first 76
+    # subcarriers of one symbol, the extrapolated channel correlated with the pilots at 0.18 and the
+    # sample was refused, while the same symbols filled along time correlated at 0.9988. The channel
+    # drifts slowly in time and the allocation is contiguous, so a symbol that does observe a
+    # subcarrier is the right source for the symbols that do not. A symbol observed nowhere stays
+    # zero here and is interpolated with the DM-RS symbols below.
+    fitted = np.array([symbol for symbol in range(NOF_SYMBOLS) if observed[symbol].any()],
+                      dtype=np.int64)
+    if fitted.size and not observed[fitted].all():
+        for subcarrier in np.flatnonzero(~observed[fitted].all(axis=0)):
+            column = observed[fitted, subcarrier]
+            if not column.any():
+                continue
+            values = channel[fitted, subcarrier]
+            known = np.flatnonzero(column)
+            channel[fitted, subcarrier] = (
+                np.interp(np.arange(fitted.size), known, values[known].real)
+                + 1j * np.interp(np.arange(fitted.size), known, values[known].imag))
 
     # The DM-RS symbols carry no data, so the fit above leaves them at zero -- and the DM-RS symbols are
     # exactly where `pilot_ls_consistency` looks, because that is where the pilot LS is defined. Comparing
@@ -354,6 +392,13 @@ def build_sample(name, prefix, cfg, alloc, tb_path, source, snr_db, seed, payloa
         # rate -- is chosen by us, so the label does not depend on the reference chain having
         # decoded this cell. The number of coded bits a window carries does not depend on the
         # payload, so one probe with a tiny block measures it.
+        #
+        # THE PROBE STAYS CONTROL-FREE, deliberately. The control element counts depend on the
+        # payload's own segmentation (`sum_nof_cb_size`), so a probe with a tiny block would report
+        # a map for a transport block this sample does not carry -- eight bits put the CSI formula
+        # at the alpha ceiling and would size the payload from a codeword a third of the real one.
+        # The rate this switch names is therefore the shared channel's before the control parts
+        # take their elements, and the realized one is slightly higher.
         _, _, probe = SN.encode_symbols(np.zeros(8, dtype=np.uint8), len(alloc), NOF_SYMBOLS, qm,
                                         dmrs_mask, int(cfg["n_id"]), int(cfg["rnti"]), rv,
                                         return_bits=True)
@@ -365,9 +410,17 @@ def build_sample(name, prefix, cfg, alloc, tb_path, source, snr_db, seed, payloa
         # The synthetic route chooses its own payload, so the dump only supplies the size. The
         # bits are then exact by construction, which is the whole point of building the pair.
         tb_bits = np.random.default_rng(seed).integers(0, 2, size=tb_bits.size).astype(np.uint8)
+
+    # The control payload the reception multiplexed on the shared channel. It does not change the
+    # channel or the payload; it changes WHERE the shared channel is transmitted and how long its
+    # codeword is, so it has to reach the encoder, the data-aided channel and the label plane
+    # alike. DERIVED FROM THE SAMPLE's OWN DM-RS PATTERN: `target_dmrs` manufactures a transmission
+    # that places the pilots elsewhere, and the control elements move with them.
+    uci = UCI.from_capture(cfg, tb_bits, len(alloc), dmrs_symbols, int(cfg["dmrs_type"]),
+                           int(cfg["dmrs_nof_cdm_groups_without_data"]))
     symbols, data_pos, bits = SN.encode_symbols(tb_bits, len(alloc), NOF_SYMBOLS, qm, dmrs_mask,
                                                 int(cfg["n_id"]), int(cfg["rnti"]), rv,
-                                                return_bits=True)
+                                                return_bits=True, uci=uci)
 
     sub = allocation_subcarriers(alloc)
     # The transmit positions in absolute subcarriers: `data_pos` is allocation relative and the
@@ -478,6 +531,15 @@ def build_sample(name, prefix, cfg, alloc, tb_path, source, snr_db, seed, payloa
         "dmrs_bitmap": np.uint16(dmrs_mask),
         "qm": np.uint8(qm),
         "snr_nominal": np.float32(snr_db if snr_db is not None else np.nan),
+        # The control payload, stored because the label path needs the same element map the symbol
+        # path used: a consumer that assumed every data element carried a shared-channel symbol
+        # would scatter the stored bits over elements the reception did not carry them on. Four
+        # element counts, not the payload sizes and beta offsets: those derive the counts through
+        # the transport block's segmentation, and the derivation belongs in one place.
+        "uci_nof_harq_ack": np.int32(uci.nof_harq_ack),
+        "uci_ack_re": np.int32(uci.nof_ack_re),
+        "uci_ack_rvd_re": np.int32(uci.nof_ack_rvd_re),
+        "uci_csi1_re": np.int32(uci.nof_csi1_re),
     }
     return sample, bits, grid, channel_grid, sigma2, r
 
@@ -518,7 +580,8 @@ def assemble(samples, keys_arrays):
         transport[index, :len(sample["tb_bits"])] = sample["tb_bits"]
     out["tb_bits"] = transport
     for name in ("nof_bits", "nof_tb_bits", "alloc_first_prb", "alloc_nof_prb", "dmrs_bitmap",
-                 "qm", "snr_nominal", "rnti", "n_id", "rv"):
+                 "qm", "snr_nominal", "rnti", "n_id", "rv", "uci_nof_harq_ack", "uci_ack_re",
+                 "uci_ack_rvd_re", "uci_csi1_re"):
         out[name] = np.array([s[name] for s in samples])
     out["source"] = np.array([s["source"] for s in samples], dtype=np.uint8)
     out["unit"] = np.array(keys_arrays, dtype=object)
@@ -576,19 +639,26 @@ def selfcheck(path):
                    + 1j * data["H"][index][:, :, 1].astype(np.float32)).T * scale
         sigma2 = float(data["sigma2_over_r2"][index]) * scale * scale
 
-        # Walk the data REs exactly as the contract's gather does, so a wrong bit order shows up
-        # as a residual that is nothing like the noise variance.
-        predicted = np.zeros_like(grid)
-        cursor = 0
-        for symbol in range(NOF_SYMBOLS):
-            if symbol in dmrs_symbols:
-                continue
-            for subcarrier in np.flatnonzero(D3.allocated_subcarriers(alloc)):
-                predicted[symbol, subcarrier] = channel[symbol, subcarrier] * symbols[cursor]
-                cursor += 1
-        assert cursor == len(symbols), (cursor, len(symbols))
+        # Do the samples carry a control payload? The stored element counts say so, and the label
+        # path has to be given them: the same four numbers the symbol path was built from.
+        uci = None
+        if "uci_csi1_re" in data.files:
+            uci = UCI.UciLayout(int(data["uci_nof_harq_ack"][index]),
+                                int(data["uci_ack_re"][index]),
+                                int(data["uci_ack_rvd_re"][index]),
+                                int(data["uci_csi1_re"][index]))
 
-        data_mask = D3.data_re_mask(alloc, dmrs_symbols).T
+        # Walk the data REs exactly as the contract's gather does, so a wrong bit order shows up
+        # as a residual that is nothing like the noise variance. The control payload removes
+        # elements from this walk; the bits it punctured are not in the stored sequence at all, so
+        # the walk and the bits are the same length.
+        predicted = np.zeros_like(grid)
+        data_subcarriers, data_symbols_of_re = D3.data_re_indices(alloc, dmrs_symbols, uci)
+        assert data_subcarriers.size == len(symbols), (data_subcarriers.size, len(symbols))
+        predicted[data_symbols_of_re, data_subcarriers] = (
+            channel[data_symbols_of_re, data_subcarriers] * symbols)
+
+        data_mask = D3.data_re_mask(alloc, dmrs_symbols, uci).T
         residual = np.abs(grid[data_mask] - predicted[data_mask]) ** 2
         ratio = float(residual.mean() / sigma2)
         ratios.append(ratio)
@@ -617,10 +687,11 @@ def selfcheck(path):
         tb_bits = np.unpackbits(data["tb_bits"][index])[:nof_tb]
         assert tb_bits.size == nof_tb, "the stored transport block is shorter than it claims"
 
-        # The label plane, the bits and the gather must agree in the chain's order.
-        label = D3.label_plane(bits, alloc, dmrs_symbols, modulation)
-        assert np.array_equal(D3.llr_gather(label, alloc, dmrs_symbols, modulation), 1.0 - bits), \
-            "the stored bits are not in the chain's order"
+        # The label plane, the bits and the gather must agree in the chain's order, over the
+        # elements the control payload left.
+        label = D3.label_plane(bits, alloc, dmrs_symbols, modulation, uci)
+        assert np.array_equal(D3.llr_gather(label, alloc, dmrs_symbols, modulation, uci),
+                              1.0 - bits), "the stored bits are not in the chain's order"
 
     print(f"  residual/sigma2 over {len(ratios)} checked samples: "
           f"min {min(ratios):.3f} median {np.median(ratios):.3f} max {max(ratios):.3f}")

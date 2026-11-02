@@ -22,7 +22,15 @@ import numpy as np
 
 FIELD_ORDER = ["X", "H", "r", "sigma2_over_r2", "bits", "nof_bits", "tb_bits", "nof_tb_bits",
                "rnti", "n_id", "rv", "alloc_first_prb", "alloc_nof_prb", "dmrs_bitmap",
-               "qm", "snr_nominal", "source", "pilot_ls_ratio", "unit"]
+               "qm", "snr_nominal", "source", "pilot_ls_ratio",
+               # The control payload, carried through so a drawn subset keeps the element map its
+               # label plane is built from. A file that predates the fields simply has none.
+               "uci_nof_harq_ack", "uci_ack_re", "uci_ack_rvd_re", "uci_csi1_re",
+               "unit"]
+
+#: Fields a file may predate. A dataset built before the control payload was carried has no
+#: control information in its element map, so zeros are the true value for those rows.
+OPTIONAL_FIELDS = {"uci_nof_harq_ack", "uci_ack_re", "uci_ack_rvd_re", "uci_csi1_re"}
 
 
 def load_units(path):
@@ -130,7 +138,12 @@ def main(argv):
                 raise SystemExit("input key(s) not in FIELD_ORDER: " + ", ".join(sorted(unknown)))
             idx = np.array(sorted(per_file[f]), dtype=np.int64)
             for k in FIELD_ORDER:
-                chunks[k].append(z[k][idx])
+                if k in z.files:
+                    chunks[k].append(z[k][idx])
+                elif k in OPTIONAL_FIELDS:
+                    chunks[k].append(np.zeros(idx.size, dtype=np.int32))
+                else:
+                    raise SystemExit(f"input {f} has no '{k}' column")
             z.close()
         for k in FIELD_ORDER:
             if k == "unit":

@@ -22,29 +22,34 @@ Output: labels.npz {X, Y, width, snr_train, rank} (grids padded to
 Usage: build_labels.py <capture_dir> [--pairs <pairs.npz>] [--max N]
                         [--out labels.npz] [--bucket 52|106] [--gate DB]
 """
-import os, sys, csv
+import os, sys, csv, glob
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dd_label import segment, rate_match, bit_interleave, scramble, modulate, smooth_dense
 import nr_ldpc
+import pusch_uci
 
 
 def build_label(tb_bits, rx_grid, n_prb, n_syms, n_ports, mod, dmrs_mask, n_id,
-                n_scid, scr_id, rnti, n_layers, rv):
-    """Re-encode the TB against this grant and return H [n_sc, n_syms] complex."""
+                n_scid, scr_id, rnti, n_layers, rv, uci=None):
+    """Re-encode the TB against this grant and return H [n_sc, n_syms] complex.
+
+    `uci` is the reception's control payload (`pusch_uci.UciLayout`) or None. It removes the
+    elements the control parts take and moves the scrambling to each element's position in the full
+    allocation, the same layout `synth.encode_symbols` uses. The elements without a shared-channel
+    symbol are filled from their neighbours in frequency: the channel is not observed there, and
+    leaving zero would teach the estimator that ninety-seven resource elements of the allocation
+    carry no channel at all.
+    """
     n_sc = n_prb * 12
     # Data RE layout (measured on the captured grids): all 12 REs/PRB on the
     # non-DMRS symbols; the DMRS symbols carry ONLY the pilots (both combs are
     # DMRS/reserved with 2 CDM groups without data - the odd REs measure ~0).
     dmrs_syms = [s for s in range(14) if (dmrs_mask >> s) & 1]
-    data_pos = []  # (sym, sc) in the transmission order (symbol-major, sc ascending)
-    for s in range(n_syms):
-        if s in dmrs_syms:
-            continue
-        for sc in range(n_sc):
-            data_pos.append((s, sc))
+    layout = pusch_uci.data_layout(n_prb, n_syms, dmrs_syms, mod, uci)
+    data_pos = layout.data_pos
     n_data_re = len(data_pos)
-    E_total = n_data_re * mod  # mod = the srsRAN enum = bits per symbol
+    E_total = layout.e_total  # mod = the srsRAN enum = bits per symbol
 
     tbs = len(tb_bits)
     cbs = segment(tb_bits)
@@ -84,9 +89,11 @@ def build_label(tb_bits, rx_grid, n_prb, n_syms, n_ports, mod, dmrs_mask, n_id,
         E_c = (E_sym // n_cb) * mod if c < nof_short else ((E_sym + n_cb - 1) // n_cb) * mod
         coded.extend(bit_interleave(rate_match(cw, len(cbs[c]), K_b, Zc, E_c, rv, bg), mod))
     assert len(coded) == E_total, f'E mismatch: {len(coded)} vs {E_total}'
-    # Scramble (the PUSCH data c_init has no slot term).
-    sc = scramble(coded, (rnti << 15) + n_id)
-    syms = np.array(modulate(sc, mod), dtype=np.complex64)
+    # Scramble (the PUSCH data c_init has no slot term), at each element's position in the full
+    # allocation. Without control information the positions are the codeword's own indices, so this
+    # is the contiguous scramble it replaces.
+    scrambled = pusch_uci.scramble(coded, layout, (rnti << 15) + n_id)
+    syms = np.array(modulate(scrambled.tolist(), mod), dtype=np.complex64)
     assert len(syms) == n_data_re
     # Map to the data REs; rx grid file order: [sym][port][sc] (single-port
     # captures: identical to symbol-major [sym][sc]).
@@ -94,8 +101,71 @@ def build_label(tb_bits, rx_grid, n_prb, n_syms, n_ports, mod, dmrs_mask, n_id,
     H = np.zeros((n_syms, n_sc), dtype=np.complex64)
     for i, (s, sc) in enumerate(data_pos):
         H[s, sc] = rx[s, sc] / syms[i]
+    if layout.keep.size != layout.keep.sum():
+        # The control elements carry no shared-channel symbol. Interpolate the channel across them
+        # from the elements that do, so the label stays a channel rather than a hole.
+        observed = np.zeros((n_syms, n_sc), dtype=bool)
+        for s, sc in data_pos:
+            observed[s, sc] = True
+        for s in range(n_syms):
+            if s in dmrs_syms or observed[s].all():
+                continue
+            known = np.flatnonzero(observed[s])
+            if known.size == 0:
+                continue
+            missing = np.flatnonzero(~observed[s])
+            H[s, missing] = (np.interp(missing, known, H[s, known].real)
+                             + 1j * np.interp(missing, known, H[s, known].imag))
     Hd = smooth_dense(H.T, n_sc, n_syms, [s in dmrs_syms for s in range(n_syms)], n_prb)
     return Hd  # [n_sc, n_syms]
+
+
+def sidecar_index(directory):
+    """Map `(slot, rnti)` to the capture sidecar that describes that reception.
+
+    The sidecar's file name is `<prefix>_<extended frame>_<slot>_<rnti>.txt`, so the key is read
+    off the NAME: indexing a capture directory of six figures by opening every file would cost
+    minutes, and this pipeline only needs the handful the pairs select.
+    """
+    index = {}
+    for path in glob.glob(os.path.join(directory, "*.txt")):
+        base = os.path.basename(path)[:-4]
+        if base.endswith("_ce"):
+            continue
+        parts = base.rsplit("_", 3)
+        if len(parts) != 4:
+            continue
+        try:
+            index[(int(parts[2]), int(parts[3]))] = path
+        except ValueError:
+            continue
+    return index
+
+
+def read_sidecar(path):
+    cfg = {}
+    with open(path) as handle:
+        for line in handle:
+            if "=" in line:
+                key, _, value = line.partition("=")
+                cfg[key.strip()] = value.strip()
+    return cfg
+
+
+def control_layout(path, tb_bits, n_prb, dmrs_symbols, cache):
+    """The reception's control payload, read from its sidecar and checked against the rx row."""
+    if path in cache:
+        return cache[path]
+    cfg = read_sidecar(path)
+    sidecar_dmrs = [int(x) for x in cfg["dmrs_symbols"].split(",")]
+    if sorted(sidecar_dmrs) != sorted(dmrs_symbols) or int(cfg["alloc_nof_rb"]) != n_prb:
+        raise ValueError(f"the capture sidecar describes {cfg['alloc_nof_rb']} PRB with DM-RS at "
+                         f"{sidecar_dmrs}, the rx row {n_prb} PRB with {sorted(dmrs_symbols)}: the "
+                         f"pairing is not this reception")
+    layout = pusch_uci.from_capture(cfg, tb_bits, n_prb, dmrs_symbols, int(cfg["dmrs_type"]),
+                                    int(cfg["dmrs_nof_cdm_groups_without_data"]))
+    cache[path] = layout
+    return layout
 
 
 def metric_db(Xc, Y):
@@ -135,8 +205,11 @@ def main():
         if len(r) >= 6:
             ce_snr[int(r[0])] = float(r[2])
 
+    sidecars = sidecar_index(d)
+    layouts = {}
     Xs, Ys, Ws, Ss, Rs = [], [], [], [], []
-    stats = {'none': 0, 'no_pass': 0, 'build_fail': 0, 'won_rank': {}, 'gate': 0}
+    stats = {'none': 0, 'no_pass': 0, 'build_fail': 0, 'control': 0, 'refused': None,
+             'won_rank': {}, 'gate': 0}
     for i in range(N):
         t = tb_idx[i, 0]
         tb_file = os.path.join(d, f'tb_{t:08d}_tbs{dd[t]}.bits')
@@ -159,8 +232,18 @@ def main():
                 if g.size < p * 12 * nsym * nports * 2:
                     continue
                 rx_grid = g[0::2] + 1j * g[1::2]
+                # The UCI description is not in rx_meta.csv: the dump predates the fields, so it
+                # comes from the capture sidecar of the same (slot, rnti), which the capture's own
+                # file name keys. A directory without them keeps the control-free layout.
+                uci = None
+                dmrs_symbols = [s for s in range(14) if (dmask >> s) & 1]
+                if len(row) >= 16 and (row[15], rnti) in sidecars:
+                    uci = control_layout(sidecars[(row[15], rnti)], tb_bits, p, dmrs_symbols,
+                                         layouts)
                 Y = build_label(tb_bits, rx_grid, p, nsym, nports, mod, dmask, nid,
-                                nscid, scrid, rnti, nlay, rv)
+                                nscid, scrid, rnti, nlay, rv, uci)
+                if uci is not None and not uci.is_empty:
+                    stats['control'] += 1
                 Xf = os.path.join(d, f'dump_{c:08d}_prb{p}.f32')
                 X = np.fromfile(Xf, dtype=np.float32).reshape(p * 12, 14, 2)
                 Xc = X[..., 0] + 1j * X[..., 1]
@@ -181,8 +264,9 @@ def main():
                     Yp = np.zeros((nsc_pad, 14, 2), np.float32); Yp[:p * 12] = np.stack([Y.real, Y.imag], -1)
                     accepted = (Xp, Yp, p, ce_snr.get(c, np.nan), k)
                     break
-            except Exception:
+            except Exception as error:
                 stats['build_fail'] += 1
+                stats['refused'] = stats['refused'] or f'{type(error).__name__}: {error}'[:160]
                 continue
         if accepted is None:
             stats['no_pass'] += 1
@@ -191,7 +275,10 @@ def main():
         stats['won_rank'][accepted[4]] = stats['won_rank'].get(accepted[4], 0) + 1
     done = len(Xs)
     print(f'pairs={N} done={done} skipped: tb_missing={stats["none"]} '
-          f'no_candidate_passed={stats["no_pass"]} build_fail={stats["build_fail"]}')
+          f'no_candidate_passed={stats["no_pass"]} build_fail={stats["build_fail"]} '
+          f'(candidates with control information: {stats["control"]})')
+    if stats['refused']:
+        print(f'  first build failure: {stats["refused"]}')
     print(f'accepted candidate rank histogram: {dict(sorted(stats["won_rank"].items()))}')
     if done:
         Xa = np.stack(Xs); Ya = np.stack(Ys); Wa = np.array(Ws)

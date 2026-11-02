@@ -28,6 +28,7 @@ set(DEPTH3_TEST_DIR ${CMAKE_SOURCE_DIR}/lib/phy/upper/ai_signal_processors/depth
 set(DEPTH3_CONTRACT_TESTS
     test_plane_contract          # pack_input/unpack_input round trip, both DM-RS patterns
     test_label_plane             # label scatter/gather/mask, both DM-RS patterns
+    test_uci_layout              # control element map, codeword length and scrambling position
     test_shipped_bundle_contract # what the default and rollback bundles declare
 )
 

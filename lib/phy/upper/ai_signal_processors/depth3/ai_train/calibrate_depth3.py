@@ -96,14 +96,16 @@ def main():
             alloc = data.allocation_of(index)
             dmrs_symbols = data.dmrs_symbols_of(index)
             modulation = data.modulation_of(index)
-            shape = D3.llr_gather(plane, alloc, dmrs_symbols, modulation)
+            uci = data.uci_of(index)
+            shape = D3.llr_gather(plane, alloc, dmrs_symbols, modulation, uci)
             unquantised = shape * scale
             quantised = D3.llr_from_logits(shape, modulation, scale).astype(np.float32)
             bler_unquantised.add(index, unquantised)
             bler_quantised.add(index, quantised)
 
             sample = data.sample(index)
-            labels = D3.llr_gather(sample["llr_shape"], alloc, dmrs_symbols, modulation) > 0.5
+            labels = D3.llr_gather(sample["llr_shape"], alloc, dmrs_symbols, modulation,
+                                   uci) > 0.5
             quantised_labels = quantised > 0
             errors += int((quantised_labels != labels).sum())
             total += int(labels.size)

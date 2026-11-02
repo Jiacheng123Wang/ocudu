@@ -18,7 +18,8 @@ CE_SHARED = os.path.normpath(os.path.join(
     "..", "..", "..", "signal_processors", "channel_estimator", "metal", "ai_train"))
 
 #: Modules imported from there. Kept as data so a missing one names itself.
-SHARED_MODULES = ("dmrs", "synth", "dd_label", "ldpc_decode", "nr_ldpc", "build_labels")
+SHARED_MODULES = ("dmrs", "synth", "dd_label", "ldpc_decode", "nr_ldpc", "build_labels",
+                  "pusch_uci")
 
 
 def add_ce_shared():
