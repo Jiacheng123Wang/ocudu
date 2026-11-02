@@ -4747,3 +4747,76 @@ done
 
 ★ 状态 ✓：★★ **123 数据集 / 128 万样本 / 65.3 GB，约 33 条腿完整** ✓；★ **66 与 107 都建成了"本来以为做不到"的大腿** ✓；
 ★★ **两条"约束"都不是真的（bash 原语、分块粒度）⇒ 解法都只是换原语/调粒度** ✓；★ **107 的磁盘停摆已有三道防线** ✓；★ **ETA 2.5–3 小时** ✓。
+
+---
+
+## 51. ★★★★★★ 2026-11-03 02:50 **飞不上手机的两个原因：**启动脚本重复启动 SCP/NRF，而且**根本没启动 AMF****
+
+**(a) ★★★★ 报错本身的含义**
+
+**⇒ 用户给的错误**：★ **`bind(2) [127.0.0.200]:7777 failed (98:Address already in use)`（SCP ✓）** ＋
+★ **`bind(2) [127.0.0.10]:7777 failed (98:Address already in use)`（NRF ✓）**
+
+**⇒ ⇒ 即**：★ **SCP 与 NRF 的端口**已经被别的实例占着** ✓
+
+**(b) ★★★★★ 而查了 `~/work/open5gs/start_5gc.sh`，问题一目了然**
+
+**⇒ 脚本里去重后的启动顺序**（原文行号 ✓）：
+| 行 | ★ 启动 |
+|---|---|
+| 9 | `sudo pkill open5gs-` |
+| 12 | **`nrfd`** ✓（**第 1 次**）|
+| 14 | **`scpd`** ✓（**第 1 次**）|
+| 16–17 | `ausfd`、`bsfd` |
+| ★ **18** | ★★ **`scpd`（第 2 次）** ✗ |
+| 19–22 | `nssfd`、`pcfd`、`udmd`、`udrd` |
+| ★ **23** | ★★ **`nrfd`（第 2 次）** ✗ |
+| 24–25 | `smfd`、`upfd`（sudo）|
+| — | ★★★ **`amfd` **从未出现**** ✗ |
+
+**⇒ ⇒ ⇒ 三个问题**：
+1. ★★ **`scpd` 启了两次** ⇒ **第 2 个 bind `127.0.0.200:7777` 失败** ✓ ⇒ **正是第一条报错** ✓
+2. ★★ **`nrfd` 启了两次** ⇒ **第 2 个 bind `127.0.0.10:7777` 失败** ✓ ⇒ **正是第二条报错** ✓
+3. ★★★ **`amfd` **根本没启动**** ✓ ⇒ ★★ **没有 AMF ⇒ 手机无法注册** ✗✓
+
+**(c) ★★★ 所以"飞不上手机"的直接原因**
+
+**⇒ 现在 211 上跑的 NF**：`nrf`、`scp`、`ausf`、`bsf`、`nssf`、`pcf`、`udm`、`udr`、`smf`、`upf` ✓
+**⇒ ★★★ **没有 `amfd`** ✗** ⇒ **NGAP 38412 没有人监听** ✓ ⇒ **UE 注册无从开始** ✓
+**⇒ ★ 而 21:49 那份日志里 AMF 还在 ✓ ⇒ **它是在 21:49:32 那条断言上**死掉的** ✓ ⇒ **之后重启用这个脚本，而脚本不启动它** ✗✓
+
+**(d) ★★ 一个潜在隐患**
+
+**⇒ 第 9 行 `sudo pkill open5gs-` 之后**没有等待** ✓ ⇒ **新进程可能先于旧进程退出而启动** ✓
+**⇒ ★ 这一次的报错不是它造成的**（**是重复行** ✓），**但它是一个真实的竞态** ⚠
+
+**(e) ★★★ 建议的修法（请用户执行 —— 我不跑 sudo）**
+
+```bash
+cd ~/work/open5gs
+# 1) 全部停掉，并确认真的退出了
+sudo pkill open5gs- ; sleep 2 ; ps ax | grep -c "[o]pen5gs-"
+# 2) 手动确认端口已释放（应无输出）
+ss -ltnp | grep 7777
+# 3) 重新启动（每个 NF 只启一次，并且**加上 amfd**）
+BIN=./install/bin ; CONF=./install/etc/open5gs
+$BIN/open5gs-nrfd -c $CONF/nrf.yaml &            sleep 1
+$BIN/open5gs-scpd -c $CONF/scp.yaml &            sleep 1
+$BIN/open5gs-ausfd -c $CONF/ausf.yaml &
+$BIN/open5gs-bsfd -c $CONF/bsf.yaml &
+$BIN/open5gs-nssfd -c $CONF/nssf.yaml &
+$BIN/open5gs-pcfd -c $CONF/pcf.yaml &
+$BIN/open5gs-udmd -c $CONF/udm.yaml &
+$BIN/open5gs-udrd -c $CONF/udr.yaml &
+$BIN/open5gs-smfd -c $CONF/smf.yaml &
+sudo $BIN/open5gs-upfd -c $CONF/upf.yaml &
+$BIN/open5gs-amfd -c $CONF/amf.yaml &            # ← 这一行原脚本里没有
+# 4) 确认
+ps ax | grep "[o]pen5gs-amfd" ; ss -lunp | grep 38412
+```
+
+**⇒ ★★ 另外**：★ **若装了 systemd 单元，`sudo systemctl restart open5gs-amfd` 更稳**（**它保证等旧进程退出** ✓）
+
+★ 状态 ✓：★★ **报错"Address already in use"＝脚本把 SCP 与 NRF 各启动了两次** ✓；
+★★★ **而"飞不上手机"的直接原因＝脚本**根本没有启动 AMF**（21:49 那次是它在断言上死掉的）** ✓；
+★ **`pkill` 无等待是另一个潜在竞态** ✓；★ **修法与验证命令已给（含单独的 `amfd` 启动行）** ✓。
