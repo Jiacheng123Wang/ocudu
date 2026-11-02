@@ -4820,3 +4820,53 @@ ps ax | grep "[o]pen5gs-amfd" ; ss -lunp | grep 38412
 ★ 状态 ✓：★★ **报错"Address already in use"＝脚本把 SCP 与 NRF 各启动了两次** ✓；
 ★★★ **而"飞不上手机"的直接原因＝脚本**根本没有启动 AMF**（21:49 那次是它在断言上死掉的）** ✓；
 ★ **`pkill` 无等待是另一个潜在竞态** ✓；★ **修法与验证命令已给（含单独的 `amfd` 启动行）** ✓。
+
+**⇒ 2026-11-03 03:00 用户指出配置目录 `~/work/open5gs/install/etc/open5gs` —— 查了，**配置本身没问题****
+
+**(a) ★★★ `amf.yaml` 是好的**
+
+**⇒ 关键几行**：
+| 行 | ★ 内容 |
+|---|---|
+| 11–14 | ★ **`amf.sbi.server: 127.0.0.5`** ✓ |
+| 21–23 | ★★ **`amf.ngap.server: 192.168.31.211`** ✓（**NGAP 在 LAN 地址上监听 ✓**）|
+| 25–26 | **metrics/其它在 127.0.0.5** ✓ |
+
+**⇒ ★★ 而且 `open5gs-amfd --help` 能正常输出**（**`Open5GS daemon v2.7.2-156-g8715915` ✓ ＋ `Configuration ...` ✓**）⇒
+★ **二进制是好的、配置能解析** ✓
+
+**⇒ ⇒ ⇒ 所以**：★ **问题**不在配置** ✓ —— **而在**启动脚本没有调用它**** ✓✓
+
+**(b) ★★ 配置目录的实际情况**
+
+**⇒ 19 个 `.yaml` ✓** —— ★ **每个 NF 一个 ✓**（**包括 `amf.yaml` ✓**）
+**⇒ ★★ 但没有 systemd 单元** ✗（`/etc/systemd/system/open5gs*` 与 `/lib/systemd/system/open5gs*` 都没有 ✓）
+**⇒ ⇒ 所以**：★ **只能手动启 ✓ ⇒ **脚本就是唯一入口 ⇒ 脚本漏了 AMF 就是致命的** ✓
+
+**(c) ★★★★ 结论（一句话）**
+
+> ★★★ **配置是好的、二进制是好的、`amf.yaml` 能解析 —— 唯一的错是 `start_5gc.sh` 里没有 `open5gs-amfd` 那一行，
+> 同时把 `scpd` 与 `nrfd` 各写了两遍。修这两处即可。**
+
+**(d) ★ 修法（仍请用户执行，sudo 我不跑）**
+
+```bash
+cd ~/work/open5gs
+sudo pkill open5gs- ; sleep 2                      # 停干净
+BIN=./install/bin ; CONF=./install/etc/open5gs
+$BIN/open5gs-nrfd -c $CONF/nrf.yaml &   sleep 1
+$BIN/open5gs-scpd -c $CONF/scp.yaml &   sleep 1
+$BIN/open5gs-ausfd -c $CONF/ausf.yaml &
+$BIN/open5gs-bsfd  -c $CONF/bsf.yaml &
+$BIN/open5gs-nssfd -c $CONF/nssf.yaml &
+$BIN/open5gs-pcfd  -c $CONF/pcf.yaml &
+$BIN/open5gs-udmd  -c $CONF/udm.yaml &
+$BIN/open5gs-udrd  -c $CONF/udr.yaml &
+$BIN/open5gs-smfd  -c $CONF/smf.yaml &
+sudo $BIN/open5gs-upfd -c $CONF/upf.yaml &
+$BIN/open5gs-amfd  -c $CONF/amf.yaml &            # ← 原脚本缺这一行
+ps ax | grep "[o]pen5gs-amfd" ; ss -lunp | grep 38412   # ← 确认
+```
+
+★ 状态 ✓：★ **`amf.yaml` 配置正确（sbi 127.0.0.5、ngap 192.168.31.211）** ✓；★ **二进制可运行、配置可解析** ✓；
+★ **无 systemd 单元 ⇒ 脚本是唯一入口 ⇒ 漏 AMF 就是致命的** ✓；★★★ **结论：配置无误，错在脚本（缺 `amfd`、重 `scpd`/`nrfd`）** ✓。
