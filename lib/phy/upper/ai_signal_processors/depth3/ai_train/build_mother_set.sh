@@ -209,9 +209,16 @@ for LEG in "$@"; do
   rm -rf -- "$job_dir"
 done
 
-# 4. Audit whatever landed. The checker reports sample counts, shapes, bit balance and SNR, and "findings:
-#    none" is what a good build looks like.
+# 4. Audit this leg's datasets. The checker reports sample counts, shapes, bit balance and SNR, and
+#    "findings: none" is what a good build looks like. Only THIS leg's files are audited: auditing
+#    the whole output directory after every leg re-reads every earlier dataset, and the cost grows
+#    with the square of the corpus (measured 2026-11-02: 19 GB of output already made each leg's
+#    audit minutes long, and it only gets worse). Every dataset is still audited exactly once, by
+#    the leg that produced it, and the whole directory is audited again at the end.
 echo "=== audit"
-"$PY" "$TOOLS/check_depth3_dataset.py" --dir "$OUT" 2>&1 | tail -20 | sed 's/^/  /'
+audit_dir=$(mktemp -d "${TMPDIR:-/tmp}/motherset-audit.XXXXXX")
+ln -s "$OUT"/${LEG}_*.npz "$audit_dir"/ 2>/dev/null || true
+"$PY" "$TOOLS/check_depth3_dataset.py" --dir "$audit_dir" 2>&1 | tail -20 | sed 's/^/  /'
+rm -rf -- "$audit_dir"
 
 exit $status
