@@ -167,10 +167,37 @@
 **⇒ ★★ 三个模型**全部是 0/120 QPSK、1/96 16QAM、0/59 64QAM、0/125 256QAM** ✓
 **⇒ ⇒ ⇒ 所以**：★ **"救回首传"这件事是**架构层面**的能力（**或能力的上限** ✓），**与语料无关** ✓** ✓
 
-**(a.6) ★★ 一个共同的**地板****
+**(a.6) ★★★★ 那个"地板"是**可设置的 —— 而代码自己的注释就说该这么用****
 
-**⇒ ★ **13 个 1-PRB 单元被臂**直接拒收**** ✓：★ **"the allocation is narrower than the trained envelope (2 PRB)"** ✓
+**⇒ ★ **13 个 1-PRB 单元被臂直接拒收** ✓：★ **"the allocation is narrower than the trained envelope (2 PRB)"** ✓
 **⇒ **三个模型拒收的是同样的 13 个** ✓（**全在 `≤3` PRB** ✓），**E4 对它们也是 KO** ✓ ⇒ **不是模型差异 ✓**
+
+**⇒ ⇒ ★★★ 但**这个下界有环境变量可以降**：`OCUDU_DEPTH3_MIN_PRB`** ✓
+**⇒ 实现在 `pusch_depth3_input_plane.cpp:43`** ✓：
+```cpp
+unsigned minimum_prb() {
+  const char* env = std::getenv("OCUDU_DEPTH3_MIN_PRB");
+  if (env == nullptr) return pusch_depth3_input_plane::MIN_PRB;      // 默认 2
+  const unsigned requested = ...;
+  return (requested == 0) ? pusch_depth3_input_plane::MIN_PRB : requested;   // 0 ⇒ 用默认
+}
+```
+**⇒ ★★ 所以**：★ **`OCUDU_DEPTH3_MIN_PRB=1` ⇒ 1-PRB 的授权**会被尝试**（**而不是被拒收** ✓）** ✓
+
+**(a.7) ★★★★★ 而源码注释把"为什么它是个开关"写得比我能写的更好**
+
+> ★★ **"WHY IT IS A SWITCH AND NOT A CONSTANT. The floor keeps the arm from computing outside what it was trained on,
+> which is the right default. But it is a statement about the TRAINING DATA, not about the plane or the network,
+> and on 2026-10-20 it made a pure run impossible to attach: the UE's small grants are 1 to 3 PRB, every one was
+> refused, every reception was erased, and no SRB1 decoded. A leg that wants to find out what the arm does below
+> the envelope says so, and the answer is measured rather than assumed."**
+
+**⇒ ⇒ ⇒ 即**：★ **这个下界说的是**训练数据**，不是平面、也不是网络** ✓
+**⇒ ★★ 而**"想知道臂在信封之下会怎样，就明确说出来"** ✓ —— **这正是用户问的那件事** ✓✓
+
+**⇒ ★ 所以**：★ **这一版表格里那 13 个单元是**被拒**，不是**被测** ✓ ⇒
+**⇒ ★★ 用 `OCUDU_DEPTH3_MIN_PRB=1` 重跑这 13 个单元（3 个模型 × 13 ＝ **39 次回放** ✓，几分钟 ✓）
+⇒ **会得到**真实结果**，而不是共同的拒收地板**** ✓
 
 **(b) ★★★ 时延：pure 模式全量实测（1 853 个单元，冷启动）**
 
