@@ -8686,3 +8686,42 @@ resumed from depth3_last.keras: next epoch 7, best 0.68603, 1 epoch(s) without i
 ★★ **107 环境：驱动 580／CUDA 13.0／Python 3.12／122 GB 磁盘，**缺 TensorFlow**** ✓；
 ★★★ **已交子代理按四步执行（git → TF＋GPU 验证 → 拷 20 GB 并校验 → 启 60 轮）** ✓；
 ★★ **并明确三条禁令：不许删数据、GPU 不可用不许静默降级、val 必须是真留出集** ✓。
+
+**(f) ★★★★★ 用户补充："107 上 ocudu 在 `~/work/ocudu`，但上游还是 GitLab，请重定向到 GitHub" —— **已查清并为这条路写了确切步骤****
+
+**⇒ 107 上 `~/work/ocudu` 的三个实测事实**：
+| # | ★ 事实 | ★ 影响 |
+|---|---|---|
+| ★★ **1** | ★★ **`origin = https://gitlab.com/JiachengWang/ocudu.git`** ✓ | **要改成 GitHub** ✓ |
+| ★★★ **2** | ★★★ **HEAD 是**分离的**（detached ✓，在 `b2e3bba` ✓）⇒ **不在任何分支上** | ★★ **改完 remote 不能 `git pull` ✓，必须**显式 checkout 分支**** ✓ |
+| ★★ **3** | ★★ **有 **21 个**改动/未跟踪文件**（**全在旧的 `channel_estimator/metal/ai_train/` 树与两个 config ✓**）| ★★★ **checkout 前必须 **stash -u** ✓ —— **否则等于用 checkout 删掉它们** ✓ |
+
+**(g) ★★★★ 而 GitHub 的连通性：**SSH 不通，HTTPS 通****
+
+**⇒ 实测**：★ **`ssh -T git@github.com` ⇒ `Permission denied (publickey)`** ✗ —— **这台机器**没有 GitHub 的 SSH key**** ✓
+**⇒ ★★★ 而**：`git ls-remote https://github.com/Jiacheng123Wang/ocudu.git apple-silicon` ⇒ **返回 `84dbcaaf80…`** ✓ ✓
+**⇒ ⇒ ★★ 所以**：★ **走 **HTTPS** ✓，不走 SSH ✓** ✓
+
+**(h) ★★★ 确切的迁移步骤（已交给子代理）**
+
+```bash
+cd ~/work/ocudu
+git stash push -u -m "pre-github-migration local state; 21 files, old ai_train tree"
+git remote set-url origin https://github.com/Jiacheng123Wang/ocudu.git
+git fetch origin
+git checkout -B apple-silicon origin/apple-silicon
+git branch --set-upstream-to=origin/apple-silicon apple-silicon
+```
+
+**⇒ ★★ 之后要确认两件事**：
+1. ★ **提交是 `84dbcaaf80` 或更新** ✓
+2. ★★★ **`lib/phy/upper/ai_signal_processors/depth3/ai_train/train_depth3.py` 存在** ✓ —— **这才是要跑的东西** ✓（**而它不是那 21 个文件所在的旧树** ✓）
+
+**(i) ⚠ 一个顺带发现的怪东西**
+
+**⇒ ★★ GitHub 远端上有一个**多余的 ref**：`refs/remotes/origin/apple-silicon`** ✓
+**⇒ ★ 它**无害**（**`ls-remote` 里会看到 ✓，别被它迷惑** ✓），**也不是这次要清的东西** ✓**
+
+★ 状态 ✓：★★★ **107 的 `~/work/ocudu` 在分离 HEAD 上、上游是 GitLab、有 21 个本地改动** ✓；
+★★ **GitHub **SSH 不通**（无 key）但 **HTTPS 通** ⇒ 走 HTTPS** ✓；
+★★★ **迁移步骤已写死（stash -u → set-url → fetch → checkout -B → set-upstream），并要求确认新树里的 `train_depth3.py` 存在** ✓。
