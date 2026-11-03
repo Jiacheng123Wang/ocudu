@@ -223,9 +223,12 @@ def main():
     mother_cells = collections.Counter()
     for path in files:
         with np.load(path, allow_pickle=False) as z:
-            for i in range(z["qm"].shape[0]):
-                mother_cells[(int(z["qm"][i]), width_band(int(z["alloc_nof_prb"][i])),
-                              snr_band(float(z["snr_nominal"][i])))] += 1
+            # Hoisted for the fourth and last time. Every one of these loops had the same defect: a compressed
+            # member re-inflated per row, which is three million decompressions for a three-million-row scan.
+            qm_m, prb_m, snr_m = z["qm"], z["alloc_nof_prb"], z["snr_nominal"]
+            for i in range(qm_m.shape[0]):
+                mother_cells[(int(qm_m[i]), width_band(int(prb_m[i])),
+                              snr_band(float(snr_m[i])))] += 1
     missing = sorted(set(mother_cells) - set(per_cell))
     print(f"  mother set: {sum(mother_cells.values())} samples over {len(mother_cells)} non-empty cell(s)")
     print(f"  draw:       {sum(per_cell.values())} samples over {len(per_cell)} cell(s)")

@@ -8548,3 +8548,84 @@ train_depth3.py --train ~/work/ai_phy_train/data/w2_train_mixed_mmap/ --modcond 
 ★ 状态 ✓：★★★ **本机 c128：23.5 h、8 轮、best **0.0883**（优于 c32 的 0.1066 ✓）、**2.9 h/轮 ⇒ 40 轮需 5 天**** ✓；
 ★★ **107：RTX 3060 空闲（6 GB）✓、122 GB 磁盘 ✓、**但没装 TensorFlow**** ✗；
 ★★★ **接力四步：装 TF → 拷检查点 → 用 mmap 训练集 → 从 epoch 8 续训** ✓；★ **预计 107 上 0.3–0.6 h/轮 ⇒ 12–24 小时** ✓。
+
+---
+
+## 25. ★★★★★★ 2026-11-03 **训练控制：早停改为"快照并继续"，可动态调整，断点续训保留**
+
+**(a) ★★★★ 用户要求（五条）**
+
+1. ★ **可固定轮数，也可早停，**启动时可选** ✓
+2. ★★ **训练**过程中**可动态调整早停的控制变量（如 cost 的下降量度量）**
+3. ★★★ **早停条件满足时**并不真的停**，而是**保存训练产物与训练现场**（**模型参数、cost 的具体值、已训练轮数** ✓）**便于事后评估配方** ✓ ⇒ **然后**收紧条件、继续训练**
+4. ★★ **即使没触发早停，固定轮次（如每 10 轮）也要保存一次同样的现场**
+5. ★ **达到最大轮次才停**
+
+**(b) ★★★★★ 实现（`train_depth3.py`）**
+
+| 参数 | ★ 作用 |
+|---|---|
+| ★ **`--epochs N`** | ★★ **最大轮次 ⇒ **唯一的终止条件**** ✓ |
+| ★★ **`--patience P`** | ★★ **触发**快照**（**不再是终止** ✓）；`0` 关闭触发** ✓ |
+| ★ **`--min-delta X`** | ★★ **"改进"的门槛 ✓ —— **cost 下降量不足此值不算改进** ✓** |
+| ★★ **`--stop-on-early`** | **恢复**旧行为**（**触发即终止** ✓）** |
+| ★★★ **`--control <json>`** | ★★★ ****每轮重读** ✓：`{"patience": n, "min_delta": x}` ⇒ **运行中可收紧/放松** ✓** |
+| ★★ **`--snapshot-every N`** | ★★ **每 N 轮**无条件**存一次现场** ✓ |
+
+**(c) ★★★★★ 快照里存了什么**
+
+**⇒ 每个快照是**两个文件** ✓：`snapshots/epoch_<NNNN>_<reason>.keras` ＋ `.json`** ✓
+**⇒ ★★★ `.keras` 带**优化器状态** ✓（**不是纯权重** ✓）⇒ **可以从它**续训** ✓**
+**⇒ ★★ `.json` 里有**：
+| 字段 | ★ 内容 |
+|---|---|
+| ★ **`reason`** | **`early_stop` / `periodic`** ✓ |
+| ★★ **`epoch`／`train`／`val`／`val_ber`／`val_bler`** | **cost 的具体值** ✓ |
+| ★ **`best`／`since`** | **最好值与已连续未改进轮数** ✓ |
+| ★★★ **`patience`／`min_delta`／`control`** | ★★★ ****触发时生效的判据是什么、来自 argv 还是文件**** ✓ |
+| ★ **`select_on`** | **按 val 还是按低 SNR 带选最好** ✓ |
+| ★★ **`history`** | ★★ **到该轮为止的完整历史** ✓ |
+
+**(d) ★★★★ 断点续训（保留，并补了一个缺口）**
+
+**⇒ `--resume` 原本就存在 ✓（**读 `depth3_last.keras` ＋ `resume.json`** ✓，**恢复 epoch／best／since** ✓）**
+**⇒ ★★★ 但发现一个缺口 ✓：**`history` **没有被恢复** ⇒ **续训后的 `history.json` 只有续训之后的那几轮**** ✗
+**⇒ ★★ 已修**：★ **`resume.json` 每轮带上 `history` ✓；旧检查点若没有该字段 ⇒ 回退读 `history.json`** ✓** ✓✓
+
+**(e) ★★★★★ 端到端实测（都跑通了）**
+
+**⇒ ① 触发即**快照并继续**** ✓：
+```
+epoch    4  ... TRIGGER at epoch 4: no improvement for 2 epoch(s) (patience 2, min_delta 0, from argv);
+            best 0.68603; snapshot epoch_0004_early_stop.keras
+epoch    5  ...          ← ★ 继续了
+epoch    6  ... TRIGGER at epoch 6: ... snapshot epoch_0006_early_stop.keras
+```
+
+**⇒ ② 定期快照** ✓：`--snapshot-every 1` ⇒ **`epoch_0001_periodic.keras`、`epoch_0002_periodic.keras`** ✓
+
+**⇒ ③ 快照现场内容** ✓：
+```
+reason early_stop | epoch 4 | best 0.68603 | since 2
+patience 2.0 min_delta 0.0 control argv select_on val
+history 轮数 4
+```
+
+**⇒ ④ 动态调整 ＋ 续训** ✓：
+```
+resumed from depth3_last.keras: next epoch 7, best 0.68603, 1 epoch(s) without improvement,
+        6 earlier epoch(s) of history carried over
+```
+（**`--control` 里写了 `{"patience": 5}` ⇒ 第 7、8 轮**没有触发** ✓，而前 6 轮记的是 `2.0` ✓）**
+
+**⇒ ⑤ `history.json` 最终 **8 轮** ✓（**6 带过来 ＋ 2 新训** ✓），且**每轮记下当时的 `patience`/`min_delta`** ✓ ——
+**⇒ ★★★ **这正是"事后评估配方"所需要的东西**** ✓✓
+
+**(f) ★★ 一个诚实的小处**
+
+**⇒ 第 6 轮那条 `patience` 是 **`None`** ✓ —— **因为它来自**加这个字段之前**的那次运行** ✓
+**⇒ ★ 没有替它编一个值 ✓** ✓
+
+★ 状态 ✓：★★★ **五条要求全部实现并逐条实测（快照并继续／定期快照／动态控制／最大轮次停止／断点续训）** ✓；
+★★ **快照同时存 `.keras`（含优化器）与 `.json`（cost、轮数、判据、历史）** ✓；
+★★★ **并修掉一个既有缺口：`history` 过去在续训时丢失，现在随 `resume.json` 一起走** ✓。

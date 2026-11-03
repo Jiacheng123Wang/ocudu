@@ -864,6 +864,19 @@ def export_buckets(args, parser, source=None):
         print(f"bucket width {width}: {path}")
 
 
+def load_snr_nominal(path):
+    """`snr_nominal` from either form of dataset path.
+
+    The trainer accepts a directory of `.npy` arrays (memory-mapped, which is how a dataset larger than RAM is
+    used) or the original compressed archive. Two places downstream of the batch loader read this one array
+    directly, and they were the last to know about only the archive -- a directory reached them as
+    `IsADirectoryError` after three epochs had already been trained.
+    """
+    if os.path.isdir(path):
+        return np.load(os.path.join(path, "snr_nominal.npy"), mmap_mode="r")
+    return np.load(path, allow_pickle=True)["snr_nominal"]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -935,7 +948,25 @@ def main():
     parser.add_argument("--resume", action="store_true",
                         help="continue from <out>/depth3_last.keras if it exists, instead of starting over")
     parser.add_argument("--patience", type=int, default=0,
-                        help="stop when the validation loss has not improved for this many epochs; 0 trains the full count")
+                        help="SNAPSHOT when the validation loss has not improved for this many epochs, then reset the "
+                             "counter and keep training (it no longer terminates -- see --stop-on-early); 0 disables "
+                             "the trigger")
+    parser.add_argument("--min-delta", type=float, default=0.0,
+                        help="improvement smaller than this does not count. 0 keeps the historical behaviour; raising "
+                             "it makes the trigger fire sooner, and it is one of the two variables --control can change "
+                             "while a run is going")
+    parser.add_argument("--stop-on-early", action="store_true",
+                        help="the OLD behaviour: end the run when the trigger fires instead of snapshotting and going "
+                             "on. Off by default because a trigger is a fact about the curve, and a run that stops on it "
+                             "cannot report what the next epochs would have done")
+    parser.add_argument("--control", default="",
+                        help="JSON re-read every epoch: {\"patience\": n, \"min_delta\": x}. Lets the trigger be "
+                             "tightened or loosened without restarting the run; values present override the command "
+                             "line for that epoch and are recorded in history")
+    parser.add_argument("--snapshot-every", type=int, default=0,
+                        help="write a full snapshot every this many epochs regardless of the trigger. These are the "
+                             "points a training recipe can be compared at: same weights, same optimizer state, same "
+                             "history up to that epoch")
     parser.add_argument("--workers", type=int, default=0,
                         help="threads that build batches while the accelerator runs; 0 keeps the loop serial")
     parser.add_argument("--prefetch", type=int, default=0,
@@ -1243,11 +1274,26 @@ def main():
             start_epoch = int(state.get("epoch", 1)) + 1
             best = float(state.get("best", best))
             epochs_without_improvement = int(state.get("since", 0))
+            # Older checkpoints predate the history being carried here, so fall back to the finished
+            # history.json when one exists -- a resumed run must never quietly lose the epochs it already ran.
+            history = list(state.get("history", []))
+            if not history:
+                done_path = os.path.join(args.out, "history.json")
+                if os.path.exists(done_path):
+                    try:
+                        history = list(json.load(open(done_path)).get("history", []))
+                    except (OSError, ValueError, json.JSONDecodeError):
+                        history = []
             print(f"resumed from {last_path}: next epoch {start_epoch}, best {best:.5f}, "
-                  f"{epochs_without_improvement} epoch(s) without improvement")
+                  f"{epochs_without_improvement} epoch(s) without improvement, "
+                  f"{len(history)} earlier epoch(s) of history carried over")
         else:
             print("no checkpoint to resume from; starting fresh")
     started = time.time()
+    # Seeded before the loop: the resume state written at the top of each epoch records these, and they are
+    # only recomputed further down. Defining them here is what keeps that write from depending on statement
+    # order inside the loop body.
+    patience_now, min_delta_now, control_src = float(args.patience), float(args.min_delta), "argv"
     for epoch in range(start_epoch, args.epochs + 1):
         losses = []
         for samples in train.epoch(args.batch, args.workers, args.prefetch or (2 * args.workers)):
@@ -1275,20 +1321,75 @@ def main():
         # carries. Written before the best-model decision, so a crash during that decision still leaves a checkpoint one
         # epoch old rather than none.
         model.save(os.path.join(args.out, "depth3_last.keras"))
+        # THE HISTORY TRAVELS WITH THE RESUME STATE. Without it a resumed run starts with an empty list and
+        # writes a history.json containing only the epochs after the resume -- and every snapshot it takes
+        # would carry that truncated history, which defeats the point of taking them. It is a few kilobytes.
         with open(os.path.join(args.out, "resume.json"), "w") as _state:
             json.dump({"epoch": epoch, "best": float(best),
-                       "since": int(epochs_without_improvement)}, _state)
+                       "since": int(epochs_without_improvement),
+                       "history": history,
+                       "patience": patience_now, "min_delta": min_delta_now,
+                       "control": control_src}, _state)
         chosen = val_band if (args.select_on == "band" and np.isfinite(val_band)) else val_loss
-        if chosen < best:
+        # THE TRIGGER'S TWO VARIABLES, RE-READ EVERY EPOCH (2026-11-03). A run that must be restarted to change
+        # its patience cannot be used to find out what the patience should be: the restart costs the epochs
+        # already spent and changes the noise the comparison would have to be made under. The file is optional
+        # and its absence is not an error, so a run started without one behaves exactly as before.
+        patience_now, min_delta_now, control_src = float(args.patience), float(args.min_delta), "argv"
+        if args.control:
+            try:
+                with open(args.control) as _ctl:
+                    _c = json.load(_ctl)
+                if "patience" in _c:
+                    patience_now = float(_c["patience"])
+                if "min_delta" in _c:
+                    min_delta_now = float(_c["min_delta"])
+                control_src = "file"
+            except (OSError, ValueError, json.JSONDecodeError) as _err:
+                print(f"  WARNING: could not read {args.control} ({_err}); keeping the command-line values",
+                      file=sys.stderr)
+        history[-1]["patience"] = patience_now
+        history[-1]["min_delta"] = min_delta_now
+        if chosen < best - min_delta_now:
             best = chosen
             epochs_without_improvement = 0
             model.save(os.path.join(args.out, "depth3_best.keras"))
         else:
             epochs_without_improvement += 1
-            if (args.patience > 0) and (epochs_without_improvement >= args.patience):
-                print(f"early stop at epoch {epoch}: no improvement for {args.patience} epoch(s); "
-                      f"best {best:.5f} at epoch {epoch - epochs_without_improvement}")
+
+        # ---- snapshots ----------------------------------------------------------------------------
+        # `snapshot` writes the whole training site: the model WITH its optimizer, the history up to this
+        # epoch, the trigger variables, and which of the three reasons produced it. A run that ends on the
+        # patience cannot answer "what would the next ten epochs have done", and that is the question a
+        # recipe comparison asks -- so by default the trigger snapshots and continues.
+        def snapshot(reason):
+            snap_dir = os.path.join(args.out, "snapshots")
+            os.makedirs(snap_dir, exist_ok=True)
+            stem = os.path.join(snap_dir, f"epoch_{epoch:04d}_{reason}")
+            model.save(stem + ".keras")
+            with open(stem + ".json", "w") as _h:
+                json.dump({"reason": reason, "epoch": epoch, "train": float(np.mean(losses)),
+                           "val": val_loss, "val_ber": val_ber, "val_bler": val_bler,
+                           "best": float(best), "since": int(epochs_without_improvement),
+                           "patience": patience_now, "min_delta": min_delta_now,
+                           "control": control_src, "select_on": args.select_on,
+                           "history": history}, _h, indent=1)
+            return stem
+
+        fired = (patience_now > 0) and (epochs_without_improvement >= patience_now)
+        if fired:
+            stem = snapshot("early_stop")
+            print(f"TRIGGER at epoch {epoch}: no improvement for {int(epochs_without_improvement)} epoch(s) "
+                  f"(patience {patience_now:g}, min_delta {min_delta_now:g}, from {control_src}); "
+                  f"best {best:.5f}; snapshot {os.path.basename(stem)}.keras")
+            if args.stop_on_early:
                 break
+            # CONTINUE, WITH THE COUNTER RESET. The next trigger needs a fresh run of unimproved epochs; leaving
+            # the counter over the threshold would fire every epoch from here on.
+            epochs_without_improvement = 0
+        if (args.snapshot_every > 0) and (epoch % args.snapshot_every == 0) and not fired:
+            stem = snapshot("periodic")
+            print(f"  snapshot at epoch {epoch} ({os.path.basename(stem)}.keras)")
 
     with open(os.path.join(args.out, "history.json"), "w") as handle:
         json.dump({"history": history, "parameters": parameters,
@@ -1304,7 +1405,7 @@ def main():
     # gate to receptions the model has essentially never met.
     snr_range = cli_snr_range(args)
     if snr_range is None and args.train:
-        nominal = np.load(args.train, allow_pickle=True)["snr_nominal"]
+        nominal = load_snr_nominal(args.train)
         # ONLY THE FINITE ENTRIES: one NaN poisons the percentile, and a bundle that declares 'nan,nan' is read by
         # the engine as "no range declared" -- the domain gate would be silently off (measured 2026-10-17, on the
         # first export of the final checkpoint).
@@ -1613,7 +1714,7 @@ def main():
     # gate to receptions the model has essentially never met.
     snr_range = cli_snr_range(args)
     if snr_range is None and args.train:
-        nominal = np.load(args.train, allow_pickle=True)["snr_nominal"]
+        nominal = load_snr_nominal(args.train)
         # ONLY THE FINITE ENTRIES: one NaN poisons the percentile, and a bundle that declares 'nan,nan' is read by
         # the engine as "no range declared" -- the domain gate would be silently off (measured 2026-10-17, on the
         # first export of the final checkpoint).
