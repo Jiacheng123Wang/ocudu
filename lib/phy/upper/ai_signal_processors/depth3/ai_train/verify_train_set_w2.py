@@ -144,7 +144,7 @@ def main():
     mother_index = {}
     files = sorted(glob.glob(os.path.join(args.mother, "*.npz")))
     print(f"  indexing {len(files)} mother file(s) by row key ...")
-    for path in files:
+    for file_idx, path in enumerate(files):
         # The same rule the draw uses, and it has to be: every rebuilt mother file has "w2_harq_"
         # in its name, so testing for "_harq" alone labels a _self file as recovered. A self
         # population judged against the 250 recovered cap is not the check that was specified.
@@ -155,18 +155,26 @@ def main():
             # use them, and holding them resident costs a hundred and thirteen kilobytes per row.
             a = {name: z[name] for name in KEY_ARRAYS}
             for j in range(a["qm"].shape[0]):
-                mother_index[key_of(a, j)] = harq
+                # THE ORIGIN, not just the population. Keeping only the boolean threw away the exact
+                # identity the duplicate check needs: all three million mother keys are unique, so
+                # (file, row) identifies a sample exactly, while a hash of a few fields can collide --
+                # it did, twenty-six times in a hundred and sixty-six thousand, on samples whose full
+                # grids differ.
+                mother_index[key_of(a, j)] = (harq, file_idx, j)
 
     pop = collections.Counter()          # (mod, width, snr, harq) -> drawn count
+    seen_origin = collections.Counter()  # (file_idx, row_idx) -> how many drawn rows claim it
     unmatched = 0
     for i in range(n):
         k = (int(qm[i]), int(prb[i]), float(snr[i]), int(d["nof_bits"][i]),
              int(d["nof_tb_bits"][i]), int(d["rnti"][i]), int(d["n_id"][i]), int(d["rv"][i]),
              int(d["alloc_first_prb"][i]), int(d["dmrs_bitmap"][i]), float(d["sigma2_over_r2"][i]))
-        h = mother_index.get(k)
-        if h is None:
+        origin = mother_index.get(k)
+        if origin is None:
             unmatched += 1
             continue
+        h = origin[0]
+        seen_origin[origin] += 1
         pop[(int(qm[i]), width_band(int(prb[i])), snr_band(float(snr[i])), h)] += 1
     if unmatched:
         problems.append(f"{unmatched} drawn row(s) have no mother row")
@@ -260,11 +268,14 @@ def main():
 
     # ---- 3. DUPLICATES -------------------------------------------------------------------------------
     print("\n== 3. duplicates ==")
-    seen = collections.Counter(row_key(d["H"], qm, snr, i) for i in range(n))
-    dupes = sum(1 for v in seen.values() if v > 1)
-    print(f"  {dupes} duplicated row(s) among {n}")
+    # BY ORIGIN, NOT BY HASH. Sixteen channel values plus modulation and noise is not unique in this corpus --
+    # samples from flat channels share their first values -- and the hash version reported twenty-six of those
+    # collisions as duplicates when every one was a pair of genuinely different samples. The origin is exact
+    # because all three million mother keys are unique.
+    dupes = sum(1 for v in seen_origin.values() if v > 1)
+    print(f"  {dupes} duplicated origin(s) among {len(seen_origin)} matched row(s)")
     if dupes:
-        problems.append(f"{dupes} duplicated row(s) in the draw")
+        problems.append(f"{dupes} duplicated origin(s) in the draw")
 
     # ---- verdict ------------------------------------------------------------------------------------
     print("\n== verdict ==")
