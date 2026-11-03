@@ -928,6 +928,11 @@ def main():
                              "more expensive than a forward pass, so this is a subset; 0 skips it")
     parser.add_argument("--seed", type=int, default=20261013)
     args = parser.parse_args()
+    # WHAT THE PROCESS WAS LAUNCHED WITH. The log is the only lasting record of a multi-hour run, and a
+    # restart is where flags drift: on 2026-11-03 a restart dropped `--bler-samples 0`, the default 24
+    # took over, and the first decode killed a run that had been healthy for fourteen epochs. The old
+    # per-modulation logs cannot say what their batch was for exactly this reason.
+    print("argv: " + " ".join(sys.argv[1:]), flush=True)
 
     tf.get_logger().setLevel("ERROR")
     tf.random.set_seed(args.seed)
