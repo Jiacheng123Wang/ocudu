@@ -284,12 +284,28 @@ class Batches:
 
     def __init__(self, path, modulation, max_samples=0, seed=0, snr_min=None, snr_max=None, cond=False,
                  target="coded", layout="folded"):
-        # Read every array once, eagerly. The file is a compressed archive, and accessing
-        # `data["X"]` per sample would decompress the whole 200 MB array every time.
-        archive = np.load(path, allow_pickle=True)
-        self.data = {name: archive[name] for name in self.ARRAYS}
-        self.uci = ({name: archive[name] for name in self.UCI_ARRAYS}
-                    if self.UCI_ARRAYS[0] in archive.files else None)
+        # TWO FORMS, ONE MEANING. A path that is a directory holds one `.npy` per array and is opened
+        # memory-mapped, so the dataset is limited by disk rather than by RAM; `convert_npz_to_mmap.py`
+        # writes that form. A path that is a file is the original compressed archive.
+        #
+        # WHY THE ARCHIVE IS READ EAGERLY. `.npz` is a ZIP container: nothing inside it can be
+        # memory-mapped even when the members are stored uncompressed, because `np.load` goes through
+        # `zipfile` and needs the whole member in memory. Reading it once and keeping it is cheaper
+        # than decompressing a 200 MB array on every sample, which is what per-sample access would do.
+        if os.path.isdir(path):
+            def load(name):
+                return np.load(os.path.join(path, name + ".npy"), mmap_mode="r")
+            self.data = {name: load(name) for name in self.ARRAYS}
+            uci_path = os.path.join(path, self.UCI_ARRAYS[0] + ".npy")
+            self.uci = ({name: load(name) for name in self.UCI_ARRAYS}
+                        if os.path.exists(uci_path) else None)
+            self.mmap = True
+        else:
+            archive = np.load(path, allow_pickle=True)
+            self.data = {name: archive[name] for name in self.ARRAYS}
+            self.uci = ({name: archive[name] for name in self.UCI_ARRAYS}
+                        if self.UCI_ARRAYS[0] in archive.files else None)
+            self.mmap = False
         self.modulation = modulation
         self.qm = D3.BITS_PER_SYMBOL[modulation]
         # A CONDITIONED dataset feeds one model that serves every modulation: the samples carry their own Qm (the
