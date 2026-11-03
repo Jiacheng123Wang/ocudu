@@ -32,14 +32,16 @@ constexpr unsigned DMRS_REF_POINT_K_TO_POINT_A = 0;
 /// QPSK-like with unit total power, so each component carries 1/sqrt(2).
 constexpr float DMRS_SEQUENCE_AMPLITUDE = 0.70710678118654752440F;
 
-/// \brief The narrowest allocation the arm will compute, in PRBs: the bundle's trained envelope unless a leg
-/// lowers it (OCUDU_DEPTH3_MIN_PRB).
+/// \brief The narrowest allocation the arm will compute, in PRBs (OCUDU_DEPTH3_MIN_PRB, default 1 = no floor).
 ///
-/// WHY IT IS A SWITCH AND NOT A CONSTANT. The floor keeps the arm from computing outside what it was trained on,
-/// which is the right default. But it is a statement about the TRAINING DATA, not about the plane or the network,
-/// and on 2026-10-20 it made a pure run impossible to attach: the UE's small grants are 1 to 3 PRB, every one was
-/// refused, every reception was erased, and no SRB1 decoded. A leg that wants to find out what the arm does below
-/// the envelope says so, and the answer is measured rather than assumed.
+/// WHY IT IS A SWITCH AND NOT A CONSTANT. A floor keeps the arm from computing outside what it was trained on, which
+/// sounds like the right default and twice was not. On 2026-10-20 it made a pure run impossible to attach: the UE's
+/// small grants are 1 to 3 PRB, every one was refused, every reception was erased, and no SRB1 decoded. On 2026-11-03
+/// a floor of two was still refusing one-PRB allocations -- five units of a five-thousand-unit measurement, three of
+/// which the classical chain decoded. The general lesson is that a floor is a statement about the TRAINING DATA and
+/// not about the network: outside the envelope the arm is untested rather than known-bad, so the default is now to
+/// compute every allocation the contract describes and let measurements establish where the envelope really is. A leg
+/// that wants a floor sets the variable, and the answer is measured rather than assumed.
 unsigned minimum_prb()
 {
   static const unsigned value = [] {
@@ -105,8 +107,8 @@ const char* pusch_depth3_input_plane::to_string(status value)
       static thread_local std::array<char, 96> text = {};
       std::snprintf(text.data(),
                     text.size(),
-                    "the allocation is narrower than the trained envelope (%u PRB)",
-                    static_cast<unsigned>(MIN_PRB));
+                    "the allocation is narrower than the configured envelope (%u PRB)",
+                    minimum_prb());
       return text.data();
     }
     case status::no_rx_port:

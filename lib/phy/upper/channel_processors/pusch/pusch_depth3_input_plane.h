@@ -94,7 +94,14 @@ public:
   // The history worth keeping: this constant was four because the model was fine-tuned down to four and the offline
   // validation said the repair worked (narrow set 0.5245 to 0.4200 coded BLER against genie's 0.4051, and 32 of 35
   // captures at chain level against the classical arm's 31). None of that stopped the attach from failing in the field.
-  static constexpr unsigned MIN_PRB = 2;
+  //
+  // ONE, NOT TWO (changed 2026-11-03 on the user's instruction). Two still refused the one-PRB allocations a scheduler
+  // can issue, and every refusal is a reception the network never looks at -- measured on the delivered-bits comparison
+  // as five units of five thousand, three of which the classical chain decoded. A floor has to be justified by what the
+  // network is worse at, and outside the envelope it is simply untested rather than known-bad, so the default is now to
+  // compute every allocation the contract describes and let the measurements say where the envelope really is. A leg
+  // that wants a floor back sets OCUDU_DEPTH3_MIN_PRB.
+  static constexpr unsigned MIN_PRB = 1;
 
   /// Channel indices, `model_network_design.md` section 0.2(b). Named because a plane written with
   /// the wrong one is a plane that trains and receives nothing.
