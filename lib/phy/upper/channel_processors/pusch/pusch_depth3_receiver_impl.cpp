@@ -991,9 +991,15 @@ public:
     // already (`estimate()` forwards to it), so its SNR is available here as an INDEPENDENT domain check -- it
     // decides only whether the network's measurement may be published, and the number published is never the
     // estimator's.
-    // IT APPLIES IN EITHER MODE, because the published post-equalisation SINR is this arm's own in either mode
-    // (see the note where it is published): a knob position may not decide whether an extrapolated measurement
-    // reaches the scheduler, and the `classic` position is the DEFAULT.
+    //
+    // OFF BY DEFAULT SINCE 2026-11-03 (user instruction, design section 19). What the gate was meant to protect is
+    // narrower than what it did: only the REPORTED measurement is an extrapolation outside the trained range, while
+    // the LLRs -- the thing that decides whether a block decodes -- are computed just as well either way. Refusing
+    // the whole reception therefore threw away the computation to protect a number, and did it asymmetrically: under
+    // a pure-network leg the refusal erased the reception and charged the network for a block it never looked at,
+    // while with the fallback on the classical chain decoded it and the network was credited with the result. Both
+    // directions are bias, so the default is now to compute and let the measurement say what it says. A flight that
+    // wants the old behaviour sets OCUDU_DEPTH3_DOMAIN_GATE=estimator (or =net for the plane-only measurement).
     if (domain_by_qm[qm].has && (domain_gate == "estimator")) {
       const unsigned port   = config.rx_ports.empty() ? 0 : config.rx_ports.front();
       // The estimator reports a linear power (`report_measurements` prints it through `convert_power_to_dB`), so
