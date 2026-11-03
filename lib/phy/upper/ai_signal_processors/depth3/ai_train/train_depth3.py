@@ -1193,15 +1193,29 @@ def main():
                         history = list(json.load(open(done_path)).get("history", []))
                     except (OSError, ValueError, json.JSONDecodeError):
                         history = []
+            # THE HISTORY IS THE RECORD, SO IT SETTLES AN INTERRUPTED STATE. Until 2026-11-03 the state was
+            # written before the best-model decision, so `best` and `since` lag one decision; loading that
+            # blindly would let the next epoch treat a worse value as an improvement and overwrite the best
+            # checkpoint. Both numbers are recomputable exactly from the history: the best is its minimum and
+            # the counter is the distance to the epoch that produced it.
+            measured = [(position, float(entry["val"])) for position, entry in enumerate(history)
+                        if np.isfinite(float(entry["val"]))]
+            if measured:
+                position, value = min(measured, key=lambda pair: pair[1])
+                if value != best:
+                    print(f"  resume state said best {best:.5f}; the history's minimum is {value:.5f} "
+                          f"at epoch {history[position]['epoch']} -- using the history")
+                best = value
+                epochs_without_improvement = len(history) - 1 - position
             print(f"resumed from {last_path}: next epoch {start_epoch}, best {best:.5f}, "
                   f"{epochs_without_improvement} epoch(s) without improvement, "
                   f"{len(history)} earlier epoch(s) of history carried over")
         else:
             print("no checkpoint to resume from; starting fresh")
     started = time.time()
-    # Seeded before the loop: the resume state written at the top of each epoch records these, and they are
-    # only recomputed further down. Defining them here is what keeps that write from depending on statement
-    # order inside the loop body.
+    # Seeded before the loop so the state written at the END of an epoch always has a value to record,
+    # even if the loop is entered with a control file that cannot be read: the variables are re-read
+    # every epoch, but the write must not depend on that read having happened.
     patience_now, min_delta_now, control_src = float(args.patience), float(args.min_delta), "argv"
     for epoch in range(start_epoch, args.epochs + 1):
         losses = []
@@ -1226,19 +1240,10 @@ def main():
         # WHAT "BEST" MEANS (design section 19.438): the validation loss by default, or -- with `--select-on band` -- the BER of
         # the low-SNR band, which is the quantity the acceptance gates measure. Choosing on the latter means the checkpoint kept
         # is the one the gates would have picked, so an early stop can no longer miss a later gate-optimal epoch.
-        # THE RESUMABLE STATE, EVERY EPOCH (see --resume): the model with its optimizer plus the three numbers the loop
-        # carries. Written before the best-model decision, so a crash during that decision still leaves a checkpoint one
-        # epoch old rather than none.
+        # THE WEIGHTS GO FIRST, THE STATE AFTER THE DECISION (2026-11-03). An interruption while deciding must
+        # still leave a checkpoint one epoch old rather than none, so `depth3_last` is written here; the state
+        # that says which epoch was BEST is written below, once that is known.
         model.save(os.path.join(args.out, "depth3_last.keras"))
-        # THE HISTORY TRAVELS WITH THE RESUME STATE. Without it a resumed run starts with an empty list and
-        # writes a history.json containing only the epochs after the resume -- and every snapshot it takes
-        # would carry that truncated history, which defeats the point of taking them. It is a few kilobytes.
-        with open(os.path.join(args.out, "resume.json"), "w") as _state:
-            json.dump({"epoch": epoch, "best": float(best),
-                       "since": int(epochs_without_improvement),
-                       "history": history,
-                       "patience": patience_now, "min_delta": min_delta_now,
-                       "control": control_src}, _state)
         chosen = val_band if (args.select_on == "band" and np.isfinite(val_band)) else val_loss
         # THE TRIGGER'S TWO VARIABLES, RE-READ EVERY EPOCH (2026-11-03). A run that must be restarted to change
         # its patience cannot be used to find out what the patience should be: the restart costs the epochs
@@ -1265,6 +1270,19 @@ def main():
             model.save(os.path.join(args.out, "depth3_best.keras"))
         else:
             epochs_without_improvement += 1
+
+        # THE RESUMABLE STATE, WRITTEN AFTER THE DECISION (2026-11-03). Until now it was written before it,
+        # so the file always lagged one decision: a live run's best of epoch 13 was recorded as epoch 9's
+        # value, and a crash-resume would have treated a WORSE epoch as an improvement and overwritten
+        # `depth3_best.keras` -- the one file every measurement downstream reads.
+        # THE HISTORY TRAVELS WITH IT. Without the list a resumed run starts empty and writes a history.json
+        # holding only the epochs after the resume, and every snapshot it takes inherits the truncation.
+        with open(os.path.join(args.out, "resume.json"), "w") as _state:
+            json.dump({"epoch": epoch, "best": float(best),
+                       "since": int(epochs_without_improvement),
+                       "history": history,
+                       "patience": patience_now, "min_delta": min_delta_now,
+                       "control": control_src}, _state)
 
         # ---- snapshots ----------------------------------------------------------------------------
         # `snapshot` writes the whole training site: the model WITH its optimizer, the history up to this
