@@ -1,0 +1,10 @@
+# The 10,000 capture files are deliberately NOT tracked.
+#
+# 355 MB of .bin/.txt in git history cannot be removed without a rewrite, and they
+# are reproducible from the corpus with prep_sample.py + units.txt. The metadata
+# below IS tracked, so anyone can rebuild or verify the set without the blobs.
+#
+# To materialise locally:
+#   ./materialise.sh /path/to/s2_amc_ping_1102a
+#
+ruler_s2_amc_5000_corpus/
