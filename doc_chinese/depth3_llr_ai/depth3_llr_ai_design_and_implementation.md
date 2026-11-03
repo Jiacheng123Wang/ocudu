@@ -8968,3 +8968,44 @@ errors = np.mean((hard[labelled] > 0) != (labels[labelled] > 0.5)) if labelled.a
 ★★★ **`BER` ＝ 未编码误比特率（`(llr>0) != (label>0.5)` 的平均）⇒ 衡量解映射器，不是接收机** ✓；
 ★★ **三条易误读：BER 低 ≠ 块能解；BER 下限是 0.5；`val` 跨模型不可比（除非同数据同权重）** ✓；
 ★★★ **`coded BLER` 才是与 CRC 对应的量，且常因太贵而为 `nan`** ✓。
+
+**(j) ★★★★★ 2026-11-03 16:05 **60 轮训练的第 1 轮实测：1 139 s（18 分 59 秒）****
+
+**⇒ 实测输出**：
+```
+epoch    1  train 0.26307  val 0.17446  uncoded BER 0.0748  coded BLER nan  mean|LLR| 5.6  (1139s)
+```
+
+**⇒ ★★★ 预计**：★ **60 × 1 139 s ＝ 68 340 s ≈ **19 小时**** ✓ ⇒ **约 **明天（11-04）11:00 HKT 完成 ± 0.5 h**
+**⇒ ★★ 而且**偏向保守** ✓ —— **第 1 轮含首次调用的 tracing** ✓ ⇒ **稳态应当略快于 1 139 s** ✓** ✓
+
+**(k) ★★★★★ `coded BLER` 在第 1 轮是 `nan` —— 这是设计**
+
+**⇒ `--bler-every 5`** ✓ ⇒ **每 5 轮解码一次** ✓ ⇒ **第一个 coded 数落在**第 5 轮**** ✓
+**⇒ ⇒ ★★★ 所以**：★ **第 1–4 轮只有**比特级 BER** ✓，**块级**要等到第 5 轮** ✓ —— **这与 §27 的解释一致**（**`coded BLER` 贵 ✓，只在指定轮次算** ✓）✓
+
+**(l) ★★★★★ 一个**很到位的运维观察**：**86 °C 与热降频****
+
+**⇒ 子代理的原话**：
+> ★★★ **"It is a 6 GB laptop 3060 running at its 80 W cap, so 86 °C is the expected steady state rather than a fault,
+> but it is close enough to the throttle point that if the later epochs come in **materially slower** than 1 139 s,
+> **thermal throttling is the first thing I would check rather than the dataloader**."** ✓✓
+
+**⇒ ★★ 实测**：★ **4 291 MiB ✓、84–87% 利用率 ✓、**86 °C** ✓、75–78 W ✓**（**80 W 上限** ✓）
+**⇒ ⇒ ★★★ 所以**：★ **若后续轮次显著变慢 ⇒ **先查热降频**，不是查数据加载** ✓✓
+
+**(m) ★★★ `resume.json` 里 `best: Infinity` —— 这是**已知的顺序问题**，无害**
+
+**⇒ 原因**：★ **resume 状态在"best 判定"**之前**写** ✓ ⇒ **第 1 轮写的时候还没有 best** ✓
+**⇒ ★★ 后果**：★ **若在第 1 轮崩溃、`--resume` 会从第 2 轮继续、best 仍是 ∞ ⇒ 下一轮必然成为 best** ✓ ⇒ **只是**重新确立一次** ✓，**不丢信息** ✓** ✓
+
+**(n) ★★ 已就位的两件事**
+
+1. ★★ **`overlap_report.json` 已放进 `runs/w2c32_b18_e21/`** ✓ ⇒ **55.2% / 731 行 / 37 格这个数**跟着模型走**** ✓
+2. ★★★ **快照监视已武装** ✓ —— **`snapshots/epoch_0010_periodic.keras` 预计 **今天 18:50 HKT** 出现** ✓
+   **⇒ ★★ 并约定**：**一出现就报**文件列表与 JSON 的 `epoch`/`val`/`best`** ✓，**不等第 60 轮** ✓✓
+
+★ 状态 ✓：★★★ **第 1 轮 1 139 s（18m59s）⇒ 60 轮约 **19 小时** ⇒ ETA **明天 11:00 ± 0.5 h** ✓；
+★★ **`coded BLER` 的 `nan` 是设计（`--bler-every 5` ⇒ 第 5 轮才有）** ✓；
+★★★★ **86 °C ／ 80 W 是稳态，但已指明"若变慢先查热降频而非 dataloader"** ✓；
+★★ **`best: Infinity` 的顺序问题无害；`overlap_report.json` 已随模型；快照监视已武装（第 10 轮 ~18:50）** ✓。
