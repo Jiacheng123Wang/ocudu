@@ -109,6 +109,18 @@ def main():
             problems.append(f"{name} has {d[name].shape[0]} rows, X has {n}")
     print(f"  {len(REQUIRED)} arrays, all with {n} rows" if not problems else "  FAIL row counts differ")
 
+    # `bits` and `tb_bits` store BYTES per sample while `nof_bits` / `nof_tb_bits` count BITS, so the
+    # bound that must hold is ceil(nof_bits / 8) <= width, not nof_bits <= width: a row may legitimately
+    # carry up to eight times the byte width in bits. Fourteen thousand six hundred and thirty-four rows
+    # of this draw have bit counts that are not multiples of eight, which is legal.
+    for packed, count in (("bits", "nof_bits"), ("tb_bits", "nof_tb_bits")):
+        need = int((np.asarray(d[count]).max() + 7) // 8)
+        width = d[packed].shape[1]
+        print(f"  {packed} width {width} bytes, max ceil({count}/8) {need} bytes: "
+              f"{'ok' if need <= width else 'FAIL'}")
+        if need > width:
+            problems.append(f"{count} needs {need} bytes but {packed} is {width}")
+
     # ---- 1. CAPS, per population, recovered from provenance -------------------------------------------
     #
     # `self` and `harq` are NOT stored in the draw -- the arrays carry no such field -- so a check from the

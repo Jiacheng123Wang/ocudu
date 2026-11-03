@@ -16,9 +16,26 @@ self 2 500 and harq 250 per bin. The harq cap is a tenth of the self cap because
 carry a donor dependency -- their label comes from another reception in the same chain -- so they are
 worth having but not worth letting dominate a bin.
 
+WHY THE WRITE STREAMS. The full draw is a hundred and sixty-six thousand samples at about a hundred and
+sixteen kilobytes each -- nineteen gigabytes. The first version held every selected chunk and then
+called `np.concatenate`, which needs the chunks plus a second copy at the same time, about thirty-four
+gigabytes of resident memory on a thirty-one gigabyte machine. The kernel killed it at the concatenate
+after twenty-one minutes, having written nothing. The write now preallocates one `.npy` memmap per array
+and fills it one source file at a time, so peak memory is one source file plus the bin index and the
+dataset is limited by disk rather than by RAM. The scan, bins, seed, sorted-bin iteration, `rng.choice`
+calls, by-file and sorted-row order, arrays and padding are unchanged.
+
 WIDTH AND SNR BANDS. Width comes from `alloc_nof_prb` and uses the same edges the replay test builder
 does: <=3, <=8, <=24, >24. SNR comes from `snr_nominal` with the project's edges: <0, 0-6, 6-10,
 10-14, 14-20, 20-30, >=30. Same edges as section 10.2's table so the report can be read against it.
+
+PACKED WIDTHS. `bits` and `tb_bits` are packed per sample, and their second dimension is the widest in
+the file they came from -- the rebuilt set has thirty-one widths for `bits` (99 to 7 344) and forty-two
+for `tb_bits` (11 to 6 787). Concatenating files of different widths has to pad. The packed arrays store
+BYTES while `nof_bits` / `nof_tb_bits` count BITS, so the bound that must hold is
+`ceil(nof_bits / 8) <= width`, not `nof_bits <= width`: a row may legitimately carry up to eight times
+the byte width in bits. The tool asserts the byte bound after the fill, and every consumer reads
+`nof_bits` / `nof_tb_bits` and never looks past it.
 
 USAGE.
   draw_train_set_w2.py --in ~/work/ai_phy_train/data/datasets_full_w2 \
@@ -30,6 +47,7 @@ import collections
 import glob
 import os
 import sys
+import zipfile
 
 import numpy as np
 
@@ -38,6 +56,8 @@ ARRAYS = ("X", "H", "bits", "nof_bits", "alloc_first_prb", "alloc_nof_prb", "dmr
           "qm", "sigma2_over_r2", "snr_nominal", "tb_bits", "nof_tb_bits", "rnti", "n_id",
           "rv")
 OPTIONAL = ("uci_nof_harq_ack", "uci_ack_re", "uci_ack_rvd_re", "uci_csi1_re")
+# Packed per sample; their second dimension differs between files.
+RAGGED = ("bits", "tb_bits")
 
 QM_NAME = {2: "QPSK", 4: "16QAM", 6: "64QAM", 8: "256QAM"}
 WIDTH_EDGES = ((3, "<=3"), (8, "<=8"), (24, "<=24"))
@@ -72,6 +92,23 @@ def is_harq(path):
     if "_harq" in base:
         return True
     raise ValueError(f"cannot tell self from harq in {base}")
+
+
+def npy_header(zf, member):
+    """Shape and dtype of one `.npy` inside an `.npz`, without materialising the array.
+
+    The write needs the widths before it can preallocate, and opening every archive once to read
+    nineteen headers is cheap; reading the arrays to ask their shape would not be.
+    """
+    with zf.open(member) as f:
+        version = np.lib.format.read_magic(f)
+        if version == (1, 0):
+            shape, fortran, dtype = np.lib.format.read_array_header_1_0(f)
+        elif version == (2, 0):
+            shape, fortran, dtype = np.lib.format.read_array_header_2_0(f)
+        else:
+            shape, fortran, dtype = np.lib.format._read_array_header(f, version)
+    return shape, dtype
 
 
 def main():
@@ -139,60 +176,103 @@ def main():
         print("\ndry run: nothing written")
         return 0
 
-    # ---- 4. write one .npy per array, memory-mappable ----------------------------------------------
-    #
-    # Grouped by source file and opened once per file: the mother set is a hundred and sixty gigabytes
-    # and a per-array loop would reopen all two hundred and forty-seven archives fourteen times. This
-    # way each file is read once and every array's contribution is taken from that one read.
+    # ---- 4. flatten the draw into output order: file ascending, row ascending -----------------------
     by_file = collections.defaultdict(list)
     for key in sorted(drawn):
         for fi, si in drawn[key]:
             by_file[fi].append(si)
+    for fi in by_file:
+        by_file[fi] = np.asarray(sorted(by_file[fi]), dtype=np.int64)
+    order = sorted(by_file)
+    assert sum(len(by_file[fi]) for fi in order) == kept
+    del bins, drawn
 
-    pieces = collections.defaultdict(list)
-    have_uci = True
-    for fi in sorted(by_file):
-        with np.load(files[fi], allow_pickle=False) as z:
-            rows = np.asarray(sorted(by_file[fi]), dtype=np.int64)
-            for name in ARRAYS:
-                if name not in z.files:
-                    print(f"FATAL: required array {name} missing from {os.path.basename(files[fi])}",
-                          file=sys.stderr)
-                    return 1
-                pieces[name].append(z[name][rows])
-            if have_uci:
-                if OPTIONAL[0] in z.files:
-                    for name in OPTIONAL:
-                        pieces[name].append(z[name][rows])
-                else:
-                    have_uci = False
+    # ---- 5. preallocate one .npy memmap per array ---------------------------------------------------
+    #
+    # The shapes come from the headers of the files that will actually be read, so the padding width
+    # is the widest selected chunk. Dtypes and non-packed shapes must agree across those files.
+    tails = collections.defaultdict(set)          # array -> {tail shape}
+    dtypes = collections.defaultdict(set)         # array -> {dtype}
+    missing = set()
+    for fi in order:
+        with zipfile.ZipFile(files[fi]) as zf:
+            members = set(zf.namelist())
+            for name in ARRAYS + OPTIONAL:
+                if name + ".npy" not in members:
+                    missing.add(name)
+                    continue
+                shape, dtype = npy_header(zf, name + ".npy")
+                tails[name].add(shape[1:])
+                dtypes[name].add(np.dtype(dtype))
+
+    for name in ARRAYS:
+        if name in missing:
+            print(f"FATAL: required array {name} missing from a selected file", file=sys.stderr)
+            return 1
+    have_uci = not any(name in missing for name in OPTIONAL)
 
     os.makedirs(args.dst, exist_ok=True)
-    written = 0
-    for name, chunks in pieces.items():
-        # RAGGED ARRAYS ARE PADDED, NOT REFUSED. `bits` and `tb_bits` are packed per sample and their
-        # second dimension is the widest in the file they came from -- 3 672 bits in one leg, 3 456 in
-        # another, and 1 985 against 2 370 for the blocks. Concatenating files of different widths has
-        # to pad, and padding is safe because every consumer reads `nof_bits` / `nof_tb_bits` and never
-        # looks past it. A file that stored them unpadded would fail here, which is the right outcome:
-        # silent truncation is the alternative and it corrupts samples.
-        if len({c.shape[1:] for c in chunks}) > 1:
-            width = max(c.shape[1] for c in chunks)
-            padded = []
-            for c in chunks:
-                if c.shape[1] == width:
-                    padded.append(c)
+    outs = {}
+    shapes = {}
+    for name in list(ARRAYS) + (list(OPTIONAL) if have_uci else []):
+        if len(dtypes[name]) != 1:
+            print(f"FATAL: {name} has mixed dtypes {dtypes[name]}", file=sys.stderr)
+            return 1
+        dtype = next(iter(dtypes[name]))
+        widths = {t[0] for t in tails[name] if t}
+        if name in RAGGED:
+            width = max(widths)
+            tail = (width,)
+            if len(widths) > 1:
+                # PADDED, NOT REFUSED. Concatenating files of different widths has to pad, and padding
+                # is safe because every consumer reads `nof_bits` / `nof_tb_bits` and never looks past
+                # it. A file that stored them unpadded would fail here, which is the right outcome:
+                # silent truncation is the alternative and it corrupts samples.
+                print(f"  note: {name} padded to width {width} across files of differing widths")
+        else:
+            if len(tails[name]) != 1:
+                print(f"FATAL: {name} has differing shapes {tails[name]}", file=sys.stderr)
+                return 1
+            tail = next(iter(tails[name]))
+        shapes[name] = (kept,) + tail
+        outs[name] = np.lib.format.open_memmap(os.path.join(args.dst, name + ".npy"), mode="w+",
+                                               dtype=dtype, shape=shapes[name])
+
+    # ---- 6. fill one source file at a time ----------------------------------------------------------
+    pos = 0
+    for fi in order:
+        rows = by_file[fi]
+        m = len(rows)
+        with np.load(files[fi], allow_pickle=False) as z:
+            for name, out in outs.items():
+                chunk = z[name][rows]
+                if name in RAGGED and chunk.ndim == 2:
+                    out[pos:pos + m, :chunk.shape[1]] = chunk
                 else:
-                    pad = np.zeros((c.shape[0], width - c.shape[1]) + c.shape[2:], dtype=c.dtype)
-                    padded.append(np.concatenate([c, pad], axis=1))
-            chunks = padded
-            print(f"  note: {name} padded to width {width} across files of differing widths")
-        stacked = np.concatenate(chunks, axis=0)
-        out = os.path.join(args.dst, name + ".npy")
-        np.save(out, stacked)
+                    out[pos:pos + m] = chunk
+        pos += m
+    assert pos == kept
+
+    # The packed arrays count BITS per sample while storing BYTES, so the bound that must hold is
+    # ceil(nof_bits / 8) <= width, not nof_bits <= width. 14 634 rows of the real draw have bit counts
+    # that are not multiples of eight, which is legal; a literal nof_bits <= width test would reject
+    # every one of them. Check the byte bound rather than assume it.
+    for packed, count in (("bits", "nof_bits"), ("tb_bits", "nof_tb_bits")):
+        need = int((np.asarray(outs[count]).max() + 7) // 8)
+        width = outs[packed].shape[1]
+        print(f"  check: max ceil({count}/8) = {need} <= {packed} width {width} bytes")
+        if need > width:
+            print(f"FATAL: {count} needs {need} bytes but {packed} is {width}", file=sys.stderr)
+            return 1
+
+    for out in outs.values():
+        out.flush()
+
+    written = 0
+    for name, out in outs.items():
+        b = os.path.getsize(out.filename)
         written += 1
-        print(f"  {name:20s} {str(stacked.shape):24s} {stacked.dtype}  "
-              f"{os.path.getsize(out) / 1048576:8.1f} MB")
+        print(f"  {name:20s} {str(shapes[name]):24s} {out.dtype}  {b / 1048576:8.1f} MB")
 
     print(f"\nwrote {written} array(s) for {kept} sample(s) into {args.dst}")
     print(f"train with: --train {args.dst}")
