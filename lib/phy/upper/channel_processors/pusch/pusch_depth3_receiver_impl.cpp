@@ -298,10 +298,21 @@ public:
     noise_head(pusch_depth3_input_plane::NOF_SUBCARRIERS * pusch_depth3_input_plane::NOF_SYMBOLS),
     channel_head(pusch_depth3_input_plane::NOF_SUBCARRIERS * 2 * pusch_depth3_input_plane::NOF_SYMBOLS)
   {
-  // The gate switch is read ONCE, like the reporting source: a run either gates on the estimator throughout or
-  // on the plane's own residual throughout, and which one it was is visible in the first degradation line.
+  // The gate switch is read ONCE, like the reporting source: a run either gates on the estimator throughout, on the
+  // plane's own residual throughout, or not at all, and which one it was is visible in the first degradation line.
+  // "none" and "net" both start with `n`, so they are told apart by length rather than by the first character -- the
+  // first-character test that was here before would have read "none" as "net" and quietly kept the gate on.
   if (const char* env = std::getenv("OCUDU_DEPTH3_DOMAIN_GATE")) {
-    domain_gate = (env[0] == 'n') ? "net" : "estimator";
+    const std::string requested(env);
+    if ((requested == "none") || (requested == "off") || (requested == "0")) {
+      domain_gate = "none";
+    }
+    else if (!requested.empty() && (requested[0] == 'n')) {
+      domain_gate = "net";
+    }
+    else {
+      domain_gate = "estimator";
+    }
   }
   if (const char* env = std::getenv("OCUDU_DEPTH3_GATE_REPORT")) {
     gate_report = (env[0] != '0');
@@ -389,7 +400,9 @@ public:
   // produced, and the published measurement cannot be the classical one. Both are forced onto the arm's own shared
   // measurement layer here, once, and said out loud -- a silent substitution would be the worst of both.
   if (!fallback_enabled) {
-    if (domain_gate != "net") {
+    // "none" is a deliberate choice and survives; "estimator" cannot -- there is no estimator to ask -- so it
+    // falls back to the arm's own measurement.
+    if (domain_gate == "estimator") {
       domain_gate = "net";
     }
     if (reporting_source != "net") {
@@ -401,8 +414,14 @@ public:
                "own. A reception that cannot be computed is erased and counted, not handed over.\n");
   }
   // Said once, at construction: which measurement gates this run, so a log never has to be guessed at.
-  fmt::print(stderr, "[pusch_receiver] AI depth-3: domain gate on the {}\n",
-             (domain_gate == "net") ? "arm's own plane residual (R7/S2)" : "classical estimator's SNR");
+  if (domain_gate == "none") {
+    fmt::print(stderr, "[pusch_receiver] AI depth-3: DOMAIN GATE OFF: every reception is computed and measured, in "
+                       "or out of the declared SNR range (set OCUDU_DEPTH3_DOMAIN_GATE=estimator for the old gate)\n");
+  }
+  else {
+    fmt::print(stderr, "[pusch_receiver] AI depth-3: domain gate on the {}\n",
+               (domain_gate == "net") ? "arm's own plane residual (R7/S2)" : "classical estimator's SNR");
+  }
 
     fmt::print(stderr, "[pusch_receiver] AI depth-3: startup grace = {} s (0 = disabled)\n", startup_grace.count());
     if (startup_grace.count() > 0) {
@@ -2138,11 +2157,16 @@ private:
   /// The empty results a pure run hands the chain as its completion signal.
   depth3_empty_estimator_results                    empty_est_results;
   /// Which measurement decides the domain gate, read once from the environment at construction:
-  ///   "estimator" -- the classical estimator's SNR, the behaviour before R7/S2 (the default, so this change
-  ///                  is inert until a flight asks for it);
+  ///   "none"      -- NO GATE (the DEFAULT since 2026-11-03, on the user's instruction). The arm computes every
+  ///                  reception and reports its own measurement, in or out of the declared range -- for the same
+  ///                  reason MIN_PRB went to one: the gate describes the TRAINING DATA, while a rejection is a
+  ///                  reception nothing ever computes. Outside the declared range the arm is untested, not
+  ///                  known-bad, and only a measurement settles which. A flight that wants the old behaviour sets
+  ///                  OCUDU_DEPTH3_DOMAIN_GATE=estimator (or =net for the plane-only measurement);
+  ///   "estimator" -- the classical estimator's SNR, the behaviour before R7/S2 and the default until 2026-11-03;
   ///   "net"       -- the arm's own plane-only residual SNR, which needs neither the estimator nor a forward
   ///                  pass. That is the measurement S2 replaces the gate with (design sections 19.234, 20.4).
-  std::string                                       domain_gate = "estimator";
+  std::string                                       domain_gate = "none";
   /// Receptions the plane-based gate has measured, for its sampled report.
   unsigned                                          gate_samples = 0;
   /// \brief What prepare() measured for a slot, before the network ran.
