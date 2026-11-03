@@ -62,7 +62,7 @@ def snr_band(snr_db):
     return ">=30"
 
 
-def row_key(X, H, qm, snr, i):
+def row_key(H, qm, snr, i):
     """Identity of one row, from data rather than from position.
 
     Deliberately cheap. Hashing a whole sample is a hundred and thirteen kilobytes, and the mother set
@@ -109,15 +109,70 @@ def main():
             problems.append(f"{name} has {d[name].shape[0]} rows, X has {n}")
     print(f"  {len(REQUIRED)} arrays, all with {n} rows" if not problems else "  FAIL row counts differ")
 
-    # ---- 1. CAPS, from the drawn samples' own fields --------------------------------------------------
-    print("\n== 1. caps ==")
+    # ---- 1. CAPS, per population, recovered from provenance -------------------------------------------
+    #
+    # `self` and `harq` are NOT stored in the draw -- the arrays carry no such field -- so a check from the
+    # draw alone can only see the combined count. That is not equivalent to two separate caps: a cell whose
+    # harq population is 2 013 deep contributes 250 and stays under 2 750 combined, and a verifier using the
+    # combined cap reports it as "should have been taken whole" when it was taken exactly right. Fifteen
+    # cells of the real draw failed that way before this was fixed, all of them one population over its own
+    # cap and the total under the sum.
+    #
+    # So the populations are recovered by matching each drawn row back to the mother row it came from, using
+    # a key of the fields that identify a sample. That is the same match the alignment check does, done for
+    # every row instead of two hundred, and it is what makes the per-population caps checkable at all.
+    print("\n== 1. caps (per population, via provenance) ==")
     qm, prb, snr = d["qm"], d["alloc_nof_prb"], d["snr_nominal"]
-    # self/harq is not stored in the draw (the arrays carry no such field), so the cap check is on the
-    # combined count per (mod, width, snr) against self_cap + harq_cap, and the split is recovered by
-    # the provenance check below.
-    per_cell = collections.Counter()
+
+    KEY_ARRAYS = ("qm", "alloc_nof_prb", "snr_nominal", "nof_bits", "nof_tb_bits", "rnti",
+                  "n_id", "rv", "alloc_first_prb", "dmrs_bitmap", "sigma2_over_r2")
+
+    def key_of(a, i):
+        """Key of row `i`, from arrays already materialised.
+
+        `a` is a dict of arrays, NOT an open NpzFile. Reading a member of a compressed archive
+        decompresses it in full on every access, so a per-row `z["qm"][i]` inside a loop over three
+        million rows decompresses `qm` three million times -- which is exactly the trap the trainer's
+        own comment warns about, and which the first version of this file walked straight into: eight
+        hundred and fifty gigabytes of reads for a hundred and sixty-four gigabytes of data.
+        """
+        return (int(a["qm"][i]), int(a["alloc_nof_prb"][i]), float(a["snr_nominal"][i]),
+                int(a["nof_bits"][i]), int(a["nof_tb_bits"][i]), int(a["rnti"][i]),
+                int(a["n_id"][i]), int(a["rv"][i]), int(a["alloc_first_prb"][i]),
+                int(a["dmrs_bitmap"][i]), float(a["sigma2_over_r2"][i]))
+
+    mother_index = {}
+    files = sorted(glob.glob(os.path.join(args.mother, "*.npz")))
+    print(f"  indexing {len(files)} mother file(s) by row key ...")
+    for path in files:
+        harq = "_harq" in os.path.basename(path)
+        with np.load(path, allow_pickle=False) as z:
+            # Every array the key needs, taken ONCE. X and H are deliberately not loaded: the key does not
+            # use them, and holding them resident costs a hundred and thirteen kilobytes per row.
+            a = {name: z[name] for name in KEY_ARRAYS}
+            for j in range(a["qm"].shape[0]):
+                mother_index[key_of(a, j)] = harq
+
+    pop = collections.Counter()          # (mod, width, snr, harq) -> drawn count
+    unmatched = 0
     for i in range(n):
-        per_cell[(int(qm[i]), width_band(int(prb[i])), snr_band(float(snr[i])))] += 1
+        k = (int(qm[i]), int(prb[i]), float(snr[i]), int(d["nof_bits"][i]),
+             int(d["nof_tb_bits"][i]), int(d["rnti"][i]), int(d["n_id"][i]), int(d["rv"][i]),
+             int(d["alloc_first_prb"][i]), int(d["dmrs_bitmap"][i]), float(d["sigma2_over_r2"][i]))
+        h = mother_index.get(k)
+        if h is None:
+            unmatched += 1
+            continue
+        pop[(int(qm[i]), width_band(int(prb[i])), snr_band(float(snr[i])), h)] += 1
+    if unmatched:
+        problems.append(f"{unmatched} drawn row(s) have no mother row")
+    print(f"  {n - unmatched}/{n} drawn rows matched to a mother row ({unmatched} unmatched)")
+    print(f"  populations: self {sum(v for k, v in pop.items() if not k[3])}, "
+          f"harq {sum(v for k, v in pop.items() if k[3])}")
+
+    per_cell = collections.Counter()
+    for k, v in pop.items():
+        per_cell[k[:3]] += v
     over = {k: v for k, v in per_cell.items() if v > args.self_cap + args.harq_cap}
     if over:
         for k, v in sorted(over.items()):
@@ -129,13 +184,12 @@ def main():
 
     # ---- 4/5. ALIGNMENT + PROVENANCE against the mother set ------------------------------------------
     print("\n== 4/5. alignment and provenance ==")
-    files = sorted(glob.glob(os.path.join(args.mother, "*.npz")))
     print(f"  mother set: {len(files)} file(s)")
 
     # Index the mother set by row hash, lazily per file, so the check does not need the whole set in RAM.
     wanted = min(args.align_samples, n)
     picks = np.linspace(0, n - 1, wanted, dtype=np.int64)
-    draw_keys = {int(i): row_key(d["X"], d["H"], qm, snr, int(i)) for i in picks}
+    draw_keys = {int(i): row_key(d["H"], qm, snr, int(i)) for i in picks}
     # Keyed BY HASH, valued by drawn row -- the other way round silently matches nothing, which is what
     # the first version of this check did before it was tested against data.
     remaining = {h: row for row, h in draw_keys.items()}
@@ -144,9 +198,11 @@ def main():
         if not remaining:
             break
         with np.load(path, allow_pickle=False) as z:
-            Xm, Hm = z["X"], z["H"]
-            for j in range(Xm.shape[0]):
-                k = row_key(Xm, Hm, z["qm"], z["snr_nominal"], j)
+            # H only, not X: row_key reads sixteen channel values. The arrays are taken once, outside the
+            # row loop, for the reason in key_of's docstring.
+            Hm, qm_m, snr_m = z["H"], z["qm"], z["snr_nominal"]
+            for j in range(qm_m.shape[0]):
+                k = row_key(Hm, qm_m, snr_m, j)
                 if k in remaining:
                     found[remaining.pop(k)] = (os.path.basename(path), j)
         print(f"    {os.path.basename(path)}: {len(found)} matched, {len(remaining)} to go")
@@ -176,17 +232,27 @@ def main():
     else:
         print("  every non-empty cell in the mother set is represented")
 
-    # A cell under its cap must have been taken whole.
+    # A population under its OWN cap must have been taken whole. Judged per population, since that is what
+    # the caps are; the combined-cap version of this test flagged fifteen correct cells on the real draw.
     short = 0
-    for k, have in mother_cells.items():
-        if have <= args.self_cap + args.harq_cap and per_cell.get(k, 0) != have:
-            problems.append(f"cell {QM_NAME.get(k[0], k[0])}/{k[1]}/{k[2]} had {have} < cap but the draw has {per_cell.get(k, 0)}")
+    mother_pop = collections.Counter()
+    for path in files:
+        h = "_harq" in os.path.basename(path)
+        with np.load(path, allow_pickle=False) as z:
+            qm_m, prb_m, snr_m = z["qm"], z["alloc_nof_prb"], z["snr_nominal"]
+            for i in range(qm_m.shape[0]):
+                mother_pop[(int(qm_m[i]), width_band(int(prb_m[i])), snr_band(float(snr_m[i])), h)] += 1
+    for k, have in mother_pop.items():
+        cap = args.harq_cap if k[3] else args.self_cap
+        if have <= cap and pop.get(k, 0) != have:
+            problems.append(f"{'harq' if k[3] else 'self'} cell {QM_NAME.get(k[0], k[0])}/{k[1]}/{k[2]} "
+                            f"had {have} <= cap {cap} but the draw has {pop.get(k, 0)}")
             short += 1
-    print(f"  cells under their cap taken whole: {'yes' if short == 0 else f'{short} FAILED'}")
+    print(f"  populations under their own cap taken whole: {'yes' if short == 0 else f'{short} FAILED'}")
 
     # ---- 3. DUPLICATES -------------------------------------------------------------------------------
     print("\n== 3. duplicates ==")
-    seen = collections.Counter(row_key(d["X"], d["H"], qm, snr, i) for i in range(n))
+    seen = collections.Counter(row_key(d["H"], qm, snr, i) for i in range(n))
     dupes = sum(1 for v in seen.values() if v > 1)
     print(f"  {dupes} duplicated row(s) among {n}")
     if dupes:
