@@ -9048,3 +9048,57 @@ epoch    3  train 0.12637  val 0.13134  uncoded BER 0.0563  (3383s)
 ★★ **epoch 4/60、best 0.13134、1 122 s/轮 ⇒ 60 轮约 **18.7 小时** ⇒ 明天 ~11:00–12:00** ✓；
 ★ **GPU 83%、87 °C（比先前 86 °C 略高，仍在预期内）** ✓；
 ★★★ **`best` 目前不及 c32 但只到第 4 轮，不可比；且 `val` 仅 731 行 ⇒ 最终"最佳轮"必须**用尺子验**，不能只看 `resume.json`** ✓。
+
+**(r) ★★★★★★ 2026-11-03 17:16 **训练停止的原因：`coded BLER` 路径崩了****
+
+**⇒ 日志末尾**：
+```
+File "train_depth3.py", line 1251, in evaluate
+    bler.add(index, gathered)
+File "train_depth3.py", line 499, in add
+    raise ValueError(f"{llr_chain.size} LLRs for {transmitted.size} transmitted bits")
+ValueError: 6912 LLRs for 6880 transmitted bits
+```
+
+**⇒ ★★★ 时间对得上**：★ **最后检查点 **16:54** ✓ ＝ **第 4 轮** ✓ ⇒ **第 5 轮崩的** ✓
+**⇒ ★★★★ 而第 5 轮正是 `--bler-every 5` 的**第一次解码评估**** ✓ ⇒ **`bler.add` 只在**那里**被调用** ✓** ✓✓
+
+**(s) ★★★★ 崩在哪：`6912` 与 `6880` 差 **32 比特**
+
+**⇒ 代码**（`train_depth3.py:495-500`）：
+```python
+transmitted = np.unpackbits(data["bits"][index])[:int(data["nof_bits"][index])]
+if transmitted.size != llr_chain.size:
+    raise ValueError(f"{llr_chain.size} LLRs for {transmitted.size} transmitted bits")
+```
+**⇒ ★★★ 即**：★ **网络/装配给出的 **LLR 数 6912** ✓，而 **`nof_bits` 记的**传输比特只有 6880** ✓ ⇒ **差 **32**** ✓
+**⇒ ★★ 32 比特 ＝ **4 字节** ⇒ **像是**一个 TB 的尾部对齐**或**一个 CB 的边界** ✓** ⚠
+
+**⇒ ⇒ ⇒ ★★★★ 结论**：★ **至少有一个 w2 样本的 `nof_bits` 与其分配所蕴含的 LLR 数**不一致** ✓
+**⇒ ★★ 这是**数据一致性问题** ✓（**可能是重建后的某个数据集 ✓**）** ⚠
+
+**(t) ★★★ 处置：按 `--bler-samples 0` 续训（已生效）**
+
+**⇒ 现场**：
+```
+resumed from depth3_last.keras: next epoch 5, best 0.13134, 0 epoch(s) without improvement
+```
+**⇒ ★★★ 即**：★ **从第 5 轮续 ✓、best 保住 ✓、4 轮历史带过来 ✓** ✓✓
+
+**⇒ ★★ 为什么这个处置是对的**：
+| 方案 | ★ 代价 |
+|---|---|
+| ★★★ **`--bler-samples 0`（**采用**）** | ★ **放弃 `coded BLER`** ✓ —— **但那个量在 **731 行、盲一个角落** 的 val 上本来就不该用来下判断** ✓；**块级结论由**尺子**给** ✓✓ |
+| ★ 修 `nof_bits` 的一致性 | ★ **要逐样本查 166 495 行 ✓ ⇒ 一小时的活 ✓，且不改变训练结果** ✓ |
+
+**⇒ ★★★ 所以**：★ **先让它跑到 60 轮 ✓，`nof_bits` 的不一致**另立一件事** ✓** ✓✓
+
+**(u) ⚠ 两个必须记下的后果**
+
+1. ★★★ **这次 60 轮**没有 `coded BLER`** ✓ ⇒ **"哪一轮块级最好"只能**事后用尺子量**（**而那正是 §26(q) 已经要求的 ✓**）** ✓
+2. ★★ **`nof_bits` 与 LLR 数不一致是一个**真实的缺陷** ✓ ⇒ **它可能在别处也出现** ⇒ **应当有一个**全量一致性检查**（**对 166 495 行逐行比 `nof_bits` 与分配所蕴含的比特数 ✓**）** ✓
+
+★ 状态 ✓：★★★ **停止原因查明：第 5 轮首次 `coded BLER` 评估时 `bler.add` 抛 `6912 LLRs for 6880 transmitted bits` ⇒ `nof_bits` 与 LLR 数差 32** ✓；
+★★ **已用 `--resume --bler-samples 0` 从第 5 轮续训（best 0.13134 保住、4 轮历史带过来）** ✓；
+★★★ **代价是本次没有 `coded BLER` ⇒ 块级结论改由尺子给（本来就是更可靠的那把）** ✓；
+★★ **并记下一个待办：`nof_bits` 的全量一致性检查（166 495 行）** ✓。
