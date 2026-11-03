@@ -145,7 +145,11 @@ def main():
     files = sorted(glob.glob(os.path.join(args.mother, "*.npz")))
     print(f"  indexing {len(files)} mother file(s) by row key ...")
     for path in files:
-        harq = "_harq" in os.path.basename(path)
+        # The same rule the draw uses, and it has to be: every rebuilt mother file has "w2_harq_"
+        # in its name, so testing for "_harq" alone labels a _self file as recovered. A self
+        # population judged against the 250 recovered cap is not the check that was specified.
+        base = os.path.basename(path)
+        harq = ("_self" not in base) and ("_harq" in base)
         with np.load(path, allow_pickle=False) as z:
             # Every array the key needs, taken ONCE. X and H are deliberately not loaded: the key does not
             # use them, and holding them resident costs a hundred and thirteen kilobytes per row.
@@ -237,7 +241,8 @@ def main():
     short = 0
     mother_pop = collections.Counter()
     for path in files:
-        h = "_harq" in os.path.basename(path)
+        base = os.path.basename(path)
+        h = ("_self" not in base) and ("_harq" in base)
         with np.load(path, allow_pickle=False) as z:
             qm_m, prb_m, snr_m = z["qm"], z["alloc_nof_prb"], z["snr_nominal"]
             for i in range(qm_m.shape[0]):
