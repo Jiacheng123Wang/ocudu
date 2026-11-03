@@ -38,3 +38,21 @@ and do not belong in a unit-test run:
 | `fly_arm.sh`, `capture_attach.sh`, `fit_sinr_cal.sh` | A radio and the flight environment |
 
 The design document named in `depth3/README.md` is the authority for those tools and their criteria.
+
+## The fourth test, added 2026-11-03
+
+`test_control_bearing_decode.py` pins the **decoder** side of the same contract the other three pin on
+the plane side: a codeword that carries uplink control decodes, and the wrong element map is refused.
+
+It exists because the coded-BLER path raised on the first control-bearing sample of a sixty-epoch
+run, and that raise was the harmless outcome. A HARQ-ACK of one or two bits **punctures** its reserved
+elements rather than shortening the code -- `nof_ul_sch_bits` keeps them (`lib/ran/pusch/ulsch_info.cpp`)
+and the demultiplexer **zeroes** their soft bits (`ocuduvec::zero` in `ulsch_demultiplex_impl.cpp`) --
+so `nof_bits` is the number of coded bits that were on air and the codeword is longer. A decoder that
+treats the two as the same number reads a plausible BLER instead of failing.
+
+It decodes one sample from each family (two-bit ACK: eight punctured elements; four-bit ACK: none) with
+perfect LLRs and requires zero block errors, then requires a plane gathered over the whole allocation to
+be refused. Mutating the erasure insertion out, or the comparison back to all bits, makes it fail.
+Still pure Python plus numpy: it imports `coded_bler.py`, which is why that module is separate from the
+trainer (design section 28).
