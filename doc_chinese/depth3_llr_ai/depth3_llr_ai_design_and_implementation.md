@@ -8725,3 +8725,46 @@ git branch --set-upstream-to=origin/apple-silicon apple-silicon
 ★ 状态 ✓：★★★ **107 的 `~/work/ocudu` 在分离 HEAD 上、上游是 GitLab、有 21 个本地改动** ✓；
 ★★ **GitHub **SSH 不通**（无 key）但 **HTTPS 通** ⇒ 走 HTTPS** ✓；
 ★★★ **迁移步骤已写死（stash -u → set-url → fetch → checkout -B → set-upstream），并要求确认新树里的 `train_depth3.py` 存在** ✓。
+
+**(g) ★★★★★ 2026-11-03 14:40 **子代理的三条更正，其中两条纠正了我****
+
+**① ★★★★ val 用哪一批 —— **设计文档早已指定**，而我提了一个**错的**方案****
+
+**⇒ 文档 `depth3_llr_ai_design_and_implementation.md` **§12.18(d)** 写明**：
+> ★★★ **验证集 = `w2_monitor1.npz`**（**1 000 个样本 ✓、四种调制混合 ✓**）
+> **⇒ ★★ 并明确**不要**用 `w2_test1/2`**（**那是留出测试集 ✓，在上面选点就是泄漏** ✓）
+
+**⇒ ★★★ 而它**不是行不相交** ✓（**实测 134/1 000 与旧 `w2_train_mixed` 重合 ✓，文档称之为"偶然"** ✓）**
+
+**② ★★★★★ 而"不同种子"这个方案**根本不可能成立** —— **这是我错了****
+
+**⇒ 子代理的原话**：
+> ★★★ **"a disjoint seed does not buy disjoint rows. A per-bin val drawn from the same mother set will
+> overlap the per-bin training draw **more, not less** — both target the same 112 bins, and where a bin has
+> ≤ 2 500 members the training draw takes **every row**, so a val row from that bin is **guaranteed** to be in training."** ✓✓
+
+**⇒ ★★★ 即**：★ **训练抽取**整箱取满**（**箱 ≤ 2 500 时 ✓**）⇒ **同箱的 val 行**必然**在训练集里**** ✓
+**⇒ ★★ 唯一诚实的检查是**内容级**：★ **对每行 `X`＋`H` 求哈希 ✓，要求交集为空** ✓ —— **命中就**剔除并报数**** ✓
+**⇒ ★ 而它仍抓不到"同一次捕获、不同行"的配对 ✓ —— **这个限制文档已经接受过** ✓**
+
+**③ ★★★★ 参数量：我给的命令**训的不是同一个模型****
+
+**⇒ 实测（从两个 bundle 自己的 `history.json` ✓ 读）**：★ **E4 与 W2-cond 都记 **26 185**** ✓
+**⇒ ★★★ 而子代理准备的命令产出 **26 284**（`spatial` 布局 ✓）** ⇒ **差值 **99** ＝ **`ch_est`(66) ＋ `dmrs_noise`(33)** ✓✓
+**⇒ ⇒ ★★★ 即**：★ **它多带了**两个可选上报头**** ✗
+**⇒ ★ 修法**：★ **加 `--no-reporting-heads`** ✓（**保留 `post_eq_noise` ✓ —— 那才是把 logits 变成 LLR 的那一个** ✓）
+**⇒ ★★ 而 `folded` 布局的 **30 875** 是**另一种布局** ✓ ⇒ **不要动布局** ✓
+
+**(h) ★★★ 已下达的三条**
+
+| # | ★ 内容 |
+|---|---|
+| ★★★ **1** | **加 `--no-reporting-heads`；并在**第 1 轮打印后**核对是否为 **26 185** ✓ —— **不是就停下来说** ✓** |
+| ★★ **2** | **val 用 `w2_monitor1`** ✓（**与既有 w2 运行可比** ✓）；**并另建哈希去重集作第二意见 ✓，交集非空就报数、不静默剔除** ✓ |
+| ★ **3** | **保留 `~/work/ocudu` ✓；那个 518 M 的浅克隆**留着** ✓（**今天不该再累积删除** ✓）；stash 留着** ✓ |
+
+**⇒ ★★ 并要求**：**拷贝后**19 个数组全部**校验** ✓，**不只 `X`** ✓ —— **撕裂的那份**大小与行数都对** ✓，**只有 per-array checksum 能抓到第二个** ✓**
+
+★ 状态 ✓：★★★ **val 用 `w2_monitor1`（§12.18(d) 已指定）；"不同种子"不成立，唯一诚实检查是**内容哈希交集**** ✓；
+★★ **参数量对不上是真缺陷：多带两个上报头（+99）⇒ 加 `--no-reporting-heads` ⇒ 26 185** ✓；
+★★ **并要求拷贝后 19 个数组逐个校验（大小与行数都相等也可能有差异）** ✓。
