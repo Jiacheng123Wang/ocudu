@@ -418,37 +418,17 @@ export LD_LIBRARY_PATH=$(ls -d .venv/lib/python*/site-packages/nvidia/*/lib | tr
 
 ## 10. 测试与评估（"尺子"）
 
-**口径**：**交付比特** ＝ Σ `tbs_bytes × 8`（`crc=OK` 的单元），**不是块数**。
+> ★★ **本节已独立成文**：**`doc_chinese/depth3_llr_ai/gate_measurement_runbook.md`** ✓
+> 那里有从 `.keras` 导出 `.mlmodelc`、标定 sidecar、恢复并校验尺子、逐条跑臂、算分（交付比特／bootstrap／McNemar／
+> 按调制分解）与归档要求的**完整步骤**，以及 2026-11-04 那批的实测记录。
 
-```bash
-# 在 203 上：一条臂，5000 个固定单元，每单元一个进程、串行、PURE
-cd ~/replay_bits_1102/<臂目录>
-BIN=$HOME/dev/ocudu/build/lib/phy/upper/channel_processors/metal/ul_chain_replay
-BUNDLE=$HOME/ai_depth3/runs/<臂>/<模型>.mlmodelc
-python3 run_arm_ext.py --arm ai --bundle "$BUNDLE" --units units_from_clean_cpu.txt \
-  --corpus /Users/jiachengwang/replay_bits_1102/corpus --out <臂>.csv --logs logs_<臂> --tmp tmp_<臂> \
-  --warmup 0 --guard 1
-```
+**这里只留三句必须记住的**：
 
-| 协议要点 | 为什么 |
-|---|---|
-| `OCUDU_DEPTH3_FALLBACK=none`（PURE）| 否则网络拒收的单元会被经典链接手，两条臂不再独立 |
-| `depth3_scales.txt` 放在 bundle 旁 | 缺了会退回默认标定 |
-| 每单元一进程、**串行** | 两个 replay 并发会互相污染 |
-| 守卫：每单元前 `ps`，有第二个 replay 就中止 | 同上，且守卫必须**被看到触发过** |
-| 记录二进制 sha256 | 不同二进制不可直接比（例如 1-PRB 单元有的版本不算）|
-
-**导出（Mac/Core ML）**：
-
-```bash
-train_depth3.py --export-only <best.keras> --export-probe /tmp/<臂>.mlpackage \
-  --modcond --layout spatial --modulation 256QAM --c-hid 32 --blocks 18 --snr-range 0,48
-xcrun coremlcompiler compile /tmp/<臂>.mlpackage <输出目录>/
-calibrate_depth3.py --model <best.keras> --data <monitor.npz> --cond --layout spatial \
-  --samples 60 --write-scales <输出目录>
-```
-
----
+1. **口径**：**交付比特** ＝ Σ(`crc=OK` 的 `tbs_bytes × 8`)，**不是块数**（大块会被系统性低估）。
+2. **尺子**：`ruler_s2_amc_5000`（5 000 个未按 CRC 过滤的接收），归档在
+   `lib/phy/upper/ai_signal_processors/test/`，用 `materialise.sh` 或分片 tar 还原，**并用 `SHA256SUMS` 校验 10 000 条**。
+3. **四条硬要求**：`OCUDU_DEPTH3_FALLBACK=none`（PURE）、`depth3_scales.txt` 与 bundle 同目录、**每单元一进程串行**、
+   **守卫**（每单元前查有没有第二个 replay）。
 
 ## 11. 工具清单（一张表）
 
