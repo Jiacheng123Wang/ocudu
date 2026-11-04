@@ -5986,7 +5986,7 @@ nohup bash ~/ai_depth3/build_s2_all.sh > ~/ai_depth3/logs_build_s2/driver.out 2>
 **(g) ★★ 产物**
 
 ⇒ ★ `~/ai_depth3/census_s2_bins.csv`（与本节同源，224 行逐箱计数 ✓），已入库到 `doc_chinese/depth3_llr_ai/census_s2_bins.csv` ✓；
-工具 `~/ai_depth3/census_s2_mother.py`（2026-11-04 写，直接复用 `census_bins.py` 的边界函数，所以与另外三个工具同构 ✓）
+工具 ★ **`lib/phy/upper/ai_signal_processors/depth3/ai_train/census_mother_set.py`**（2026-11-04 **入库** ✓，直接复用 `census_bins.py` 的边界函数，所以与另外三个工具同构 ✓；`--caps` 直接打印均匀抽取的总量与构成 ✓）
 
 ★ 状态 ✓：★★ **s2 的 112 箱盘点完成（2 488 175 样本、197/224 箱非空）** ✓；
 ★★★ **「训练集按 bin 均匀抽取、不按尺子加权」这一口径已写进本节** ✓；

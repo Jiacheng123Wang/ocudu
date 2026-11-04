@@ -323,6 +323,86 @@ export CHUNK=8000    # ★ 单进程样本上限；多腿并行时必须设，�
 
 ---
 
+## 7.1 分箱盘点（**抽取之前必须做的一步**）
+
+母集建好之后、抽训练集之前，先回答一个问题：**这份语料到底覆盖了哪些格子、每格有多少**。
+不看这一步就抽，等于闭着眼睛配额。
+
+### 7.1.1 箱的定义（四个工具共用一套边界）
+
+**4 调制 × 4 宽度 × 7 SNR × 2 群体 ＝ 112 箱**：
+
+| 维 | 边界 | 代码出处 |
+|---|---|---|
+| 调制 | QPSK / 16QAM / 64QAM / 256QAM | — |
+| 宽度（`alloc_nof_prb`）| `<=3`、`<=8`、`<=24`、`>24` | `census_bins.WIDTH_EDGES = [3, 8, 24]` |
+| SNR（`snr_nominal`，dB）| `<0`、`0-6`、`6-10`、`10-14`、`14-20`、`20-30`、`>=30` | `census_bins.SNR_EDGES = [0,6,10,14,20,30]` |
+| 群体 | `self`（首传自己解出）/ `harq`（靠重传捞回）| 文件名 `_self.npz` / `_harq.npz` |
+
+★ **边界只有一个出处**：`census_bins.py` 的 `width_band()` / `snr_band()`。
+`census_s2_mother.py`、`select_by_bin.py`、`split_depth3_stratified.py` 都是同一套，**所以四者的箱号不可能漂移**。
+
+### 7.1.2 两种盘点，回答两个不同的问题
+
+| 盘点 | 工具 | 读什么 | 回答 |
+|---|---|---|---|
+| **捕获侧** | `ai_train/census_bins.py` | 每条腿的 `cap_*.txt` 侧车（**不含** `_ce.txt`）| ★ **采集覆盖了什么**（含解不出的样本）|
+| ★ **母集侧** | ★ **`ai_train/census_mother_set.py`**（2026-11-04 入库）| 母集 npz 里的 `qm` / `alloc_nof_prb` / `snr_nominal` | ★★ **抽取能用到什么**（只含可解码样本）|
+
+★ **抽训练集要看母集侧的箱** —— 抽取工具配额的对象就是母集的样本；
+捕获侧的箱用来判断"**下一腿该补哪个格子**"。
+
+### 7.1.3 命令
+
+```bash
+PY=~/ai_ce_work/venv/bin/python
+LIB=~/dev/ocudu/lib/phy/upper/ai_signal_processors/depth3/ai_train
+
+# ① 捕获侧（可增量：--ledger 记住已数过的腿；--force 重数时是"替换"不是"累加"）
+$PY $LIB/census_bins.py --jobs 14 \
+    --csv ~/ai_depth3/census_captures.csv \
+    --ledger ~/ai_depth3/census_ledger.json \
+    /Volumes/T7_Corpus/corpus/s2_amc_ping_1103a /Volumes/T7_Corpus/corpus/s2_amc_iperf_1103i
+
+# ② 母集侧（一次扫完整个目录；322 个 npz / 2.49 M 样本约 3 分钟）
+$PY $LIB/census_mother_set.py --dir ~/ai_depth3/datasets_full_s2 \
+    --csv ~/ai_depth3/census_s2_bins.csv --caps 2500:250,8000:800   # 逐箱表 ＋ 均匀抽取投影
+```
+
+**输出格式**：`census_bins.py --csv` 写 `leg,modulation,width,snr,n`（另有 `ALL` 汇总行）；
+`census_s2_mother.py` 写 `modulation,width,snr,population,samples`。
+
+### 7.1.4 怎么用这份盘点选抽取（**均匀，不按尺子加权**）
+
+**★★★ 口径（2026-11-04 用户定）**：**训练集按 bin 均匀抽取**（每箱等量、不足全取），
+**不要按尺子的构成去加权** —— 尺子只是**一条腿的随机抽样**，按它加权等于**让模型迎合尺子**，不公平也不可外推。
+
+**均匀抽取的总量与构成可以事先算出来**：`总量 = Σ_箱 min(该箱样本数, cap)`。
+
+```bash
+# 例：算 8000/800 能抽多少、构成如何（读 census_s2_bins.csv 即可）
+python3 - <<'PY'
+import csv, collections
+c = {(r["modulation"], r["width"], r["snr"], r["population"]): int(r["samples"])
+     for r in csv.DictReader(open("/Users/jiachengwang/ai_depth3/census_s2_bins.csv"))}
+for cs, ch in ((2500, 250), (5000, 500), (8000, 800)):
+    take = {k: min(v, cs if k[3] == "self" else ch) for k, v in c.items()}
+    tot = sum(take.values()); by = collections.Counter()
+    for k, v in take.items(): by[k[0]] += v
+    print(f"cap {cs}/{ch}: {tot:,} samples, mix " + " ".join(f"{m} {100*by[m]/tot:.0f}%" for m in
+          ("QPSK", "16QAM", "64QAM", "256QAM")))
+PY
+```
+
+### 7.1.5 空箱就是采集的缺口（但先分清"难产生"与"漏采"）
+
+**★ 低阶调制 × 低 SNR**、**256QAM × <0 dB** 这些格子**物理上就难产生**（低 SNR 用低阶、高 SNR 才用高阶）⇒
+**空着是正常的**，不要为了填满它去硬采；但它们正是"模型可能遇到而语料没见过"的边缘 ⇒
+**要补就用衰减把高阶调制压到低 SNR**，而不是换位置碰运气。
+
+**★ 2026-11-04 的 s2 实例**（详见 `corpus_capture_and_new_datasets_build.md` §65）：
+2 488 175 个样本、**197/224 箱非空**、27 个空箱；均匀抽取 2 500/250 → **140 940**，8 000/800 → **342 368**。
+
 ## 8. 训练集 / 验证集 / monitor 集的抽取
 
 母集是"什么都有"的库；训练要的是**按箱受控**的抽取。
@@ -438,6 +518,8 @@ export LD_LIBRARY_PATH=$(ls -d .venv/lib/python*/site-packages/nvidia/*/lib | tr
 | 流量 | `ping` / `iperf3 -R` / `wip/run_iperf_ladder.sh` | 上行速率 → 授权宽度 | `-R` 才是上行；server 在手机 |
 | dump | `ai_train/dump_tb.sh` | 捕获 → `tb_<腿>/{index.csv,units.txt,tb/}` | CPU 路径；`--jobs`；三条对账 |
 | 建库 | `ai_train/build_mother_set.sh` | dump＋捕获 → `datasets_full_s2/<腿>_<MOD>_<pop>.npz` | 不走抽样；`CHUNK` 控内存 |
+| 分箱盘点（捕获）| `ai_train/census_bins.py` | 腿目录 → `leg,mod,width,snr,n` CSV ＋ 增量 ledger | `--force` 是替换不是累加；读侧车，不读 `.bin` |
+| 分箱盘点（母集）| `ai_train/census_mother_set.py` | 母集 npz → 逐箱 CSV ＋ 表 ＋ 均匀抽取投影 | 复用 `census_bins` 的边界；`--caps` 直接算抽多少；扫一遍约 3 分钟 |
 | 抽训练集 | `ai_train/draw_train_set_w2.py` | 母集 → 一数组一 `.npy` 的目录 | cap 是**每箱**；先 `--dry-run` |
 | 抽 monitor | 同上（小 cap、不同 seed）| 母集 → `datasets_monitor/` | 同源、测重叠 |
 | 验收 | `ai_train/verify_train_set_w2.py` | 抽取目录＋母集 → 六项报告 | 对齐/出处能抓转置 |
@@ -510,6 +592,9 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/dump_tb.sh \
 TRAIN=~/dev/ocudu DUMP_ROOT=~/ai_depth3/dump_s2 CORPUS_ROOT=/Volumes/T7_Corpus/corpus \
 OUT=~/ai_depth3/datasets_full_s2 PY=~/ai_ce_work/venv/bin/python JOBS=1 CHUNK=8000 \
 bash lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh s2_amc_ping_1103p
+
+# 4.5) 分箱盘点（抽取之前；母集侧）
+$PY $LIB/census_mother_set.py --caps 2500:250,8000:800
 
 # 5) 抽训练/monitor 集（在训练机上）
 $PY $LIB/draw_train_set_w2.py --in datasets_full_s2 --out data/datasets_train_w2 --self-cap 2500 --harq-cap 250 --seed 20261103
