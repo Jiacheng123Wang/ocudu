@@ -484,13 +484,30 @@ export LD_LIBRARY_PATH=$(ls -d .venv/lib/python*/site-packages/nvidia/*/lib | tr
 | `--layout spatial` | 平面布局 | 与部署形态一致 |
 | `--c-hid` / `--blocks` | 宽度 / 块数 | c32=26 185 参数；c128=325 897 |
 | `--batch` | 显存/速度的旋钮 | ★ 6 GB 卡上 c128 **batch 16 OOM、12 可跑**（实测）|
-| `--patience` | 早停（0 = 不停）| 与 `--min-delta`、`--control <json>`（每轮可改）配合 |
-| `--snapshot-every` | 每 N 轮存一份**可续训的完整站点** | 产物在 `<out>/snapshots/epoch_NNNN_periodic.{keras,json}` |
+| `--patience` | 早停（**0 = 不停**）| ★★★ **现在的默认做法是 0**：不停、每轮留快照，**事后用尺子选**（见下）|
+| `--snapshot-every` | 每 N 轮存一份**可续训的完整站点** | ★★ **研究早停是否有用时设 1**（每轮都留）；产物在 `<out>/snapshots/epoch_NNNN_periodic.{keras,json}` |
 | `--resume` | 从 `depth3_last.keras` ＋ `resume.json` 续训 | ★ 状态文件在**最佳决策之后**写；加载时还会用 history 校正 `best/since` |
 | `--bler-samples` | 每 `--bler-every` 轮解码多少个验证样本 | 0 = 不解码（选模型靠 val loss，判优劣靠尺子）|
 
 **产物**：`depth3_best.keras`（每次 val 改善）、`depth3_last.keras`（每轮）、`resume.json`（续训状态）、
 `history.json`（跑完才写）、`snapshots/`。
+
+### 9.1 ★★★★ 不早停，用快照 ＋ 尺子选模型（2026-11-05 定）
+
+**⇒ ★★ 训练时的 `val`（monitor）现在只作**参考**，不再是选模型的依据** ✓
+**⇒ ⇒ ★★★ 做法**：**`--patience 0`（不早停）＋ `--snapshot-every 1`（每轮一个快照）** ⇒ 训练跑满预定轮数，
+**每轮的模型参数都留在 `<out>/snapshots/epoch_NNNN_periodic.{keras,json}`** ✓
+**⇒ ★★ 事后**：用**尺子**（5 000 单元、交付比特）逐快照测量 ⇒ **"早停到底该停在哪一轮"这个问题，从推测变成测量** ✓
+
+**为什么这样更好**：
+
+| 早停（旧）| 快照 ＋ 事后选（新）|
+|---|---|
+| 用**训练时那份 monitor** 选 ⇒ monitor 一变（例如只有 181 条），选择就抖 | ★ **用尺子选**，与训练时的 monitor 无关 ✓ |
+| 早停**只留最好那一轮**，无法回答"再训几轮会不会更好" | ★★ **整条曲线都在**，可以逐点看 ✓ |
+| `patience` 是个**猜**出来的超参 | ★ 变成**可测**的量（哪一轮的交付比特最高）✓ |
+
+**代价**：每个快照约 **1.6 MB（c128）／6 MB（c256）／24 MB（c512）** —— 四轮十几个快照也就几百 MB ✓。
 
 **★ 起飞前先看日志头三行**：`parameters N`、`layout`、`train/val` 样本数 —— 架构错在这里就能发现，不必等一轮。
 
