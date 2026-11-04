@@ -1136,3 +1136,45 @@ python -u train_depth3.py --resume --train datasets_train_s2_5k --val datasets_m
 
 ★ 状态 ✓：★★ **两条训练都独立于本机运行（nohup/setsid、ppid 1）** ✓；★★ **两台都加了看门狗，221 的队列改成可续** ✓；
 ★★ **重启说明放在两台机器的 `/tmp/RESTART_*.md`** ✓；★★ **"第一轮前没有 checkpoint"这个唯一风险已写明** ✓。
+
+### 9.11 ★★★★ 2026-11-05 07:30 **更正 §9.10：脚本和说明已从 `/tmp` 移到持久目录（`/tmp` 重启即清空）**
+
+**(a) ★★★ 用户指出的问题（他说得对）**
+
+**⇒ §9.10 把看门狗脚本和 `RESTART_*.md` 放在 `/tmp`** ✗ ⇒ **机器一旦重启，`/tmp` 被清空** ⇒
+**看门狗本身没了、说明也没了 —— 而这两样恰恰是"重启之后"才需要的东西** ✓
+
+**(b) ★★★ 新的持久位置（已就位并重启了看门狗）**
+
+| 机器 | 看门狗 / 队列 | 说明 |
+|---|---|---|
+| **106** | ★ `~/work/ai_phy_train/bin/watch_c256.sh` | ★ `~/work/ai_phy_train/RESTART.md` |
+| **221** | ★ `~/work/ai_phy_train/bin/deep_queue.sh`（两阶段队列）＋ `bin/watch_deep.sh`（看门狗）| ★ `~/work/ai_phy_train/RESTART.md` |
+
+**(c) ★★★ 重启后只需一条命令**
+
+```bash
+# 106
+nohup bash ~/work/ai_phy_train/bin/watch_c256.sh < /dev/null \
+  >> ~/work/ai_phy_train/runs/watch_c256.log 2>&1 &
+
+# 221（队列会被看门狗自动拉起；也可直接起队列）
+nohup bash ~/work/ai_phy_train/bin/watch_deep.sh < /dev/null \
+  >> ~/work/ai_phy_train/logs_deep/watch.out 2>&1 &
+```
+
+**(d) ★★ 一个现场踩到的坑：106 上用普通 `nohup … &` 起的看门狗**静默死了**
+
+**⇒ 现象**：`nohup bash … &` 起完 `pgrep` 看得到，几十秒后消失，日志一个字都没有（脚本本身没问题）✓
+**⇒ 修法**：Linux 上用 ★ **`setsid nohup … &`** ⇒ 现在 `ppid = 1`、稳定运行 ✓
+**⇒ 221 是 macOS，没有 `setsid`** ⇒ 用 `nohup … < /dev/null >> log 2>&1 &`，实测 `ppid = 1` ✓（macOS 的 nohup 足够）
+
+**(e) ★★ 当前进程（07:30 实测）**
+
+| 机器 | 进程 | ppid |
+|---|---|---|
+| 106 | 训练 `15001`（c256）＋ 看门狗 ★ **`18725`** | 皆 **1** ✓ |
+| 221 | 训练 `3208`（c32×72，40K）＋ 看门狗 **`3434`** ＋ 队列 **`3438`** | 皆 **1**（队列为看门狗子进程）✓ |
+
+★ 状态 ✓：★★ **脚本与说明已移出 `/tmp`（`bin/` ＋ `RESTART.md`）** ✓；★★ **两台看门狗都已重启并 `ppid=1`** ✓；
+★★ **"106 需 `setsid`、221 无 setsid"这一差异与踩坑记录在案** ✓；★★ **重启只需一条命令，已写进本节与两台机器的 `RESTART.md`** ✓。
