@@ -5841,3 +5841,16 @@ local leg="$1" out="$OUT/tb_$leg" log="$LOGD/$leg.log"
 ★ 状态 ✓：★★ **15/15 dump 完成并对账通过**（750 000 单元、**553 854 crc=OK**）✓；
 ★★ **CPU 路径、4 腿并行、2 小时 8 分** ✓；★★★ **驱动 bug（`local` 展开顺序）已修并加自检**，被污染目录改名保留 ✓；
 ★★ **93 GiB 中约 90 GiB 是可回收草稿，已写明来源，未删** ✓。
+
+## 63. ★★★★★ 2026-11-04 15:20 **全过程说明书已单独成文：`corpus_to_training_db_manual.md`**
+
+**⇒ ★★ 五份采集/建库文档有**时间先后**，其中的命令**新旧混杂**（旧：`..._llr_collect.yml`、`MIN_RB=43`、`RV=0`、手动 export `OCUDU_*`；
+新：`run_collect_leg.sh` 的采集默认值、`LEG_NAME` 派生路径、`pinned_mcs*.yml`、T7 语料根、`build_mother_set.sh`）✓
+**⇒ ★★★ 所以把"以谁为准"和"每一步怎么做"收进一份手册**：★ **`doc_chinese/depth3_llr_ai/corpus_to_training_db_manual.md`** ✓
+
+**⇒ 它涵盖**：★ 准备（代码/环境变量/配置 pinned↔amc/硬件检查）→ ★ 起飞（最近一次成功的命令形状）→ 手机接入与打流量（`-R` 是上行、
+阶梯工具的"速率→宽度"规律）→ ★ 收腿核对与 `FLIGHT.txt` → ★ dump（CPU 路径、三条对账、实测 47 ms/单元、2 h 8 min/15 腿）→
+★ 建库（母集直调、**不走 `select_by_bin`**、`CHUNK` 控内存、实测 22 min/腿、`findings: none`）→ ★ 训练/monitor 抽取（`draw_train_set_w2.py`，
+**cap 是每箱 × 112 格**）→ ★ 验收与格式转换 → ★ 训练参数与产物 → ★ 尺子回放（PURE／串行／守卫／二进制哈希）→ 工具清单 → 十三个真实坑 → 一页速查 ✓
+
+★ 状态 ✓：★★ 手册已成文并入库 ✓；★★ **凡"实测"处都标了日期**（2026-11-04）✓；★★ **新旧命令的取舍在各节与 §0 的时间线里写明** ✓。
