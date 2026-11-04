@@ -101,8 +101,8 @@ ru_sdr:
   device_args: type=b200,num_recv_frames=512,num_send_frames=64,clock_source=gpsdo,time_source=gpsdo,gpsdo=1
   srate: 23.04
   otw_format: sc12
-  tx_gain: 60
-  rx_gain: 50
+  tx_gain: 80
+  rx_gain: 75
   clock: gpsdo
   sync: internal
 
@@ -139,8 +139,8 @@ cell_cfg:
     # 所以采集配置改成让 AMC 自己走：远场自然落到 QPSK/16QAM 的低档，包才解得出来、才有标签。
     # 代价是同一个距离上调制/码率会变，语料不再"一个工作点"——对低 SNR 语料这正是想要的。
     # 要恢复旧行为（高 SNR 定点评测）：把下面两行取消注释即可。
-    min_ue_mcs: 4
-    max_ue_mcs: 4
+    # min_ue_mcs: 4
+    # max_ue_mcs: 4
     # ★ 上行功控目标抬 6 dB（默认 -76）。配方要"高 SNR"，这是买得到它的那个旋钮；
     #   ul_ab 腿实测 +3…+6 dB SINR。必须是 2 的倍数。
     p0_nominal_with_grant: -76
