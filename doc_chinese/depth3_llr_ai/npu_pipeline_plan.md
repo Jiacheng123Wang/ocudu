@@ -376,3 +376,47 @@ du_low_phy_pipeline.h:276:11: error: enumeration value 'npu' not handled in swit
 
 ★ 状态 ✓：★★★ **编译错误（缺 npu case）＋两处白名单已修，`gnb` 构建通过** ✓；★★ **模式矩阵单测 30/30** ✓；
 ★★★ **实链在 gpu 与 npu 下都"零丢块"拉起小区** ✓；★★ **手机接入被 AMF 缺失阻塞，原因已查明** ✓。
+
+---
+
+## 13. ★★★★ 2026-11-05 21:40 **实链跑通（手机接入、ping 通）后的一问：npu 下为什么还量到 CE/EQ-DEMOD？**
+
+**(a) ★★★ 实测（用户 2026-11-05 飞行日志）**
+
+```
+[ul_pipeline]        mean=585.2us median=564.0us  p99=705.0us
+[ul_time_frequency]  mean=512.9us median=489.0us   ← DFT 占大头
+[ul_channel_estimation] mean=24.8us median=23.3us
+[ul_equalization_demod] mean=20.8us median=19.8us
+```
+
+**(b) ★★★★ 两个探针量的**不是**你以为的东西**
+
+| 探针 | 代码位置 | `ai_network` 下量到的是什么 |
+|---|---|---|
+| **`ul_channel_estimation`** | `pusch_processor_impl.cpp:580`（`record_ce_end`）| ★★ **经典估计器**：**它确实还在跑，而且是**设计如此** ✓ |
+| **`ul_equalization_demod`** | 同文件 **904–912**：`record_demod_enter` → **`dependencies->get_depth3().demodulate(...)`** → `record_demod_return` | ★★ **depth3 臂自己的 `demodulate()`**（组平面、前向、量化、解扰），**不是经典解调器** ✓ |
+
+**⇒ 关键代码事实**（`pusch_depth3_receiver.h` 的枚举注释，原文）：
+> `ai_network`: `demodulate()` assembles the contract's plane from the grid, runs the forward pass on the ANE and
+> delivers the network's own soft bits; **the classical demodulator does not run**. `estimate()` **still runs the
+> classical estimator**, because the chain's measurements (RSRP, EPRE, SNR, timing advance) are read from its
+> results until the reporting heads replace them.
+
+**⇒ ⇒ ★★★ 所以**：
+1. **CE 24.8 µs 是真的经典估计器在跑** —— 因为**网络还没有输出上报量**（用户 20:21 指出"原设计有，只是没做"）✓
+   ⇒ 一旦网络输出 RSRP/EPRE/SNR/TA，这段就可以拿掉 ⇒ **那是下一项优化，不是 bug** ✓
+2. **EQ-DEMOD 20.8 µs 是网络臂自己的开销**（含 ANE 前向）—— **不是**经典解调器 ✓
+   ⇒ 也说明**网络前向本身很快**（~20 µs 量级），回放里看到的"50 ms/单元"主要是**进程启动与模型加载**，不是推理 ✓
+
+**(c) ★★ 如何确认那次飞行真的跑的是网络（而不是 `ai_identity` 兜底）**
+
+**⇒ 看启动日志里这两类行**：
+- `depth-3 receiver arm: ai (...)`（回放器）/ `[pusch_receiver] backend=...`
+- ★ `[pusch_receiver] AI depth-3: ...`（**绑定结果**，逐模型一条：kept / redundant / refused）
+**⇒ ★★★ 若日志里没有"绑定成功"的行，那么 `ai_identity` 在跑（委托经典链）⇒ CE 与 EQ-DEMOD 都是经典实现** ✓
+—— 这是"npu 下为什么还有 EQ-DEMOD"的**唯一另一种解释**，用绑定行即可排除 ✓
+
+★ 状态 ✓：★★★ **两个探针的代码位置与语义已查明**（CE 在 580 行、EQ-DEMOD 括的是 `get_depth3().demodulate`）✓；
+★★ **"CE 仍在跑是因为上报量还没由网络输出"已写明** ✓；★★ **"EQ-DEMOD 是网络臂自身开销、非经典解调器"已写明** ✓；
+★★ **如何用绑定行排除 `ai_identity` 兜底** ✓。
