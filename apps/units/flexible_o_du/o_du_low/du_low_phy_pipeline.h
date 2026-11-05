@@ -275,6 +275,12 @@ inline std::optional<phy_pipeline_effective> resolve_phy_pipeline(const phy_pipe
 
   switch (out.mode) {
     case phy_pipeline_mode::cpu:
+    // `npu` takes the SAME MODULE MATRIX as `cpu` (2026-11-05): every PHY module is on the host, for the same
+    // reason -- the air chain's classical receiver is the CPU one, and an AI arm measured inside the GPU lane was
+    // compared against a different chain. What differs is only that the learned receiver is allowed here and
+    // refused in `cpu`, and that nothing may write the grid on the device. `lane_fused` therefore stays false:
+    // there is no single-submission lane in this mode.
+    case phy_pipeline_mode::npu:
       // No module may offload in this mode: report the first conflict instead of silently running on the CPU.
       if (!is_cpu_phy_backend(request.dft)) {
         set_phy_pipeline_conflict(error, out.mode, "--pusch_dft_type", request.dft);
