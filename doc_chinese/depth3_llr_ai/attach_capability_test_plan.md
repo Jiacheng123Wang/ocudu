@@ -114,3 +114,62 @@
 
 ★ 状态 ✓：★★★ **离线代理已测，E4 窄带 −30.7%（2 PRB −43.7%）** ✓；★★ **两个 attach 门控的历史与代码位置已记录** ✓；
 ★★ **离线/实链测试方案与四个对策已列出** ✓。
+
+---
+
+## 7. ★★★★★ 实链飞行记录 1：`c128_e17_40k` ＋ `npu`（2026-11-05 22:50，用户执行）
+
+**(a) 命令与结果**
+
+```bash
+sudo ./build/apps/gnb/gnb -c configs/pinned_mcs04.yml \
+  --expert_phy.phy_pipeline npu \
+  --expert_phy.pusch_receiver_model .../bundles/c128_e17_40k/c128_e17_40k.mlmodelc
+```
+
+| 项 | 结果 |
+|---|---|
+| ★ **手机接入** | ★★ **成功**（UE 4601，RRC 建立，`N2: Connection to AMF … completed`）✓ |
+| ★ **ping 业务** | ★★ **通** ✓（UL 有持续 PUSCH，`[ul_mac_pdu_size] total=51469 B`）|
+| PURE / 域门 / grace | `PURE mode` ✓ ／ `DOMAIN GATE OFF` ✓ ／ `startup grace = 0 s` ✓ |
+| 模型绑定 | 4 个调制（Qm=2/4/6/8）✓；`no narrow-band buckets bound` ⇒ 全部用全带 bundle |
+
+**⇒ ★★★ 与离线预测一致**：`c128_e17_40k` 窄带 2 PRB 176/206（85% 经典）⇒ **接入可行** ✓
+
+**(b) ★★★ 但暴露两个新问题**
+
+**问题 1：Core ML 把这个模型放到了 **GPU 路径**（"SLOW STATE"）**
+
+```
+[depth3-timing] SLOW STATE: the first 64 predictions took 2997 us at the median
+                (the fast state is about 400). Core ML placed this model on the GPU path for this run;
+                throughput survives, latency roughly doubles. Not repair-able from here.
+```
+
+**⇒ ★★ 代码里记录的预期是**：`all` 最坏也只落到 **650–930 µs**（`pusch_depth3_receiver_impl.cpp:378–383` 注释）；
+**这次实测 2997 µs，已超出该包络 3–4 倍** ✗ ⇒ **该注释的前提在本机（M4 Pro / 当前 macOS）不再成立** ✓
+
+**问题 2：UL 块错误率约 **39%**
+
+| 来源 | 数字 |
+|---|---|
+| MAC 表（用户粘贴的 26 个区间）| ok ≈ **114**、nok ≈ **72** ⇒ **nok ≈ 39%** |
+| `[ul_by_size]` | 104 个 CRC-OK hop（探针只看到 104 次解码）|
+| `[ul_pipeline]` | 中位 **5 932 µs**（p99 6 542 µs）|
+| `[ul_equalization_demod]` | 中位 **5 385 µs**（＝网络臂自身）|
+| `[ul_time_frequency]` | 中位 492 µs（DFT 未变）|
+| `[ul_channel_estimation]` | 中位 **16.9 µs** ⇒ ★ PURE 下这是**臂自己的 `estimate()`**（上下文＋notifier），**不是**经典估计器 ✓ |
+
+**⇒ ★★ 因果判断（待验证）**：5.9 ms ≫ 30 kHz 的 slot（0.5 ms）⇒ **处理超时** ⇒ 超时的 TB 被判 nok 并重传，
+**而不是模型判错** ✓ —— 若如此，**把预测拉回 ~400 µs 的 fast state，nok 应显著下降** ✓
+
+**(c) ★★★ 下一步（按代价排序）**
+
+| # | 动作 | 说明 |
+|---|---|---|
+| ★ 1 | **放开 `OCUDU_DEPTH3_COMPUTE_UNITS=cpu_ne`**（当前被强制改回 `all`，见 `:377–391`）| 只为让 Core ML **强制走 ANE**；用一次飞行对比 `[depth3-timing]` 与 nok |
+| 2 | 若 ANE 仍慢/落回 GPU | 检查 bundle 的算子是否 ANE 不支持（reshape/identity 之类），必要时重导 |
+| 3 | 再测 `w2c32_b18_e60` | 离线预测 2 PRB 1/206 ⇒ 预期接入困难，作为**反面对照** |
+
+**⇒ ★★★ 结论（本轮）**：**`npu` ＋ `c128_e17_40k` 能让手机接入并跑通业务** ✓；
+**当前的瓶颈是 Core ML 的放置（GPU 慢态）**，不是窄带能力 ✓ —— 先解决放置，再谈模型选型 ✓
