@@ -339,3 +339,40 @@ OCUDU_DEPTH3_FALLBACK=none OCUDU_REPLAY_MODEL=<bundle>.mlmodelc \
 
 ★ 状态 ✓：★★★ **"CPU 前端较慢"已用同机实测推翻（快 2.8×）** ✓；★★ **npu+ai 85 ms 甚至快于 Metal 前端＋经典 94 ms** ✓；
 ★★ **原因（每单元一进程的固定开销、张量太小、Metal LDPC 附加成本）已写明** ✓；★★ **时间预算改为 7 min（本机）/12–15 min（203）** ✓。
+
+---
+
+## 12. ★★★★ 2026-11-05 21:45 **实链回归：`npu` 与 `gpu` 都能把小区拉起来、射频零丢块**（未做手机接入：核心网 AMF 没起）
+
+**(a) ★★★ 编译器先抓到一处真问题**
+
+**⇒ 加枚举值后 `make gnb` 直接失败**：
+```
+du_low_phy_pipeline.h:276:11: error: enumeration value 'npu' not handled in switch [-Werror,-Wswitch]
+```
+**⇒ 修法**：`npu` 与 `cpu` **共用同一个 case**（模块全部 CPU、禁止 device 写栅格、`lane_fused=false`），
+只有"允许 AI 接收机"这一点不同 ✓
+**⇒ 另外两处硬编码的模式白名单也要加**（否则 CLI 直接拒 `npu`）：
+`du_low_config_cli11_schema.cpp:176` 的校验器、`du_low_phy_pipeline.h:221` 的错误文本 ✓
+
+**(b) ★★★ 单元测试：模式矩阵未变**
+
+`du_low_phy_pipeline_test`：**30/30 通过**（含 `cpu`、`cpu_gpu`、`gpu` 的解析与冲突规则）✓
+
+**(c) ★★★★ 实链试飞（本机 B210，n78 20 MHz，PCI=1）**
+
+| 模式 | 结果 |
+|---|---|
+| ★ **`gpu`**（生产路径）| 小区起来；**`radio sample continuity: 0 gaps over 537 129 blocks -> OK`** ✓ |
+| ★ **`npu`**（新路径）| ★ 小区起来；**`0 gaps over 481 110 blocks -> OK`** ✓，且日志出现 `contract (mode=npu)` ✓ |
+
+**⇒ ★★★ 结论**：**两条路径的 PHY/射频都正常**，新改动没有搞崩实链 ✓
+
+**(d) ★★ 但**没有做成手机接入**：核心网 AMF 没起**
+
+**⇒ 现象**：`"NG Setup Procedure" timed out after 5000ms` ✓
+**⇒ 原因**（已核查 211）：只有 `open5gs-smfd/upfd` 在跑，**没有 `open5gs-amfd`**，**38412 端口未监听** ✓
+**⇒ 与本次改动无关**：这是核心网的运行状态 ✓ —— **要测手机接入，必须先起 AMF** ✓
+
+★ 状态 ✓：★★★ **编译错误（缺 npu case）＋两处白名单已修，`gnb` 构建通过** ✓；★★ **模式矩阵单测 30/30** ✓；
+★★★ **实链在 gpu 与 npu 下都"零丢块"拉起小区** ✓；★★ **手机接入被 AMF 缺失阻塞，原因已查明** ✓。

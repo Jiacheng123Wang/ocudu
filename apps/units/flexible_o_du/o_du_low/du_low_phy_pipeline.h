@@ -218,7 +218,7 @@ inline std::optional<phy_pipeline_effective> resolve_phy_pipeline(const phy_pipe
                          !is_cpu_phy_backend(request.equalizer) || !is_cpu_phy_backend(request.ldpc);
     out.mode = offload ? phy_pipeline_mode::cpu_gpu : phy_pipeline_mode::cpu;
   } else if (!phy_pipeline_mode_from_string(request.mode, out.mode)) {
-    error = "Invalid UL PHY pipeline mode '" + request.mode + "'. Accepted values [auto,cpu,cpu_gpu,gpu]";
+    error = "Invalid UL PHY pipeline mode '" + request.mode + "'. Accepted values [auto,cpu,cpu_gpu,gpu,npu]";
     return std::nullopt;
   }
 

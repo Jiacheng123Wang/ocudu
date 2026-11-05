@@ -175,10 +175,13 @@ static void configure_cli11_expert_execution_args(CLI::App& app, du_low_unit_exp
 static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_upper_phy_config& expert_phy_params)
 {
   auto phy_pipeline_check = [](const std::string& value) -> std::string {
-    if ((value == "auto") || (value == "cpu") || (value == "cpu_gpu") || (value == "gpu")) {
+    // `npu` is part of the same vocabulary as the library's enum: the PHY runs on the CPU and only the learned
+    // receiver leaves the host. It is validated here in step with phy_pipeline_mode.h; a mode the schema accepts and
+    // the library cannot parse (or the reverse) is how a knob silently degrades to "auto".
+    if ((value == "auto") || (value == "cpu") || (value == "cpu_gpu") || (value == "gpu") || (value == "npu")) {
       return {};
     }
-    return "Invalid uplink PHY pipeline mode. Accepted values [auto,cpu,cpu_gpu,gpu]";
+    return "Invalid uplink PHY pipeline mode. Accepted values [auto,cpu,cpu_gpu,gpu,npu]";
   };
   auto device_resource_grid_check = [](const std::string& value) -> std::string {
     if ((value == "auto") || (value == "on") || (value == "off")) {
