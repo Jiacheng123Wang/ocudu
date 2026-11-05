@@ -1,34 +1,42 @@
-# `npu` PHY pipeline 规划（第四条 pipeline，让网络路径彻底脱离 GPU 路径）
+# `npu` PHY pipeline 规划（**v2**，2026-11-05 20:45 重写）
 
-**状态**：★ **规划（未实现）**，2026-11-05 提出。**决策者**：用户。**执行**：待批准后实施。
-**目标一句话**：新增 `--phy_pipeline npu`，使 **depth3 网络臂的前端（FFT、估计、解调、LDPC）全部走 CPU/DSP**，
-**与 Metal/GPU 路径毫无关系** —— 从而能回答"**AI 相对真实 gNB 的 CPU 链好多少**"这个至今没有测过的问题。
+> **v2 取代 v1**。v1 写于同日 20:08，当时的前提是"要写一份估计器拷贝、要改契约探针、约 1–2 天工作量"。
+> **两个实测把前提推翻了**：
+> 1. `--phy_pipeline cpu --pusch_receiver_backend ai` **今天就能跑**（无需任何代码）；
+> 2. **AI 臂的 LLR 与前端无关** —— 前端换成 Metal 或 CPU，20/20 个单元**逐字相同**（§2.3）。
+>
+> ⇒ 所以 `npu` 的真实内容只有一件事：**把 LDPC 解码器从 Metal 换成 CPU**（那是 gNB 空中链用的那一个），
+> **加上命名与拒绝非法组合**。**估计器拷贝不做**（理由见 §3.3）。
 
----
-
-## 1. 为什么必须做（这条是全部动机）
-
-**⇒ 现状**：AI 臂只能在 `--phy_pipeline gpu`（Metal 融合通道）里跑；它的"经典链参照"是
-**Metal 链的 `--pusch_receiver_backend classic`**，**不是**真实 gNB 跑的 CPU 链 ✓
-
-**⇒ 实测差异（同一条腿 `s2_amc_ping_1102a`、同一 5 000 个单元）**：
-
-| 链 | 二进制 | 调用方式 | 解码/5 000 | 交付比特 |
-|---|---|---|---|---|
-| **dump / 语料标签**（= 真 gNB 风格）| `ul_chain_replay_cpu`（`b68ef309…`）| `--phy_pipeline cpu --pusch_receiver_backend classic` | ★ **4 105（82.1%）** | ★ **11 565 432** |
-| **尺子 `clean_cpu.csv`**（我们的"CPU 参照"）| `metal/ul_chain_replay`（`dbe8f06d…` / 203 上 `d785f039…`）| `--metal --phy_pipeline gpu --pusch_receiver_backend classic` | 3 465（69.3%） | 8 933 800 |
-| 差 | | | **+640 个单元** | ★★ **+29.5%** |
-
-**⇒ ★★★ 含义**：今天所有 "vs CPU" 的增益（+13.39%、+20.32% …）都是**相对一条弱 29.5% 的经典链**；
-若拿真 gNB 的 CPU 链当基线，`c32@60` 的 10 129 952 bit **反而低于** 11 565 432（−12%）✓
-**⇒ 但这个 −12% 也不公平**：AI 臂的前端是 Metal 估计器，两条链前端不同 ⇒ **必须把 AI 臂的前端换成 CPU**，
-这就是 `npu` pipeline 的全部理由 ✓
+**状态**：规划（未实现）。**决策者**：用户。**规模**：★ **4 个文件、约半天**（不含测量）。
 
 ---
 
-## 2. 现状（已核实的代码与行为，2026-11-05）
+## 1. 目标
 
-### 2.1 pipeline 只有三种模式
+新增 `--phy_pipeline npu`，语义是：
+
+> **PHY 全部模块在 CPU/DSP 上（FFT、估计、均衡/解映射、LDPC），只有"网络"在 ANE（Core ML）跑；
+> 路径里不得出现任何 Metal 模块。**
+
+**⇒ 要回答的问题**：**AI 相对真实 gNB 的 CPU 链好多少** —— 这个问题至今**没有测过** ✓
+
+**⇒ 为什么必须问**：同一条腿（`s2_amc_ping_1102a`）、同一 5 000 个单元：
+
+| 链 | 二进制 | 解码/5 000 | 交付比特 |
+|---|---|---|---|
+| **dump / 语料标签（≈ 真 gNB）** | `ul_chain_replay_cpu`（`b68ef309…`）| ★ **4 105（82.1%）** | ★ **11 565 432** |
+| 尺子 `clean_cpu.csv`（Metal 链的经典路）| `metal/ul_chain_replay`（`dbe8f06d…` / 203 上 `d785f039…`）| 3 465（69.3%） | 8 933 800 |
+| 差 | | **+640 单元** | ★★ **+29.5%** |
+
+**⇒ 今天所有 "vs CPU" 的增益（+13.39%、+20.32% …）都是相对**弱 29.5% 的那条链** ✓
+**⇒ `npu` 口径才是"相对真 gNB 链"的数字** ✓
+
+---
+
+## 2. 现状与证据（全部已实测）
+
+### 2.1 pipeline 现在有三种模式
 
 `include/ocudu/phy/phy_pipeline_mode.h`：
 
@@ -36,250 +44,31 @@
 enum class phy_pipeline_mode { cpu, cpu_gpu, gpu };
 ```
 
-- `cpu`：全链 CPU（每个模块的 backend 旋钮必须解析成 CPU 实现）
-- `cpu_gpu`：模块级卸载（每个模块各自跨界）
-- `gpu`：融合通道（IQ→LLR 在一个 device lane 里；LDPC 仍在 CPU）
+- 模式是**编排标签**，不是数据通路输入；被契约/探针读取（`phy_pipeline_contract.h`、`phy_pipeline_strict.h`、`phy_pipeline_crossings.h`、`ul_pipeline_probe.h`）
+- **空中链（apps）也有同一个旋钮**：`--expert_phy.phy_pipeline`（`auto|cpu|cpu_gpu|gpu`）＋ `--expert_phy.pusch_ldpc_decoder_type`
 
-**⇒ 模式是"编排标签"，不是数据通路的输入**（数据通路取各自配置）；它主要被**契约/探针**读取
-（`phy_pipeline_contract.h`、`phy_pipeline_strict.h`、`phy_pipeline_crossings.h`、`ul_pipeline_probe.h`）✓
-
-### 2.2 回放器的开关已经把模块分配到四个 bool
+### 2.2 回放器的四个 bool 与两个词汇表
 
 `lib/phy/upper/channel_processors/metal/test/ul_chain_replay.cpp`：
 
-| 旋钮 | 行 | 作用 |
+| 旋钮 | 行 | 设置 |
 |---|---|---|
-| `--cpu` / `--metal` / `--metal-cpu-ldpc` / `--metal-cpu-demod` | 528–540, 574–585 | 设置 `use_metal_ce` / `use_metal_demod` / `use_metal_decoder` / `dft_metal` |
-| `--phy_pipeline <mode>` | 528–540 | 与上面四个 bool 联动 |
-| `--pusch_receiver_backend classic\|ai` | 568 | 选经典接收机或 depth3 臂 |
-| 估计器选择 | 1165–1168 | `use_metal_ce` ⇒ `port_channel_estimator_algorithm::metal_mmse`，否则 ⇒ 默认（CPU）|
-| 警告 | 1301–1308 | `ai` 但没有 metal CE/demod 时打 WARNING（"两层独立设置"）|
-
-**⇒ ★★ 关键发现（已实测）**：**AI 臂现在就能在 `--phy_pipeline cpu` 下跑** ✓
-
-```bash
-OCUDU_DEPTH3_FALLBACK=none OCUDU_REPLAY_MODEL=<bundle>.mlmodelc \
-  ul_chain_replay <unit> --out /tmp/x --phy_pipeline cpu --pusch_receiver_backend ai
-```
-
-输出：`depth-3 receiver arm: ai`、`(cpu CE, cpu equalizer/demapper, cpu LDPC, 6 decoder iteration(s))`、
-`crc=OK iterations=2 sinr=30.31` —— **与该单元在 Metal 链上的结果逐字相同**（同一 bundle）✓
-**⇒ 即**：`npu` 不是一个从零开始的新链路，而是**"把 AI 臂钉在 CPU 前端上"的正式化与保证** ✓
-
-### 2.3 depth3 臂与估计器的关系
-
-`lib/phy/upper/channel_processors/pusch/processor_factories.cpp`（~170–215 行）：
-depth3 单元是**"估计 + 均衡 + 解映射"作为一个整体**构造的：
-
-```cpp
-unit->set_depth3(create_pusch_depth3_receiver(depth3_kind, unit->get_estimator(), unit->get_demodulator(), …));
-```
-
-**⇒ 臂只是"引用"估计器与解调器，不拥有它们**（注释明确：拥有会让严格策略去问没人执行的实例）✓
-**⇒ 所以"估计器用哪一份实现"由 pipeline 的模块旋钮决定** —— 这正是 `npu` 要固定的那一项 ✓
-
----
-
-## 3. 设计
-
-### 3.1 语义（写进 enum 注释，作为契约）
-
-| 模式 | 语义 |
-|---|---|
-| `cpu` | 全链 CPU |
-| `cpu_gpu` | 模块级卸载 |
-| `gpu` | 融合 lane（Metal）|
-| ★ **`npu`** | ★★ **PHY 模块全在 CPU/DSP（FFT、估计、解调、LDPC），只有"网络"跑在 ANE（Core ML）**；<br>**不得出现任何 Metal 模块**；估计器使用 **NPU 专用的一份拷贝**（见 3.3）|
-
-**⇒ 与 `cpu` 的区别**：`cpu` 里 `pusch_receiver_backend` 可以是 `classic`；`npu` 里它**必须是 `ai`**（否则等价于 `cpu`），
-违反时**明确报错**而不是警告（沿用"旋钮不能被静默忽略"的既有纪律）✓
-
-### 3.2 回放器的行为
-
-`--phy_pipeline npu` ⇒
-
-| 项 | 值 |
-|---|---|
-| `dft_metal` | **false**（FFT 走 DSP/CPU）|
-| `use_metal_ce` | **false**（并改用 NPU 拷贝的估计器，见 3.3）|
-| `use_metal_demod` | **false** |
-| `use_metal_decoder` | **false**（LDPC 在 CPU）|
-| `pusch_receiver_backend` | **必须是 `ai`**，否则 `error` |
-| 模型 | 仍由 `OCUDU_REPLAY_MODEL` / `--expert_phy.pusch_receiver_model` 给 |
-
-**⇒ 日志必须打印一行"npu 口径"**（例如 `[phy_pipeline] npu: all PHY modules on CPU/DSP, network on ANE`），
-且 `BIN_SHA`/`MODEL`/`SCALES` 照旧记（现有 `run_arm_ext.py` 已记）✓
-
-### 3.3 估计器"拷贝"（用户明确要求：拷贝，不是复用）
-
-**⇒ 做法**：新增一份 **NPU 专用**的端口信道估计器实现（克隆现有 CPU 实现），
-在 `port_channel_estimator_algorithm` 里加一个取值（如 `cpu_npu_copy` / `npu`），工厂按它构造 ✓
-
-**⇒ 为什么拷贝而不是复用**（写进代码注释）：
-1. ★ NPU 路径将来要**为网络臂单独调整**（例如给 AI 单元提供额外中间量、改平滑/插值策略），
-   **这些改动不能波及现有 `cpu` 路径**（那是 gNB 的基准，必须保持可比）✓
-2. ★ 拷贝让两条路径**各自可回归**：CPU 路径的数值不变（有既有测试兜底），NPU 路径的改动只影响自己 ✓
-3. ★ 代价是一次性的代码重复 —— 用户已明确接受（"拷贝并不是冗余"）✓
-
-**⇒ 文件建议**：
-- `lib/phy/upper/signal_processors/channel_estimator/port_channel_estimator_cpu_npu.{h,cpp}`（克隆自现有 CPU 实现）
-- 在 `factories.cpp` 里按算法枚举分派；`npu` 模式选这一份 ✓
-
-### 3.4 契约与探针（不能漏）
-
-`phy_pipeline_strict.h` / `phy_pipeline_crossings.h` / `phy_pipeline_contract.h` / `ul_pipeline_probe.h`
-里有对 `gpu` 的**特判**（例如"融合 lane 才关掉分段时延探针"、"gpu 才要求 device 真的跑过"）✓
-
-**⇒ `npu` 的规则**：**按 `cpu` 对待**（无 device 交叉、无融合 lane），
-但**额外要求"网络确实被调用"**（AI 臂的 `bound` 状态必须为真）——
-否则一个 `npu` 跑出来是"纯 CPU 链"却声称是 AI 结果 ✓
-
----
-
-## 4. 改动清单（按文件）
-
-| # | 文件 | 改动 | 规模 |
-|---|---|---|---|
-| 1 | `include/ocudu/phy/phy_pipeline_mode.h` | 加 `npu`：枚举、`to_string`、`from_string`、注释（语义见 3.1）| S |
-| 2 | `include/ocudu/phy/upper/signal_processors/channel_estimator/port_channel_estimator_parameters.h` | 算法枚举加 `npu` 取值 | S |
-| 3 | `include/ocudu/phy/upper/signal_processors/channel_estimator/factories.h` ＋ `lib/.../factories.cpp` | 按算法分派到 NPU 拷贝 | S |
-| 4 | ★ 新文件 `port_channel_estimator_cpu_npu.{h,cpp}` | **克隆 CPU 估计器**（保持数值行为一致）| M |
-| 5 | `lib/phy/upper/channel_processors/metal/test/ul_chain_replay.cpp` | `--phy_pipeline npu` 的解析、强制 CPU 模块、强制 `backend=ai`、日志行 | M |
-| 6 | `lib/phy/upper/channel_processors/pusch/processor_factories.cpp` | 确保 `npu` 下 depth3 臂拿到**NPU 拷贝的估计器**（而不是普通 CPU 的）| S |
-| 7 | `include/ocudu/phy/phy_pipeline_strict.h`、`phy_pipeline_crossings.h`、`phy_pipeline_contract.h`、`support/executors/ul_pipeline_probe.h` | `npu` 按 `cpu` 处理 ＋ "臂必须已绑定"这一条 | S |
-| 8 | `~/ai_depth3/exp_bits_1102/run_arm_ext.py`（测量侧） | 支持 `--phy-pipeline npu`（透传）并在日志里记 `PIPELINE npu` | S |
-| 9 | 文档：`gate_measurement_runbook.md`、`depth3_gate_and_model_pk.md` | 新增"npu 口径"，与"gpu 口径"并列 | S |
-
-**规模合计**：S×6 ＋ M×1 ⇒ **约 1–2 天**（不含测量与回归）
-
----
-
-## 5. 里程碑（每步都有可验收的判据）
-
-| 里程碑 | 内容 | 验收判据 |
-|---|---|---|
-| **M1** | 枚举 ＋ 回放器解析 ＋ 强制 CPU 模块 ＋ 日志 | `--phy_pipeline npu` 能跑通单个单元；日志有 npu 行；`--phy_pipeline npu` 且 backend=classic 时**报错退出** |
-| **M2** | NPU 拷贝的估计器 ＋ 工厂分派 | `npu` 与 `cpu` 两条路径在同一批单元上**逐比特相同**（拷贝未引入差异）|
-| **M3** | 契约/探针适配 ＋ `run_arm_ext.py` 透传 | `npu` 下"臂未绑定"会被拒绝；探针不因 `npu` 误报 device 交叉 |
-| **M4** | 测量 | 5 000 单元上跑 **npu+classic**（应与 dump 的 4 105 解码一致）与 **npu+ai**，并给出"npu 口径"的增益 |
-
----
-
-## 6. 验收判据（三个等式，缺一不可）
-
-1. ★★ **`npu+classic` ≡ `cpu` 链**：同一 5 000 单元、逐单元 `crc`/`tbs` 完全一致（对照基准：
-   **dump 的 4 105 个解码单元 / 11 565 432 bit**）✓
-2. ★★ **`npu+ai` ≡ `gpu+ai`**：同一个 bundle、同一批单元，结果**逐单元相同**
-   （因为 AI 的输入是频域栅格，前端估计器不参与它的计算）✓
-   —— **若不相同**，说明 AI 臂**确实消费了估计器的输出**，那第 1 条就要改成"npu 口径自身自洽"，并记录差异 ✓
-3. ★ **`npu+ai` 与 `npu+classic` 的差值 = 真正要报的"AI vs gNB CPU 链"增益** ✓
-
----
-
-## 7. 风险与未决问题
-
-| # | 风险 / 未决 | 说明 | 对策 |
-|---|---|---|---|
-| ★ 1 | **AI 臂是否消费估计器输出** | 若消费，则"npu+ai"与"gpu+ai"不会完全相同（M3 判据 2）| 先做一次单单元对照（已有 §2.2 的证据：结果相同）|
-| ★ 2 | **性能** | CPU FFT/CE 比 Metal 慢；`npu` 回放会变慢（估计 1.5–3×）| 只用于**测量**，不做实时；5 000 单元预计 40–70 min/臂 |
-| ★ 3 | **ANE 与 CPU 线程争用** | Core ML 推理与 CPU PHY 抢核 | 回放串行（既有纪律）；必要时降 `--jobs` |
-| ★ 4 | **契约探针对 `gpu` 的特判** | 漏改会让 `npu` 误报或漏报 | M3 专门列表逐条过 |
-| ★ 5 | **`p0_nominal`/SINR 上报** | `npu` 下上报走 CPU 链的估计量，与 gpu 口径**不可直接比 SINR** | 文档注明；SINR 只作参考，交付比特为主 |
-| ★ 6 | **两套数字并存** | 之后会有"gpu 口径"与"npu 口径"两套 PK 数字 | ★ **所有表格必须标口径**；`gpu 口径`保留作历史对照 |
-
----
-
-## 8. 对现有结论的影响（先说清）
-
-- **已记录的 gpu 口径数字全部有效**，但它们回答的是"AI 相对 Metal 链经典路"✓
-- **npu 口径**将回答"AI 相对真 gNB CPU 链"，**预期增益会明显变小**（基线强 29.5%）；
-  若 npu 口径下 AI **仍然领先**，那才是可以对外讲的结论 ✓
-- **HARQ 限定（PK §51）在两种口径下都存在**（都还没有 `--harq-chain`），不因 npu 而改变 ✓
-
----
-
-## 9. 批准后第一步（建议）
-
-**M1 先行**（枚举＋回放器＋强制 CPU＋日志），它不依赖估计器拷贝，
-完成后立刻可以做 §6 的判据 2（`npu+ai` vs `gpu+ai` 同单元对照）——
-**这一步就能回答"AI 臂到底消不消费估计器"这个最关键的不确定性** ✓
-
----
-
-## 10. ★★★★★ 2026-11-05 20:30 **实测修正：`cpu+ai` 与 `gpu+ai` **并不等价** —— 所以 `npu` 不是纯别名**
-
-**(a) ★★★ 我先前说错了一句**
-
-**⇒ 我此前只对照了 **1 个单元**，看到 `cpu+ai` 与 `gpu+ai` 的 `crc`/`sinr` 相同，就写了"逐字相同" ✗
-**⇒ 20 个单元逐行对照后：**2 个单元不同** ✓
-
-```
-cap_10020_16087_17922   gpu: crc=OK iterations=3   cpu: crc=OK iterations=2   ← 迭代数不同
-cap_10052_16727_17922   gpu: crc=KO iterations=6   cpu: crc=OK iterations=6   ← ★ 判决翻转（KO → OK）
-```
-
-**⇒ ★★★ 结论**：**AI 臂的输出确实受前端影响**（至少在某些单元上）✓
-**⇒ ⇒ 这直接影响本规划的两个判断**：
-1. ★ `npu` **不是**"`cpu` ＋ `ai` 换个名字"：**它会产生不同的数字**（这正是要它的理由 —— 那些数字才是对 CPU 链的公平比较）；
-2. ★ 我原先在 §6 判据 2 里假设的"`npu+ai ≡ gpu+ai`"**被实测否定** ✗ ⇒ 判据要改成：
-   ★ **记录两者的差异，并把 `npu` 的数字作为新的正式口径** ✓
-
-**(b) ★★★ 好消息：**测量今天就能开始，不需要任何代码**
-
-```bash
-# 已经可用（本机实测）：
-OCUDU_DEPTH3_FALLBACK=none OCUDU_REPLAY_MODEL=<bundle>.mlmodelc \
-  ul_chain_replay <unit> --out <o> --phy_pipeline cpu --pusch_receiver_backend ai
-```
-
-**⇒ ★★ 也就是说**：要拿到"AI vs 真 CPU 链"的数字，**现在就能跑 5 000 单元**（只是名字还叫 `cpu+ai`）✓
-
-**(c) ★★★ 用户提议的"只改 config"要分三件看**
-
-| 提议 | 规模 | 判断 |
-|---|---|---|
-| ★ 新增 `--phy_pipeline npu` ≡ `cpu` ＋ `ai` | ★ **S**（枚举 ＋ 回放器解析 ＋ 日志，1 个文件）| ✅ **简单，值得做** |
-| ★ 取消 `gpu + ai` 组合 | ★ **S**（回放器里报错拒绝 ＋ 文档）| ✅ **可行，历史数字已记录** |
-| ★★ **删除 `--pusch_receiver_backend`** | ★★★ **L：261 处引用** | ⚠ **不建议现在做** |
-
-**⇒ ★★★ "删除 `--pusch_receiver_backend`" 的真实规模**（`grep` 实测）：**261 处引用**，分布在
-`apps/units/.../du_low_config.h`、`du_low_config_yaml_writer.cpp`、`du_low_phy_pipeline.h`、
-`upper_phy_factories.cpp`、`pusch/processor_factories.cpp`、`pusch_processor_impl.cpp`、
-`tests/unittests/apps/units/flexible_du/...` 等 —— 它还是**应用层 YAML 配置**的一部分（能读写回去）✓
-**⇒ 建议**：**保留这个旋钮**（作为内部开关），让 `npu` 模式**隐含**它；
-删除旋钮作为**独立的重构任务**（有自己的 YAML 兼容/测试面），不要塞进这次 ✓
-
-**(d) ★★★ 修订后的最小范围（建议批准这一版）**
-
-| # | 改动 | 文件 | 规模 |
-|---|---|---|---|
-| 1 | `phy_pipeline_mode` 加 `npu` ＋ 注释语义 | `include/ocudu/phy/phy_pipeline_mode.h` | S |
-| 2 | 回放器：`--phy_pipeline npu` ⇒ 全 CPU 模块 ＋ 强制 `backend=ai`；`gpu`＋`ai` ⇒ **报错拒绝**；日志打 `npu` 行 | `ul_chain_replay.cpp` | S |
-| 3 | 测量脚本透传 `--phy-pipeline npu` | `run_arm_ext.py` | S |
-| 4 | 文档：runbook ＋ PK 增加 "npu 口径" | 2 份 md | S |
-
-**⇒ 规模：**4 个文件、约半天**（不含测量）** ✓ —— 这才是"只改 config"的真实版本 ✓
-
-**(e) ★★ 顺带纠正一个设计点（用户 20:21 提到）**
-
-**⇒** "网络本来可以输出上报估计量，只是我们目前没做" ✓
-**⇒ 这意味着**：现在 `npu` 口径下的 **SINR/epre/rsrp 仍来自 CPU 经典估计器**，而网络只出 LLR ✓
-**⇒ 后果**：`npu` 口径下**不要用 SINR 去比较两臂**（两者来源相同，但网络没参与）；**判据仍只看交付比特** ✓
-
-★ 状态 ✓：★★★ **`cpu+ai` 与 `gpu+ai` 不相同的实测证据已记录** ✓；★★ **"测量今天可做、代码非必需"已写明** ✓；
-★★★ **三件提议的规模（S / S / L＝261 处）已给出，并建议删除旋钮另立任务** ✓。
-
----
-
-## 11. ★★★★★ 2026-11-05 20:40 **更正 §10：差异来自 **LDPC 解码器**，不是前端 —— AI 臂的 LLR **确实与前端无关**
-
-**(a) ★★★ §10 的归因错了（用户当场质疑"怎么都是 gpu"）**
-
-**⇒ §10 我拿 `--metal --phy_pipeline gpu` 与 `--phy_pipeline cpu` 对比，把差异归给"前端" ✗
-**⇒ 但 `--metal` 这个旧别名**同时打开了 Metal LDPC**（`use_metal_decoder = true`），
-而 `--phy_pipeline gpu` 只设 CE/demod、**不动解码器** ⇒ 两次运行在**前端和解码器**上都不同 ⇒ **归因不成立** ✗
-
-**(b) ★★★★ 三组对照（20 个单元、同一 bundle `w2c32_b18_e46`）**
+| `--phy_pipeline cpu` | 528–532 | CE/demod = CPU（**不动解码器**）|
+| `--phy_pipeline cpu_gpu` | 533–535 | 同上（模块级卸载是**逐模块 opt-in**）|
+| `--phy_pipeline gpu` | 536–540 | CE/demod = Metal（**不动解码器**）|
+| `--metal`（旧别名）| 574–577 | **CE/demod/LDPC 三者全 Metal** |
+| `--metal-cpu-ldpc`（旧别名）| 580–583 | CE/demod = Metal，**LDPC = CPU** |
+| `--metal-cpu-demod`（旧别名）| 584–587 | 只有 CE = Metal |
+| `--pusch_ldpc_decoder_type` | 546–563 | `auto|generic|neon|avx2|avx512|metal|metal_flooding|…`（**与空中链同名**）|
+
+**⇒ ★★ 重要澄清（用户问的）**：`--metal-cpu-ldpc` **是回放器自己的旧别名，空中链没有这个名字** ✓
+它的等价空中写法是：**`--expert_phy.phy_pipeline cpu_gpu` ＋ Metal 的 CE/demod 旋钮 ＋ `--pusch_ldpc_decoder_type generic`（CPU 解码器）** ✓
+代码里明确写了这个历史（523–526 行）：回放器当年自造了 `--cpu/--metal/--metal-cpu-ldpc/--metal-cpu-demod`，
+与空中链的词汇表对不上，所以**旧名字保留为别名** ✓
+
+### 2.3 ★★★ 决定性实验：AI 臂的 LLR 与前端无关
+
+20 个单元、同一 bundle（`w2c32_b18_e46`）：
 
 | 组 | 配置 | 前端 | LDPC |
 |---|---|---|---|
@@ -287,33 +76,124 @@ OCUDU_DEPTH3_FALLBACK=none OCUDU_REPLAY_MODEL=<bundle>.mlmodelc \
 | **B** | `--phy_pipeline cpu` ＋ `backend=ai` | **CPU** | CPU |
 | **C** | `--metal --phy_pipeline gpu` ＋ `backend=ai` | Metal | **Metal** |
 
-**⇒ 结果**：
-
-| 比较 | 差异 | ★ 含义 |
+| 比较 | 差异 | 结论 |
 |---|---|---|
-| ★ **A vs B**（只差前端）| ★★ **0 处** | ★★★ **换前端不影响 AI 臂的输出** ✓ |
-| **A vs C**（只差解码器）| **9 处** | ★★ **全部差异来自 LDPC 解码器**（Metal vs CPU）✓ |
+| ★ **A vs B**（只差前端）| ★★ **0 处** | ★★★ **前端不影响 AI 臂输出** ✓ |
+| **A vs C**（只差解码器）| **9 处** | ★★ **差异全部来自 LDPC 解码器** ✓ |
 
-**⇒ ⇒ ★★★ 结论**：
-1. ★★★ **AI 臂的 LLR 与前端无关**（输入是频域栅格，估计器只用于经典链与上报）✓
-   ⇒ **§6 判据 2 的假设成立**：`npu+ai` 与 `gpu+ai` 的差异**只会来自 LDPC 解码器** ✓
-2. ★★ **移向 `npu` 唯一会变的组件是 LDPC 解码器**（Metal → CPU）——
-   而这正是**真 gNB 跑的那一个**，所以这个变化是**有意的、也是必须的** ✓
-3. ★★ §10 里"AI 臂消费前端"的推断**作废**；`npu` 因此**不会**因为它而改变 AI 的 LLR 计算 ✓
+**⇒ ⇒ ★★★ 两个直接后果**：
+1. **`npu` 不需要改网络、不需要改估计器、不需要重训** ✓
+2. **`npu` 与今天 `gpu` 口径的差异，只会有解码器这一项**（Metal → CPU）——而这正是 gNB 跑的那一个 ✓
 
-**(c) ★★ 对"npu+ai ≡ gpu+ai"这个说法的澄清**
+---
 
-**⇒ 那是**计划里的一个**预测**（当时 npu 还不存在）**，，意思是"若 AI 臂不依赖前端，那么把前端换成 CPU 后结果应当相同" ✓
-**⇒ 因为 `npu` 按定义 ≡ `cpu ＋ ai`，所以**现在就能用现成的 `cpu+ai` 代替它来验证** ✓
-**⇒ 验证结果（A vs B = 0 处）说明：**前端确实不影响**；**剩余的差异（A vs C = 9 处）是解码器** ✓
+## 3. 设计
 
-**(d) ★★★ 修订后的"验收判据"（替换 §6 的判据 2）**
+### 3.1 `npu` 的语义（写进 enum 注释）
 
-| # | 判据 | 现状 |
+| 模式 | 语义 |
+|---|---|
+| `cpu` | 全链 CPU（含 CPU LDPC）|
+| `cpu_gpu` | 模块级卸载 |
+| `gpu` | 融合 lane（CE/demod 在 Metal；**解码器仍由 `--pusch_ldpc_decoder_type` 决定**）|
+| ★ **`npu`** | ★ **= 全 CPU 模块（FFT/CE/均衡/解映射/LDPC）＋ `pusch_receiver_backend=ai`**；<br>**禁止任何 Metal 模块**；`backend` 不是 `ai` 时**报错**（不是警告）|
+
+### 3.2 回放器的行为
+
+`--phy_pipeline npu` ⇒
+
+| 项 | 值 |
+|---|---|
+| `use_metal_ce` / `use_metal_demod` / `use_metal_decoder` | **全 false** |
+| `dft_metal` | **false**（FFT 走 DSP/CPU）|
+| `pusch_receiver_backend` | **必须 `ai`**，否则 `error` |
+| 日志 | 打一行 `[phy_pipeline] npu: PHY on CPU/DSP, network on ANE` |
+| 与 `--metal*` 别名同时给出 | **报错**（互斥，避免静默覆盖）|
+
+**⇒ `gpu + ai` 组合**：按用户决定**取消** ⇒ 回放器里直接**报错**：
+`--phy_pipeline gpu with --pusch_receiver_backend ai is no longer supported; use --phy_pipeline npu`
+
+### 3.3 为什么**不做**估计器拷贝（v1 的方案作废）
+
+**⇒ v1 计划克隆一份 CPU 估计器给 NPU 路径**，理由是"将来给网络路径单独调参时不波及 CPU 基准" ✓
+**⇒ 现在不需要了**，因为：
+1. ★★ **AI 臂根本不消费前端**（§2.3，A/B = 0 处差异）⇒ 估计器只服务**经典链与上报**；
+2. ★★ **`npu` 下估计器就用现有的 CPU 实现**，它同时服务"经典臂"与"AI 臂的上报"⇒ **两条臂共享同一份前端，
+   这恰恰是公平比较要求的** ✓
+3. ★ 真要对 NPU 路径单独改估计器，那是**将来的独立需求**，到时有实测理由再做，不在这次范围内 ✓
+
+### 3.4 `--pusch_receiver_backend` 旋钮：**保留**
+
+**⇒ 实测规模**：`grep` 出 **261 处引用**，分布在
+`apps/units/flexible_o_du/o_du_low/{du_low_config.h,du_low_config_yaml_writer.cpp,du_low_phy_pipeline.h}`、
+`upper_phy_factories.cpp`、`pusch/processor_factories.cpp`、`pusch_processor_impl.cpp`、
+以及 `tests/unittests/apps/units/flexible_du/...` —— 它还是**应用层 YAML 配置**的一部分（能读写回去）✓
+**⇒ 决定**：**保留旋钮**，让 `npu` 模式**隐含**它（`npu` ⇒ backend 必须是 `ai`）；
+**删除旋钮另立任务**（含 YAML 兼容与测试面）✓
+
+---
+
+## 4. 改动清单
+
+| # | 文件 | 改动 | 规模 |
+|---|---|---|---|
+| 1 | `include/ocudu/phy/phy_pipeline_mode.h` | 加 `npu`：枚举 ＋ `to_string` ＋ `from_string` ＋ 注释（§3.1 语义）| **S** |
+| 2 | `lib/phy/upper/channel_processors/metal/test/ul_chain_replay.cpp` | `--phy_pipeline npu` ⇒ 全 CPU ＋ 强制 `ai`；`gpu+ai` ⇒ 报错；与 `--metal*` 互斥；日志行 | **S** |
+| 3 | `~/ai_depth3/exp_bits_1102/run_arm_ext.py` | 透传 `--phy-pipeline npu`，日志记 `PIPELINE npu` | **S** |
+| 4 | 文档：`gate_measurement_runbook.md`、`depth3_gate_and_model_pk.md` | 增加"npu 口径"，与"gpu 口径"并列 | **S** |
+
+**⇒ 合计：4 个文件，约半天。** 无新算法、无新模块、无重训、无契约改动（除枚举语义）。
+
+---
+
+## 5. 验收判据
+
+| # | 判据 | 状态 |
 |---|---|---|
-| 1 | `npu+classic` ≡ `cpu` 链（对照 dump：4 105 解码 / 11 565 432 bit）| 待做 |
-| 2' | ★ **`npu+ai` 与 `gpu+ai` 的差异**必须**全部落在解码器**上<br>（即 `npu+ai` ≡ `--metal-cpu-ldpc` ＋ `ai`，20/20 单元一致）| ★ **已验证 20/20** ✓ |
-| 3 | `npu+ai` − `npu+classic` ＝ 要报的"AI vs gNB CPU 链"增益 | 待做 |
+| 1 | ★ `npu+ai` ≡ `--metal-cpu-ldpc` ＋ `ai`（**20/20 单元逐字一致**）| ★ **已验**（§2.3 A vs B）|
+| 2 | `npu+classic` ≡ `cpu` 链（同一 5 000 单元逐单元一致；对照 dump：**4 105 解码 / 11 565 432 bit**）| 待做（实现后）|
+| 3 | `npu` 下 `backend=classic` ⇒ **报错退出**；`gpu+ai` ⇒ **报错退出** | 待做 |
+| 4 | 日志含 `PIPELINE npu`、`BIN_SHA`、`BUNDLE_FILES`、`SIDECAR` | 待做 |
 
-★ 状态 ✓：★★★ **归因错误已更正（差异来自 LDPC 解码器，不是前端）** ✓；★★ **AI 臂与前端无关已被 20/20 单元证实** ✓；
-★★ **"npu 只改解码器"这一结论已写明** ✓。
+---
+
+## 6. 测量计划（**代码未改之前就能开始**）
+
+**⇒ 关键：`npu` 只是命名；用现有开关就能拿到 npu 口径的数字** ✓
+
+```bash
+# 现在就能跑（≡ 未来的 --phy_pipeline npu）
+OCUDU_DEPTH3_FALLBACK=none OCUDU_REPLAY_MODEL=<bundle>.mlmodelc \
+  ul_chain_replay <unit> --out <o> --phy_pipeline cpu --pusch_receiver_backend ai
+```
+
+**⇒ 建议顺序**：
+1. **先用现有开关跑一臂 5 000 单元**（`run_arm_ext.py` 里把 `--phy_pipeline cpu` 传下去，并记 `PIPELINE cpu+ai`）
+   ⇒ 得到"AI vs gNB CPU 链"的第一个真实数字（预计基线是 11.57 M bit，AI 增益会明显小于 gpu 口径的 +13.39%）；
+2. 再把 `npu` 实现（半天），用判据 1/2/3 复核；
+3. 之后所有新数字标 **npu 口径**；`gpu` 口径的数字保留为历史对照 ✓
+
+**⇒ 代价**：CPU 前端比 Metal 慢，5 000 单元预计 **40–70 min/臂**（gpu 口径约 24 min）✓
+
+---
+
+## 7. 风险与注意
+
+| # | 风险 | 说明 | 对策 |
+|---|---|---|---|
+| 1 | **数字会变** | `npu` 与历史 `gpu` 口径的差异**只来自解码器**（§2.3），但足以改变判决（20 单元里 1 个 KO→OK）| ★ 这是**有意的**；文档并列两种口径 |
+| 2 | **SINR 仍是经典估计器给的** | 网络目前不输出上报估计量（用户 20:21 指出原设计有）| ★ **npu 口径下不要用 SINR 比较两臂**，只看交付比特 |
+| 3 | **`cpu_gpu` 语义** | 该模式**不会**自己打开 Metal 模块（逐模块 opt-in）| 实现时别顺手把 `npu` 写成 `cpu_gpu` 的变体 |
+| 4 | **旋钮删除** | 261 处引用 | ★ 另立任务，不在本次范围 |
+| 5 | **HARQ 口径** | PK §51 的限定在两种口径下都成立 | 不变 |
+
+---
+
+## 8. v1 作废的原因（留档）
+
+| v1 的假设 | 实际情况 |
+|---|---|
+| 要克隆 CPU 估计器给 NPU 路径 | ★ 不需要：AI 臂不消费前端（§2.3）|
+| 要适配 4 个契约/探针头文件 | ★ 不需要：`npu` 在契约上等价于 `cpu`（无 device 交叉、无融合 lane）|
+| 要 1–2 天 | ★ **约半天、4 个文件** |
+| `npu+ai ≡ gpu+ai`（预测）| ★ 修正为：**`npu+ai ≡ metal-cpu-ldpc + ai`**；与 `gpu`（Metal 解码器）**不同**，差异来自解码器 |
