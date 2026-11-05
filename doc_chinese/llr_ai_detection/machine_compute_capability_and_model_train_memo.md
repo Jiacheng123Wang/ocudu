@@ -1426,3 +1426,22 @@ python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU')
 
 ★ 状态 ✓：★★★ **`.bashrc` ＋ `.profile` 已写入 107 并验证（交互/登录都生效）** ✓；
 ★★★ **所有启动脚本内置该导出**（`run_c32_e61.sh` 已改）✓；★★★ **2026-11-06 07:26 重启后实测 GPU 88%、首轮 1 111 s** ✓。
+
+**(e) ★★★ 启动脚本已归档（2026-11-06，107）**
+
+**⇒ 位置**：`~/work/ai_phy_train/bin/`（★ **正典**；历史脚本进 `bin/archive/`）✓
+
+| 文件 | 作用 |
+|---|---|
+| ★ **`bin/env.sh`** | **所有训练的唯一环境入口**：venv python、`LD_LIBRARY_PATH`、数据/输出目录、★ **`require_gpu`（看不到 GPU 就拒绝启动）** |
+| ★ **`bin/README.md`** | 每个脚本训练什么、**参考单轮时间**（c32 GPU 1 111 s／c128 GPU 3 538 s／c32 CPU 7 031 s）、四条防错约定 |
+| `bin/run_c32_e61.sh` | 当前在跑的那条（第 61–100 轮）＋ **防重跑守卫**（同输出目录已在跑则拒绝）|
+| `bin/archive/*` | 历史：`run_c32_from46.sh`、`queue_c128_e2e.sh`、`run_w2c128_e2e.sh`、`run_w2c32_b18_e21.sh`、`trial_c128.sh` |
+
+**⇒ ★★ 写法**：脚本一律
+```bash
+source "$HOME/work/ai_phy_train/bin/env.sh"
+require_gpu            # 没有 GPU ⇒ exit 2（FORCE_CPU=1 可显式绕过）
+```
+**⇒ ★★ 四条防错约定**（README 里）：一臂一脚本一输出目录；输出目录必须新或空；日志留在 `logs/<同名>.log`；
+**`pkill -f` 不能用会自匹配的模式**（本次事故的现场教训）。
