@@ -6,6 +6,8 @@
 #include "apps/services/worker_manager/worker_manager_config.h"
 #include "du_low_config.h"
 #include "du_low_phy_pipeline.h"
+
+#include <cstdlib>
 #include "ocudu/adt/format.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc.h"
@@ -191,6 +193,17 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
   // merely describing it: the factory refuses a value it cannot honour (see the assertion in
   // create_ul_processor_factory), so an "ai" that reached it would be a hard failure and not a
   // classic chain wearing an AI label.
+  // npu MEANS PURE (2026-11-05). The mode exists so that the PHY runs on the CPU and the network computes the unit;
+  // the classical estimator is the fallback's input and nothing else reads it -- the published measurement comes from
+  // the arm's own shared layer. Leaving the fallback on therefore pays the estimator on every reception for nothing,
+  // which is what the first npu flight measured (24.8 us of channel estimation under an AI arm). The operator keeps
+  // the last word: an explicit OCUDU_DEPTH3_FALLBACK is never overridden, so a run that wants the fallback still has
+  // it by saying so.
+  if ((effective.mode == phy_pipeline_mode::npu) && (std::getenv("OCUDU_DEPTH3_FALLBACK") == nullptr)) {
+    setenv("OCUDU_DEPTH3_FALLBACK", "none", 1);
+    ocudulog::fetch_basic_logger("PHY")
+        .info("[phy_pipeline]   npu implies PURE: OCUDU_DEPTH3_FALLBACK=none, the classical estimator is not called");
+  }
   upper_phy_factory_config.pusch_receiver_backend  = effective.receiver;
   // The RESOLVED model: the requested one, or the build's default when the knob is absent (see
   // resolve_phy_pipeline). The factory must not see an empty path here, because an empty path is the identity arm.
