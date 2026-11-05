@@ -8,11 +8,11 @@
 | 问题 | 看哪份 |
 |---|---|
 | **怎么训练**（数据、架构、lr、轮数、快照、选优策略、配方坑）| ★ **本文件** |
-| **怎么启动 / 机器算力**（哪台机器多快、nohup/setsid/看门狗、地址、备份）| `machine_compute_capability_and_model_train_memo.md` |
-| **语料怎么来**（采集 → dump → 母集 → 分箱 → 抽取）| `../depth3_llr_ai/corpus_to_training_db_manual.md` |
-| **怎么测**（Core ML 导出、尺子、交付比特、统计）| `../depth3_llr_ai/gate_measurement_runbook.md` |
-| **PK 结果**（各臂交付比特、显著性）| `../depth3_llr_ai/depth3_gate_and_model_pk.md` |
-| **跑到哪了 / 历史状态** | `../depth3_llr_ai/depth3_llr_ai_model_train_status.md` |
+| **怎么启动 / 机器算力**（哪台机器多快、nohup/setsid/看门狗、地址、备份）| `../llr_ai_detection/machine_compute_capability_and_model_train_memo.md` |
+| **语料怎么来**（采集 → dump → 母集 → 分箱 → 抽取）| `corpus_to_training_db_manual.md` |
+| **怎么测**（Core ML 导出、尺子、交付比特、统计）| `gate_measurement_runbook.md` |
+| **PK 结果**（各臂交付比特、显著性）| `depth3_gate_and_model_pk.md` |
+| **跑到哪了 / 历史状态** | `depth3_llr_ai_model_train_status.md` |
 
 > ⚠ 本文件只写**可复现的配方与判据**；某次跑崩了、某台机器满了之类的**运维事件**记在机器 memo。
 
