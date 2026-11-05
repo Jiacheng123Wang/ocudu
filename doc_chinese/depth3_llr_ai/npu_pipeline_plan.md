@@ -470,3 +470,36 @@ gnb -c <config> \
 
 ★ 状态 ✓：★★★ **"那次 npu 飞行是 classic 接收机"已由 `/tmp/gnb.log` 证实** ✓；
 ★★ **两个探针因此都是经典链的真实耗时，解释闭合** ✓；★★ **AI 臂上天的确切命令与三行判据已写清** ✓。
+
+---
+
+## 15. ★★★★ 2026-11-05 22:00 **"共享测量层"是什么、是不是 CPU —— 是，而且它**天生只有 CPU**
+
+**(a) ★★★ 它是什么**
+
+**⇒ 函数**：`measure_ul_slow(pilots, scaling, nof_layers)` —— `lib/phy/upper/channel_processors/pusch/pusch_ul_slow_measurements.cpp` ✓
+**⇒ 输入**：**DM-RS 导频的 LS 估计**（`ls_re/ls_im`，按符号、再按子载波排序）✓
+**⇒ 输出**：**EPRE、噪声方差、SNR、CFO**（全部是栅格单位，与经典估计器的口径一致）✓
+**⇒ ★★ 它是一段**普通库函数**：**没有 Metal 版本、没有 backend 旋钮、没有 device 路径** ✓
+**⇒ ★★★ 所以"共享测量层 = CPU 路径"**不是配置选择，而是**构造使然** ✓
+
+**(b) ★★★ 为什么叫"共享"**
+
+**⇒ 经典解调器与 depth3 臂**都调它**（`pusch_depth3_measurements.cpp:72` 调 `measure_ul_slow`；经典路的解调器用同一函数）** ⇒
+**两条路报出的 RSRP/EPRE/SNR/CFO 不可能互相矛盾** ✓ —— 这正是"共享"的含义 ✓
+
+**(c) ★★★ npu 飞行里那 24.8 µs 的 CE 与这层的关系**
+
+**⇒ AI 臂的 `prepare()` 自己**组装 DM-RS 符号的 LS**（`prepare_assembler->assemble`），再调 `measure_ul_slow` 得到上报量 ✓
+**⇒ 但 `estimate()` **仍然调用经典估计器**（`pusch_depth3_receiver.h`：上报量"read from its results **until the reporting heads replace them**"）✓
+**⇒ ⇒ ★★ 于是**两套 LS/CE 都在跑**：臂自己的一套（CPU）＋ 经典估计器一套（npu 下也是 CPU）✓
+**⇒ ★★★ 这就是**一个明确的优化点**：一旦上报量改由**臂自己的测量**提供，经典估计器那 ~25 µs 可以去掉** ✓
+（落地方式是"npu＋ai 且 bundle 无 reporting head 时跳过经典 estimate()"，属下一项工作，不是当前 bug ✓）
+
+**(d) ★★ 一句话回答**
+
+**⇒ ★★★ **是的**：共享测量层现在跑的就是 CPU 路径（而且它只有 CPU 实现）；npu 里那 24.8 µs 的 CE 是**经典估计器**在跑，**
+**和共享测量层是两条并行的 CPU 工作**，将来可以由臂自己的测量取代 ✓
+
+★ 状态 ✓：★★ **共享测量层的实现位置、输入输出、CPU-only 性质已核实** ✓；★★ **"共享"指经典路与 AI 臂共用同一函数** ✓；
+★★★ **npu 下 CE 与共享测量层是两套并行工作，已标为可优化项** ✓。
