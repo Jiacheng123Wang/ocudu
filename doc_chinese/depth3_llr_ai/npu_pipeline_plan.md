@@ -249,3 +249,49 @@ OCUDU_DEPTH3_FALLBACK=none OCUDU_REPLAY_MODEL=<bundle>.mlmodelc \
 
 ★ 状态 ✓：★★★ **"实链 gpu = fused lane（= depth3 的 Metal 对应物）"已确认，并指出回放器没发布模式这一差异** ✓；
 ★★ **历史测量用的是 Metal LDPC 这一事实已查明** ✓；★★★ **统一词汇表（删别名、发布模式、解码器默认 CPU）已写入设计，并新增 M0 里程碑** ✓。
+
+---
+
+## 10. ★★★★★ 2026-11-05 21:10 **更正 §9.1：回放与实链用的是**同一批功能模块**，差别只在"模式是否发布"这一层策略**
+
+**(a) ★★★ 用户问得对：既然是同一批模块，为什么说"不一样"？**
+
+**⇒ 我 §9.1 的措辞**过重**了 ✗ —— 准确的说法是：**
+
+| 层 | 实链 `gpu` | 回放 `--phy_pipeline gpu` |
+|---|---|---|
+| **功能模块**（CE / 均衡 / 解调 / 解码器）| Metal 实现 | ★ **同一批 Metal 实现**（同一个工厂、同样的三个 bool）✓ |
+| **数据通路数学** | 不因模式分支 | ★ **同样不分支** ✓ |
+| ★ **pipeline 模式是否发布** | **发布**（`du_low_config_translator.cpp:51`）| ★★ **不发布**（刻意如此）|
+| ★ **由模式派生的策略** | **生效**：`phy_pipeline_strict_enabled()` 为真 ⇒ **device 拒绝的 hop 必须失败（CRC KO），不许回退到宿主** | ★★ **不生效** ⇒ 走"回退到宿主"的容错路线 |
+| 探针 | `in_fused_lane()` 为真 ⇒ 分段时延探针自关 | 为假 ⇒ 探针照常 |
+
+**⇒ ⇒ ★★★ 所以"不一样"指的是**编排策略**，不是**功能模块** ✓
+**⇒ 在同一台健康设备上，两条路的**数值结果应当相同**；差别只在**某次 hop 被 device 拒绝**时：
+实链**失败**（让 MAC 重传），回放**回退宿主**把它算出来 ✓
+
+**(b) ★★★ 代码里写明这是**故意的**（`phy_pipeline_strict.h` 的注释）**
+
+> "`OCUDU_GPU_STRICT` overrides the decision. It exists because the **offline harness (`ul_chain_replay`)
+> deliberately never publishes a pipeline mode**, so without the override the fused lane's own policy could not
+> be exercised offline at all — and a policy that cannot be tested is the failure mode this whole line keeps correcting."
+
+**⇒ ★★ 所以回放器**有一个专门的开关 `OCUDU_GPU_STRICT=1`** 用来**在离线下打开 fused 的策略** ✓
+**⇒ ★★ 这意味着**：离线上我们**一直跑的是"模块级 Metal + 宿主回退"**；
+严格 fused 策略（device 拒绝即失败）**从没在离线上跑过**，除非显式设了 `OCUDU_GPU_STRICT=1` ✓
+
+**(c) ★★★ 对统一方案的影响（修订 §9.3/§9.4）**
+
+| 项 | 修订后的做法 |
+|---|---|
+| 词汇表 | 仍然统一为 `auto|cpu|cpu_gpu|gpu|npu` ＋ `--pusch_ldpc_decoder_type` ✓ |
+| ★ **模式发布** | ★★ **回放器改为"发布模式"**（与实链一致）——这才是"同一件事"的**唯一缺口** ✓ |
+| ★ **严格策略** | ★ 发布后**默认生效**；离线下若还要"回退宿主"的容错行为，**显式**用 `OCUDU_GPU_STRICT=0` 关掉（把例外变成显式选择）✓ |
+| 解码器 | 仍由 `--pusch_ldpc_decoder_type` 决定、默认 CPU ✓ |
+| `npu` | 新增，全 CPU ＋ `backend=ai` ✓ |
+
+**⇒ ★★ 这样 `--phy_pipeline gpu` 在两处才是**字面同一件事**：同一批 Metal 模块 ＋ 同一个已发布模式 ＋ 同一套严格策略 ✓
+
+★ 状态 ✓：★★★ **§9.1 的过重措辞已更正：模块相同、差在"模式是否发布"及其派生策略** ✓；
+★★ **`OCUDU_GPU_STRICT` 的存在与"回放刻意不发布"已在代码注释中确认并记录** ✓；
+★★ **统一方案因此收敛为一件事：回放器发布模式（＋默认严格），例外改为显式** ✓。
