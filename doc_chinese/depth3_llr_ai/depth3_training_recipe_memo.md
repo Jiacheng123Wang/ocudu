@@ -133,6 +133,37 @@ python -u train_depth3.py \
 （本次同一个 epoch-50 快照在两边都测了 500 单元：**都是 +12.32%（1 362 080 vs 1 212 640）** —— 说明这两个二进制在这片样本上一致，
 但**记录里仍要带 `BIN_SHA`**。）✓
 
+### 5.2 ★★★★ 探针主机：**首选 203**，本机是备用（附 203 的准备清单）
+
+**⇒ ★★ 规则**：**探针默认在 203 上跑** —— 它的 replay 二进制 **`d785f039…`** 与所有历史 5 000 单元整跑**同源**，
+数字可以直接并表；本机的 `dbe8f06d…` 属于**另一个探针家族**（只与自身可比）✓
+
+**(a) ★★★ 203 的准备清单（缺一样就跑不通，2026-11-05 逐项踩过）**
+
+| # | 需要 | 位置 / 做法 | 踩过的坑 |
+|---|---|---|---|
+| 1 | **TF ＋ coremltools** | `~/venv_tf312`：TF 2.21 ＋ **`coremltools==9.0`** | 装时警告 “TF 2.21 未测试”，**实测可用** ✓ |
+| 2 | **代码是当前提交** | `cd ~/dev/ocudu && git pull --ff-only` | ★★ **203 的 checkout 曾停在旧提交，带着“112 vs 28 通道”的导出 bug** ⇒ 导出静默失败、`coremlcompiler` 报 “Model does not exist” ✓ |
+| 3 | **标定数据** | `~/ai_depth3/gate_ai_models/calib/datasets_monitor_w2`（89 MB）| 缺了 `calibrate_depth3.py` 直接报错 |
+| 4 | **评分基准** | `~/ai_depth3/clean_cpu.csv` | 缺了只能拿到 arm 的比特、算不出差值 |
+| 5 | **尺子语料** | `~/replay_bits_1102/corpus`（20 000 个文件）| — |
+| 6 | **单元清单** | `~/replay_bits_1102/e17_1104/units_from_clean_cpu.txt`（sha256 **`47dcad0d…`**，5 000 行）| 与整跑必须是**同一份** |
+| 7 | **回放器** | `~/replay_bits_1102/e17_1104/run_arm_ext.py` | — |
+| 8 | **replay 二进制** | `~/dev/ocudu/build/lib/phy/upper/channel_processors/metal/ul_chain_replay`（`d785f039…`）| — |
+| 9 | **coremlcompiler** | `xcrun -f coremlcompiler` 有输出（Xcode 已装）| 只有 CLT 也能用，但要确认路径 |
+| 10 | **内存** | 8 GB ⇒ ★★ **一次只跑一个探针**（跑完 `free` 只剩 **0.1 GB**）| 并发会 swap |
+
+**(b) ★★ 实测（同一快照、同一 500 单元，两台机器各跑一遍）**
+
+| 机器 | 耗时 | 结果 | `BIN_SHA` |
+|---|---|---|---|
+| 本机（M4 Pro，64 GB）| **3 min 05 s** | **+12.32%**（1 362 080 vs 1 212 640）| `dbe8f06d…` |
+| ★ **203（M2，8 GB）** | **4 min 11 s** | ★ **+12.32%（完全相同）** | ★ `d785f039…`（**canonical**）|
+
+**⇒ ★★ 结论：203 完全自给自足，且结果与规格最高的一致性来源一致** ✓
+**⇒ ★ 本机备用**：需要仓库里的尺子语料（`lib/phy/upper/ai_signal_processors/test/ruler_s2_amc_5000_corpus`，352 MB）、
+`exp_bits_1102/run_arm_ext.py`、`units_from_clean_cpu.txt`、`clean_cpu.csv` —— 这些本机都已就位 ✓
+
 **⇒ 自动化**：`~/ai_depth3/bin/probe_watch.sh` 每 5 分钟扫一次快照目录，**每个新快照探一次**（`.done` 标记保证幂等），
 结果追加到 `~/ai_depth3/probe/results_<run>.txt` ✓
 **⇒ 第一次实测**（`w2c32_b18_e21` 的 **epoch 50** 快照，500 单元）：**1 362 080 vs CPU 1 212 640 ⇒ +12.32%** ✓
