@@ -503,3 +503,57 @@ gnb -c <config> \
 
 ★ 状态 ✓：★★ **共享测量层的实现位置、输入输出、CPU-only 性质已核实** ✓；★★ **"共享"指经典路与 AI 臂共用同一函数** ✓；
 ★★★ **npu 下 CE 与共享测量层是两套并行工作，已标为可优化项** ✓。
+
+---
+
+## 16. ★★★★★ 2026-11-05 22:10 **查出根因：经典估计器之所以还在，是因为**fallback 开关默认开着** —— 去掉它的机制**早就存在**
+
+**(a) ★★★ 根因（代码事实）**
+
+`pusch_depth3_receiver_impl.cpp` 的 `estimate()`：
+
+```cpp
+if (!fallback_enabled) {              // OCUDU_DEPTH3_FALLBACK=none
+  estimate_skipped = true;
+  notifier.on_estimation_complete(empty_est_results);   // 链仍要前进，所以不是"什么都不做"
+  return;                             // ← 经典估计器根本不调用
+}
+estimator.estimate(notifier, grid, config);            // ← 默认走这条
+```
+
+**⇒ ★★ 即**：**PURE 模式（`OCUDU_DEPTH3_FALLBACK=none`）本来就不调用经典估计器** ✓
+**⇒ 而实链默认 fallback 开着** ⇒ 用户那次 npu 飞行走的是**下面那条** ⇒ 才有 24.8 µs 的 CE ✓
+
+**(b) ★★★ PURE 还会连带做两件事（所以不是"只省时间"）**
+
+| 项 | PURE 下的行为 |
+|---|---|
+| 域门（domain gate）| 从 `estimator` 改为 **`net`**（用臂自己的平面残差判断）|
+| 上报量来源 | 强制为 **`net`**（臂自己的共享测量层）|
+
+⇒ **⇒ 这正是用户说的"网络可以自己输出上报量"**：**共享测量层本来就是 CPU、且由臂自己算** ✓
+
+**(c) ★★★ 本次改动：`npu` 隐含 PURE**
+
+**⇒** 在 `du_low_config_translator.cpp` 里：`mode == npu` 且 **操作者没显式设** `OCUDU_DEPTH3_FALLBACK` ⇒
+自动 `setenv("OCUDU_DEPTH3_FALLBACK","none",1)`，并打一行日志 ✓
+**⇒ ★★ 显式设置永不覆盖**（操作者保留最后决定权）✓
+
+**(d) ★★★ 本地验证（B210、n78、无 UE）**
+
+```
+[pusch_receiver] AI depth-3: PURE mode (OCUDU_DEPTH3_FALLBACK=none): the classical estimator is not called,
+                 the gate judges on the arm's own plane residual and the published measurement is the arm's own.
+[phy_pipeline]   radio sample continuity: 0 gaps over 312 689 blocks -> OK
+```
+
+**⇒ ★★ 小区起来、射频零丢块、PURE 生效** ✓（CE 探针"no samples"是因为**没有 UE 就没有 PUSCH 接收**，不作证据）
+
+**(e) ★★★ 必须同时接受的代价（PURE 不是纯赚）**
+
+**⇒ 没有 fallback ⇒ 网络算不了的接收**被"擦除并计数"，**不会交给经典链** ✓
+**⇒ 对 E4（覆盖 Qm 2/4/6/8 全部四种调制）这是可接受的语义；但它意味着**模型漏一个就丢一个 TB** ✓
+**⇒ ★ 所以实链上必须量**：PURE 下的**吞吐/丢块率**，与 fallback 模式对比 —— 这是下一步飞行要看的第一个数 ✓
+
+★ 状态 ✓：★★★ **根因（fallback 默认开）与代码位置已写明** ✓；★★ **PURE 的连带效应（域门、上报源）已写明** ✓；
+★★★ **`npu` ⇒ PURE 已实现并本地验证** ✓；★★ **代价（无 fallback ⇒ 擦除计数）与下一步要量的东西已写明** ✓。
