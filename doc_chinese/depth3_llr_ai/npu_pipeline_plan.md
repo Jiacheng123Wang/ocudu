@@ -420,3 +420,53 @@ du_low_phy_pipeline.h:276:11: error: enumeration value 'npu' not handled in swit
 ★ 状态 ✓：★★★ **两个探针的代码位置与语义已查明**（CE 在 580 行、EQ-DEMOD 括的是 `get_depth3().demodulate`）✓；
 ★★ **"CE 仍在跑是因为上报量还没由网络输出"已写明** ✓；★★ **"EQ-DEMOD 是网络臂自身开销、非经典解调器"已写明** ✓；
 ★★ **如何用绑定行排除 `ai_identity` 兜底** ✓。
+
+---
+
+## 14. ★★★★★ 2026-11-05 21:50 **查证：那次 npu 飞行跑的是**经典接收机**（`receiver=classic`），网络没有参与**
+
+**(a) ★★★ 用户的问题：`depth-3 receiver arm: ai (...)` 打到 console 还是日志？**
+
+| 位置 | 形态 | 去向 |
+|---|---|---|
+| ★ **回放器**（`ul_chain_replay`）| `depth-3 receiver arm: ai (--pusch_receiver_backend)` | **stdout**（`std::printf`）|
+| ★★ **实链（gnb）** | ★ `[phy_pipeline]   receiver=classic\|ai (expert_phy --pusch_receiver_backend …)` | ★ **INFO 日志**（logger）|
+| 实链（绑定细节）| `[pusch_receiver] AI depth-3: …`（kept / redundant / refused）| ★ **stderr**（`fmt::print(stderr, …)`）⇒ 没重定向就只在终端 |
+
+**(b) ★★★★★ 查 `/tmp/gnb.log` 的结果（决定性）**
+
+```
+2026-11-05T13:22:49.789964 [PHY] [I] [0.0] [phy_pipeline]   receiver=classic (expert_phy --pusch_receiver_backend auto)
+```
+
+**⇒ ★★★ 那次飞行的接收机是 **`classic`**（配置里 `pusch_receiver_backend: auto` ⇒ 经典）** ✗ 网络**没有参与** ✓
+**⇒ ⇒ ★★★ 所以那两个探针完全解释得通**：
+
+| 探针 | 那次飞行量到的是 |
+|---|---|
+| `ul_channel_estimation` 24.8 µs | ★ **经典估计器**（因为整条链就是经典的）|
+| `ul_equalization_demod` 20.8 µs | ★ **经典解调器**（同上）|
+
+**⇒ ★★ 即 §13 的两种解释里，落到的是"另一种"：不是 AI 臂在跑，而是**根本没开 AI 臂** ✓
+
+**(c) ★★★ 那次飞行的真正价值（仍然很大）**
+
+**⇒ 它证明的是**pipeline 模式本身**没问题：`--phy_pipeline npu` ⇒ 全 CPU PHY、射频零丢块、**手机接入、ping 通** ✓
+**⇒ 但它**没有测到 AI 臂**：要测，必须显式给接收机和模型：
+```bash
+gnb -c <config> \
+  --expert_phy.phy_pipeline npu \
+  --expert_phy.pusch_receiver_backend ai \
+  --expert_phy.pusch_receiver_model <bundle>.mlmodelc
+```
+**⇒ ★★ 缺模型时实链会**报错**（`du_low_phy_pipeline.h`：`ai` 必须有模型，否则拒），不会静默降级 ✓
+
+**(d) ★★ 下一次飞行的检查清单（3 行日志即可判定）**
+
+1. `[phy_pipeline] receiver=ai (...)` ⇒ 接收机是 AI；
+2. `[pusch_receiver] AI depth-3: … kept …` ⇒ **模型绑定成功**（在 stderr，记得 `2>&1`）；
+3. 飞行后 `[ul_channel_estimation]` 仍在（设计如此，上报量还没由网络输出），
+   而 `[ul_equalization_demod]` 变成**网络臂的开销**（§13）✓
+
+★ 状态 ✓：★★★ **"那次 npu 飞行是 classic 接收机"已由 `/tmp/gnb.log` 证实** ✓；
+★★ **两个探针因此都是经典链的真实耗时，解释闭合** ✓；★★ **AI 臂上天的确切命令与三行判据已写清** ✓。
