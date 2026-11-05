@@ -53,6 +53,7 @@
 // The D1 hand-over as the CONSUMER sees it (see --dft and write_grid()): the hook is a no-op in a build
 // without Metal, which is what keeps this tool usable as a plain replay.
 #include "ocudu/phy/phy_pipeline_grid_ready.h"
+#include "ocudu/phy/phy_pipeline_mode.h"
 #include "ocudu/phy/support/resource_grid.h"
 #include "ocudu/phy/support/resource_grid_reader.h"
 #include "ocudu/phy/support/resource_grid_writer.h"
@@ -482,6 +483,9 @@ int main(int argc, char** argv)
   /// and the design document's "the CPU reference also fails on every narrow hop" note was that
   /// artifact. The mode is therefore REQUIRED: a run has to say which back ends it means.
   bool mode_given = false;
+  /// The pipeline mode as named on the command line, published once the run is validated (see below).
+  /// Empty means the caller named back ends through a build-only alias that has since been removed.
+  std::string pipeline_mode;
 
   for (int i = 1; i != argc; ++i) {
     std::string arg = argv[i];
@@ -538,11 +542,21 @@ int main(int argc, char** argv)
         use_metal_ce = use_metal_demod = true;
       } else if (mode == "auto") {
         use_metal_ce = use_metal_demod = true;
+      } else if (mode == "npu") {
+        // THE WHOLE PHY ON THE CPU, ONLY THE NETWORK ON THE ANE. Every module backend stays on the host; the AI
+        // receiver is the only consumer of the accelerated device. The pairing with `pusch_receiver_backend=ai` is
+        // enforced below, not left to the caller: an `npu` run with the classical receiver would be an expensive
+        // spelling of `cpu`.
+        use_metal_ce      = false;
+        use_metal_demod   = false;
+        use_metal_decoder = false;
+        dft_metal         = false;
       } else {
-        std::fprintf(stderr, "--phy_pipeline takes auto, cpu, cpu_gpu or gpu (got '%s')\n", mode.c_str());
+        std::fprintf(stderr, "--phy_pipeline takes auto, cpu, cpu_gpu, gpu or npu (got '%s')\n", mode.c_str());
         return 1;
       }
-      mode_given = true;
+      pipeline_mode = mode;
+      mode_given    = true;
     } else if (((arg == "--pusch_ldpc_decoder_type") || (arg == "--ldpc")) && (i + 1 < argc)) {
       const std::string type(argv[++i]);
       // THE SAME NAMES THE AIR CONFIGURATION TAKES, and the same default: anything that does not start with `metal` is
@@ -570,21 +584,20 @@ int main(int argc, char** argv)
       // environment variable that already carried this keeps working for the scripts that use it.
       receiver_backend = argv[++i];
       mode_given       = true;
-    } else if (arg == "--cpu") {
-      use_metal_ce = use_metal_demod = use_metal_decoder = false;
-      mode_given                     = true;
-    } else if (arg == "--metal") {
-      use_metal_ce = use_metal_demod = use_metal_decoder = true;
-      mode_given                     = true;
-    } else if (arg == "--metal-cpu-ldpc") {
-      use_metal_ce = use_metal_demod = true;
-      use_metal_decoder              = false;
-      mode_given                     = true;
-    } else if (arg == "--metal-cpu-demod") {
-      use_metal_ce  = true;
-      use_metal_demod = false;
-      use_metal_decoder = false;
-      mode_given = true;
+    } else if ((arg == "--cpu") || (arg == "--metal") || (arg == "--metal-cpu-ldpc") || (arg == "--metal-cpu-demod")) {
+      // ONE VOCABULARY FOR THE HARNESS AND THE AIR CHAIN (2026-11-05). These four used to be the only way to say
+      // which back ends a replay meant, and they did not mean the same thing as the air chain's knobs: `--metal`
+      // turned the LDPC decoder to Metal as well, while `--phy_pipeline gpu` leaves it alone -- so a "gpu" run here
+      // and a "gpu" run on air could differ in the decoder, and every measurement carried that ambiguity. They are
+      // refused rather than aliased, because an alias that silently changes one of four back ends is the exact
+      // failure this harness keeps correcting.
+      std::fprintf(stderr,
+                   "%s: %s has been removed. Name the pipeline and the decoder the way the air chain does:\n"
+                   "        --phy_pipeline cpu|cpu_gpu|gpu|npu   --pusch_ldpc_decoder_type auto|generic|metal|...\n"
+                   "        (old --cpu = --phy_pipeline cpu; old --metal = --phy_pipeline gpu --pusch_ldpc_decoder_type metal;\n"
+                   "         old --metal-cpu-ldpc = --phy_pipeline gpu --pusch_ldpc_decoder_type generic)\n",
+                   argv[0], arg.c_str());
+      return 1;
     } else if (arg == "-h" || arg == "--help") {
       std::printf("usage: %s <capture-base> --out <prefix> [--cpu|--metal|--metal-cpu-ldpc|--metal-cpu-demod]\n"
                   "  <capture-base> is one reception of a capture, e.g. /tmp/C_4352_17921\n"
@@ -633,9 +646,9 @@ int main(int argc, char** argv)
   // refuse it, because the whole point of a replay is to know WHICH chain produced the numbers.
   if (!mode_given) {
     std::fprintf(stderr,
-                 "%s: no back end selected. Pass --cpu, --metal, --metal-cpu-ldpc or --metal-cpu-demod.\n"
-                 "        (The back ends default to the CPU chain, so an omitted flag makes a device-route\n"
-                 "         replay run on the host and look plausible.)\n",
+                 "%s: no pipeline selected. Pass --phy_pipeline cpu|cpu_gpu|gpu|npu, the same vocabulary the air\n"
+                 "        chain takes. (Every module backend defaults to the CPU chain, so an omitted flag would make\n"
+                 "         a device-route replay run on the host and look plausible.)\n",
                  argv[0]);
     return 1;
   }
@@ -1298,15 +1311,48 @@ int main(int argc, char** argv)
                                             : (std::getenv("OCUDU_REPLAY_RECEIVER") != nullptr
                                                    ? std::string(std::getenv("OCUDU_REPLAY_RECEIVER"))
                                                    : std::string());
-  if ((effective_backend == "ai") && !(use_metal_ce && use_metal_demod)) {
+  // THE MODE AND THE RECEIVER BACKEND ARE ONE DECISION (2026-11-05). `npu` exists to measure the learned unit
+  // against the chain the gNB actually runs, so an `npu` run with the classical receiver is an expensive spelling
+  // of `cpu` and is refused; and `gpu` with the learned unit was retired with the same change, because it measured
+  // the arm against the GPU lane's classical chain rather than the CPU one.
+  if (pipeline_mode == "npu" && (effective_backend != "ai")) {
     std::fprintf(stderr,
-                 "[replay] WARNING: pusch_receiver_backend=ai without phy_pipeline=gpu -- the two levels are set "
-                 "together; this run measures a configuration the arm does not deploy\n");
+                 "[replay] --phy_pipeline npu requires --pusch_receiver_backend ai (got '%s'): npu means the PHY runs on\n"
+                 "         the CPU and the network on the ANE, and without the network it is just 'cpu'.\n",
+                 effective_backend.c_str());
+    return 1;
   }
-  if ((effective_backend == "classic") && use_metal_ce && use_metal_demod) {
+  if (pipeline_mode == "gpu" && (effective_backend == "ai")) {
     std::fprintf(stderr,
-                 "[replay] NOTE: phy_pipeline=gpu with pusch_receiver_backend=classic -- the classical receiver runs, "
-                 "the learned unit does not\n");
+                 "[replay] --phy_pipeline gpu with --pusch_receiver_backend ai is no longer supported (2026-11-05):\n"
+                 "         it measured the arm against the GPU lane's classical chain, which is not the gNB's.\n"
+                 "         Use --phy_pipeline npu for an AI arm.\n");
+    return 1;
+  }
+  if ((effective_backend == "ai") && (pipeline_mode == "cpu")) {
+    std::fprintf(stderr,
+                 "[replay] NOTE: --phy_pipeline cpu with an AI arm is the pre-2026-11-05 spelling of npu; prefer npu.\n");
+  }
+  // THE HARNESS PUBLISHES THE MODE IT RUNS (2026-11-05). It deliberately never did, so that the fused lane's strict
+  // policy -- a hop the device refuses must fail instead of being computed on the host -- could not be exercised
+  // offline at all; the air chain published it and the harness did not, which made "gpu" mean two things. Publishing
+  // it here is what makes the vocabulary shared; OCUDU_GPU_STRICT=0 remains the explicit way to ask for the tolerant
+  // path when a run needs it.
+  {
+    phy_pipeline_mode published = phy_pipeline_mode::cpu;
+    if (pipeline_mode == "npu") {
+      published = phy_pipeline_mode::npu;
+    } else if (pipeline_mode == "gpu") {
+      published = phy_pipeline_mode::gpu;
+    } else if (pipeline_mode == "cpu_gpu") {
+      published = phy_pipeline_mode::cpu_gpu;
+    } else if (pipeline_mode == "auto") {
+      published = (use_metal_ce || use_metal_demod || use_metal_decoder) ? phy_pipeline_mode::cpu_gpu
+                                                                        : phy_pipeline_mode::cpu;
+    }
+    phy_pipeline_mode_registry::set(published);
+    std::printf("[phy_pipeline] mode=%s published, decoder=%s\n", to_string(published),
+                use_metal_decoder ? "metal" : "cpu");
   }
   if (!receiver_backend.empty()) {
     proc_cfg.pusch_receiver_backend = receiver_backend;

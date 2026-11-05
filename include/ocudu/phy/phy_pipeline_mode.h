@@ -19,7 +19,12 @@ namespace ocudu {
 /// - \c gpu: fused lane. The whole IQ -> LLR chain runs inside one device-side pipeline with only two host <-> device
 ///   *data* crossings (the IQ upload and the LLR download). The lane takes over the backends of the modules it
 ///   contains; the LDPC decoder is \b not part of the lane (the LLR still leaves the device for the CPU decoder).
-enum class phy_pipeline_mode { cpu, cpu_gpu, gpu };
+/// - \c npu: the whole PHY runs on the CPU/DSP (FFT, estimation, equalisation/demapping, LDPC) and only the learned
+///   depth-3 unit runs on the ANE. It exists because the air chain's classical receiver is the CPU one: an AI arm
+///   measured inside the GPU lane was compared against a \e different classical chain (2026-11-05, 29.5% apart in
+///   delivered bits on the same captures). \c npu keeps every PHY module off the device, so the arm's LLRs are
+///   produced from the same front end the gNB uses. Selecting it requires the AI receiver backend.
+enum class phy_pipeline_mode { cpu, cpu_gpu, gpu, npu };
 
 /// String form of a concrete mode, as used by the command line and the logs.
 constexpr const char* to_string(phy_pipeline_mode mode)
@@ -31,6 +36,8 @@ constexpr const char* to_string(phy_pipeline_mode mode)
       return "cpu_gpu";
     case phy_pipeline_mode::gpu:
       return "gpu";
+    case phy_pipeline_mode::npu:
+      return "npu";
   }
   return "unknown";
 }
@@ -51,6 +58,10 @@ constexpr bool phy_pipeline_mode_from_string(std::string_view value, phy_pipelin
   }
   if (value == "gpu") {
     mode = phy_pipeline_mode::gpu;
+    return true;
+  }
+  if (value == "npu") {
+    mode = phy_pipeline_mode::npu;
     return true;
   }
   return false;
