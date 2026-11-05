@@ -374,22 +374,31 @@ public:
                prepare_full_plane ? "WHOLE" : "DM-RS-only",
                prepare_full_plane ? "OCUDU_DEPTH3_PREPARE_FULL_PLANE=1" : "OCUDU_DEPTH3_PREPARE_FULL_PLANE=0");
   }
-  // PREFERRED COMPUTE UNITS ARE PINNED BACK TO "all", AND LOUDLY (design section 19.374(b)). The engine accepts
-  // `cpu_gpu` and `cpu_ne` because the latency probe needs them to measure each tier in isolation, but on air they are
-  // not a preference -- they are a way to break the link. Measured 2026-10-23: with `cpu_gpu` the prediction took
-  // 1677 microseconds against a 500-microsecond slot, so receptions arrived late and the decode rate fell to 15.2
-  // percent, which shows up as iperf running at zero while ping still answers. `all` lets Core ML pick, and the worst
-  // it does is land at 650 to 930 microseconds with decoding intact.
+  // THE NETWORK PREFERS THE ANE, AND `all` NO LONGER DOES THAT (2026-11-05, user instruction). The engine's own
+  // default is `all`, which hands the placement to Core ML and reports NOTHING back; the flight of that evening found
+  // it landing on the GPU with 2997-microsecond predictions against a fast state near 400, twelve slots late, and the
+  // uplink lost about 39 percent of its blocks. The envelope an earlier comment recorded for `all` -- 650 to 930
+  // microseconds -- no longer held on this machine.
+  //
+  // So the receiver now ASKS for `cpu_ne` (CPU and ANE, GPU excluded), which is as close as Core ML lets a caller get
+  // to "run this on the ANE": a layer the ANE cannot take falls to the CPU rather than to the GPU. `all` stays
+  // available for an A/B and is no longer the default. `cpu_gpu` and `cpu` stay refused: the first was measured at
+  // 1677 microseconds with a 15.2 percent decode rate (2026-10-23), and the second is the same story without the GPU.
   if (const char* units = std::getenv("OCUDU_DEPTH3_COMPUTE_UNITS")) {
     const std::string requested(units);
-    if ((requested == "cpu_gpu") || (requested == "cpu_ne") || (requested == "cpu")) {
+    if ((requested == "cpu_gpu") || (requested == "cpu")) {
       fmt::print(stderr,
-                 "[pusch_receiver] AI depth-3: REFUSING OCUDU_DEPTH3_COMPUTE_UNITS={} for the receiver (it costs 1677 us "
-                 "per reception and drops decoding to 15 percent, measured 2026-10-23); using 'all'. The tier knob "
-                 "exists for the latency probe, which does not go through this receiver.\n",
+                 "[pusch_receiver] AI depth-3: REFUSING OCUDU_DEPTH3_COMPUTE_UNITS={} for the receiver (measured 1677 us "
+                 "per reception and a 15.2 percent decode rate on 2026-10-23); using 'cpu_ne'. `all` is accepted when a "
+                 "run wants Core ML to choose.\n",
                  requested);
-      setenv("OCUDU_DEPTH3_COMPUTE_UNITS", "all", 1);
+      setenv("OCUDU_DEPTH3_COMPUTE_UNITS", "cpu_ne", 1);
     }
+  } else {
+    fmt::print(stderr,
+               "[pusch_receiver] AI depth-3: compute units default to 'cpu_ne' (CPU and ANE, GPU excluded) so the "
+               "forward pass lands on the ANE; set OCUDU_DEPTH3_COMPUTE_UNITS=all to let Core ML choose again\n");
+    setenv("OCUDU_DEPTH3_COMPUTE_UNITS", "cpu_ne", 1);
   }
 
   // The fallback switch: `none` is the pure configuration the final comparison runs (design section 19.245).
