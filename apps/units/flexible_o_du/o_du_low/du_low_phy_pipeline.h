@@ -241,7 +241,19 @@ inline std::optional<phy_pipeline_effective> resolve_phy_pipeline(const phy_pipe
   //   * cpu forbids every offload, so an AI receiver there is the same conflict as a Metal DFT;
   //   * cpu_gpu is per-MODULE offload and cannot say "these three modules at once", so accepting it would leave
   //     the mode unable to describe what it runs.
-  if (request.receiver == "auto" || request.receiver == "classic") {
+  // `npu` IMPLIES THE NETWORK (2026-11-05, user ruling). The mode means "the whole PHY on the CPU and the network on
+  // the ANE", so asking for it and then not running the network would leave it indistinguishable from `cpu` -- and a
+  // mode whose name promises a receiver the run does not use is the failure this matrix exists to refuse. An explicit
+  // `classic` alongside `npu` is therefore a conflict rather than an override.
+  if (request.receiver == "auto") {
+    out.receiver = (out.mode == phy_pipeline_mode::npu) ? "ai" : "classic";
+  } else if (request.receiver == "classic") {
+    if (out.mode == phy_pipeline_mode::npu) {
+      error = "--phy_pipeline npu with --pusch_receiver_backend classic: npu means the PHY on the CPU and the "
+              "network on the ANE, so without the network it is exactly --phy_pipeline cpu. Drop the mode or ask for "
+              "the ai receiver.";
+      return std::nullopt;
+    }
     out.receiver = "classic";
   } else if (request.receiver == "ai") {
     if (out.mode == phy_pipeline_mode::cpu) {
@@ -251,15 +263,28 @@ inline std::optional<phy_pipeline_effective> resolve_phy_pipeline(const phy_pipe
     if (out.mode == phy_pipeline_mode::cpu_gpu) {
       error = "--phy_pipeline cpu_gpu conflicts with --pusch_receiver_backend ai: the AI receiver replaces the "
               "channel estimator, the equalizer and the demapper together (depth 3 is one unit), which per-module "
-              "offload cannot express - use --phy_pipeline gpu";
+              "offload cannot express - use --phy_pipeline npu";
       return std::nullopt;
     }
-    // A model is what makes the arm COMPUTE, so an "ai" request always runs one: the requested model, or the one
-    // this build carries as its default. The distinction matters because the failure this matrix exists to refuse is
-    // a run that REPORTS "ai" while the classical chain produces its output -- which is what an arm without a model
-    // is (it forwards), and which cost a flight before the capability was wired. Leaving the model unspecified is
-    // therefore not an error: it selects the default. The diagnostic identity arm stays reachable from the library
-    // (pusch_depth3_kind::ai_identity) and from the replay tool.
+    if (out.mode == phy_pipeline_mode::gpu) {
+      error = "--phy_pipeline gpu with --pusch_receiver_backend ai was retired (2026-11-05): it measured the arm "
+              "against the GPU lane's classical chain rather than the CPU one. Use --phy_pipeline npu.";
+      return std::nullopt;
+    }
+    out.receiver = "ai";
+  } else {
+    error = "Invalid PUSCH receiver backend value '" + request.receiver + "'. Accepted values [auto,classic,ai]";
+    return std::nullopt;
+  }
+
+  // A model is what makes the arm COMPUTE, so every path that ends at the AI receiver resolves one: the requested
+  // model, or the one this build carries as its default (E4, see default_depth3_model_path). The distinction matters
+  // because the failure this matrix exists to refuse is a run that REPORTS "ai" while the classical chain produces
+  // its output -- which is what an arm without a model is (it forwards), and which cost a flight before the
+  // capability was wired. This sits AFTER the branch above so that `npu` -- which implies the receiver without
+  // naming it -- gets the default too; keeping it inside the `ai` branch is what made the first npu flight refuse a
+  // model the build carries.
+  if (out.receiver == "ai") {
     out.receiver_model = request.receiver_model.empty() ? std::string(default_model) : request.receiver_model;
     if (out.receiver_model.empty()) {
       error = "--pusch_receiver_backend ai needs a model and this build carries no default one: pass "
@@ -267,10 +292,6 @@ inline std::optional<phy_pipeline_effective> resolve_phy_pipeline(const phy_pipe
               "would report receiver=ai while the CLASSICAL chain produced its output";
       return std::nullopt;
     }
-    out.receiver = "ai";
-  } else {
-    error = "Invalid PUSCH receiver backend value '" + request.receiver + "'. Accepted values [auto,classic,ai]";
-    return std::nullopt;
   }
 
   switch (out.mode) {
