@@ -607,7 +607,13 @@ def export_deployment(model, qm, path, cond=False, snr_range=None, sinr_cal=None
         compute_precision=ct.precision.FLOAT16,
         minimum_deployment_target=ct.target.iOS17,
         convert_to="mlprogram")
-    converted = rename_outputs(converted, qm, list(model.output_names))
+    # THE MAIN HEAD'S WIDTH IS THE CONDITIONING STRIDE WHEN THE MODEL IS CONDITIONED, NOT THE MODULATION's qm.
+    # A conditioned trunk writes COND_STRIDE values per symbol (8), so its llr head is NOF_SYMBOLS * 8 channels;
+    # the contract check used qm, which is right only when the caller happens to pass 256QAM, whose bits per
+    # symbol equal the stride. Exporting a QPSK-nominal conditioned model with `--modulation QPSK` asked for
+    # 14 * 2 = 28 channels against the graph's 112 and refused a valid checkpoint (2026-11-05).
+    head_qm = D3.COND_STRIDE if cond else qm
+    converted = rename_outputs(converted, head_qm, list(model.output_names))
     # EVERY metadata write goes through a SPEC and is REBUILT into a model, because `get_spec()` hands back a COPY:
     # mutating the returned spec and then saving the MODEL silently drops the write -- which is exactly what
     # happened on the first export of a conditioned bundle (the metadata came out holding only coremltools' own
