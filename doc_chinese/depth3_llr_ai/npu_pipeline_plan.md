@@ -203,3 +203,68 @@ unit->set_depth3(create_pusch_depth3_receiver(depth3_kind, unit->get_estimator()
 **M1 先行**（枚举＋回放器＋强制 CPU＋日志），它不依赖估计器拷贝，
 完成后立刻可以做 §6 的判据 2（`npu+ai` vs `gpu+ai` 同单元对照）——
 **这一步就能回答"AI 臂到底消不消费估计器"这个最关键的不确定性** ✓
+
+---
+
+## 10. ★★★★★ 2026-11-05 20:30 **实测修正：`cpu+ai` 与 `gpu+ai` **并不等价** —— 所以 `npu` 不是纯别名**
+
+**(a) ★★★ 我先前说错了一句**
+
+**⇒ 我此前只对照了 **1 个单元**，看到 `cpu+ai` 与 `gpu+ai` 的 `crc`/`sinr` 相同，就写了"逐字相同" ✗
+**⇒ 20 个单元逐行对照后：**2 个单元不同** ✓
+
+```
+cap_10020_16087_17922   gpu: crc=OK iterations=3   cpu: crc=OK iterations=2   ← 迭代数不同
+cap_10052_16727_17922   gpu: crc=KO iterations=6   cpu: crc=OK iterations=6   ← ★ 判决翻转（KO → OK）
+```
+
+**⇒ ★★★ 结论**：**AI 臂的输出确实受前端影响**（至少在某些单元上）✓
+**⇒ ⇒ 这直接影响本规划的两个判断**：
+1. ★ `npu` **不是**"`cpu` ＋ `ai` 换个名字"：**它会产生不同的数字**（这正是要它的理由 —— 那些数字才是对 CPU 链的公平比较）；
+2. ★ 我原先在 §6 判据 2 里假设的"`npu+ai ≡ gpu+ai`"**被实测否定** ✗ ⇒ 判据要改成：
+   ★ **记录两者的差异，并把 `npu` 的数字作为新的正式口径** ✓
+
+**(b) ★★★ 好消息：**测量今天就能开始，不需要任何代码**
+
+```bash
+# 已经可用（本机实测）：
+OCUDU_DEPTH3_FALLBACK=none OCUDU_REPLAY_MODEL=<bundle>.mlmodelc \
+  ul_chain_replay <unit> --out <o> --phy_pipeline cpu --pusch_receiver_backend ai
+```
+
+**⇒ ★★ 也就是说**：要拿到"AI vs 真 CPU 链"的数字，**现在就能跑 5 000 单元**（只是名字还叫 `cpu+ai`）✓
+
+**(c) ★★★ 用户提议的"只改 config"要分三件看**
+
+| 提议 | 规模 | 判断 |
+|---|---|---|
+| ★ 新增 `--phy_pipeline npu` ≡ `cpu` ＋ `ai` | ★ **S**（枚举 ＋ 回放器解析 ＋ 日志，1 个文件）| ✅ **简单，值得做** |
+| ★ 取消 `gpu + ai` 组合 | ★ **S**（回放器里报错拒绝 ＋ 文档）| ✅ **可行，历史数字已记录** |
+| ★★ **删除 `--pusch_receiver_backend`** | ★★★ **L：261 处引用** | ⚠ **不建议现在做** |
+
+**⇒ ★★★ "删除 `--pusch_receiver_backend`" 的真实规模**（`grep` 实测）：**261 处引用**，分布在
+`apps/units/.../du_low_config.h`、`du_low_config_yaml_writer.cpp`、`du_low_phy_pipeline.h`、
+`upper_phy_factories.cpp`、`pusch/processor_factories.cpp`、`pusch_processor_impl.cpp`、
+`tests/unittests/apps/units/flexible_du/...` 等 —— 它还是**应用层 YAML 配置**的一部分（能读写回去）✓
+**⇒ 建议**：**保留这个旋钮**（作为内部开关），让 `npu` 模式**隐含**它；
+删除旋钮作为**独立的重构任务**（有自己的 YAML 兼容/测试面），不要塞进这次 ✓
+
+**(d) ★★★ 修订后的最小范围（建议批准这一版）**
+
+| # | 改动 | 文件 | 规模 |
+|---|---|---|---|
+| 1 | `phy_pipeline_mode` 加 `npu` ＋ 注释语义 | `include/ocudu/phy/phy_pipeline_mode.h` | S |
+| 2 | 回放器：`--phy_pipeline npu` ⇒ 全 CPU 模块 ＋ 强制 `backend=ai`；`gpu`＋`ai` ⇒ **报错拒绝**；日志打 `npu` 行 | `ul_chain_replay.cpp` | S |
+| 3 | 测量脚本透传 `--phy-pipeline npu` | `run_arm_ext.py` | S |
+| 4 | 文档：runbook ＋ PK 增加 "npu 口径" | 2 份 md | S |
+
+**⇒ 规模：**4 个文件、约半天**（不含测量）** ✓ —— 这才是"只改 config"的真实版本 ✓
+
+**(e) ★★ 顺带纠正一个设计点（用户 20:21 提到）**
+
+**⇒** "网络本来可以输出上报估计量，只是我们目前没做" ✓
+**⇒ 这意味着**：现在 `npu` 口径下的 **SINR/epre/rsrp 仍来自 CPU 经典估计器**，而网络只出 LLR ✓
+**⇒ 后果**：`npu` 口径下**不要用 SINR 去比较两臂**（两者来源相同，但网络没参与）；**判据仍只看交付比特** ✓
+
+★ 状态 ✓：★★★ **`cpu+ai` 与 `gpu+ai` 不相同的实测证据已记录** ✓；★★ **"测量今天可做、代码非必需"已写明** ✓；
+★★★ **三件提议的规模（S / S / L＝261 处）已给出，并建议删除旋钮另立任务** ✓。
