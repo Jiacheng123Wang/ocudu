@@ -1368,3 +1368,61 @@ nohup bash ~/work/ai_phy_train/bin/watch_deep.sh < /dev/null \
 
 ★ 状态 ✓：★★ **`~/venv_metal` 实测有 GPU:0，能力已具备** ✓；★★★ **但 Metal 在 c32 上慢 2 倍、c128 上慢 10%，不该用** ✓；
 ★★ **本机真正的瓶颈是数据加载（同一模型两种数据源差 30%）** ✓。
+
+---
+
+## 4.1 ★★★★★ 2026-11-06 **`LD_LIBRARY_PATH` 必须**固化在 107（已写入 `.bashrc` ＋ `.profile` ＋ 所有启动脚本）
+
+**(a) ★★★ 事故经过（这次真的发生了）**
+
+**⇒ 现象**：107 上 c32 续训（`w2c32_b18_e61`）单轮 **7 031 s（1.95 h）**，而用户记录的 GPU 单轮是 **18 min**；
+`nvidia-smi` 显示 GPU 利用率 **0%**，TF 日志只有一行被忽略的
+`Cannot dlopen some GPU libraries ... Skipping registering GPU devices` ✓
+**⇒ 根因**：venv 里的 **nvidia 轮子齐全**（cublas/cudnn/cufft/curand/cusolver/cusparse/nccl/nvjitlink），
+但**没有任何东西把 `site-packages/nvidia/*/lib` 放进 loader 路径** ⇒ TF 的"pip CUDA 自动发现"在本机**没生效** ✓
+
+**(b) ★★★★ 实测对照（同一台 107、同一数据、同一 batch）**
+
+| 运行 | 单轮 | 结论 |
+|---|---|---|
+| c32（GPU）| ★ **1 111 s ≈ 18.5 min** | 与用户记录一致 ✓ |
+| c32（CPU，本次事故）| **7 033 s ≈ 1.95 h** | 慢 **6.3×** ✓ |
+| **c128（11-04 那次 40 轮）** | ★ **3 538 s ≈ 59 min** | ★ **是 GPU**：3.3 × c32 的 GPU 轮，与 C²（4×）吻合 ✓ |
+
+**⇒ ★★★ 推论**：**"c128 在 CPU 上不可能 1 h/轮"是对的** —— 因为那次本来就在 GPU 上；
+**只有 e61 续训那次掉到了 CPU**，原因是**启动环境不同**（交互会话有该变量，ssh 非交互脚本没有）✓
+
+**(c) ★★★ 固化做法（107 已完成）**
+
+| 位置 | 作用 |
+|---|---|
+| ★ `~/.bashrc` | 交互 shell（含 tmux/screen）|
+| ★ `~/.profile` | 登录 shell（`ssh -l`）|
+| ★ **每个启动脚本**（`run_c32_e61.sh` 等）| ★ **必须**：`ssh host 'cmd'` 的非交互 shell **两个文件都不读** ✓ |
+
+```bash
+# 三处统一的一段（幂等，已带 ocudu-cuda-libs 标记）
+NV=$(ls -d "$HOME"/work/ai_phy_train/.venv/lib/python3.12/site-packages/nvidia/*/lib 2>/dev/null | tr "\n" ":")
+[ -n "$NV" ] && export LD_LIBRARY_PATH="$NV${LD_LIBRARY_PATH:-}"
+```
+
+**⇒ ★★ 验证（三种 shell 都要过）**：
+```bash
+bash -ic 'echo ${LD_LIBRARY_PATH:0:50}'     # 交互
+bash -lc 'echo ${LD_LIBRARY_PATH:0:50}'     # 登录
+python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"
+# 期望：[PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')]
+```
+**⇒ 训练日志里应出现**：`Created device ... GPU:0` ＋ `Loaded cuDNN version 92700` ✓
+
+**(d) ★★ 判据：怎么一眼看出训练在 CPU 上**
+
+| 检查 | GPU 正常 | 掉到 CPU |
+|---|---|---|
+| `nvidia-smi --query-gpu=utilization.gpu` | **60–90%** | **0%** |
+| 日志 `Created device.*GPU` | 有 | **无** |
+| c32 单轮 | ~1 100 s | ~7 000 s |
+| c128 单轮 | ~3 500 s | ~14 000 s（推算）|
+
+★ 状态 ✓：★★★ **`.bashrc` ＋ `.profile` 已写入 107 并验证（交互/登录都生效）** ✓；
+★★★ **所有启动脚本内置该导出**（`run_c32_e61.sh` 已改）✓；★★★ **2026-11-06 07:26 重启后实测 GPU 88%、首轮 1 111 s** ✓。
