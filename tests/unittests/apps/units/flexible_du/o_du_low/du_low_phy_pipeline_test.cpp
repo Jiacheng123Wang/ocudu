@@ -511,14 +511,17 @@ TEST(phy_pipeline_mode_test, receiver_ai_resolves_to_the_ai_arm_now_that_its_hea
 
   std::string error;
   const auto  effective = resolve_phy_pipeline(
-      make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model), all_available, error);
+      make_request("npu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model), all_available, error);
   ASSERT_TRUE(effective.has_value()) << error;
   EXPECT_EQ(effective->receiver, "ai");
   // The rest of the configuration is untouched: the arm is chosen at the granularity of the whole depth-3
   // unit, so the per-module backends still describe the units the CLASSICAL arm would use -- and the AI head
   // delegates to exactly those today.
-  EXPECT_TRUE(effective->lane_fused);
-  EXPECT_EQ(effective->ch_est, "metal_mmse");
+  // npu is NOT the fused lane and every module is on the host: the arm reads the grid and computes, the estimator
+  // and the equaliser stay on the CPU (2026-11-05, when the AI arm moved out of the GPU lane).
+  EXPECT_FALSE(effective->lane_fused);
+  EXPECT_EQ(effective->ch_est, "cpu");
+  EXPECT_EQ(effective->equalizer, "cpu");
 }
 
 TEST(phy_pipeline_mode_test, receiver_ai_conflicts_with_the_two_modes_that_cannot_express_it)
@@ -556,16 +559,29 @@ TEST(phy_pipeline_mode_test, receiver_ai_substitutes_the_classic_one_when_the_bi
   // factory had all been in place for days - a leg flew and reported "receiver=classic (asked for ai ...)".
   std::string error;
   const auto  effective = resolve_phy_pipeline(
-      make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model), none_available, error);
+      make_request("npu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model), none_available, error);
   ASSERT_TRUE(effective.has_value()) << "a missing capability substitutes, it does not refuse: " << error;
   EXPECT_EQ(effective->receiver, "classic");
 
   // And with the capability on, the same request is honoured - so the two branches are genuinely different
   // answers to the same command line and only the capability decides which one runs.
   const auto with_capability = resolve_phy_pipeline(
-      make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model), all_available, error);
+      make_request("npu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model), all_available, error);
   ASSERT_TRUE(with_capability.has_value()) << error;
   EXPECT_EQ(with_capability->receiver, "ai");
+}
+
+TEST(phy_pipeline_mode_test, receiver_ai_is_retired_in_gpu_mode)
+{
+  // The AI arm used to live in the fused lane, which made every one of its numbers a comparison against that lane's
+  // classical chain rather than the CPU one the gNB runs (2026-11-05, 29.5% apart in delivered bits on the same
+  // captures). The combination is refused and points at npu, so a run cannot silently keep measuring the old axis.
+  std::string error;
+  EXPECT_FALSE(resolve_phy_pipeline(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model),
+                                    all_available,
+                                    error)
+                   .has_value());
+  EXPECT_NE(error.find("npu"), std::string::npos) << error;
 }
 
 TEST(phy_pipeline_mode_test, receiver_ai_without_a_model_takes_the_builds_default)
@@ -576,7 +592,7 @@ TEST(phy_pipeline_mode_test, receiver_ai_without_a_model_takes_the_builds_defaul
   // is a property of the BUILD (OCUDU_DEPTH3_DEFAULT_MODEL), so it is passed into the resolver here instead of
   // being read from a header by every consumer.
   std::string  error;
-  const auto   effective = resolve_phy_pipeline(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai"),
+  const auto   effective = resolve_phy_pipeline(make_request("npu", "auto", "auto", "auto", "auto", "auto", "ai"),
                                               all_available,
                                               error,
                                               "/models/default.mlmodelc");
@@ -590,7 +606,7 @@ TEST(phy_pipeline_mode_test, receiver_ai_without_a_model_conflicts_when_the_buil
   // The one case that cannot be honoured: no model on the command line AND none in the build. There is nothing to
   // bind, so the run is refused rather than run as an identity arm under a name that promises a network.
   std::string error;
-  EXPECT_FALSE(resolve_phy_pipeline(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai"),
+  EXPECT_FALSE(resolve_phy_pipeline(make_request("npu", "auto", "auto", "auto", "auto", "auto", "ai"),
                                     all_available,
                                     error,
                                     "")
@@ -604,7 +620,7 @@ TEST(phy_pipeline_mode_test, receiver_ai_keeps_the_model_it_was_given)
   // the validator's question (it has a filesystem) and whether it BINDS is the arm's (it has the loader), and each
   // reports its own answer.
   const auto effective =
-      resolve(make_request("gpu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model));
+      resolve(make_request("npu", "auto", "auto", "auto", "auto", "auto", "ai", ai_model));
   EXPECT_EQ(effective.receiver, "ai");
   EXPECT_EQ(effective.receiver_model, ai_model);
 }

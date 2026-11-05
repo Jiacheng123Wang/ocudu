@@ -25,9 +25,14 @@ struct du_low_unit_expert_upper_phy_config {
   /// - \c cpu_gpu: module-level offload, each module follows its own backend knob (every module boundary keeps its own
   ///   host <-> device crossing), or
   /// - \c gpu: fused IQ -> LLR GPU pipeline: the chain runs inside a single device-side lane with only two host <->
-  ///   device *data* crossings (the IQ upload and the LLR download). The lane takes over the DFT, channel estimator,
-  ///   equalizer and demapper backends, which must be left at \c auto; the LDPC decoder is not part of the lane (the
-  ///   LLR leaves the device for the CPU decoder).
+  ///   device *data* crossings (the IQ upload and the LLR download). The lane takes over the channel estimator, the
+  ///   equalizer and the demapper, whose knobs must be left at \c auto (the metal values are the lane's flavors).
+  ///   The DFT and the LDPC decoder are NOT part of the lane: the DFT defaults to the CPU one in this mode (the grid
+  ///   is written by the host unless `--pusch_dft_type metal` asks otherwise) and the decoder keeps its own knob,
+  ///   defaulting to the CPU implementation.
+  /// - \c npu: the whole PHY on the CPU/DSP (DFT, channel estimator, equalizer/demapper, LDPC) with only the learned
+  ///   depth-3 unit on the ANE. It implies the AI receiver and the PURE fallback (no classical estimator, no
+  ///   hand-over); an explicit `classic` receiver or `OCUDU_DEPTH3_FALLBACK` still wins over the implication.
   std::string phy_pipeline = "auto";
   /// \brief Keep the uplink resource grid on the device: the OFDM demodulation writes it from the GPU and the CPU reads
   /// the same memory (see lower_phy_configuration::device_resource_grid).

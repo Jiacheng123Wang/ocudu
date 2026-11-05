@@ -56,9 +56,15 @@ enum class pusch_depth3_kind {
   /// \brief The AI arm with a bound model: the network computes the unit.
   ///
   /// \c demodulate() assembles the contract's plane from the grid, runs the forward pass on the ANE and
-  /// delivers the network's own soft bits; the classical demodulator does not run. \c estimate() still runs the
-  /// classical estimator, because the chain's measurements (RSRP, EPRE, SNR, timing advance) are read from its
-  /// results until the reporting heads replace them (`design` section 17.2, R6).
+  /// delivers the network's own soft bits; the classical demodulator does not run.
+  ///
+  /// \c estimate() DEPENDS ON THE FALLBACK, and the code is the authority here (the previous wording read as if the
+  /// estimator always ran, which stopped being true on 2026-11-03):
+  /// - fallback ON (`OCUDU_DEPTH3_FALLBACK` unset or anything but none): it forwards to the classical estimator,
+  ///   whose results feed the degraded hand-over;
+  /// - fallback OFF (PURE): it returns BEFORE calling the estimator, hands an empty estimate to the notifier so the
+  ///   chain still reaches demodulation, and every published measurement comes from the arm's own shared layer
+  ///   (`measure_ul_slow`) instead. That is what makes the 700-800 us estimator cost disappear from an npu run.
   ai_network
 };
 

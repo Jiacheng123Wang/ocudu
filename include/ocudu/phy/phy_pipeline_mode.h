@@ -17,8 +17,10 @@ namespace ocudu {
 /// - \c cpu_gpu: module-level offload. Each module follows its own backend knob, so every module boundary keeps its own
 ///   host <-> device crossing.
 /// - \c gpu: fused lane. The whole IQ -> LLR chain runs inside one device-side pipeline with only two host <-> device
-///   *data* crossings (the IQ upload and the LLR download). The lane takes over the backends of the modules it
-///   contains; the LDPC decoder is \b not part of the lane (the LLR still leaves the device for the CPU decoder).
+///   *data* crossings (the IQ upload and the LLR download). The lane takes over the CHANNEL ESTIMATOR, the EQUALISER
+///   and the DEMAPPER; the DFT is NOT one of them since 2026-09-30 -- its default in this mode is the CPU one, so the
+///   grid is written by the host unless `--pusch_dft_type metal` (or its `gpu` alias) asks otherwise. The LDPC
+///   decoder is \b not part of the lane either: it keeps its own knob and defaults to the CPU implementation.
 /// - \c npu: the whole PHY runs on the CPU/DSP (FFT, estimation, equalisation/demapping, LDPC) and only the learned
 ///   depth-3 unit runs on the ANE. It exists because the air chain's classical receiver is the CPU one: an AI arm
 ///   measured inside the GPU lane was compared against a \e different classical chain (2026-11-05, 29.5% apart in
