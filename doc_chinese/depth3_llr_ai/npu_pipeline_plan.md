@@ -197,3 +197,55 @@ OCUDU_DEPTH3_FALLBACK=none OCUDU_REPLAY_MODEL=<bundle>.mlmodelc \
 | 要适配 4 个契约/探针头文件 | ★ 不需要：`npu` 在契约上等价于 `cpu`（无 device 交叉、无融合 lane）|
 | 要 1–2 天 | ★ **约半天、4 个文件** |
 | `npu+ai ≡ gpu+ai`（预测）| ★ 修正为：**`npu+ai ≡ metal-cpu-ldpc + ai`**；与 `gpu`（Metal 解码器）**不同**，差异来自解码器 |
+
+---
+
+## 9. ★★★★★ 2026-11-05 21:00 追加：**统一回放与实链的 pipeline 词汇表**，并把 **Metal LDPC 从默认里拿掉**
+
+### 9.1 用户的第三问：`gpu` 是不是就是 fused lane？——**实链是，回放不一定**
+
+| 环境 | `phy_pipeline gpu` 实际含义 | 证据 |
+|---|---|---|
+| ★ **实链（apps / gNB）** | ★★ **fused lane**：IQ→LLR 在一条 device pipeline 里，宿主只两次数据跨界 | 枚举注释（`phy_pipeline_mode.h:19`）＋ 实链日志 `[phy_pipeline] mode=gpu fused=yes … lane=IQ->LLR`（`du_low_config_translator.cpp:54–58`）|
+| **回放器** | ★ 只设 `use_metal_ce = use_metal_demod = true`（**模块级 Metal**）；**从不发布 pipeline 模式** | `grep phy_pipeline_mode_registry::set` 只出现在 apps 与单测；回放器里一次都没有 |
+
+**⇒ ⇒ ★★★ 结论**：**实链的 `gpu` 是 fused lane，它确实就是 depth3 的 Metal 对应物**（两者都是"整条 LLR 链一次交付"）✓
+**但回放器的 `gpu` **没有**发布这个模式 ⇒ 探针/契约看不到、fused 的严格策略也不会生效 ⇒
+**回放器的 "gpu" 与实链的 "gpu" 不是同一件事** ✗ —— **这正是要统一词汇表的直接理由** ✓
+
+### 9.2 ★★ 另一个必须修的默认：**历史测量里解码器是 Metal**
+
+**⇒ 我们所有已记录的 AI 测量，命令都是 `--metal --phy_pipeline gpu --pusch_receiver_backend ai`**；
+**而 `--metal` 这个别名会把 `use_metal_decoder` 也置真** ⇒ **那些数字用的是 Metal LDPC** ✓
+**⇒ 与实链默认（CPU 解码器）不一致** ⇒ 又一个口径差异 ✓
+**⇒ 与 §2.3 的 A vs C 一致**：Metal LDPC 与 CPU LDPC 在 20 个单元里差 9 处（含 1 个判决翻转）✓
+
+### 9.3 统一后的词汇表（回放器向实链看齐）
+
+| 项 | 统一后的规则 |
+|---|---|
+| pipeline 选项 | ★ **只有** `--phy_pipeline auto|cpu|cpu_gpu|gpu|npu`（与 `--expert_phy.phy_pipeline` 同名同值）|
+| 旧的四个别名 | ★ **删除**（`--cpu`、`--metal`、`--metal-cpu-ldpc`、`--metal-cpu-demod`）；若保留则**必须报错并指路**，不允许静默别名 |
+| 解码器 | ★★ **由 `--pusch_ldpc_decoder_type` 单独决定，默认 CPU**（`auto` → CPU）；**`gpu` 不再隐含 Metal 解码器** |
+| 模式发布 | ★★ 回放器**必须调用 `phy_pipeline_mode_registry::set(mode)`** —— 让契约/探针在回放里与实链行为一致 |
+| `npu` | 新增（§3.1）：全 CPU ＋ `backend=ai`；`gpu+ai` 报错 |
+
+### 9.4 这对改动清单与里程碑的影响
+
+**⇒ 新增 M0（前置）**：
+
+| 里程碑 | 内容 | 验收 |
+|---|---|---|
+| ★ **M0** | 统一词汇表：删四个别名（或改成显式报错）、**发布模式**、**解码器默认 CPU**、日志打印解析后的 `mode/decoder` | 同一份命令在实链与回放里**逐字相同**；`--metal` 之类**报错并指路**；`gpu` 下**默认 CPU 解码器** |
+
+**⇒ 改动文件增加**：`ul_chain_replay.cpp`（解析与发布）、`run_arm_ext.py`（去掉 `--metal`，改传 `--phy_pipeline` ＋ `--pusch_ldpc_decoder_type`）；
+**⇒ 规模从 4 个文件升到 5 个，仍约半天到一天** ✓
+
+### 9.5 ★★ 对历史数字的影响（必须写进 PK 文档）
+
+**⇒ 历史 gpu 口径 = **Metal CE/demod ＋ Metal LDPC ＋ AI** ✓
+**⇒ npu 口径 = **CPU 全套 ＋ AI** ✓
+**⇒ 两者差异**（§2.3）**只来自解码器**，但足以让个别单元判决翻转 ⇒ **新口径要重新测，不能从旧数字换算** ✓
+
+★ 状态 ✓：★★★ **"实链 gpu = fused lane（= depth3 的 Metal 对应物）"已确认，并指出回放器没发布模式这一差异** ✓；
+★★ **历史测量用的是 Metal LDPC 这一事实已查明** ✓；★★★ **统一词汇表（删别名、发布模式、解码器默认 CPU）已写入设计，并新增 M0 里程碑** ✓。
