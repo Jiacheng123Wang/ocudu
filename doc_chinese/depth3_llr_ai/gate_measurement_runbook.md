@@ -420,3 +420,87 @@ python3 run_arm_ext.py --arm ai --bundle B/M.mlmodelc --units ruler_s2_amc_5000_
 # 算分（开发机）
 python3 analyze_<批次>.py
 ```
+
+---
+
+## 13. ★★★★★ 2026-11-06 起的**标准测量流程**：三种尺度 × 两台主机
+
+> **分工（用户 2026-11-06 指示）**：
+> **本机（Mac）＝主力开发机**，只跑**短任务** ⇒ ★ **探针（2–3 min）**在这里跑；
+> **203（M2）＝验收机**，承担 **尺子（5 000）** 与 **全腿（50 000）** ✓
+> **两台机器三种尺度都能跑**，命令只差路径（下表给全）。
+
+### 13.1 口径（三张表共用，缺一不可）
+
+| 项 | 值 |
+|---|---|
+| pipeline | `--phy_pipeline npu`（＝全 CPU PHY ＋ ANE 上的网络；**隐含 `ai` 与 PURE**）|
+| 解码器 | `--pusch_ldpc_decoder_type generic`（CPU neon）**必须显式写** |
+| fallback | PURE（`npu` 已隐含；回放器若单独跑需 `OCUDU_DEPTH3_FALLBACK=none`）|
+| 模式发布 | 回放器**发布** `npu` ⇒ 严格策略生效（2026-11-05 起）|
+| 指标 | **交付比特**＝`crc=OK` 的 `tbs_bytes×8` 之和 |
+| HARQ | **首传口径**（重传 0 比特，见 §11.5）|
+
+### 13.2 三种尺度的基线（**CPU 链**，来自 dump，已用同二进制复核）
+
+| 尺度 | 单元集 | 基线（交付比特）| 解码 |
+|---|---|---|---|
+| 探针 | `units_probe_500.txt`（sha `2234aa3f…`）| ★ **1 149 352** | 409/500 |
+| 尺子 | `ruler_s2_amc_5000_units.txt`（sha `47dcad0d…`）| ★ **11 565 432** | 4 105/5 000 |
+| 全腿 | `tb_s2_amc_ping_1102a` 全部 50 000 | ★ **114 122 976** | 40 810/50 000 |
+
+**⇒ ⚠⚠ 203 探针脚本会打印 `+19%` 之类**：它拿 `~/ai_depth3/clean_cpu.csv`（**旧 gpu 口径**的经典路，500 单元 930 016）
+当基线 ⇒ **必须换算到 1 149 352**，否则会把 −3% 读成 +19% ✗
+
+### 13.3 三种尺度 × 两台主机：命令
+
+**共用前置**（每台机器一次）：
+```bash
+# 探针（Mac 用 ~/ai_ce_work/venv，203 用 ~/venv_tf312；脚本内部按 probe_env.sh 取）
+ls ~/ai_depth3/bin/probe_snapshot.sh          # 探针一键脚本
+ls ~/dev/ocudu/build/lib/phy/upper/channel_processors/metal/ul_chain_replay   # 回放器
+```
+```bash
+# 尺子/全腿用的通用臂测量脚本（两机同源，路径由参数给）
+#   measure_arm.py  <units> <corpus> <bundle.relpath> <out.csv> [decoder]
+```
+
+| 尺度 | ★ 本机（Mac，短任务）| ★ 203（验收）|
+|---|---|---|
+| **探针 500**（2–3 min）| `C32="--c-hid 128 --blocks 18" ~/ai_depth3/bin/probe_snapshot.sh <snap.keras> 500`<br>（c32 模型省略 `C32=`）| `cd ~ && C32="--c-hid 128 --blocks 18" ~/ai_depth3/bin/probe_snapshot.sh ~/ai_depth3/probe/<snap>.keras 500` |
+| **尺子 5 000**（Mac 7 min / 203 ~10 min）| `python /tmp/measure_arm.py <units.txt> <corpus> <bundle>/<bundle>.mlmodelc /tmp/ruler_<arm>.csv` | 同左，corpus 用 `~/replay_bits_1102/corpus` |
+| **全腿 50 000**（Mac 75 min / 203 ~100 min）| `python /tmp/measure_full.py /tmp/units_50000.txt ~/ai_depth3/corpus/s2_amc_ping_1102a <bundle> /tmp/full_<arm>.csv` | ★ corpus 用 `~/ai_depth3/corpus/s2_amc_ping_1102a`（**2026-11-06 已拷到 203**）|
+
+**⇒ ★★ 两机结果的一致性已被验证**：同一臂、同一单元集，本机（`3b66bf45`）与 203（`12f55d11`）**逐单元 5 000/5 000 相同** ✓
+
+### 13.4 记录要求（每行都要）
+
+| 字段 | 说明 |
+|---|---|
+| **规范名** | `d3_<ds>_c<C>b<B>_<recipe>_e<EP>[best]`（见 `model_naming_convention.md`）|
+| `mlmodelc` sha | 与 sidecar `artifact` 对得上 |
+| **主机 ＋ `BIN_SHA`** | 例：`203 / 12f55d11` |
+| `PIPELINE npu`、`DECODER generic` | 缺一不可 |
+| 单元集 | 探针 sha `2234aa3f`／尺子 sha `47dcad0d`／全腿 50 000 |
+| 结果 | 解码数、交付比特、`vs CPU`（**同表基线**）|
+
+### 13.5 已知坑（按踩过的顺序）
+
+| # | 坑 | 表现 | 处置 |
+|---|---|---|---|
+| 1 | **`--guard 1`** | 探针在另一个回放进程存在时**第一单元就中止**（`GUARD_TRIPPED`）| 等全腿/尺子跑完，或换机器 |
+| 2 | **203 的 `run_arm_ext.py` 是旧版**（`--metal --phy_pipeline gpu`）| 新二进制**拒绝** `--metal` ⇒ 探针立即失败 | 用 2026-11-06 之后的版本（`--pipeline npu --decoder generic`）|
+| 3 | **203 的 `clean_cpu.csv` 是旧 gpu 口径** | 探针打印 +19% 而真实是 −3% | 一律换算到 §13.2 的 CPU 基线 |
+| 4 | **c128 上不了 ANE**（2.8 ms/预测）| 探针/尺子不受影响（离线），**实链**会超时 | 实链飞行用 c32；c128 只做能力上限 |
+| 5 | 全腿目录 200 002 个小文件 | `ls cap_*.bin` 报 `Argument list too long` | 用 `find`／Python `os.listdir` |
+| 6 | 旧 `rsync --info=progress2` | macOS 自带 rsync 2.6 不支持 ⇒ 打印 usage | 用 `rsync -a` |
+
+### 13.6 2026-11-06 的全腿结果（第一批，供对照）
+
+| 臂（规范名）| 全腿交付比特 | vs CPU | 尺子 | 探针 |
+|---|---|---|---|---|
+| `d3_w2_c32b18_e2e-cond-norep_e60` | 101 786 864 | −10.81% | −11.68% | −13.1% |
+| `d3_e17x40k_c128b18_2st-cond_e9best` | 102 557 416 | −10.13% | −10.84% | −10.0% |
+
+**⇒ ★★ 子集一致性**：把全腿结果按尺子 5 000 切出来 = **10 311 760**（与尺子独立跑**完全相同**）✓
+⇒ **尺子对全腿无偏**（差 0.3–0.9 pp），**全腿只在需要排除抽样质疑时跑** ✓
