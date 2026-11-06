@@ -165,3 +165,51 @@ sudo ./build/apps/gnb/gnb -c configs/pinned_mcs04.yml \
   --expert_phy.pusch_receiver_model /Users/jiachengwang/ai_depth3/gate_ai_models/bundles/<规范名>/<规范名>.mlmodelc
 ```
 **⇒ 起飞后应看到**：`narrow-band buckets bound: 108 180 …` ＋ `[ul_equalization_demod]` 中位 **~0.15–0.3 ms**（不再是 4.6 ms）✓
+
+---
+
+## 7. ★★★★★ 2026-11-06 10:35 **实链验证：c32＋窄带桶飞行 —— 时延降 6.6×，UL 丢块从 39% 降到约 2%**
+
+**⇒ 命令**（用户执行，`pinned_mcs04.yml`，npu，桶已绑定）：
+```bash
+sudo ./build/apps/gnb/gnb -c configs/pinned_mcs04.yml --expert_phy.phy_pipeline npu \
+  --expert_phy.pusch_receiver_model …/d3_w2_c32b18_e2e-cond-norep_e60/d3_w2_c32b18_e2e-cond-norep_e60.mlmodelc
+```
+
+**(a) ★★★★ 时延：三条都按预期下降**
+
+| 探针 | **c32＋桶（本次）** | c128 无桶（11-05）| 变化 |
+|---|---|---|---|
+| ★ `[ul_equalization_demod]`（**臂自身**）| ★ **346 µs**（p99 481）| 5 385 µs | ★★ **15.6× 更快** |
+| ★★ `[ul_pipeline]`（整跳）| ★★ **900 µs**（p95 1 057）| 5 932 µs | ★★ **6.6× 更快** |
+| `[ul_time_frequency]`（DFT）| 489 µs | 492 µs | 不变（本来就不是瓶颈）|
+| `[ul_channel_estimation]` | 17 µs | 17 µs | PURE 下是臂自己的 `estimate()` |
+| `[ul_ldpc_decode]` | 28 µs | 55 µs | — |
+
+**⇒ ★★★ 900 µs ≈ 1.8 个 slot（30 kHz）⇒ 稳在 PUSCH 预算内** ✓
+**⇒ 预算分解**：DFT **54%** ＋ 臂 **38%** ＋ 其余 8% ⇒ **下一个可压的是臂（346 µs vs 模型侧 137 µs）** ✓
+
+**(b) ★★★★ 丢块：**39% → 约 2%**，而且是"时延假设"的决定性证据**
+
+| 指标 | 结果 |
+|---|---|
+| MAC 表 UL `nok` | ★ **绝大多数区间为 0**；零星的 1–2 次集中在**接入阶段**（前 12 个区间），稳定后基本无 |
+| 逐跳统计 | ★ **1 508 个 hop 全部 CRC-OK**（`[ul_by_size] … 1508 CRC-OK hop(s)`）|
+| 吞吐 | UL 稳定 **84–99 kbps**，`[ul_mac_pdu_size] total=798 342 B` |
+
+**⇒ ⇒ ★★★ 结论**：**此前的 39% 丢块是"超时"，不是"解不出"** —— 同一模型加桶后立刻消失 ✓
+（这正是 `ane_latency_curve.md` §4 的预测："c32 0.42 ms 能赶上、c128 2.82 ms 赶不上"）✓
+
+**(c) ★★ 臂 346 µs 与模型 137 µs 的差（≈200 µs）**
+
+**⇒ 组成**：组平面（612×14×16 fp16 的读写）＋ 输入端量化/布局 ＋ 输出解量化＋解扰 ✓
+**⇒ 其中 `[phy_pipeline] host device data crossings` 显示 depth3 读了 **24 563 次 / 120 MB** 的网格 ⇒ 平均 **4.9 KB/次**？**
+   —— 这个数字对应的是"读栅格进平面"的跨界统计，**说明组平面本身在搬数据** ⇒ 值得作为下一个优化点 ✓
+
+**(d) ★★★ 飞行录制的改进（用户要求）**
+
+**⇒ 新增 `~/ai_depth3/bin/fly.sh <规范名> [config] [秒数]`**：
+**stdout ＋ stderr 合并**（保持终端顺序）后 `tee` 到
+`~/ai_depth3/flight_logs/<规范名>_<时间戳>.log` ✓
+**⇒ 以后飞行用这条，我直接读文件分析，不需要贴日志** ✓
+**⇒ 注意**：macOS 没有 `timeout`；脚本会依次尝试 `gtimeout`/`timeout`，都没有则**不限时并提示** ✓
