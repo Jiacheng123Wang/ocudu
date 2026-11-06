@@ -844,3 +844,37 @@ train_depth3.py ... --c-hid 32 --blocks 18 --dense-blocks \
 1. ★★★ **211/66 上正在跑的 dense 是"崩塌配置"** ⇒ 每轮 3 h 都在训练一个学不会的模型 ✗
 2. ★★ **dens 这条线要先修训练配方**（`--scale-init`/`lr`），再谈"架构是否有效" ✓
 3. ★ 因此**2×2 的 dense 两格**应等配方修好之后再在 GPU 上跑（每轮 18.6 min）✓
+
+---
+
+## 23. ★★★ 2026-11-06 21:30 **CPU "高性能模式"能带多少？—— 实测**只有约 4%**（这两台是同一款 CPU，且没有 turbo 余量）
+
+**(a) ★★ 硬件与当前频率**
+
+| 机器 | CPU | 当前平均 | 硬件上限 |
+|---|---|---|---|
+| **211**（Linux）| Intel Xeon **E-2286M @ 2.40 GHz** | ★ **2 300 MHz**（ondemand 已接近上限）| ★ 2 401 MHz |
+| **66**（macOS）| ★ 同款 **E-2286M** | 由 macOS 自行调频 | 同上 |
+
+**⇒ ★★★ `scaling_governor` 现在是 `ondemand`，但**已跑到 2.3 / 2.4 GHz** ⇒ 切 `performance` 最多 **+4%** ✗
+（`cpuinfo_max_freq` = 2 401 MHz，没有暴露 turbo ⇒ 频率这条路上限就在这）
+
+**(b) ★★ 若要切换（需要 sudo，按规矩我不执行）**
+
+```bash
+# 211，需要你自己执行
+echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+```
+**⇒ 66 是 macOS，没有 governor 接口**；`caffeinate -i` 只能防休眠，不能提频 ✓
+
+**(c) ★★★ 真正能提速的无 sudo 手段（比频率更有效）**
+
+| 手段 | 现状 | 可试 |
+|---|---|---|
+| ★ **算子内线程数** | 进程只用 ~10 / 16 核 | 设 `intra_op_parallelism_threads=16`、`inter_op=1`（TF 默认未必最优）|
+| ★ **DataLoader 线程** | `--workers 6`，与算子线程抢核 | 降到 4，把核让给算子 |
+| **batch** | 16 | 32（CPU 上更划算）|
+| ✗ fp16/bf16 | E-2286M 是 Coffee Lake ⇒ 无 AMX/bf16 加速 | 不适用 |
+
+**⇒ ★★ 结论**：**频率最多 +4%，不值得等**；而且**当前 dense 是崩塌配置**，
+   **在配方修好之前，谈 CPU 提速没有意义** ✓
