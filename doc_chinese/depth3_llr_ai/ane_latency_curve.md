@@ -119,3 +119,32 @@
                  the smallest that fits a reception's allocation plus four PRB of context is used
 ```
 **⇒ ⇒ 下一步：用这个带桶的 c128 上天飞行**（预期：小分配 0.27–0.6 ms，不再超时）✓
+
+**(d) ★★★★★ c32 的桶已补齐，并验证**逐位等价**（2026-11-06 10:10）**
+
+| 桶宽 | **c32 p50** | **c128 p50** |
+|---|---|---|
+| **108** | ★ **137 µs** | **266 µs** |
+| **180** | 172 µs | 432 µs |
+| **252** | 206 µs | — |
+| **612（全带）** | 387 µs | 2 824 µs |
+
+**⇒ ★★ c32 在 108 桶下 137 µs（全带 387 的 1/2.8），c128 是 266 µs** ⇒ **两者都远在 0.5 ms 的 slot 预算内** ✓
+
+**⇒ ★★★ 逐位等价已实测**：c32 带桶在探针 500 上 **363 OK / 999 200 bit**，与**不带桶时的数字完全相同** ✓
+（与 `export_buckets` 文档注释一致："reproduces the full-band outputs bit for bit — measured, not assumed"）✓
+
+**⇒ ★★ 两个待飞 bundle 均已就绪**：
+
+| 规范名 | 路径 | 小分配延迟 |
+|---|---|---|
+| `d3_w2_c32b18_e2e-cond-norep_e60` | `~/ai_depth3/gate_ai_models/bundles/d3_w2_c32b18_e2e-cond-norep_e60/<同名>.mlmodelc` | **137 µs** |
+| `d3_w2_c128b18_e2e-cond-norep_e40` | `…/d3_w2_c128b18_e2e-cond-norep_e40/<同名>.mlmodelc` | **266 µs** |
+
+**⇒ 飞行命令（两条，只需换 `--expert_phy.pusch_receiver_model`）**：
+```bash
+sudo ./build/apps/gnb/gnb -c configs/pinned_mcs04.yml \
+  --expert_phy.phy_pipeline npu \
+  --expert_phy.pusch_receiver_model /Users/jiachengwang/ai_depth3/gate_ai_models/bundles/<规范名>/<规范名>.mlmodelc
+```
+**⇒ 起飞后应看到**：`narrow-band buckets bound: 108 180 …` ＋ `[ul_equalization_demod]` 中位 **~0.15–0.3 ms**（不再是 4.6 ms）✓
