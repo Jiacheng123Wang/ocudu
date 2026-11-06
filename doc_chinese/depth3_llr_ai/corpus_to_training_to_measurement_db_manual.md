@@ -677,6 +677,9 @@ cd lib/phy/upper/ai_signal_processors/depth3/ai_train
 | ★ `ane_width_sweep.py` | 宽度-延迟扫描（**未训练权重即可**：延迟与权重无关）|
 | `coreml_latency_probe`（build 产物）| 单模型逐档延迟（`cpu`/`cpu_ne`/`all`）|
 
+**⇒ ★★ 这些工具本体都放在**仓库** `doc_chinese/depth3_llr_ai/work_tmp/tools/`**；`~/ai_depth3/bin/` 只留包装器与主机配置 ✓
+**⇒ 规则**：**工具＝代码⇒进仓库；采集/数据集/dump/bundle＝数据⇒留在 `~/ai_depth3/`** ✓
+
 **⇒ ★★ 目录布局（臂按名字探测，写错不报错）**：
 ```
 <bundle-dir>/<name>.mlmodelc               ← 全带（612）

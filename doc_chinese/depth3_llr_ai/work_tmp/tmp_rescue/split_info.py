@@ -1,0 +1,1 @@
+{'history_lines': 1441, 'main_lines': 579}
