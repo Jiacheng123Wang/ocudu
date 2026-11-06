@@ -9,7 +9,7 @@
 ## 1. 名字格式
 
 ```
-d3_<ds>_c<C>b<B>_<recipe>_e<EP>
+d3_<ds>_c<C>b<B>_<recipe>_e<EP>[best]
 ```
 
 | 段 | 含义 | 取值 |
@@ -20,14 +20,19 @@ d3_<ds>_c<C>b<B>_<recipe>_e<EP>
 | `b<B>` | ★ **块数** | `b12`｜`b18` |
 | `<recipe>` | ★ **配方标签**，`-` 连接 | 见 §2 |
 | `e<EP>` | ★ **快照所处的训练轮**（**不是**总计划轮数）| `e9`｜`e33`｜`e60` |
+| `best` | ★★ **仅当该快照是 val 选出的 best 时追加**（用户 2026-11-06 指示）| `e33best`｜`e6best` |
+
+**⇒ ★★★ 为什么必须区分**：`best` 是**按 val 选的**，而 val 选轮在尺子上已被证伪三次（配方 memo §6）⇒
+`e6best` 与 `e9`（同一 run 的第 9 轮）**是两个不同的东西**，名字上必须一眼看出来 ✓
 
 **⇒ 例**：
 ```
-d3_w2_c32b18_e2e-cond-norep_e60      ← 现在的 w2c32_b18_e60
-d3_w2_c128b18_e2e-cond-norep_e33     ← w2c128_e2e 的 best（val 0.094690 @33）
-d3_w2_c128b18_e2e-cond-norep_e40     ← 同一个 run 的 last
-d3_e17x40k_c128b18_2st-cond_e9       ← 现在的 c128_e17_40k（best @9）
-d3_w2_c128b18_2st-cond_e6            ← 现在的 w2_cond_c128_b18（best @6）
+d3_w2_c32b18_e2e-cond-norep_e60        ← 现在的 w2c32_b18_e60（第 60 轮快照，非 best）
+d3_w2_c128b18_e2e-cond-norep_e33best   ← w2c128_e2e 的 best（val 0.094690 @33）
+d3_w2_c128b18_e2e-cond-norep_e40       ← 同一个 run 的 last（第 40 轮）
+d3_e17x40k_c128b18_2st-cond_e9best     ← 现在的 c128_e17_40k（best @9）
+d3_w2_c128b18_2st-cond_e6best          ← 现在的 w2_cond_c128_b18（best @6）
+d3_w2_c128b18_2st-cond_e9              ← 现在的 w2_cond_c128_b18_e9（同 run 的第 9 轮）
 ```
 
 ---
@@ -62,7 +67,7 @@ d3_w2_c128b18_2st-cond_e6            ← 现在的 w2_cond_c128_b18（best @6）
   "arch": {"c_hid": 32, "blocks": 18, "cond": true, "reporting_heads": false,
            "layout": "spatial", "nsc": 612, "plane_channels": 16},
   "train": {"mode": "e2e", "init_from": null, "batch": 16, "lr": 1e-3,
-            "epochs_planned": 60, "epochs_run": 60, "snapshot_epoch": 60,
+            "epochs_planned": 60, "epochs_run": 60, "snapshot_epoch": 60, "is_best": false,
             "early_stop_patience": 0, "seed": 20261105, "gpu": "RTX 3060"},
   "export": {"snr_range": [-0.18, 34.70], "modulation_arg": "QPSK", "quantisation": "fp16"},
   "artifact": {"mlmodelc_sha256": "<sha>", "keras_sha256": "<sha>", "bytes": 1605771},
@@ -86,12 +91,12 @@ d3_w2_c128b18_2st-cond_e6            ← 现在的 w2_cond_c128_b18（best @6）
 | 现名 | 规范名 | 语料 | 备注 |
 |---|---|---|---|
 | `w2c32_b18_e13/e20/e40/e46/e60` | `d3_w2_c32b18_e2e-cond-norep_e<EP>` | w2 | e2e 续训各轮 |
-| `w2c128_e2e`（best/last）| `d3_w2_c128b18_e2e-cond-norep_e33` / `_e40` | w2 | 40 轮到 02:48 完成 |
-| `w2_cond_c128_b18` | `d3_w2_c128b18_2st-cond_e6` | w2 | 两段式 |
+| `w2c128_e2e`（best/last）| `d3_w2_c128b18_e2e-cond-norep_e33best` / `_e40` | w2 | 40 轮到 02:48 完成 |
+| `w2_cond_c128_b18` | `d3_w2_c128b18_2st-cond_e6best` | w2 | 两段式 |
 | `w2_cond_c128_b18_e9` | `d3_w2_c128b18_2st-cond_e9` | w2 | 两段式 |
-| `c128_e17` | `d3_e17_c128b18_2st-cond_e5` | e17 | best @5 |
-| `c128_e17_40k` | `d3_e17x40k_c128b18_2st-cond_e9` | e17 40k | **最强（+14.44%）** |
-| `d3_e4`（构建默认）| `d3_e4_c32b18_2st-cond_e40` | 旧 w2+HK | 有 attach 数据 |
+| `c128_e17` | `d3_e17_c128b18_2st-cond_e5best` | e17 | best @5 |
+| `c128_e17_40k` | `d3_e17x40k_c128b18_2st-cond_e9best` | e17 40k | gpu 口径最强（+14.44%）；npu 口径 −10.0% |
+| `d3_e4`（构建默认）| `d3_e4_c32b18_2st-cond_e40` | 旧 w2+HK | 有 attach 数据（无 reporting heads）|
 
 **⇒ ★★ 注意 `c128_e17` vs `c128_e17_40k`**：两者**只差语料**（99k vs 40k），
 结果却是 **−3.69% vs +14.44%** ⇒ **语料是最大的一个变量**，名字里必须能看出来 ✓（旧名看不出来 ✗）
