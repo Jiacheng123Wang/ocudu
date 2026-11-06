@@ -98,6 +98,20 @@ d3_w2_c128b18_2st-cond_e6            ← 现在的 w2_cond_c128_b18（best @6）
 
 ---
 
+## 4.1 ★★★ sidecar 不用手工编 —— **训练器把 `argv:` 写进日志了**
+
+**⇒ 实测**：`train_depth3.py` 在每个 run 的日志开头写一行完整命令行，例如
+```
+argv: --train …/datasets_train_w2 --val …/datasets_monitor_w2 --out …/runs/w2c128_e2e       --modulation QPSK --modcond --no-reporting-heads --c-hid 128 --blocks 18 --epochs 40       --patience 0 --snapshot-every 5 --batch 16 --workers 4 --max-val 1000 --bler-samples 0 --batch 12
+```
+**⇒ ★★ 所以 `model.json` 的 `train` 段可以**从日志机械生成**，不需要回忆 ✓
+**⇒ ★★★ 顺带发现一个**必须记录**的细节**：那行里 `--batch` 出现**两次**（16 然后 12），
+**后者生效** ⇒ 实际 batch 是 **12**（因为 6 GB 卡上 batch 16 在反向传播 OOM，脚本用第二个 `--batch 12` 覆盖）✓
+—— 若只看配方表（写着 16）就会记错 ✗ **这正是 sidecar 要解决的** ✓
+
+**⇒ 生成方式（建议）**：`make_model_json.py <run 目录> <bundle 目录>` 从 `argv:` ＋ `history.json`
+＋ `mlmodelc` 的 sha 生成，人工只补 `measured` ✓
+
 ## 5. 使用规则
 
 1. ★ **一个新 artifact 一个新名**；改名必须写进 §4 的迁移表，`aliases` 保留旧名；
