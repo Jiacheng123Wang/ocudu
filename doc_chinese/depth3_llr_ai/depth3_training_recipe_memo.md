@@ -9,7 +9,7 @@
 |---|---|
 | **怎么训练**（数据、架构、lr、轮数、快照、选优策略、配方坑）| ★ **本文件** |
 | **怎么启动 / 机器算力**（哪台机器多快、nohup/setsid/看门狗、地址、备份）| `../llr_ai_detection/machine_compute_capability_and_model_train_memo.md` |
-| **语料怎么来**（采集 → dump → 母集 → 分箱 → 抽取）| `corpus_to_training_db_manual.md` |
+| **语料怎么来**（采集 → dump → 母集 → 分箱 → 抽取）| `corpus_to_training_to_measurement_db_manual.md` |
 | **怎么测**（Core ML 导出、尺子、交付比特、统计）| `gate_measurement_runbook.md` |
 | **PK 结果**（各臂交付比特、显著性）| `depth3_gate_and_model_pk.md` |
 | **跑到哪了 / 历史状态** | `depth3_llr_ai_model_train_status.md` |
@@ -73,7 +73,7 @@ python -u train_depth3.py \
 
 | 项 | 配方 | 依据 |
 |---|---|---|
-| 母集 | 每条腿、每种调制、self/harq 各一个 `.npz`（**可解码样本全集**）| `corpus_to_training_db_manual.md` §7 |
+| 母集 | 每条腿、每种调制、self/harq 各一个 `.npz`（**可解码样本全集**）| `corpus_to_training_to_measurement_db_manual.md` §7 |
 | 分箱 | 4 调制 × 4 宽度 × 7 SNR × 2 群体 ＝ **112 箱** | 同一套边界（`census_bins.py`）|
 | 抽取 | ★★ **按 bin 均匀抽取**（每箱上限 self/harq），**不按尺子加权** | 尺子只是随机抽样，按它加权＝迎合尺子 |
 | 格式 | ★ **未压缩 `.npy`（一数组一文件）**，mmap 流式 | 内存不随数据集增长；压缩 npz 会把整库读进内存 |

@@ -5842,11 +5842,11 @@ local leg="$1" out="$OUT/tb_$leg" log="$LOGD/$leg.log"
 ★★ **CPU 路径、4 腿并行、2 小时 8 分** ✓；★★★ **驱动 bug（`local` 展开顺序）已修并加自检**，被污染目录改名保留 ✓；
 ★★ **93 GiB 中约 90 GiB 是可回收草稿，已写明来源，未删** ✓。
 
-## 63. ★★★★★ 2026-11-04 15:20 **全过程说明书已单独成文：`corpus_to_training_db_manual.md`**
+## 63. ★★★★★ 2026-11-04 15:20 **全过程说明书已单独成文：`corpus_to_training_to_measurement_db_manual.md`**
 
 **⇒ ★★ 五份采集/建库文档有**时间先后**，其中的命令**新旧混杂**（旧：`..._llr_collect.yml`、`MIN_RB=43`、`RV=0`、手动 export `OCUDU_*`；
 新：`run_collect_leg.sh` 的采集默认值、`LEG_NAME` 派生路径、`pinned_mcs*.yml`、T7 语料根、`build_mother_set.sh`）✓
-**⇒ ★★★ 所以把"以谁为准"和"每一步怎么做"收进一份手册**：★ **`doc_chinese/depth3_llr_ai/corpus_to_training_db_manual.md`** ✓
+**⇒ ★★★ 所以把"以谁为准"和"每一步怎么做"收进一份手册**：★ **`doc_chinese/depth3_llr_ai/corpus_to_training_to_measurement_db_manual.md`** ✓
 
 **⇒ 它涵盖**：★ 准备（代码/环境变量/配置 pinned↔amc/硬件检查）→ ★ 起飞（最近一次成功的命令形状）→ 手机接入与打流量（`-R` 是上行、
 阶梯工具的"速率→宽度"规律）→ ★ 收腿核对与 `FLIGHT.txt` → ★ dump（CPU 路径、三条对账、实测 47 ms/单元、2 h 8 min/15 腿）→

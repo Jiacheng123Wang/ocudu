@@ -2,7 +2,7 @@
 
 > **用途**：从一个 `.keras` 模型出发，产出"它比经典链好还是差、差多少、在哪些格子上"的**可复现**结论。
 > **口径固定**：尺子 `ruler_s2_amc_5000`（5 000 个未按 CRC 过滤的接收）、指标**交付比特**、统计**配对**。
-> **本文是操作的唯一入口**；方法论与事故史见 `depth3_llr_ai/corpus_to_training_db_manual.md` §10（指针）、
+> **本文是操作的唯一入口**；方法论与事故史见 `depth3_llr_ai/corpus_to_training_to_measurement_db_manual.md` §10（指针）、
 > `depth3_llr_ai/depth3_gate_and_model_pk.md`（结果与逐节分析）、`depth3_llr_ai/depth3_llr_ai_design_and_implementation.md` §16–§17（为什么这么量）。
 > **实测日期**：2026-11-04（广州，回放机 203 ＝ `192.168.0.228`）。
 
