@@ -114,7 +114,7 @@ class FoldedScaleConv(tf.keras.layers.Layer):
 def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, residual=True,
           reporting_heads=True, low_rank=0,
           dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False,
-          dense_bottleneck=0,
+          dense_bottleneck=0, fuse_relu=False,
           layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False):
     """The contract's graph: the plane in, the reporting heads out.
 
@@ -172,16 +172,20 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
                 block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}a")(block)
                 block = tf.keras.layers.Conv2D(narrow, 3, padding="same",
                                                dilation_rate=(dilation, 1), dtype=keras_dtype,
+                                               activation="relu" if fuse_relu else None,
                                                name=f"cv{i}_3x3_d{dilation}")(block)
             elif dense:
                 block = tf.keras.layers.Conv2D(c_hid, 3, padding="same",
                                                dilation_rate=(dilation, 1), dtype=keras_dtype,
+                                               activation="relu" if fuse_relu else None,
                                                name=f"cv{i}_3x3_d{dilation}")(y)
             else:
                 block = tf.keras.layers.DepthwiseConv2D(
                     3, padding="same", dilation_rate=(dilation, 1), dtype=keras_dtype,
+                    activation="relu" if fuse_relu else None,
                     name=f"dw{i}_3x3_d{dilation}")(y)
-            block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}")(block)
+            if not fuse_relu:
+                block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}")(block)
             block = FoldedScaleConv(c_hid, initial_gain=scale_init, rank=low_rank,
                                     dtype=keras_dtype, name=f"pw{i}_1x1")(block)
             block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}b")(block)
@@ -253,8 +257,10 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         else:
             block = tf.keras.layers.DepthwiseConv2D(
                 3, padding="same", dilation_rate=(dilation, 1), dtype=keras_dtype,
+                activation="relu" if fuse_relu else None,
                 name=f"dw{i}_3x3_d{dilation}")(y)
-        block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}")(block)
+        if not fuse_relu:
+            block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}")(block)
         if residual and fold_scale:
             block = FoldedScaleConv(c_hid, initial_gain=scale_init, rank=low_rank,
                                     dtype=keras_dtype, name=f"pw{i}_1x1")(block)
@@ -856,6 +862,12 @@ def main():
                         help="dense 3x3 instead of depthwise. Section 25.3 measured the same "
                              "latency for 5.7x the FLOPs, and depthwise is what caps the "
                              "per-position capacity the diagnosis points at")
+    parser.add_argument("--fuse-relu", action="store_true",
+                        help="carry the trunk's first activation inside the 3x3 convolution instead of as a "
+                             "separate ReLU. Every layer boundary on the ANE is a tensor the runtime has to "
+                             "materialise, and the c32 bucket graph is 101 compute operations of which 37 are "
+                             "exactly these ReLUs. No weights change, so an existing snapshot exports to the "
+                             "fused graph without retraining")
     parser.add_argument("--dense-bottleneck", type=int, default=0, metavar="N",
                         help="dense 3x3 on c_hid/N channels, squeezed into and expanded out of that "
                              "width inside the block. Keeps the joint space-and-channel mixing that "
@@ -1025,7 +1037,7 @@ def main():
                             residual=not args.no_residual, dtype=args.dtype,
                             fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
                             llr_linear=args.llr_linear, dense=args.dense_blocks,
-                            dense_bottleneck=args.dense_bottleneck,
+                            dense_bottleneck=args.dense_bottleneck, fuse_relu=args.fuse_relu,
                             layout=args.layout, in_channels=in_channels, cond=args.modcond)
         export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
         return 0
@@ -1059,7 +1071,7 @@ def main():
                   residual=not args.no_residual, dtype=args.dtype,
                   fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
                   llr_linear=args.llr_linear, dense=args.dense_blocks,
-                  dense_bottleneck=args.dense_bottleneck, layout=args.layout,
+                  dense_bottleneck=args.dense_bottleneck, layout=args.layout, fuse_relu=args.fuse_relu,
                   in_channels=in_channels, cond=args.modcond)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}  heads {sorted(model.output.keys())}")
