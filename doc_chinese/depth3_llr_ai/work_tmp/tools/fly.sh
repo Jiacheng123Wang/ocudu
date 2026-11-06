@@ -1,36 +1,60 @@
 #!/bin/bash
-# Fly the gNB with one depth3 bundle and keep BOTH streams in one file, so the run can be read afterwards.
+# Fly the gNB with one depth3 bundle, showing the run on the console AND keeping it in a per-leg log file.
 #
-# WHY A WRAPPER. The probe summaries -- the phase latencies, the block table, the depth3 timing line -- go to stdout and
-# stderr, not to the logger's file, so a plain redirection of the logger keeps them out of reach and the only record of a
-# flight is what the person at the keyboard pastes. This wrapper tees both streams to a named log, prints the path at the
-# end, and names the run after the model so the files stay distinguishable.
+# THE CONSOLE MATTER OF BUFFERING. When stdout is a pipe the app's printf is block-buffered, so `gnb ... | tee log` shows
+# nothing until the buffer fills or the process exits -- which is what made the first version of this wrapper look silent
+# during a flight. `script -q /dev/null` gives the app a pty, so it line-buffers again and the console shows the run as it
+# happens, while tee still records every byte.
 #
-# stdout+stderr are merged in order THROUGH THE SAME PIPE, so the interleaving is what the terminal showed. `2>&1 | tee`
-# would be correct only because tee is on the right of the merge; writing it as `> file 2>&1` first is what scrambles it.
+# THE SUMMARY IS THE POINT OF THE FLIGHT. The phase latencies ([ul_pipeline], [ul_equalization_demod], ...) and the block
+# table are printed at SHUTDOWN. Stop the run with ONE Ctrl-C and wait for "Stopping..." and the summary; a second Ctrl-C
+# kills the process before it reports, and the log then contains a flight with no measurements in it.
+#
+# usage: fly.sh [model] [config] [leg] [seconds]
+#   model    bundle name under ~/ai_depth3/gate_ai_models/bundles (default: none = the build's default bundle)
+#   config   gnb yaml (default: configs/pinned_mcs04.yml)
+#   leg      leg name; logs go to ~/ai_depth3/flight_logs/<leg>/ (default: "adhoc")
+#   seconds  optional; stop the run after N seconds with a single SIGINT (Ctrl-C equivalent)
 set -u
-NAME=${1:?usage: fly.sh <bundle-name> [config] [seconds]}
+MODEL=${1:-}
 CFG=${2:-$HOME/dev/ocudu/configs/pinned_mcs04.yml}
-SECS=${3:-0}
-BUNDLE=$HOME/ai_depth3/gate_ai_models/bundles/$NAME/$NAME.mlmodelc
-[ -d "$BUNDLE" ] || { echo "no such bundle: $BUNDLE" >&2; exit 1; }
-OUTDIR=$HOME/ai_depth3/flight_logs
+LEG=${3:-adhoc}
+SECS=${4:-0}
+
+GNB=$HOME/dev/ocudu/build/apps/gnb/gnb
+[ -x "$GNB" ] || { echo "no gnb at $GNB" >&2; exit 1; }
+[ -f "$CFG" ] || { echo "no config at $CFG" >&2; exit 1; }
+
+ARGS=(-c "$CFG" --expert_phy.phy_pipeline npu)
+if [ -n "$MODEL" ]; then
+  BUNDLE=$HOME/ai_depth3/gate_ai_models/bundles/$MODEL/$MODEL.mlmodelc
+  [ -d "$BUNDLE" ] || { echo "no such bundle: $BUNDLE" >&2; exit 1; }
+  ARGS+=(--expert_phy.pusch_receiver_model "$BUNDLE")
+fi
+
+OUTDIR=$HOME/ai_depth3/flight_logs/$LEG
 mkdir -p "$OUTDIR"
 STAMP=$(date +%Y%m%d_%H%M%S)
-LOG=$OUTDIR/${NAME}_${STAMP}.log
+LOG=$OUTDIR/${MODEL:-build-default}_${STAMP}.log
+{
+  echo "# model:  ${MODEL:-<build default>}"
+  echo "# config: $CFG"
+  echo "# leg:    $LEG"
+  echo "# gnb:    $GNB  sha256 $(shasum -a 256 "$GNB" | cut -c1-16)"
+  echo "# started $(date -Is)"
+} > "$LOG"
 echo "log: $LOG"
-echo "model: $NAME"
-echo "config: $CFG"
-# macOS ships no `timeout`; gtimeout from coreutils is used when present, and otherwise the run is untimed and says so
-# rather than failing with "command not found" halfway through a flight.
-TIMER=""
+
+# One SIGINT after SECS seconds, so an unattended run still reaches its summary. SIGINT, never SIGKILL: the summary is
+# emitted by the normal shutdown path.
 if [ "$SECS" -gt 0 ]; then
-  if command -v gtimeout >/dev/null 2>&1; then TIMER="gtimeout $SECS"
-  elif command -v timeout >/dev/null 2>&1; then TIMER="timeout $SECS"
-  else echo "note: no timeout/gtimeout here, running untimed (Ctrl-C to stop)" >&2; fi
+  ( sleep "$SECS"; pkill -INT -f "build/apps/gnb/gnb -c" 2>/dev/null; echo "[fly] sent one SIGINT after ${SECS}s" ) &
 fi
-# shellcheck disable=SC2086
-$TIMER sudo "$HOME/dev/ocudu/build/apps/gnb/gnb" -c "$CFG" \
-  --expert_phy.phy_pipeline npu \
-  --expert_phy.pusch_receiver_model "$BUNDLE" 2>&1 | tee "$LOG"
+
+# `script -q /dev/null` allocates the pty (line buffering); tee writes the file and the console at the same time.
+script -q /dev/null sudo "$GNB" "${ARGS[@]}" 2>&1 | tee -a "$LOG"
 echo "=== saved: $LOG"
+if ! grep -qa "ul_pipeline" "$LOG"; then
+  echo "=== WARNING: no [ul_pipeline] summary in this log -- the run was stopped before shutdown, so it holds no" >&2
+  echo "            latency or block measurements. Stop with a single Ctrl-C and wait for 'Stopping...'." >&2
+fi

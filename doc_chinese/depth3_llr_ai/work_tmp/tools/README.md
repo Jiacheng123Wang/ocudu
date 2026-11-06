@@ -10,7 +10,7 @@ thousand files is not a place to keep scripts: it makes them slow to grep and im
 
 | tool | what it does |
 |---|---|
-| `fly.sh` | fly one bundle: merges stdout+stderr through `tee` into `~/ai_depth3/flight_logs/<name>_<stamp>.log`, so a flight can be read afterwards instead of pasted |
+| `fly.sh` | fly one bundle: **console and file at once** (`script` gives the app a pty so it line-buffers, `tee` records it), logs under `~/ai_depth3/flight_logs/<leg>/<model>_<stamp>.log`; arguments `[model] [config] [leg] [seconds]` |
 | `fly_attach.sh` | the same for an attach-focused run, timing it and summarising the attach markers |
 | `probe_snapshot.sh` | one snapshot to a probe score: export, compile, calibrate, replay, score (2–3 min) |
 | `probe_watch.sh` | run the probe on a snapshot as soon as its training run produces one |
@@ -27,3 +27,18 @@ thousand files is not a place to keep scripts: it makes them slow to grep and im
 The scripts take their data paths from the environment (`PY`, `CORPUS`, `BIN`, `UNITS_FILE`, `CLEAN_CPU`) and the probe
 sources `~/ai_depth3/bin/probe_env.sh` when it exists, so one copy serves both machines. `~/ai_depth3/bin/*` are thin
 wrappers that exec the copies here, which keeps the old invocation paths working while the source of truth stays in git.
+
+## fly.sh
+
+```bash
+fly.sh                                  # build's default bundle, pinned_mcs04.yml, leg "adhoc"
+fly.sh <model>                          # one bundle
+fly.sh <model> <config.yml>             # a specific air configuration
+fly.sh <model> <config.yml> <leg> 300   # a named leg, stopped after 300 s with ONE SIGINT
+```
+Logs land in `~/ai_depth3/flight_logs/<leg>/`, so every leg of a campaign keeps its own directory.
+
+**Stop a flight with ONE Ctrl-C and wait for `Stopping...`.** The phase latencies and the block table are printed at
+shutdown; a second Ctrl-C kills the process before it reports, and the log then holds a flight with no measurements. The
+script checks for `[ul_pipeline]` afterwards and warns when it is missing, because a silent log is indistinguishable from a
+run that measured nothing.
