@@ -22,7 +22,12 @@
 
 # Scratch trees: corpora, gate dumps, reference binaries, scratch tables.
 work_tmp/
-**/work_tmp/
+*/work_tmp/
+# ... EXCEPT the workflow's development tools, which are code rather than scratch (user rule, 2026-11-06: tools go in
+# work_tmp so they are greppable beside the docs, while the large artefacts stay in ~/ai_depth3 on each host).
+!depth3_llr_ai/work_tmp/
+!depth3_llr_ai/work_tmp/tools/
+!depth3_llr_ai/work_tmp/tools/**
 */gates/
 */ref/
 */corpus/

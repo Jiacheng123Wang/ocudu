@@ -1,0 +1,29 @@
+# tools/ — this workflow's development tools
+
+**Rule (user, 2026-11-06): tools live here, data lives in `~/ai_depth3/`.**
+
+`~/ai_depth3/` holds the large, numerous artefacts — captures, datasets, dumps, bundles, logs — and a directory of twenty
+thousand files is not a place to keep scripts: it makes them slow to grep and impossible to version. Everything that is
+*code* belongs in this directory, in git, next to the documents that describe it.
+
+## What is here
+
+| tool | what it does |
+|---|---|
+| `fly.sh` | fly one bundle: merges stdout+stderr through `tee` into `~/ai_depth3/flight_logs/<name>_<stamp>.log`, so a flight can be read afterwards instead of pasted |
+| `fly_attach.sh` | the same for an attach-focused run, timing it and summarising the attach markers |
+| `probe_snapshot.sh` | one snapshot to a probe score: export, compile, calibrate, replay, score (2–3 min) |
+| `probe_watch.sh` | run the probe on a snapshot as soon as its training run produces one |
+| `measure_arm.py` | one arm over a unit list against a corpus and a bundle, in the air chain's pipeline vocabulary |
+| `measure_abs.py` | the same with an absolute bundle path (for probe-built bundles outside `bundles/`) |
+| `measure_full.py` | the same over the full leg with progress lines and an ETA |
+| `measure_arm_203.py` | the 203-flavoured copy whose corpus and interpreter paths differ |
+| `narrow_models.py` | the narrow-band table (≤3 PRB) for a list of bundles — the attach-capability proxy |
+| `plan.swift` | dumps Core ML's per-operation device placement and estimated cost for a compiled model |
+| `backup_s2_to_211.sh` | archive each capture leg to 211 as its own tar, with the byte comparison that caught the `wc` padding bug |
+
+## Hosts
+
+The scripts take their data paths from the environment (`PY`, `CORPUS`, `BIN`, `UNITS_FILE`, `CLEAN_CPU`) and the probe
+sources `~/ai_depth3/bin/probe_env.sh` when it exists, so one copy serves both machines. `~/ai_depth3/bin/*` are thin
+wrappers that exec the copies here, which keeps the old invocation paths working while the source of truth stays in git.
