@@ -1,6 +1,15 @@
 #!/bin/bash
 # Fly the gNB with one depth3 bundle, showing the run on the console AND keeping it in a per-leg log file.
 #
+# ARGUMENT ORDER: leg first, because every flight has one and it decides where the log goes; everything after it has a
+# sensible default, so `fly.sh <leg>` is a complete command.
+#
+#   fly.sh <leg> [config] [model] [seconds]
+#     leg      required; logs go to ~/ai_depth3/flight_logs/<leg>/
+#     config   gnb yaml                (default: configs/pinned_mcs04.yml)
+#     model    bundle name             (default: none = the build's default bundle)
+#     seconds  stop after N seconds    (default: 0 = unlimited)
+#
 # THE CONSOLE MATTER OF BUFFERING. When stdout is a pipe the app's printf is block-buffered, so `gnb ... | tee log` shows
 # nothing until the buffer fills or the process exits -- which is what made the first version of this wrapper look silent
 # during a flight. `script -q /dev/null` gives the app a pty, so it line-buffers again and the console shows the run as it
@@ -9,16 +18,14 @@
 # THE SUMMARY IS THE POINT OF THE FLIGHT. The phase latencies ([ul_pipeline], [ul_equalization_demod], ...) and the block
 # table are printed at SHUTDOWN. Stop the run with ONE Ctrl-C and wait for "Stopping..." and the summary; a second Ctrl-C
 # kills the process before it reports, and the log then contains a flight with no measurements in it.
-#
-# usage: fly.sh [model] [config] [leg] [seconds]
-#   model    bundle name under ~/ai_depth3/gate_ai_models/bundles (default: none = the build's default bundle)
-#   config   gnb yaml (default: configs/pinned_mcs04.yml)
-#   leg      leg name; logs go to ~/ai_depth3/flight_logs/<leg>/ (default: "adhoc")
-#   seconds  optional; stop the run after N seconds with a single SIGINT (Ctrl-C equivalent)
 set -u
-MODEL=${1:-}
+LEG=${1:-}
+if [ -z "$LEG" ]; then
+  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' >&2
+  exit 2
+fi
 CFG=${2:-$HOME/dev/ocudu/configs/pinned_mcs04.yml}
-LEG=${3:-adhoc}
+MODEL=${3:-}
 SECS=${4:-0}
 
 GNB=$HOME/dev/ocudu/build/apps/gnb/gnb
@@ -37,9 +44,9 @@ mkdir -p "$OUTDIR"
 STAMP=$(date +%Y%m%d_%H%M%S)
 LOG=$OUTDIR/${MODEL:-build-default}_${STAMP}.log
 {
+  echo "# leg:    $LEG"
   echo "# model:  ${MODEL:-<build default>}"
   echo "# config: $CFG"
-  echo "# leg:    $LEG"
   echo "# gnb:    $GNB  sha256 $(shasum -a 256 "$GNB" | cut -c1-16)"
   echo "# started $(date -Is)"
 } > "$LOG"

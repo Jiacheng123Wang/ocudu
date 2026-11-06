@@ -31,11 +31,13 @@ wrappers that exec the copies here, which keeps the old invocation paths working
 ## fly.sh
 
 ```bash
-fly.sh                                  # build's default bundle, pinned_mcs04.yml, leg "adhoc"
-fly.sh <model>                          # one bundle
-fly.sh <model> <config.yml>             # a specific air configuration
-fly.sh <model> <config.yml> <leg> 300   # a named leg, stopped after 300 s with ONE SIGINT
+fly.sh <leg>                                  # build's default bundle, pinned_mcs04.yml, unlimited
+fly.sh <leg> <config.yml>                     # a specific air configuration
+fly.sh <leg> <config.yml> <model>             # a specific bundle
+fly.sh <leg> <config.yml> <model> 240         # stop after 240 s with ONE SIGINT
 ```
+**The leg comes first and is the only required argument**, because every flight has one and it decides where the log goes;
+everything after it has a default.
 Logs land in `~/ai_depth3/flight_logs/<leg>/`, so every leg of a campaign keeps its own directory.
 
 **Stop a flight with ONE Ctrl-C and wait for `Stopping...`.** The phase latencies and the block table are printed at

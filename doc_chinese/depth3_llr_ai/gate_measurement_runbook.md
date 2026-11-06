@@ -549,7 +549,7 @@ RUN_ARM=$HOME/ai_depth3/replay_bits_1102/e17_1104/run_arm_ext.py
 | ★ **主机差异配置** | `~/ai_depth3/bin/probe_env.sh` | 每台机器的解释器/corpus 路径不同 ✓ |
 | **兼容入口** | `~/ai_depth3/bin/*.sh` 是**3 行包装器**，`exec` 仓库里的本体 | 旧命令与旧文档照常可用 ✓ |
 
-**⇒ ★★ 飞行用 `work_tmp/tools/fly.sh [model] [config] [leg] [秒数]`**：
+**⇒ ★★ 飞行用 `work_tmp/tools/fly.sh <腿名> [config] [model] [秒数]`**（★ **腿名第一，且只有它是必填**）：
 **console 与文件同时输出**（用 `script` 分配 pty，避免管道缓冲导致"看起来没输出"）；日志落
 `~/ai_depth3/flight_logs/<leg>/`；**停止请只按一次 Ctrl-C** 并等 `Stopping...` —— 阶段时延与块表在**退出时**打印，
 按第二次会杀掉进程、日志里就没有测量数据了（脚本事后会检查 `[ul_pipeline]` 并警告）✓
