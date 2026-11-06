@@ -512,3 +512,36 @@ ls ~/dev/ocudu/build/lib/phy/upper/channel_processors/metal/ul_chain_replay   # 
 
 **⇒ ★★ 子集一致性**：把全腿结果按尺子 5 000 切出来 = **10 311 760**（与尺子独立跑**完全相同**）✓
 ⇒ **尺子对全腿无偏**（差 0.3–0.9 pp），**全腿只在需要排除抽样质疑时跑** ✓
+
+---
+
+## 14. ★★★★★ 2026-11-06：**203 的一级工作目录统一为 `~/ai_depth3/`**
+
+> **规则**：**203 上所有与本工作相关的东西都放在 `~/ai_depth3/` 下面**，不再散落在 `~` 根目录 ✓
+> 旧的 `~/gate_data`、`~/probe`、`~/replay_bits_1102`、`~/replay_cap` **已全部移入**（2026-11-06）✓
+
+### 14.1 统一后的布局
+
+| 路径（203）| 内容 |
+|---|---|
+| ★ `~/ai_depth3/bin/` | `probe_snapshot.sh`、`probe_env.sh`（探针唯一入口与主机路径）|
+| ★ `~/ai_depth3/gate_ai_models/bundles/` | 所有可用 **`.mlmodelc`**（c32／c128／两段式／E4 等）|
+| ★ `~/ai_depth3/replay_bits_1102/corpus/` | **尺子 5 000** 的捕获（20 000 文件）＋ 历史测量 CSV ＋ `run_arm_ext.py` |
+| ★ `~/ai_depth3/corpus/s2_amc_ping_1102a/` | **全腿 50 000** 的捕获（200 002 文件 / 8.6 GB）|
+| `~/ai_depth3/probe/` | 当前模型快照（`.keras`）与其探针产物 |
+| `~/ai_depth3/probe_1105/` | 旧探针产物（`epoch_0050_periodic`；历史）|
+| `~/ai_depth3/gate_data/` | 历史模型（`E4.keras`、`E14.keras`、`E17.keras`）与 **attach 数据**（2.7 GB）|
+| `~/ai_depth3/replay_cap/` | 小规模捕获样本（`cap40`，历史）|
+| `~/ai_depth3/runs/`、`~/ai_depth3/clean_cpu.csv`、`units_probe_500.txt` | 结果与参考 |
+
+**⇒ ★★ 维护 `probe_env.sh` 里的两条路径**（移动后已更新）：
+```
+CORPUS=$HOME/ai_depth3/replay_bits_1102/corpus
+RUN_ARM=$HOME/ai_depth3/replay_bits_1102/e17_1104/run_arm_ext.py
+```
+
+### 14.2 规则
+
+1. ★ **新东西只往 `~/ai_depth3/` 里放**；`~` 根目录不再新增工作目录 ✓
+2. ★ 删除任何东西前**先确认不属于上面任何一类**；本工作流**从不自动删除**（用户授权才删）✓
+3. ★ 本机（Mac）的对应布局：`~/ai_depth3/` 同样是工作根目录（`probe/`、`corpus/`、`gate_ai_models/`、`exp_bits_1102/`）✓
