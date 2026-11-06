@@ -58,8 +58,16 @@ if [ "$SECS" -gt 0 ]; then
   ( sleep "$SECS"; pkill -INT -f "build/apps/gnb/gnb -c" 2>/dev/null; echo "[fly] sent one SIGINT after ${SECS}s" ) &
 fi
 
+# THE DIAGNOSTICS THE RECEIVER ONLY PRINTS ON REQUEST. `OCUDU_DEPTH3_TIMING` makes the arm report its allocation mix --
+# which bucket served how many receptions -- and that line is the only way to tell a model's cost apart from the cost of
+# switching between its buckets. It prints and changes nothing, so flights enable it by default; the other two are passed
+# through when the caller set them, because sudo does not carry the environment.
+PASS_ENV=(env "OCUDU_DEPTH3_TIMING=${OCUDU_DEPTH3_TIMING:-1}")
+for v in OCUDU_DEPTH3_COMPUTE_UNITS OCUDU_DEPTH3_BUCKETS OCUDU_DEPTH3_FALLBACK; do
+  if [ -n "${!v:-}" ]; then PASS_ENV+=("$v=${!v}"); fi
+done
 # `script -q /dev/null` allocates the pty (line buffering); tee writes the file and the console at the same time.
-script -q /dev/null sudo "$GNB" "${ARGS[@]}" 2>&1 | tee -a "$LOG"
+script -q /dev/null sudo "${PASS_ENV[@]}" "$GNB" "${ARGS[@]}" 2>&1 | tee -a "$LOG"
 echo "=== saved: $LOG"
 if ! grep -qa "ul_pipeline" "$LOG"; then
   echo "=== WARNING: no [ul_pipeline] summary in this log -- the run was stopped before shutdown, so it holds no" >&2

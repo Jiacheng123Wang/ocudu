@@ -251,3 +251,46 @@ sudo ./build/apps/gnb/gnb -c configs/pinned_mcs04.yml --expert_phy.phy_pipeline 
 1. **只留 180 桶**（`mv` 掉其余）飞一次 ⇒ 判定"桶切换"是否是尾部来源；
 2. 同一配置**再飞 c32**（对照）⇒ 看尾部是否与模型相关；
 3. 若确认是切换：**按腿固定桶宽**（把分配限制在同一桶内），或给切换加**预热/常驻**策略。
+
+
+---
+
+## 9. ★★★★ 2026-11-06 11:10 **"只留 180 桶"会怎样？—— 不会算错，但会**更慢**（回退 612）**
+
+**(a) ★★★ 代码路径（`pusch_depth3_receiver_impl.cpp` ~960–990）**
+
+```cpp
+unsigned bucket_nsc = bound_nsc_;              // ← 默认就是**全带 612**（主 bundle）
+if (!narrow_buckets.empty()) {
+  const auto it = std::lower_bound(narrow_buckets.begin(), narrow_buckets.end(), needed_nsc);
+  if (it != narrow_buckets.end()) { bucket_nsc = *it; /* 换成对应桶的引擎 */ }
+}
+```
+**⇒ ★★★ 找不到"够大的桶"时**（`it == end`）：**`bucket_nsc` 保持 612 ⇒ 用全带模型算** ✓
+**⇒ 结果是**正确的**（612 永远够），代价是**那一帧按全带算**（c128 ≈ 2.8 ms）✓
+
+**(b) ★★★ 阈值：需要的子载波 ＝ `12 × N + 96`**（分配 N PRB ＋ 两侧各 4 PRB 上下文）
+
+| 桶宽 | 能覆盖的最大 grant |
+|---|---|
+| **108** | N ≤ 1 PRB |
+| ★ **180** | ★ **N ≤ 7 PRB** |
+| 252 | N ≤ 13 |
+| 324 | N ≤ 19 |
+| 396 | N ≤ 25 |
+| 540 | N ≤ 37 |
+| 612 | 任意（全带）|
+
+**⇒ 所以"只留 180"意味着：>7 PRB 的 grant 全部落到 612（2.8 ms）** ✓
+**⇒ 本次飞行里就有 **25 PRB** 的 grant（QPSK、低 SINR）⇒ 那条飞行会更差，**不建议** ✗
+
+**(c) ★★★ 更干净的隔离手段（不用删桶）**
+
+| # | 做法 | 说明 |
+|---|---|---|
+| ★ 1 | ★ **打开 `OCUDU_DEPTH3_TIMING=1`** | 臂会打印 **`allocation mix (subcarriers x receptions)`** ⇒ **哪个桶服务了多少次**，直接回答"有没有切换" ✓ |
+| ★ 2 | 用**固定小包的流量**（如 ping）让 grant 都 ≤7 PRB ⇒ 只用 180 桶 | 不删桶也能做到"单桶" |
+| 3 | 重复同样飞行 | 分辨"尾部是复现的还是偶发"|
+
+**⇒ ★★ `fly.sh` 已改**：飞行**默认带 `OCUDU_DEPTH3_TIMING=1`**，并把
+`OCUDU_DEPTH3_COMPUTE_UNITS`/`OCUDU_DEPTH3_BUCKETS`/`OCUDU_DEPTH3_FALLBACK` 一并**穿过 sudo**（`sudo` 默认清环境）✓
