@@ -20,8 +20,18 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-PY=${PY:-$HERE/../../../ai_train/.venv/bin/python}
-[ -x "$PY" ] || PY=${PY:-python3}
+# THE INTERPRETER MUST BE THE ONE WITH TENSORFLOW AND COREMLTOOLS. The first version guessed a relative path that does not
+# exist and fell through to the system python3, whose export failed; the failure was then swallowed by the grep that keeps
+# the output tidy, so the script stopped right after its header with no explanation. Both are fixed here: known venv
+# locations first, and the export's own error kept when it fails.
+if [ -z "${PY:-}" ]; then
+  for cand in "$HOME/ai_ce_work/venv/bin/python" "$HOME/venv_tf312/bin/python" "$HOME/work/ai_phy_train/.venv/bin/python"; do
+    [ -x "$cand" ] && PY=$cand && break
+  done
+  PY=${PY:-python3}
+fi
+"$PY" -c 'import tensorflow, coremltools' 2>/dev/null || {
+  echo "FATAL: $PY cannot import tensorflow and coremltools; pass PY=<venv python>" >&2; exit 2; }
 REPO=$(cd "$HERE/../../../../.." && pwd)
 PROBE=${PROBE:-$REPO/build/lib/phy/upper/signal_processors/channel_estimator/metal/coreml_latency_probe}
 
@@ -71,10 +81,15 @@ OUT=${OUT:-$HOME/ai_depth3/gate_ai_models/bundles/$NAME}
 mkdir -p "$OUT/buckets"
 
 echo "=== $NAME from $KERAS  (c_hid $C_HID, $BLOCKS blocks, widths $WIDTHS)"
-"$PY" -u "$HERE/train_depth3.py" --export-only "$KERAS" \
-  --export-probe "$OUT/$NAME.mlpackage" --export-buckets "$WIDTHS" \
-  --modcond --layout spatial --modulation QPSK --c-hid "$C_HID" --blocks "$BLOCKS" \
-  --snr-range="$SNR" 2>&1 | grep -aE "wrote the fp16|bucket width" | tail -"$(echo "$WIDTHS" | tr ',' '\n' | wc -l | tr -d ' ')"
+if ! "$PY" -u "$HERE/train_depth3.py" --export-only "$KERAS" \
+      --export-probe "$OUT/$NAME.mlpackage" --export-buckets "$WIDTHS" \
+      --modcond --layout spatial --modulation QPSK --c-hid "$C_HID" --blocks "$BLOCKS" \
+      --snr-range="$SNR" > /tmp/make_bucket_export.log 2>&1; then
+  echo "FATAL: export failed; last lines:" >&2
+  tail -12 /tmp/make_bucket_export.log >&2
+  exit 1
+fi
+grep -aE "wrote the fp16|bucket width" /tmp/make_bucket_export.log | tail -"$(echo "$WIDTHS" | tr ',' '\n' | wc -l | tr -d ' ')"
 
 echo "=== compiling"
 widest=$(echo "$WIDTHS" | tr ',' '\n' | sort -n | tail -1)
