@@ -910,3 +910,31 @@ echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governo
 --dense-blocks --scale-init 0.03 --lr 1e-3
 ```
 **⇒ 规范名建议**：`d3_w2_c32b18dense_sc003_e2e-cond-norep_e10`（`sc003` ＝ scale-init 0.03，`-` 连接进配方段）✓
+
+---
+
+## 25. ★★★★ 2026-11-06 22:00 **dense @ w2v1 已在本机（Mac）以**低优先级**启动，20 轮**
+
+**(a) ★★★ 启动配置**
+
+| 项 | 值 |
+|---|---|
+| 规范名 | ★ `d3_w2v1_c32b18dense_sc003_e2e-cond-norep_e20` |
+| 数据 | **w2v1**（160 014）／monitor w2（731）|
+| 结构 | c32 × 18，**dense**，★ **`--scale-init 0.03`**（修好的配方）|
+| 超参 | lr 1e-3、batch 16、workers 3、patience 0、每轮快照、seed 20261105 |
+| 主机 | **本机 Mac**（CPU）|
+| ★ 优先级 | ★★ **`nice -n 20`（最低）** ＋ `TF_NUM_INTRAOP_THREADS=10`、`INTEROP=2` ⇒ **不抢占其他任务** ✓ |
+| 进程 | PID 57469（nice 20，~720% CPU）|
+| 日志 | `~/ai_depth3/runs/dense_w2v1_mac.log` |
+| 参数自检 | ★ **186 889 = dense** ✓（不是 26 185）|
+
+**(b) ★★ 预估**
+
+**⇒ 5k 切片 1 轮 = 144 s ⇒ 160k ≈ 33× ⇒ 约 **1.3 h/轮**（nice 20 ＋ 10 线程可能更慢）|
+**⇒ 20 轮约 **26 h**（若按 1.3 h/轮）⇒ 明晚完成；**随时可停**（每轮存快照 ＋ 断点）✓
+
+**(c) ★★ 用途**
+
+**⇒ 这是 2×2 里 **dense @ w2v1** 这一格，且用**修好的配方** ⇒ 与 `dw @ w2v1`（e10 = 816 720）**同数据同轮次**可比 ✓
+**⇒ 若 dense 在 256QAM 上明显优于 dw ⇒ 架构假设成立 ✓
