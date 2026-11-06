@@ -783,7 +783,12 @@ def export_buckets(args, parser, source=None):
         # had six weights against the source's ninety-six -- which is how this was found (2026-11-07). `sq{i}_1x1`
         # marks the bottleneck variant, whose 3x3 layers are also `cv`.
         dense = any(layer.name.endswith("_3x3_d1") and layer.name.startswith("cv") for layer in source.layers)
-        bottleneck = any(layer.name.startswith("sq") for layer in source.layers)
+        # THE FACTOR, NOT A FLAG. `dense_bottleneck` is an integer divisor, so reading the presence of the squeeze
+        # layer as a boolean rebuilt the bucket at c/1 -- the full width -- and the copy then refused on shape. The
+        # divisor is recoverable from the squeeze itself: its output channels are c_hid over the factor.
+        bottleneck = 0
+        if any(layer.name.startswith("sq") for layer in source.layers):
+            bottleneck = max(2, c_hid // int(source.get_layer("sq0_1x1").kernel.shape[3]))
         blocks = sum(1 for layer in source.layers
                      if layer.name.startswith(("dw", "cv")) and "_3x3_" in layer.name)
         # THE HEADS COME FROM THE SOURCE TOO, for the same reason the width and the depth do: a source trained with
