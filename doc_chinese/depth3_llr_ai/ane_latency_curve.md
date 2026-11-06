@@ -120,6 +120,23 @@
 ```
 **⇒ ⇒ 下一步：用这个带桶的 c128 上天飞行**（预期：小分配 0.27–0.6 ms，不再超时）✓
 
+### 6.1 ★★★ 工具已入库（2026-11-06）
+
+| 文件（`lib/phy/upper/ai_signal_processors/depth3/ai_train/`）| 作用 |
+|---|---|
+| ★★ **`make_bucket_bundle.sh`** | **一条命令**把 `.keras` 变成"可飞 bundle"：导出 8 个宽度 → 编译 → 摆成 `<name>.mlmodelc` ＋ `buckets/base_w*.mlmodelc` → 拷 scales →（可选）打延迟表 |
+| ★ **`ane_width_sweep.py`** | **宽度-延迟扫描**（未训练权重即可，延迟与权重无关）；就是它把"算力"假设推翻成"数据搬运" |
+| （已有）`train_depth3.py --export-buckets` | 导出函数本体 |
+| （已有）`calibrate_depth3.py` | 产生 `depth3_scales.txt` |
+
+**⇒ ★ 用法**：
+```bash
+cd lib/phy/upper/ai_signal_processors/depth3/ai_train
+./make_bucket_bundle.sh <snap.keras> --name <规范名> --c-hid 128 --calib ~/ai_depth3/gate_ai_models/calib/datasets_monitor_w2 --measure
+```
+**⇒ ★★ 关键提醒（脚本头注释也写了）**：臂是**按名字**探测 `buckets/base_w{108,…,612}.mlmodelc` 的，
+**目录名写错不会报错** —— 它会静默跑全带、只是慢。判据是日志里那行 `narrow-band buckets bound: …` ✓
+
 **(d) ★★★★★ c32 的桶已补齐，并验证**逐位等价**（2026-11-06 10:10）**
 
 | 桶宽 | **c32 p50** | **c128 p50** |
