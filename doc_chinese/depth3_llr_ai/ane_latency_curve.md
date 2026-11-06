@@ -289,8 +289,12 @@ if (!narrow_buckets.empty()) {
 | # | 做法 | 说明 |
 |---|---|---|
 | ★ 1 | ★ **打开 `OCUDU_DEPTH3_TIMING=1`** | 臂会打印 **`allocation mix (subcarriers x receptions)`** ⇒ **哪个桶服务了多少次**，直接回答"有没有切换" ✓ |
-| ★ 2 | 用**固定小包的流量**（如 ping）让 grant 都 ≤7 PRB ⇒ 只用 180 桶 | 不删桶也能做到"单桶" |
+| ★★ 2 | ★★ **用 `ping -s 1`（小包）** | ★ **流量大小是实验的旋钮**：上一次用 `-s 750` 大包 ⇒ MAC PDU **中位 528 B / 最大 1 089 B** ⇒ grant **4–25 PRB** ⇒ 用到 180/252/324/396 多个桶；`-s 1` ⇒ PDU ~32–40 B ⇒ grant **≈1 PRB** ⇒ 需要 108 子载波 ⇒ **自然只用 108 桶**（最快的那档）✓ |
 | 3 | 重复同样飞行 | 分辨"尾部是复现的还是偶发"|
+
+**⇒ ⇒ ★★★ 所以下一次实验的设计是**：**同一条腿、`ping -s 1`、`OCUDU_DEPTH3_TIMING=1`** ⇒ 若尾部消失、
+`allocation mix` 只出现 `108x…`，则**"桶切换"假设成立**；再飞 c32 同条件作对照 ✓
+**⇒ ★★ 预期（108 桶）**：c128 模型侧 266 µs、臂 ≈450 µs、整跳 ≈0.95 ms；c32 模型侧 137 µs、臂 ≈300 µs ✓
 
 **⇒ ★★ `fly.sh` 已改**：飞行**默认带 `OCUDU_DEPTH3_TIMING=1`**，并把
 `OCUDU_DEPTH3_COMPUTE_UNITS`/`OCUDU_DEPTH3_BUCKETS`/`OCUDU_DEPTH3_FALLBACK` 一并**穿过 sudo**（`sudo` 默认清环境）✓
