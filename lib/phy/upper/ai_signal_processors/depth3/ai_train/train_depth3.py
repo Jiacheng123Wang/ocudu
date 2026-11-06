@@ -158,9 +158,29 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         y = tf.keras.layers.ReLU(dtype=keras_dtype, name="entry_relu")(y)
         for i in range(blocks):
             dilation = DILATIONS[i % len(DILATIONS)]
-            block = tf.keras.layers.DepthwiseConv2D(
-                3, padding="same", dilation_rate=(dilation, 1), dtype=keras_dtype,
-                name=f"dw{i}_3x3_d{dilation}")(y)
+            # THE BLOCK TYPE HAS TO BE HONOURED ON THIS PATH TOO. The spatial layout has its own trunk
+            # builder, and it used to hard-code a depthwise 3x3: `--dense-blocks` and
+            # `--dense-bottleneck` were silently ignored whenever `--layout spatial` was in force,
+            # which is the layout every deployment bundle uses. Two runs that differed only in that
+            # flag therefore trained the same architecture, and the difference between their scores
+            # was the trainer's own version drift rather than the block (measured 2026-11-06:
+            # 26,185 parameters whether or not the flag was set, against 190,750 expected for dense).
+            if dense_bottleneck > 0:
+                narrow = max(8, c_hid // dense_bottleneck)
+                block = tf.keras.layers.Conv2D(narrow, 1, dtype=keras_dtype,
+                                               name=f"sq{i}_1x1")(y)
+                block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}a")(block)
+                block = tf.keras.layers.Conv2D(narrow, 3, padding="same",
+                                               dilation_rate=(dilation, 1), dtype=keras_dtype,
+                                               name=f"cv{i}_3x3_d{dilation}")(block)
+            elif dense:
+                block = tf.keras.layers.Conv2D(c_hid, 3, padding="same",
+                                               dilation_rate=(dilation, 1), dtype=keras_dtype,
+                                               name=f"cv{i}_3x3_d{dilation}")(y)
+            else:
+                block = tf.keras.layers.DepthwiseConv2D(
+                    3, padding="same", dilation_rate=(dilation, 1), dtype=keras_dtype,
+                    name=f"dw{i}_3x3_d{dilation}")(y)
             block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}")(block)
             block = FoldedScaleConv(c_hid, initial_gain=scale_init, rank=low_rank,
                                     dtype=keras_dtype, name=f"pw{i}_1x1")(block)
