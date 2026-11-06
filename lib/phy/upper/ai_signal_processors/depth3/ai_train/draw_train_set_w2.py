@@ -117,6 +117,16 @@ def main():
     ap.add_argument("--out", dest="dst", required=True, help="output directory for the .npy files")
     ap.add_argument("--self-cap", type=int, default=2500)
     ap.add_argument("--harq-cap", type=int, default=250)
+    ap.add_argument("--qm-budget-capped", default="",
+                    help="like --qm-budget, but reproduce the w2 METHOD: one cap per bin shared by "
+                         "every bin of that modulation, found by bisection so the modulation's total "
+                         "lands on the budget. This keeps the flat-then-thin bin shape w2 has, instead "
+                         "of following how many samples each bin happens to hold.")
+    ap.add_argument("--qm-budget", default="",
+                    help="per-modulation totals instead of per-bin caps, as Qm:count,... "
+                         "(e.g. '2:32000,4:32000,6:32000,8:64000'). Each modulation's budget is spread "
+                         "across its own bins in proportion to how many samples they hold, so the width "
+                         "and SNR shape inside a modulation is preserved and only its share changes.")
     ap.add_argument("--seed", type=int, default=20261103)
     ap.add_argument("--dry-run", action="store_true", help="report the draw without writing anything")
     args = ap.parse_args()
@@ -143,20 +153,128 @@ def main():
     print(f"{total} sample(s) across {len(bins)} non-empty bin(s)")
 
     # ---- 2. draw from each bin ---------------------------------------------------------------------
+    #
+    # TWO WAYS TO DECIDE HOW MUCH EACH BIN CONTRIBUTES. The original recipe caps every bin at the same
+    # number, which is right when the mix of modulations should stay as the scheduler produced it. A
+    # per-modulation budget is right when the mix itself is the thing being changed: the weak
+    # modulation needs a larger share, and within it the width and SNR shape should still be the one
+    # the captures actually contain -- so the budget is spread across that modulation's bins in
+    # proportion to bin size rather than divided equally, which would over-weight the thin bins.
     rng = np.random.default_rng(args.seed)
     drawn = {}
-    for key in sorted(bins):
-        members = bins[key]
-        cap = args.harq_cap if key[3] else args.self_cap
-        if len(members) <= cap:
-            drawn[key] = members
-        else:
-            pick = rng.choice(len(members), size=cap, replace=False)
-            drawn[key] = [members[j] for j in sorted(pick)]
 
-    kept = sum(len(v) for v in drawn.values())
-    print(f"drew {kept} sample(s) ({kept / total * 100:.1f}% of the mother set) "
-          f"with self<={args.self_cap}, harq<={args.harq_cap}")
+    def draw_bin(key, count):
+        members = bins[key]
+        if len(members) <= count:
+            return list(members)
+        pick = rng.choice(len(members), size=count, replace=False)
+        return [members[j] for j in sorted(pick)]
+
+    if args.qm_budget_capped:
+        # W2'S OWN METHOD, PER MODULATION. w2 capped every bin at the same number, which makes each
+        # bin contribute equally right up to where it runs out; that is the "bin composition" a
+        # re-draw has to keep. Here the cap is per modulation, found by bisection so the modulation's
+        # total hits its budget, and harq keeps w2's tenth-of-the-cap ratio.
+        budget = {}
+        for item in args.qm_budget_capped.split(","):
+            qm, count = item.split(":")
+            budget[int(qm)] = int(count)
+        for qm in sorted(budget):
+            keys = [k for k in bins if k[0] == qm]
+            if not keys:
+                print(f"FATAL: no samples for Qm={qm}", file=sys.stderr)
+                return 1
+
+            def total_at(cap):
+                return sum(min(len(bins[k]), cap if not k[3] else max(1, cap // 10)) for k in keys)
+
+            lo, hi = 1, max(len(bins[k]) for k in keys)
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if total_at(mid) >= budget[qm]:
+                    hi = mid
+                else:
+                    lo = mid + 1
+            cap = lo
+            got = 0
+            for k in keys:
+                limit = cap if not k[3] else max(1, cap // 10)
+                drawn[k] = draw_bin(k, min(len(bins[k]), limit))
+                got += len(drawn[k])
+            print(f"Qm={qm}: budget {budget[qm]}, bin cap {cap} (harq {max(1, cap // 10)}), drew {got}")
+        kept = sum(len(v) for v in drawn.values())
+        print(f"drew {kept} sample(s) ({kept / total * 100:.1f}% of the mother set) "
+              f"with per-bin caps sized to {args.qm_budget_capped}")
+        by_qm = collections.Counter()
+        for key, members in drawn.items():
+            by_qm[key[0]] += len(members)
+        print("modulation mix: " + "  ".join(
+            f"{QM_NAME.get(qm, qm)} {by_qm[qm]} ({by_qm[qm] / kept * 100:.1f}%)" for qm in sorted(by_qm)))
+    elif args.qm_budget:
+        budget = {}
+        for item in args.qm_budget.split(","):
+            qm, count = item.split(":")
+            budget[int(qm)] = int(count)
+        missing = set(budget) - {k[0] for k in bins}
+        if missing:
+            print(f"FATAL: no samples for Qm={sorted(missing)} in {args.src}", file=sys.stderr)
+            return 1
+        for qm in sorted(budget):
+            keys = [k for k in bins if k[0] == qm]
+            want = budget[qm]
+            # WATER-FILL, because a thin bin cannot give more than it holds and the surplus has to go
+            # somewhere: allocate proportionally, cap at bin size, and repeat with the remainder until
+            # the budget is spent or every bin is exhausted.
+            quota = {k: 0 for k in keys}
+            remaining = want
+            open_keys = list(keys)
+            while remaining > 0 and open_keys:
+                weight = sum(len(bins[k]) for k in open_keys)
+                if weight == 0:
+                    break
+                allocated = 0
+                for k in list(open_keys):
+                    share = remaining * len(bins[k]) / weight
+                    take = min(int(share), len(bins[k]) - quota[k])
+                    quota[k] += take
+                    allocated += take
+                    if quota[k] >= len(bins[k]):
+                        open_keys.remove(k)
+                if allocated == 0:
+                    # rounding left the budget with less than one sample per open bin: give the rest to
+                    # the largest bins, which is where they came from statistically.
+                    for k in sorted(open_keys, key=lambda k: -len(bins[k]))[:remaining]:
+                        if quota[k] < len(bins[k]):
+                            quota[k] += 1
+                    break
+                remaining -= allocated
+            got = 0
+            for k in keys:
+                if quota[k]:
+                    drawn[k] = draw_bin(k, quota[k])
+                    got += len(drawn[k])
+            print(f"Qm={qm}: budget {want}, drew {got} across {sum(1 for k in keys if quota[k])} bin(s)")
+        kept = sum(len(v) for v in drawn.values())
+        print(f"drew {kept} sample(s) ({kept / total * 100:.1f}% of the mother set) "
+              f"with a per-modulation budget of {args.qm_budget}")
+        by_qm = collections.Counter()
+        for key, members in drawn.items():
+            by_qm[key[0]] += len(members)
+        print("modulation mix: " + "  ".join(
+            f"{QM_NAME.get(qm, qm)} {by_qm[qm]} ({by_qm[qm] / kept * 100:.1f}%)" for qm in sorted(by_qm)))
+    else:
+        for key in sorted(bins):
+            members = bins[key]
+            cap = args.harq_cap if key[3] else args.self_cap
+            if len(members) <= cap:
+                drawn[key] = members
+            else:
+                pick = rng.choice(len(members), size=cap, replace=False)
+                drawn[key] = [members[j] for j in sorted(pick)]
+
+        kept = sum(len(v) for v in drawn.values())
+        print(f"drew {kept} sample(s) ({kept / total * 100:.1f}% of the mother set) "
+              f"with self<={args.self_cap}, harq<={args.harq_cap}")
 
     # ---- 3. report per bin, in section 10.2's shape -------------------------------------------------
     print("\n  modulation  width   " + "".join(f"{s:>15s}" for _, _, s in SNR_EDGES))
