@@ -778,7 +778,14 @@ def export_buckets(args, parser, source=None):
     if source is not None:
         entry = source.get_layer("entry_1x1").kernel.shape
         c_hid, in_channels = int(entry[3]), int(entry[2])
-        blocks = sum(1 for layer in source.layers if layer.name.startswith("dw"))
+        # THE BLOCK TYPE COMES FROM THE SOURCE TOO, AND THE DEPTH COUNT HAS TO FOLLOW IT. A dense trunk names its 3x3
+        # layers `cv{i}_3x3` rather than `dw{i}_3x3`, so counting only `dw` gave zero blocks and the bucket graph then
+        # had six weights against the source's ninety-six -- which is how this was found (2026-11-07). `sq{i}_1x1`
+        # marks the bottleneck variant, whose 3x3 layers are also `cv`.
+        dense = any(layer.name.endswith("_3x3_d1") and layer.name.startswith("cv") for layer in source.layers)
+        bottleneck = any(layer.name.startswith("sq") for layer in source.layers)
+        blocks = sum(1 for layer in source.layers
+                     if layer.name.startswith(("dw", "cv")) and "_3x3_" in layer.name)
         # THE HEADS COME FROM THE SOURCE TOO, for the same reason the width and the depth do: a source trained with
         # `--no-reporting-heads` has two heads fewer than the default graph, and building the bucket with the default
         # gives it four extra weights that the copy then refuses (observed as "the bucket graph has 100 weights, the
@@ -788,11 +795,12 @@ def export_buckets(args, parser, source=None):
         aux = any("post_eq_noise" in name for name in names)
     else:
         c_hid, in_channels, blocks = args.c_hid, 8, args.blocks
+        dense, bottleneck = args.dense_blocks, args.dense_bottleneck
     for width in [int(w) for w in args.export_buckets.split(",") if w.strip()]:
         narrow = build(width=width, blocks=blocks, qm=D3.BITS_PER_SYMBOL[args.modulation],
                        aux_heads=aux, c_hid=c_hid, dtype=args.dtype,
                        layout=args.layout, in_channels=in_channels, cond=args.modcond,
-                       reporting_heads=reporting)
+                       reporting_heads=reporting, dense=dense, dense_bottleneck=bottleneck)
         # WEIGHTS ARE COPIED, NOT RELOADED. A `.keras` archive carries the width the graph was built with, and loading
         # it into a graph built for another width fails on every layer past the divergence (41 objects in the first
         # attempt). The tensor shapes do not depend on the width -- they are 1x1 and depthwise convolutions -- so
