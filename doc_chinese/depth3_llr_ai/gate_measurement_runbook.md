@@ -471,6 +471,14 @@ ls ~/dev/ocudu/build/lib/phy/upper/channel_processors/metal/ul_chain_replay   # 
 | **尺子 5 000**（Mac 7 min / 203 ~10 min）| `python /tmp/measure_arm.py <units.txt> <corpus> <bundle>/<bundle>.mlmodelc /tmp/ruler_<arm>.csv` | 同左，corpus 用 `~/replay_bits_1102/corpus` |
 | **全腿 50 000**（Mac 75 min / 203 ~100 min）| `python /tmp/measure_full.py /tmp/units_50000.txt ~/ai_depth3/corpus/s2_amc_ping_1102a <bundle> /tmp/full_<arm>.csv` | ★ corpus 用 `~/ai_depth3/corpus/s2_amc_ping_1102a`（**2026-11-06 已拷到 203**）|
 
+**⇒ ★★★ 203 上那份全腿采集的范围（用户 2026-11-06 明确）**：
+**只拷"探针 500 与尺子 5 000 的母集那一腿"** —— 即 `s2_amc_ping_1102a` ✓
+**⇒ 不是**所有腿的采集（全部腿有 60 条、数百 GB）✓
+**⇒ 这也意味着 203 上能做的"全腿"就是**这一腿的 50 000 个捕获**，与探针/尺子同源** ⇒ 三者可直接互相对照 ✓
+
+**⇒ ★★ 拷贝校验（2026-11-06 完成）**：两侧均 **200 002 个文件 / 8.6 GB** ✓；
+**⇒ 203 上实跑一个单元验证通过**：`cap_10000_15687_17922` ⇒ `mode=npu published, decoder=cpu`，`crc=OK` ✓
+
 **⇒ ★★ 两机结果的一致性已被验证**：同一臂、同一单元集，本机（`3b66bf45`）与 203（`12f55d11`）**逐单元 5 000/5 000 相同** ✓
 
 ### 13.4 记录要求（每行都要）
