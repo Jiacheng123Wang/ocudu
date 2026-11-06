@@ -44,6 +44,7 @@ OUT=""
 CALIB=""
 MEASURE=0
 DENSE=0
+BOTTLENECK=0
 SNR="-0.18,34.70"
 
 usage() {
@@ -73,6 +74,7 @@ while [ $# -gt 0 ]; do
     --snr-range) SNR=$2; shift 2;;
     --measure) MEASURE=1; shift;;
     --dense) DENSE=1; shift;;
+    --dense-bottleneck) BOTTLENECK=$2; shift 2;;
     -h|--help) usage;;
     *) KERAS=$1; shift;;
   esac
@@ -85,8 +87,9 @@ mkdir -p "$OUT/buckets"
 echo "=== $NAME from $KERAS  (c_hid $C_HID, $BLOCKS blocks, widths $WIDTHS)"
 if ! "$PY" -u "$HERE/train_depth3.py" --export-only "$KERAS" \
       --export-probe "$OUT/$NAME.mlpackage" --export-buckets "$WIDTHS" \
-      --modcond --layout spatial --modulation QPSK --c-hid "$C_HID" --blocks "$BLOCKS" \\
+      --modcond --layout spatial --modulation QPSK --c-hid "$C_HID" --blocks "$BLOCKS" \
       $([ "$DENSE" = "1" ] && echo --dense-blocks) \
+      $([ "$BOTTLENECK" != "0" ] && echo --dense-bottleneck "$BOTTLENECK") \
       --snr-range="$SNR" > /tmp/make_bucket_export.log 2>&1; then
   echo "FATAL: export failed; last lines:" >&2
   tail -12 /tmp/make_bucket_export.log >&2

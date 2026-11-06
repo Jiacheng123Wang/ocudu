@@ -114,6 +114,7 @@ class FoldedScaleConv(tf.keras.layers.Layer):
 def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, residual=True,
           reporting_heads=True, low_rank=0,
           dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False,
+          dense_bottleneck=0,
           layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False):
     """The contract's graph: the plane in, the reporting heads out.
 
@@ -212,7 +213,21 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         # measured that a dense 3x3 computes 5.7 times the FLOPs for the SAME latency on this
         # engine, so the depthwise choice was buying an arithmetic-intensity saving the ANE did not
         # need, at the cost of exactly the per-position capacity the diagnosis points at.
-        if dense:
+        if dense_bottleneck > 0:
+            # BOTTLENECK DENSE. A full dense 3x3 mixes all channels with all channels at 9*C*C
+            # weights per block, which is 6 to 7 times the depthwise trunk for a c32 model and 7
+            # times for a c128 one. The squeeze below runs the spatial operator on c_hid/narrow
+            # channels and the block's existing 1x1 expands back, so the joint space-and-channel
+            # mixing that depthwise cannot express is kept while the weights grow only as C*C/narrow.
+            # At narrow=2 this is about 2.5 times the depthwise block; at narrow=4 it is cheaper
+            # than it, because the depthwise 3x3 carries 9*C against the squeeze's C*C/narrow.
+            narrow = max(8, c_hid // dense_bottleneck)
+            block = tf.keras.layers.Conv2D(narrow, 1, dtype=keras_dtype,
+                                           name=f"sq{i}_1x1")(y)
+            block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}a")(block)
+            block = tf.keras.layers.Conv2D(narrow, 3, padding="same", dilation_rate=(dilation, 1),
+                                           dtype=keras_dtype, name=f"cv{i}_3x3_d{dilation}")(block)
+        elif dense:
             block = tf.keras.layers.Conv2D(c_hid, 3, padding="same", dilation_rate=(dilation, 1),
                                            dtype=keras_dtype, name=f"cv{i}_3x3_d{dilation}")(y)
         else:
@@ -821,6 +836,12 @@ def main():
                         help="dense 3x3 instead of depthwise. Section 25.3 measured the same "
                              "latency for 5.7x the FLOPs, and depthwise is what caps the "
                              "per-position capacity the diagnosis points at")
+    parser.add_argument("--dense-bottleneck", type=int, default=0, metavar="N",
+                        help="dense 3x3 on c_hid/N channels, squeezed into and expanded out of that "
+                             "width inside the block. Keeps the joint space-and-channel mixing that "
+                             "depthwise cannot express while the weights grow as C*C/N instead of "
+                             "9*C*C: about 2.5x the depthwise block at N=2, cheaper than it at N=4. "
+                             "Implies --dense-blocks; 0 keeps the previous architectures")
     parser.add_argument("--in-channels", type=int, default=0,
                         help="input channels of the unfolded trunk. 0 takes it from the batches, "
                              "which is the only value that cannot disagree with the data; the "
@@ -984,6 +1005,7 @@ def main():
                             residual=not args.no_residual, dtype=args.dtype,
                             fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
                             llr_linear=args.llr_linear, dense=args.dense_blocks,
+                            dense_bottleneck=args.dense_bottleneck,
                             layout=args.layout, in_channels=in_channels, cond=args.modcond)
         export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
         return 0
@@ -1016,7 +1038,8 @@ def main():
                   reporting_heads=not args.no_reporting_heads,
                   residual=not args.no_residual, dtype=args.dtype,
                   fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
-                  llr_linear=args.llr_linear, dense=args.dense_blocks, layout=args.layout,
+                  llr_linear=args.llr_linear, dense=args.dense_blocks,
+                  dense_bottleneck=args.dense_bottleneck, layout=args.layout,
                   in_channels=in_channels, cond=args.modcond)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}  heads {sorted(model.output.keys())}")
