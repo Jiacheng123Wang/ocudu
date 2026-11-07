@@ -2311,3 +2311,56 @@ doc_chinese/depth3_llr_ai/work_tmp/tools/measure_thresholds.py
 3. ★★ **是否值得**：目前 211 **大部分时间空闲**，107 的卡每天只忙 6 h ⇒
    **除非要并行多条 40 轮实验**，否则优先级不高 ✓
 4. ★ 若买：eGPU 盒（¥1 500–2 500）＋ 4060/4070（¥2 000–4 000）；或同等预算买一台带 x16 的二手工作站 ✓
+
+---
+
+## 59. ★★★★ 2026-11-07 13:35 **211 只能走外置盒：具体方案与验证判据**
+
+**(a) ★★★ 前提（用户确认）**
+
+| 项 | 事实 |
+|---|---|
+| 211 机箱 | ★ **小型机箱**（NUC9VXQNB 计算模块）⇒ **没有可用的全尺寸 x16 槽** |
+| 手上的卡 | ★ **一张全尺寸 NVIDIA 卡**（无需另购）|
+| ⇒ 唯一路径 | ★★ **Thunderbolt 3 外置显卡盒（eGPU enclosure）** |
+| 空余端口 | ★ **1 个 TB3 口**（另一个接着 Lenovo dock）✓ |
+
+**(b) ★★★ 盒子必须满足的条件**
+
+| 条件 | 说明 |
+|---|---|
+| ★ **Thunderbolt 3 或 4** | 211 是 TB3；TB4 盒子向下兼容 ✓ |
+| ★★ **自带电源 ≥600 W** | NUC9 **不给 GPU 供电**；全尺寸卡常见 250–350 W |
+| ★ **支持全长度、双槽/三槽卡** | 常见：Razer Core X（650 W，3 槽 330 mm）、OWC Helios FX、Sonnet eGFX 650/750、Akitio Node Titan |
+| ★ **8 pin / 6+2 pin 线齐全** | 按卡的接口配 |
+| 散热与噪声 | 小房间注意进风 |
+
+**(c) ★★★★ 软件路径（Linux ＋ NVIDIA eGPU）**
+
+1. 插卡、开机，先看盒子是否被枚举：`boltctl list`（应出现 enclosure）、`lspci | grep -i nvidia`
+2. ★ **持久授权**：`sudo boltctl enroll --policy auto <enclosure-uuid>`（否则每次开机都要手动授权）
+3. ★★ **BIOS 里把 Thunderbolt Security 设为 No Security（或 User Authorization）**，并确认 TB 的 PCIe 支持打开
+4. 装 **NVIDIA 专有驱动**（40 系需 ≥525，50 系需 ≥570）：`ubuntu-drivers autoinstall` 或官方 runfile
+5. 重启后 `nvidia-smi` 能列出卡 ⇒ 成功
+6. 训练侧确认：`python -c "import tensorflow as tf; print(tf.config.list_physical_devices(GPU))"`
+
+**⇒ ★★★ 判据（与 §56 的教训一致）：看 `nvidia-smi` 的利用率与显存，不是"进程在跑"** ✓
+**⇒ ★★ 参考点**：107（内置 3060）的 c32 dw = **18.5 min/轮**；eGPU 正常应在同一量级 ✓
+
+**(d) ★★ 为什么 TB3 不会拖慢**
+
+| 项 | 数字 |
+|---|---|
+| TB3 ≈ PCIe 3.0 ×4 | 实测 ~2.5 GB/s |
+| 每步数据 | **1.2 MB** ⇒ **0.5 ms** |
+| ⇒ 结论 | ★★ **瓶颈在卡，不在 TB3** ✓（大模型/大 batch 才会掉速）|
+
+**(e) ★★ 已知风险与对策**
+
+| 风险 | 对策 |
+|---|---|
+| 休眠/热插拔后设备消失 | ★ **当固定安装**：不休眠、不拔 |
+| BIOS 的 TB 安全级别 | ★ 设 No Security，否则 Linux 枚举不到 |
+| 驱动与内核不匹配 | ★ 用发行版驱动包更稳 |
+| 供电不足导致掉卡 | ★ 盒电源 ≥600 W，显卡线插满 |
+| ★ 装好后仍跑 CPU | ★★ 见 §56：**必须先 `source env.sh`**，否则 TF 静默退回 CPU ✗ |
