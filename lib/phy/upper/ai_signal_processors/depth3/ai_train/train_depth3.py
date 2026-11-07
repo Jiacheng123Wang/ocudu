@@ -66,6 +66,31 @@ THR_QM = {"QPSK": -3.16, "16QAM": 6.61, "64QAM": 13.38, "256QAM": 20.91}
 DILATIONS = (1, 2, 4, 8)
 
 
+def parse_dilations(text):
+    """`--dilations "1,2,4,8,16,32"` as a tuple, or the default cycle when the flag is empty.
+
+    THE MAXIMUM DILATION WAS NEVER JUSTIFIED AGAINST A MEASUREMENT. The chain stops at 8 because that
+    was the cycle the first draft picked, which reaches a 127-subcarrier receptive field; the corpus
+    later measured the channel's coherence length at 150-300 subcarriers (`model_network_design` 30.3,
+    |rho| = 0.97 at lag 20), so the network cannot see one full coherence interval. Dilation costs
+    neither parameters nor multiply-adds (`model_network_design` 27.3: 372 -> 369 us for RF 37 -> 127),
+    which is why extending it is the cheapest lever left -- but the value has to be measurable, so it
+    is a knob now and the receptive field is printed with every run.
+    """
+    if not text.strip():
+        return DILATIONS
+    values = tuple(int(part) for part in text.split(",") if part.strip())
+    if not values or min(values) < 1:
+        raise SystemExit(f"--dilations {text}: every entry must be a positive integer")
+    return values
+
+
+def receptive_field(blocks, dilations):
+    """Subcarriers one output position can see: 1 + sum(2*d) over the block cycle."""
+    return 1 + 2 * sum(dilations[i % len(dilations)] for i in range(blocks))
+
+
+
 @tf.keras.utils.register_keras_serializable(package="ocudu")
 class FoldedScaleConv(tf.keras.layers.Layer):
     """A 1x1 convolution whose output channels carry a trainable positive gain.
@@ -124,7 +149,8 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
           reporting_heads=True, low_rank=0,
           dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False,
           dense_bottleneck=0, fuse_relu=False,
-          layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False):
+          layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False,
+          dilations=DILATIONS):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -166,7 +192,7 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         y = tf.keras.layers.Conv2D(c_hid, 1, dtype=keras_dtype, name="entry_1x1")(inp)
         y = tf.keras.layers.ReLU(dtype=keras_dtype, name="entry_relu")(y)
         for i in range(blocks):
-            dilation = DILATIONS[i % len(DILATIONS)]
+            dilation = dilations[i % len(dilations)]
             # THE BLOCK TYPE HAS TO BE HONOURED ON THIS PATH TOO. The spatial layout has its own trunk
             # builder, and it used to hard-code a depthwise 3x3: `--dense-blocks` and
             # `--dense-bottleneck` were silently ignored whenever `--layout spatial` was in force,
@@ -240,7 +266,7 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         y = tf.keras.layers.Conv2D(c_hid, 1, dtype=keras_dtype, name="entry_1x1")(y)
         y = tf.keras.layers.ReLU(dtype=keras_dtype, name="entry_relu")(y)
     for i in range(blocks):
-        dilation = DILATIONS[i % len(DILATIONS)]
+        dilation = dilations[i % len(dilations)]
         # A DEPTHWISE 3x3 mixes frequency within each channel; a dense one mixes channels and
         # frequency together, which is far more expressive per layer. `model_network_design` 25.3
         # measured that a dense 3x3 computes 5.7 times the FLOPs for the SAME latency on this
@@ -817,7 +843,8 @@ def export_buckets(args, parser, source=None):
         narrow = build(width=width, blocks=blocks, qm=D3.BITS_PER_SYMBOL[args.modulation],
                        aux_heads=aux, c_hid=c_hid, dtype=args.dtype,
                        layout=args.layout, in_channels=in_channels, cond=args.modcond,
-                       reporting_heads=reporting, dense=dense, dense_bottleneck=bottleneck)
+                       reporting_heads=reporting, dense=dense, dense_bottleneck=bottleneck,
+                       dilations=args.dilations)
         # WEIGHTS ARE COPIED, NOT RELOADED. A `.keras` archive carries the width the graph was built with, and loading
         # it into a graph built for another width fails on every layer past the divergence (41 objects in the first
         # attempt). The tensor shapes do not depend on the width -- they are 1x1 and depthwise convolutions -- so
@@ -876,6 +903,12 @@ def main():
                              "'2:slope,offset;4:...;6:...;8:...'. Measured against the classical chain's own "
                              "publication (design section 19.172); it corrects the reporting path only.")
     parser.add_argument("--blocks", type=int, default=18)
+    # THE FREE ARCHITECTURE KNOB. Dilation changes neither the parameters nor the multiply-adds, only
+    # how far each block looks, and the default cycle reaches 127 subcarriers against a measured
+    # coherence length of 150-300. Empty means the default cycle, so old command lines reproduce.
+    parser.add_argument("--dilations", default="",
+                        help="comma-separated dilation cycle along the subcarrier axis "
+                             "(default: 1,2,4,8 from the module constant)")
     parser.add_argument("--layout", choices=("folded", "spatial", "probe8", "unfolded"),
                         default="spatial",
                         help="'folded' is the superseded 64-channel contract, kept so the recorded "
@@ -1028,6 +1061,7 @@ def main():
                              "more expensive than a forward pass, so this is a subset; 0 skips it")
     parser.add_argument("--seed", type=int, default=20261013)
     args = parser.parse_args()
+    args.dilations = parse_dilations(args.dilations)
     # WHAT THE PROCESS WAS LAUNCHED WITH. The log is the only lasting record of a multi-hour run, and a
     # restart is where flags drift: on 2026-11-03 a restart dropped `--bler-samples 0`, the default 24
     # took over, and the first decode killed a run that had been healthy for fourteen epochs. The old
@@ -1079,7 +1113,8 @@ def main():
                             fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
                             llr_linear=args.llr_linear, dense=args.dense_blocks,
                             dense_bottleneck=args.dense_bottleneck, fuse_relu=args.fuse_relu,
-                            layout=args.layout, in_channels=in_channels, cond=args.modcond)
+                            layout=args.layout, in_channels=in_channels, cond=args.modcond,
+                            dilations=args.dilations)
         export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
         return 0
 
@@ -1113,9 +1148,15 @@ def main():
                   fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
                   llr_linear=args.llr_linear, dense=args.dense_blocks,
                   dense_bottleneck=args.dense_bottleneck, layout=args.layout, fuse_relu=args.fuse_relu,
-                  in_channels=in_channels, cond=args.modcond)
+                  in_channels=in_channels, cond=args.modcond, dilations=args.dilations)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}  heads {sorted(model.output.keys())}")
+    # THE RECEPTIVE FIELD IS A DESIGN PARAMETER, SO IT IS PRINTED WITH THE PARAMETER COUNT. It is the
+    # one architecture number that costs nothing (dilation adds no weights and no multiply-adds), and
+    # it was the only one that had no record in the run logs: the cycle lived in a module constant, so
+    # two runs could differ in it and look identical in the log.
+    print(f"receptive field {receptive_field(blocks, args.dilations)} subcarriers "
+          f"(cycle {','.join(str(d) for d in args.dilations)} x {blocks} blocks)")
     if args.init:
         model.load_weights(args.init)
         print(f"started from {args.init}")
