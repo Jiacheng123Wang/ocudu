@@ -193,3 +193,52 @@ argv: --train …/datasets_train_w2 --val …/datasets_monitor_w2 --out …/runs
 **⇒ 看到一个名字 ⇒ 能反推出**所有非默认参数**；配合 `model.json` ⇒ **能完整复原训练命令** ✓
 **⇒ 反例（教训）**：`w2c32_b18_e61` 里**看不出**它是"从 `--init` 暖启动、lr 仍是 1e-3" ⇒
    §2 早已要求 `ft@<src>`，但当时没遵守 ⇒ **这正是要通则的原因** ✓
+
+---
+
+## 9. ★★★★ 2026-11-07 19:20 **补两个 token：`sw<w>s<s>`（SNR 加权）与 `sc<v>` 的确认（`--scale-init`）**
+
+**(a) ★★★ 背景**
+
+`train_depth3.py` 在 2026-11-07 加了两个训练期旋钮：
+
+| 参数 | 默认 | 含义 |
+|---|---|---|
+| `--snr-weight` | **0**（关）| 把难组（按 SNR 分带）的损失放大 `w` 倍 |
+| `--snr-sigma` | 3.0 | 加权的 SNR 高斯带宽（dB）|
+
+⇒ 按 §8 的通则，**只要 `--snr-weight > 0` 就是非默认** ⇒ 必须进 `<recipe>` ✓
+
+**(b) ★★★ token 规则**
+
+| 参数组合 | token | 例 |
+|---|---|---|
+| `--snr-weight w --snr-sigma s`（s 非 3.0）| ★ **`sw<w>s<s>`** | `sw2s3` ＝ weight 2、sigma 3（两者都显式）|
+| `--snr-weight w`（sigma 保持 3.0）| ★ **`sw<w>`** | `sw2` |
+| `--snr-weight 0` | **不写**（默认关）| — |
+
+**⇒ 位置**：`<recipe>` 段的**末尾**（在 `cond`/`norep` 之后），因为它属于"微调旋钮"而不是"训练模式" ✓
+
+**⇒ ★★ `<recipe>` 的完整顺序（以此为准，已有名字都符合）**：
+
+```
+d3_<ds>_c<C>b<B><arch>_[sc<v>_]  <mode>[-cond][-norep][-sw<w>s<s>][-lr<v>][-s<seed>][-pat<n>]  _e<EP>[best]
+                        ↑ 紧跟架构段        ↑ 模式在最前                        ↑ 旋钮依次在后
+```
+
+**⇒ 例**：`d3_w2v1_c32b18dw_e2e-cond-norep-sw2s3_e20`（w2v1、c32/b18/dw、端到端、调制条件化、无 reporting heads、SNR 加权 2 dB 高斯 σ=3、第 20 轮）✓
+
+**(c) ★★ 同时确认 `sc<v>`（此前 §8 只是新增，未有实例进表）**
+
+| 参数 | 默认 | token | 例 |
+|---|---|---|---|
+| `--scale-init` | **1.0** | ★ **`sc<v>`**（去掉小数点前导 0；**紧跟架构段之后**）| `sc003` = 0.03、`sc01` = 0.1 |
+
+**⇒ 例**：`d3_w2v1_c32b18dense_sc003_e2e-cond-norep_e10`（dense 主干必须配 `sc003`，否则 e10 就崩，见网络改进计划 §25.3）✓
+
+**(d) ★ 由此产生的两个正式名字（已写进 `depth3_gate_and_model_pk_npu.md` §4.2）**
+
+```
+d3_w2v1_c32b18dense_sc003_e2e-cond-norep_e10
+d3_w2v1_c32b18dw_e2e-cond-norep-sw2s3_e20
+```
