@@ -54,6 +54,15 @@ from coded_bler import CodedBler # noqa: E402  (decoder side, no TensorFlow)
 from train_refiner import Scale    # noqa: E402
 
 NOF_SYMBOLS = D3.NOF_SYMBOLS
+# THE DECODER THRESHOLDS, MEASURED RATHER THAN ASSUMED (2026-11-07). The 50% block-error crossing of the classical chain on
+# the NOMINAL signal-to-noise ratio, computed over every AMC leg of the s2 corpus: 1,114,092 unique receptions joined from the
+# mother sets to their dump indices by capture id, thirty-five legs, with the per-leg spread on 256QAM running 17.8 to 23.5 dB,
+# which is why one leg is not enough. Adding the twenty-five fixed-MCS legs (776,514 more receptions, all QPSK) moves QPSK by
+# 0.06 dB and the other three by nothing. The values are on `snr_nominal` -- the same variable the datasets carry -- and the
+# measured-SINR variant of the same table is 9 dB away on QPSK, so mixing the two scales would be a silent error.
+# Recompute with `work_tmp/tools/measure_thresholds.py` when more captures land.
+THR_QM = {"QPSK": -3.16, "16QAM": 6.61, "64QAM": 13.38, "256QAM": 20.91}
+
 DILATIONS = (1, 2, 4, 8)
 
 
@@ -456,6 +465,9 @@ class Batches:
             # rather than per resource element.
             "dmrs_noise": np.float32(L.noise_shape_target(np.asarray([sigma2_norm]))[0][0]),
             "snr": float(data["snr_nominal"][index]),
+            # The modulation NAME, so the loss can look up that modulation's measured decoder threshold. It is the same
+            # variable the one-hot conditioning and the LLR scale were built from two lines above.
+            "modulation": modulation,
             # The scale is model-external per the contract and is PER MODULATION (design section 19.102): a
             # conditioned batch holds several modulations at once, so the loss cannot use one number for all of
             # them -- QPSK's limit is 24 and the others' is 20, and a batch scaled with the wrong one trains the
@@ -995,6 +1007,15 @@ def main():
                         help="decode PERFECT LLRs on a few validation samples and exit. The rate "
                              "must be zero, which is what proves the metric can reach zero rather "
                              "than merely being small")
+    parser.add_argument("--snr-weight", type=float, default=0.0, metavar="LAMBDA",
+                        help="weight each TRAINING sample by 1 + LAMBDA * exp(-((snr - THR_QM[modulation]) / sigma)^2), "
+                             "with sigma from --snr-sigma and the thresholds measured on the corpus. The delivered-bits "
+                             "metric is decided by the receptions near the decoder threshold -- measured 2026-11-07, fifteen "
+                             "256QAM receptions at 25 dB carried the whole six percent gap between two epochs -- while the "
+                             "global loss averages them away. Validation always reports the unweighted loss so runs stay "
+                             "comparable. 0 disables the weighting")
+    parser.add_argument("--snr-sigma", type=float, default=3.0, metavar="DB",
+                        help="width of the threshold window for --snr-weight, in dB (default 3.0)")
     parser.add_argument("--group-report", type=int, default=5, metavar="N",
                         help="print the N worst (modulation x SNR band x transport-block size) GROUPS by validation "
                              "bit-cross-entropy, with how many samples and what share of the bits each carries. The "
@@ -1125,7 +1146,12 @@ def main():
             if args.llr_linear:
                 # The bound the contract asks for, applied where it is differentiable, per sample.
                 llr = tf.clip_by_value(llr, -targets["scale"][:, None, None], targets["scale"][:, None, None])
-            terms = {"llr": L.tf_bce_loss(llr, targets["llr_shape"], targets["llr_weights"])}
+            llr_mask = targets["llr_weights"]
+            if training and args.snr_weight > 0.0:
+                # THE WEIGHTING APPLIES TO TRAINING ONLY. Validation reports the unweighted loss, so a weighted run stays
+                # comparable with every earlier one and the number in the log still means the same thing.
+                llr_mask = llr_mask * targets["w_snr"][:, None, None]
+            terms = {"llr": L.tf_bce_loss(llr, targets["llr_shape"], llr_mask)}
             if not args.no_aux:
                 # THE NOISE HEAD IS ALWAYS IN WHEN aux_heads IS (design section 22.2): it is what scales the logits
                 # into the LLRs the chain quantises, so it is trained even in the bundle that dropped the reporting
@@ -1155,6 +1181,27 @@ def main():
     # the LLRs it produces must be gathered with that layout rather than with the reception's own Qm.
     GATHER = D3.llr_gather_cond if getattr(val, "cond", False) else D3.llr_gather
 
+    def snr_weights(samples):
+        """The per-sample weight of `--snr-weight`: near the decoder threshold, and one everywhere else.
+
+        A reception is delivered or lost as a whole block around that threshold, so the samples whose distance to it is
+        small are the ones that switch delivered bits; the ones far from it teach the same lesson whatever the model
+        does. The window is in `snr_nominal`, the variable the datasets carry, and the threshold is that modulation's
+        own measured 50% crossing.
+        """
+        if args.snr_weight <= 0.0:
+            return np.ones(len(samples), dtype=np.float32)
+        sigma = max(1e-3, float(args.snr_sigma))
+        out = np.empty(len(samples), dtype=np.float32)
+        for i, sample in enumerate(samples):
+            thr = THR_QM.get(str(sample["modulation"]))
+            if thr is None:
+                out[i] = 1.0
+                continue
+            d = (float(sample["snr"]) - thr) / sigma
+            out[i] = 1.0 + args.snr_weight * np.exp(-d * d)
+        return out
+
     def tensors(samples):
         return (
             tf.constant(stack(samples, "x")),
@@ -1167,6 +1214,9 @@ def main():
                 "noise_weights": tf.constant(stack(samples, "noise_weights")),
                 "dmrs_noise": tf.constant(stack(samples, "dmrs_noise")),
                 "scale": tf.constant(stack(samples, "scale")),
+                # THE THRESHOLD WEIGHT, one number per sample (always ones unless --snr-weight is on, so a run without it
+                # is bit-identical to what it was before this existed).
+                "w_snr": tf.constant(np.asarray(snr_weights(samples), dtype=np.float32)),
             },
         )
 
