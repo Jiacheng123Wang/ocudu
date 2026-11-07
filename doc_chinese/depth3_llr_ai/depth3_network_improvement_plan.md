@@ -2214,3 +2214,49 @@ doc_chinese/depth3_llr_ai/work_tmp/tools/measure_thresholds.py
 | 107（备用）| c128 dw ＋ w2v1（已暂停，可 `--resume` 续）| 3/40 轮已存 ✓ |
 | **本机**（CPU nice 20）| c32 **dense** ＋ w2v1（sc0.03）| 11/20 轮，ETA 今晚 23:20 |
 | **211 / 66** | 空闲 | — |
+
+---
+
+## 57. ★★★★ 2026-11-07 13:10 **能不能用 AMD 显卡训练？——可以，但只有 Linux ＋ ROCm 这一条路**
+
+**(a) ★★★ 公开事实（AMD 官方 ROCm 7.2.1 文档，2026-01-08）**
+
+| 项 | 结论 |
+|---|---|
+| TensorFlow ＋ ROCm | ★ **有官方支持**：AMD 维护 `ROCm/tensorflow-upstream`，官方 TF 仓库也含 ROCm 支持 ✓ |
+| 安装方式 | ★ 官方推荐 **Docker 镜像** `rocm/tensorflow`（含 ROCm ＋ TF ＋ 依赖）✓ |
+| 平台 | ★★ **仅 Linux**（文档明确 "Applies to Linux"）✗ macOS/Windows 无 |
+| 我们用的算子 | ★ 全在支持表内：`tf.keras`、`tf.nn.conv2d`、`tf.math`、`tf.random`（ROCm ≥1.8–2.1）✓ |
+| 唯一明确不支持 | ★ **TF32 混合精度**；我们**不用** TF32（fp32 训练、导出时转 fp16）✓ |
+
+**(b) ★★★ 对我们这套代码的具体判断**
+
+| 项 | 影响 |
+|---|---|
+| 自定义层（`FoldedScaleConv`、`Scale`）| ★ 纯 TF 算子拼成 ⇒ **应可直接跑** ✓ |
+| `tf.complex`（ch_est NMSE）| 只在**带 reporting heads**时才走；我们的 bundle 是 `--no-reporting-heads` ⇒ **不触发** ✓ |
+| 数据管线 | 纯 numpy ＋ 线程 ⇒ 与后端无关 ✓ |
+| **导出（coremltools）** | ★ 在 Mac/CPU 上做，**与训练用哪块卡无关** ✓ |
+| 我们的 venv（TF 2.16/2.21）| ★★ **CUDA 专用**，不能拿来跑 ROCm ⇒ 要用 **ROCm 镜像自带的 TF 版本**（TF 版本会变）⚠ |
+
+**(c) ★★★ 三条路线与代价**
+
+| 路线 | 可行性 | 代价 | 风险 |
+|---|---|---|---|
+| ★★ **Linux ＋ ROCm Docker ＋ TF** | ★ 可行 | **半天**（装驱动/内核模块 ＋ 镜像 ＋ 挂 20 GB 数据 ＋ 跑 1 轮）| 内核版本与 ROCm 匹配、卡在支持列表内 |
+| PyTorch ＋ ROCm | ★ 支持更好 | ★★ **要移植训练器 ＋ 改导出路径**（coremltools 支持 torch，但配方/权重需重新验证）| 大工程 |
+| Mac 上的 AMD 显卡 | ✗ **不可用** | — | macOS 无 ROCm；Metal 插件只支持 Apple silicon |
+
+**(d) ★★★ 但先问一句：我们现在**缺训练吞吐吗**？
+
+| 现状 | 数字 |
+|---|---|
+| 107（3060，热降频）| c32 dw **18.5 min/轮**、c128 dw **57 min/轮** |
+| 211 / 66 | **空闲**（CPU，可跑 c32 dw ~2 h/轮）|
+| 本机（M4 Pro）| dense c32 **75 min/轮**（nice 20，不占资源）|
+| ★ 真正的瓶颈 | ★★ **不是算力，而是"该跑哪些实验"的判断**（今天的结论多次被测量推翻）|
+
+**⇒ ★★ 建议**：**除非**手上那块 AMD 卡在 Linux 机器上、且我们确定要并行多条 40 轮实验，
+   否则**先用现有三台跑通"数据 × 架构 × 加权"的矩阵**更划算 ✓
+**⇒ 若确有 Linux ＋ AMD 卡**：先跑**1 轮 c32 dw**（约 20 min 到 2 h）测 wall-clock，
+   与 107 的 18.5 min 对比 ⇒ 再决定是否投入 ✓
