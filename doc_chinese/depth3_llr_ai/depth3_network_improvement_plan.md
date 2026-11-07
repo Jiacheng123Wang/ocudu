@@ -2101,3 +2101,6 @@ doc_chinese/depth3_llr_ai/work_tmp/tools/measure_thresholds.py
 | 对照 | 已有的 `w2v1 + c32 + dw`（未加权）：e20 = 959 736、e40 = 1 003 288、e52 = 1 025 592 |
 | ★ 主判据 | **P1 的分组报表**：256QAM `>=4k` 组的 bce 是否下降；**总体 BCE 允许略升** |
 | 次判据 | 探针（val 前 5 名逐个测，取最好）|
+
+**⇒ 2026-11-07 12:35：P2 的第一个 run 已在 211 启动** `d3_w2v1_c32b18dw_sw2_e20`
+（c32 dw ＋ w2v1 ＋ `--snr-weight 2.0 --snr-sigma 3.0 --group-report 5`，20 轮；参数 26 185 ＝ dw ✓，数据 160 014 ✓）✓
