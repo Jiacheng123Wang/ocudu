@@ -45,6 +45,19 @@ CPU_REF_NOTE="dump tb_s2_amc_ping_1102a (b68ef309), npu/generic decoder, PURE, 4
 [ -f "$HOME/ai_depth3/bin/probe_env.sh" ] && . "$HOME/ai_depth3/bin/probe_env.sh"
 mkdir -p "$WORK"
 
+# ONE MEASUREMENT AT A TIME, ACROSS INVOCATIONS. `run_arm_ext.py --guard 1` aborts when another replay is
+# alive, but two jobs that start together each look at a CLEAR field -- the ruler spawns one process per
+# unit, so there is a gap between every pair -- and then trip each other. That is exactly how the e40/e44/e60
+# probe came back with `units 0 arm 0` while a ruler was running. The lock covers the WHOLE probe (export,
+# compile, calibrate, replay), and `mkdir` is atomic on every POSIX shell (macOS has no `flock`).
+LOCK=$MAC/measure.lock.d
+for _ in $(seq 1 720); do
+  mkdir "$LOCK" 2>/dev/null && break
+  sleep 10
+done
+[ -d "$LOCK" ] || { echo "REFUSING: another measurement holds $LOCK after two hours"; exit 3; }
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
+
 echo "=== $TAG  units $UNITS  $(date +%T)"
 if [[ "$SRC" == *:* ]]; then scp -q "$SRC" "$WORK/$TAG.keras" || { echo "FETCH FAILED"; exit 2; }
 else cp "$SRC" "$WORK/$TAG.keras"; fi
@@ -71,9 +84,15 @@ OCUDU_DEPTH3_FALLBACK=none python3 "$RUN_ARM" --arm ai \
   > "$WORK/run.log" 2>&1
 UNITS_SHA=$(head -n "$UNITS" "$UNITS_FILE" | shasum -a 256 | cut -c1-24)
 $PY - "$WORK/$TAG.csv" "$UNITS" "$UNITS_SHA" "$CPU_REF" "$CPU_REF_NOTE" "$(shasum -a 256 "$BIN" | cut -c1-24)" <<'PY'
-import csv, sys
+import csv, os, sys
 arm_csv, n, units_sha, ref, ref_note, bin_sha = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4]), sys.argv[5], sys.argv[6]
 rows = list(csv.DictReader(open(arm_csv)))[:n]
+# AN EMPTY ARM IS A FAILURE, NOT A ZERO. When two measurements collided the guard aborted the replay and this
+# block still printed `units 0 arm 0 cpu_ref 1,149,352 delta -100.00%` -- a sentence that reads like a
+# catastrophic model instead of a broken run. Refuse loudly and carry a non-zero status out of the script.
+if not rows:
+    print(f"FAILED: {arm_csv} has no rows -- the replay produced nothing; see {os.path.dirname(arm_csv)}/run.log")
+    sys.exit(4)
 bits = [int(r['tbs_bits']) if r['status'] == 'OK' else 0 for r in rows]
 ok = sum(1 for r in rows if r['status'] == 'OK')
 total = sum(bits)
@@ -95,4 +114,6 @@ print(f"units {len(bits)}  OK {ok}  arm {total:,}  cpu_ref {ref:,}  delta {total
       f"UNITS_SHA {units_sha}  BIN_SHA {bin_sha}")
 print(f"  reference: {ref_note}")
 PY
+STATUS=$?
 echo "=== done $(date +%T)"
+exit $STATUS
