@@ -14,7 +14,15 @@
 set -u
 SRC=${1:?usage: probe_snapshot.sh <snapshot.keras | user@host:/path/snapshot.keras> [units]}
 UNITS=${2:-500}
-TAG=$(basename "$SRC" .keras)
+# TWO CHECKPOINTS CAN SHARE A BASENAME, AND THAT USED TO OVERWRITE A BUNDLE. Every run names its snapshots
+# `epoch_0010_periodic.keras`, so the tag -- and therefore the bundle directory -- collided: probing a second
+# "e10" silently replaced the first one's compiled bundle, and the measurement that followed scored a model
+# other than the one it was named after. The tag therefore carries a short hash of the SOURCE: the file itself
+# when it is local, the `host:path` string when it is remote (the fetch has not happened yet at this point).
+TAG_BASE=$(basename "$SRC" .keras); TAG_BASE=${TAG_BASE##*:}
+if [[ "$SRC" == *:* ]]; then TAG_HASH=$(printf '%s' "$SRC" | shasum -a 256 | cut -c1-6)
+else TAG_HASH=$(shasum -a 256 "$SRC" | cut -c1-6); fi
+TAG=${TAG_BASE}_${TAG_HASH}
 MAC=$HOME/ai_depth3
 WORK=$MAC/probe/$TAG
 # THE HOST-SPECIFIC PATHS ARE OVERRIDABLE, SO ONE COPY SERVES BOTH MACHINES. On the Mac everything lives
@@ -25,7 +33,15 @@ LIB=${LIB:-$HOME/dev/ocudu/lib/phy/upper/ai_signal_processors/depth3/ai_train}
 CORPUS=${CORPUS:-$HOME/dev/ocudu/lib/phy/upper/ai_signal_processors/test/ruler_s2_amc_5000_corpus}
 BIN=${BIN:-$HOME/dev/ocudu/build/lib/phy/upper/channel_processors/metal/ul_chain_replay}
 RUN_ARM=${RUN_ARM:-$HOME/ai_depth3/exp_bits_1102/run_arm_ext.py}
-CLEAN_CPU=${CLEAN_CPU:-$HOME/ai_depth3/exp_bits_1102/clean_cpu.csv}
+# THE REFERENCE IS THE CLASSICAL CPU CHAIN, AND IT IS A NUMBER, NOT A CSV. Until 2026-11-07 the score
+# block loaded a per-unit `clean_cpu.csv` and printed the delta against it; that csv is the RULER's
+# reference for the Metal front end (the old gpu pipeline vocabulary, 3 465 of 5 000 units), so slicing
+# it to the probe's 500 units printed 930 016 -- a reference 19% weaker than the chain the AI arm is
+# actually replacing (the dump's CPU chain, 1 149 352 on the same units). Two probe results were read
+# against the wrong baseline before that was noticed. The csv has been deleted (it was byte-identical to
+# the ruler archive, so nothing is lost) and the reference is now this constant, with its provenance.
+CPU_REF=${CPU_REF:-1149352}
+CPU_REF_NOTE="dump tb_s2_amc_ping_1102a (b68ef309), npu/generic decoder, PURE, 409/500 OK"
 [ -f "$HOME/ai_depth3/bin/probe_env.sh" ] && . "$HOME/ai_depth3/bin/probe_env.sh"
 mkdir -p "$WORK"
 
@@ -53,30 +69,30 @@ OCUDU_DEPTH3_FALLBACK=none python3 "$RUN_ARM" --arm ai \
   --bundle "$WORK/$TAG.mlmodelc" --units "$WORK/units_$UNITS.txt" --corpus "$CORPUS" \
   --out "$WORK/$TAG.csv" --logs "$WORK/logs" --tmp "$WORK/tmp" --warmup 0 --guard 1 \
   > "$WORK/run.log" 2>&1
-$PY - "$WORK/$TAG.csv" "$CLEAN_CPU" "$UNITS" "$(shasum -a 256 "$BIN" | cut -c1-24)" <<'PY'
+UNITS_SHA=$(head -n "$UNITS" "$UNITS_FILE" | shasum -a 256 | cut -c1-24)
+$PY - "$WORK/$TAG.csv" "$UNITS" "$UNITS_SHA" "$CPU_REF" "$CPU_REF_NOTE" "$(shasum -a 256 "$BIN" | cut -c1-24)" <<'PY'
 import csv, sys
-arm_csv, cpu_csv, n, bin_sha = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
-def load(p): return {r['unit']: r for r in csv.DictReader(open(p))}
-a, c = load(arm_csv), load(cpu_csv)
-units = [u for u in a if u in c][:n]
-def bits(d, u):
-    r = d.get(u)
-    return int(r['tbs_bits']) if r and r['status'] == 'OK' else 0
-ab = sum(bits(a, u) for u in units); cb = sum(bits(c, u) for u in units)
+arm_csv, n, units_sha, ref, ref_note, bin_sha = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4]), sys.argv[5], sys.argv[6]
+rows = list(csv.DictReader(open(arm_csv)))[:n]
+bits = [int(r['tbs_bits']) if r['status'] == 'OK' else 0 for r in rows]
+ok = sum(1 for r in rows if r['status'] == 'OK')
+total = sum(bits)
 # THE PROBE'S OWN SAMPLING INTERVAL, so nobody reads a five-hundred-unit number as if it were the ruler's.
 # A random five hundred is unbiased for the five-thousand result -- its median lands on it -- but its 95
 # percent spread is about six points wide, and one fixed subset can therefore sit five points off the ruler
-# without anything being wrong. Bootstrap the subset itself to show that width.
-import random, statistics
+# without anything being wrong. Bootstrap the ARM side only: the reference is a fixed whole-set number, so
+# there is no paired per-unit CPU sample to resample any more (that is what the deleted csv provided).
+import random
 rng = random.Random(20261102)
 gains = []
 for _ in range(2000):
-    s = [units[rng.randrange(len(units))] for _ in range(len(units))]
-    a_ = sum(bits(a, x) for x in s); c_ = sum(bits(c, x) for x in s)
-    if c_: gains.append((a_ - c_) / c_ * 100)
+    s = sum(bits[rng.randrange(len(bits))] for _ in range(len(bits)))
+    gains.append((s - ref) / ref * 100)
 gains.sort()
 lo, hi = gains[50], gains[-51]
-print(f"units {len(units)}  arm {ab:,}  cpu {cb:,}  delta {ab-cb:+,} ({(ab-cb)/cb*100:+.2f}%)  "
-      f"自 95% 区间 [{lo:+.2f}%, {hi:+.2f}%]  BIN_SHA {bin_sha}")
+print(f"units {len(bits)}  OK {ok}  arm {total:,}  cpu_ref {ref:,}  delta {total-ref:+,} "
+      f"({(total-ref)/ref*100:+.2f}%)  arm 95% 区间 [{lo:+.2f}%, {hi:+.2f}%]  "
+      f"UNITS_SHA {units_sha}  BIN_SHA {bin_sha}")
+print(f"  reference: {ref_note}")
 PY
 echo "=== done $(date +%T)"

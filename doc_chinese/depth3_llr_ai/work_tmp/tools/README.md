@@ -24,9 +24,17 @@ thousand files is not a place to keep scripts: it makes them slow to grep and im
 
 ## Hosts
 
-The scripts take their data paths from the environment (`PY`, `CORPUS`, `BIN`, `UNITS_FILE`, `CLEAN_CPU`) and the probe
+The scripts take their data paths from the environment (`PY`, `CORPUS`, `BIN`, `UNITS_FILE`, `CPU_REF`) and the probe
 sources `~/ai_depth3/bin/probe_env.sh` when it exists, so one copy serves both machines. `~/ai_depth3/bin/*` are thin
 wrappers that exec the copies here, which keeps the old invocation paths working while the source of truth stays in git.
+
+**The probe's CPU reference is a constant, not a csv (changed 2026-11-07).** `probe_snapshot.sh` used to print its
+delta against a per-unit `clean_cpu.csv`; that file is the *ruler's* reference for the Metal front end, so slicing it to
+the probe's 500 units yielded 930 016 bit — a reference 19% weaker than the CPU chain the AI arm replaces (the dump's
+chain, **1 149 352** on the same units). Both probe baselines were read against it before that was noticed, so the file
+was deleted (it was byte-identical to the `ruler_s2_amc_5000_clean_cpu.csv` archive, sha `17300b0b…`, which remains) and
+the script now prints `cpu_ref 1,149,352` with its provenance, `UNITS_SHA` and an arm-only bootstrap interval.
+Override with `CPU_REF=<bits>` only when the unit set itself changes, and say so in the log.
 
 ## fly.sh
 
