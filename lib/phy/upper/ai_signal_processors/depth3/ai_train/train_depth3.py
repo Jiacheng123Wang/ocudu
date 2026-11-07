@@ -995,6 +995,13 @@ def main():
                         help="decode PERFECT LLRs on a few validation samples and exit. The rate "
                              "must be zero, which is what proves the metric can reach zero rather "
                              "than merely being small")
+    parser.add_argument("--group-report", type=int, default=5, metavar="N",
+                        help="print the N worst (modulation x SNR band x transport-block size) GROUPS by validation "
+                             "bit-cross-entropy, with how many samples and what share of the bits each carries. The "
+                             "global validation loss cannot rank models whose difference lives in one group: measured "
+                             "2026-11-07, two epochs eight tenths of a percent apart on the global loss were six percent "
+                             "apart on delivered bits, and the whole difference was fifteen 256QAM receptions at 25 dB "
+                             "carrying 4992-bit blocks. 0 disables the report")
     parser.add_argument("--bler-samples", type=int, default=24,
                         help="validation samples to decode for the coded BLER. Decoding is far "
                              "more expensive than a forward pass, so this is a subset; 0 skips it")
@@ -1201,8 +1208,30 @@ def main():
             "the metric cannot reach zero, so it would never accept a good model")
         return 0
 
+    # THE GROUPING THE GLOBAL LOSS CANNOT SEE. A reception is delivered or lost as a whole transport block, near a decoder
+    # threshold that depends on its modulation and block size; averaging bit-cross-entropy over every sample hides both the
+    # threshold and the size. These bands are the ones the probe already uses to report delivered bits, so a group here is
+    # directly comparable with a row there.
+    def snr_band(snr):
+        for edge, name in ((10.0, "<=10"), (16.0, "10-16"), (20.0, "16-20"),
+                           (24.0, "20-24"), (27.0, "24-27")):
+            if snr < edge:
+                return name
+        return ">27"
+
+    def tb_band(bits):
+        for edge, name in ((512, "<512b"), (2048, "512-2k"), (4096, "2k-4k")):
+            if bits < edge:
+                return name
+        return ">=4k"
+
+    def group_of(index):
+        return (val.modulation_of(index), snr_band(float(val.data["snr_nominal"][index])),
+                tb_band(int(val.data["nof_tb_bits"][index])))
+
     def evaluate(use_bler):
         totals, errors, magnitudes, band_ber = [], [], [], []
+        groups = {}          # (modulation, snr band, tb band) -> [sum bce, sum bits, samples]
         bler = CodedBler(val) if use_bler else None
         decoded = 0
         for samples in val.epoch(args.batch):
@@ -1216,6 +1245,25 @@ def main():
             # PER-ROW, SO THE LOW-SNR BAND CAN BE MEASURED (design section 19.438). The gates that decide whether a bundle is
             # adopted are per-bin BERs on the low-SNR bands, and the validation loss is a different objective that can peak at a
             # different epoch. Measuring the band during training lets the checkpoint be chosen on the acceptance metric itself.
+            if args.group_report > 0:
+                scale = targets["scale"].numpy()
+                labels = targets["llr_shape"].numpy()
+                weights = targets["llr_weights"].numpy()
+                scaled = llr.numpy() * scale.reshape((-1,) + (1,) * (llr.ndim - 1))
+                # The same stable form `depth3_loss.bce_loss` uses, kept per row so the sum and the bit count can be
+                # accumulated per group instead of collapsed into one number.
+                per_entry = (np.maximum(scaled, 0.0) - scaled * labels
+                             + np.log1p(np.exp(-np.abs(scaled))))
+                for row in range(llr.shape[0]):
+                    w = weights[row]
+                    total_w = float(w.sum())
+                    if total_w <= 0.0:
+                        continue
+                    key = group_of(int(samples[row]["index"]))
+                    slot = groups.setdefault(key, [0.0, 0.0, 0])
+                    slot[0] += float((per_entry[row] * w).sum())
+                    slot[1] += total_w
+                    slot[2] += 1
             for row in range(llr.shape[0]):
                 row_ber, _ = decode_metrics(llr.numpy()[row:row + 1],
                                             targets["llr_shape"].numpy()[row:row + 1],
@@ -1242,7 +1290,7 @@ def main():
         band = float(np.mean(low)) if low else float("nan")
         return (float(np.mean(totals)), float(np.mean(errors)), float(np.mean(magnitudes)),
                 bler.rate() if bler is not None else float("nan"),
-                bler.skipped if bler is not None else 0, band)
+                bler.skipped if bler is not None else 0, band, groups)
 
     os.makedirs(args.out, exist_ok=True)
     history = []
@@ -1304,7 +1352,7 @@ def main():
             losses.append(float(total))
         want_bler = args.bler_samples > 0 and (epoch % max(1, args.bler_every) == 0
                                                or epoch == args.epochs)
-        val_loss, val_ber, val_mag, val_bler, val_skipped, val_band = evaluate(want_bler)
+        val_loss, val_ber, val_mag, val_bler, val_skipped, val_band, val_groups = evaluate(want_bler)
         history.append({"epoch": epoch, "train": float(np.mean(losses)), "val": val_loss,
                         "val_ber": val_ber, "val_llr_mean": val_mag, "val_bler": val_bler,
                         "val_bler_skipped": val_skipped})
@@ -1312,6 +1360,17 @@ def main():
             print(f"epoch {epoch:4d}  train {np.mean(losses):.5f}  val {val_loss:.5f}  "
                   f"uncoded BER {val_ber:.4f}  coded BLER {val_bler:.4f}  "
                   f"mean|LLR| {val_mag:6.1f}  ({time.time() - started:.0f}s)")
+            # THE GROUPS THE AVERAGE HIDES. Printed on the same schedule as the epoch line, worst first, with the share of the
+            # validation bits each group carries: a group at twice the global loss that holds two percent of the bits is noise
+            # to fix, and one that holds twenty percent is the model. That distinction is what the global number cannot make.
+            if args.group_report > 0 and val_groups:
+                total_bits = sum(v[1] for v in val_groups.values())
+                worst = sorted(val_groups.items(), key=lambda kv: -(kv[1][0] / max(kv[1][1], 1.0)))
+                worst = [kv for kv in worst if kv[1][2] >= 2][:args.group_report]
+                for (qm, snr_name, tb_name), (sum_bce, nbits, nsamples) in worst:
+                    mean_bce = sum_bce / max(nbits, 1.0)
+                    print(f"    group {str(qm):<7} {snr_name:<6} {tb_name:<7}"
+                          f" bce {mean_bce:.5f}  x{nsamples:<4}  bits {nbits/total_bits*100:5.1f}%")
         # EARLY TERMINATION, the way the LDPC decoder has it (design section 19.437). The validation curve is flat long before the
         # epoch budget is spent -- E4's minimum is at epoch 18 of 40, and the remaining twenty-two epochs are five-thousandths of
         # noise -- so a patience stops the run when it has stopped learning. The weights kept are the BEST ones, which the loop
