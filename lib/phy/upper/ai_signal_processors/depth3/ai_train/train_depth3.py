@@ -1155,8 +1155,8 @@ def main():
     # one architecture number that costs nothing (dilation adds no weights and no multiply-adds), and
     # it was the only one that had no record in the run logs: the cycle lived in a module constant, so
     # two runs could differ in it and look identical in the log.
-    print(f"receptive field {receptive_field(blocks, args.dilations)} subcarriers "
-          f"(cycle {','.join(str(d) for d in args.dilations)} x {blocks} blocks)")
+    print(f"receptive field {receptive_field(args.blocks, args.dilations)} subcarriers "
+          f"(cycle {','.join(str(d) for d in args.dilations)} x {args.blocks} blocks)")
     if args.init:
         model.load_weights(args.init)
         print(f"started from {args.init}")
