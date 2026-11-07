@@ -2180,3 +2180,37 @@ doc_chinese/depth3_llr_ai/work_tmp/tools/measure_thresholds.py
 | e10（约 9.5 h 后，今晚 ~22:00）| 探针一次，与 c32 曲线对照看趋势 |
 | e20（明天 ~07:00）| 探针，并与 w2 的 c128 e20（若有）对照 |
 | ★ e33/e40 附近 | ★ **重点**：w2 的峰值就在 e33–e40，本 run 的 val 低谷大概率也在附近 ⇒ 到点按 **val 前 5 名**逐个探针 ✓ |
+
+---
+
+## 56. ★★★★ 2026-11-07 12:40 **机队调整：c128 暂停（可续），P2 加权训练搬到 107 的 GPU** —— 以及一个"静默跑在 CPU 上"的坑
+
+**(a) ★★★ 用户的决定与执行**
+
+| 动作 | 结果 |
+|---|---|
+| ★ **暂停 107 的 c128**（意义是数据集对比，可续）| ★ 已停；`resume.json` ＋ `depth3_last.keras` **都在** ⇒ 以后 `--resume` 可续 ✓ |
+| ★ 停掉 211 的 P2 副本 | 已停（它只跑了 30 min，未完成一轮，无损失）✓ |
+| ★★ **P2 搬到 107 的 GPU** | ★ **已启动**：`d3_w2v1_c32b18dw_sw2_e20` |
+| 预计 | ★ GPU 上 **18.5 min/轮** ⇒ 20 轮 ≈ **6.2 h** ⇒ 今晚 **~19:00** 出结果 ✓（CPU 上要 40 h）|
+
+**(b) ★★★★ 踩到的坑：launcher 少了 `source env.sh` ⇒ 静默跑在 CPU 上**
+
+| 现象 | 原因 |
+|---|---|
+| `nvidia-smi` **0%、18 MiB**，而进程吃着 **1011% CPU** | ★ launcher 里**没有** `source env.sh` ⇒ **`LD_LIBRARY_PATH` 没有 CUDA 库** |
+| TF 日志 | ★ `Cannot dlopen some GPU libraries … Skipping registering GPU devices` |
+| 为什么 211 上没暴露 | ★ 211 **没有 GPU**，本来就该跑 CPU ⇒ 同一个脚本在两台机器上**行为不同** ✗ |
+
+**⇒ ★★★ 修复**：脚本已加 `source "$HOME/work/ai_phy_train/bin/env.sh"` 与**解释性注释** ⇒ 重启后 `nvidia-smi` **88%、4 291 MiB** ✓
+**⇒ ★★ 教训（写进规范）**：**任何 launcher 必须 `source env.sh`**；跨主机复用 launcher 时，
+   **判据是 `nvidia-smi` 的利用率与显存**，而不是"进程在跑" ✓
+
+**(c) ★★ 当前机队**
+
+| 机器 | 任务 | 进度 |
+|---|---|---|
+| **107**（GPU）| ★ **P2：c32 dw ＋ w2v1 ＋ `--snr-weight 2 --snr-sigma 3`** | 刚启动，ETA **今晚 19:00** |
+| 107（备用）| c128 dw ＋ w2v1（已暂停，可 `--resume` 续）| 3/40 轮已存 ✓ |
+| **本机**（CPU nice 20）| c32 **dense** ＋ w2v1（sc0.03）| 11/20 轮，ETA 今晚 23:20 |
+| **211 / 66** | 空闲 | — |
