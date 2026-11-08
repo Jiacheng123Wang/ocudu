@@ -19,10 +19,23 @@ UNITS=${2:-500}
 # "e10" silently replaced the first one's compiled bundle, and the measurement that followed scored a model
 # other than the one it was named after. The tag therefore carries a short hash of the SOURCE: the file itself
 # when it is local, the `host:path` string when it is remote (the fetch has not happened yet at this point).
+# NAME THE ARTEFACT AFTER THE MODEL, NOT AFTER THE FILE (user, 2026-11-08). A snapshot called
+# `epoch_0054_periodic.keras` says nothing about which run, recipe or width it belongs to, so a probe directory
+# built from it is unfindable a week later. Pass `NAME=d3_<ds>_c<C>b<B><arch>_<recipe>_e<EP>` (the canonical
+# form in `model_naming_convention.md`) and every artefact -- directory, bundle, csv, log -- carries it, with the
+# source hash appended so two different checkpoints can never share a directory.
 TAG_BASE=$(basename "$SRC" .keras); TAG_BASE=${TAG_BASE##*:}
 if [[ "$SRC" == *:* ]]; then TAG_HASH=$(printf '%s' "$SRC" | shasum -a 256 | cut -c1-6)
 else TAG_HASH=$(shasum -a 256 "$SRC" | cut -c1-6); fi
-TAG=${TAG_BASE}_${TAG_HASH}
+if [ -n "${NAME:-}" ]; then
+  case "$NAME" in
+    d3_*) TAG=${NAME}_${TAG_HASH} ;;
+    *) echo "REFUSING: NAME=$NAME is not a canonical model name (must start with d3_); see model_naming_convention.md" >&2; exit 2 ;;
+  esac
+else
+  TAG=${TAG_BASE}_${TAG_HASH}
+  echo "NOTE: no NAME given, so the artefact is named after the FILE ($TAG); pass NAME=d3_... to follow the convention" >&2
+fi
 MAC=$HOME/ai_depth3
 WORK=$MAC/probe/$TAG
 # THE HOST-SPECIFIC PATHS ARE OVERRIDABLE, SO ONE COPY SERVES BOTH MACHINES. On the Mac everything lives

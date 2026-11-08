@@ -50,4 +50,10 @@ finally:
 # aborted, the csv still had 5 000 `no` rows, and the summary read `OK=0 bits=0` as if the chain had failed.
 if okn == 0:
     raise SystemExit(f"FAILED {os.path.basename(out_csv)}: n={len(units)} OK=0 -- the replay produced nothing")
+# THE OUTPUT FILE IS PART OF THE RECORD, SO IT IS CHECKED AGAINST THE NAMING CONVENTION. A csv called
+# `/tmp/x.csv` cannot be matched to a model a week later; the convention's names are what make the tables in
+# `depth3_gate_and_model_pk_npu.md` traceable back to a bundle.
+if not re.match(r"^(ruler|full|probe)_d3_", os.path.basename(out_csv)):
+    print(f"WARNING: {os.path.basename(out_csv)} does not follow the naming convention "
+          f"(expected <scale>_d3_<ds>_c<C>b<B>..._e<EP>.csv); see model_naming_convention.md", file=sys.stderr)
 print(f"DONE {os.path.basename(out_csv)}: n={len(units)} OK={okn} bits={bt:,}")
