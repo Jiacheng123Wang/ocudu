@@ -3,13 +3,16 @@ import CoreML
 
 func deviceName(_ d: MLComputeDevice?) -> String {
     guard let d else { return "none" }
-    // The concrete types are public classes (MLCPUComputeDevice, MLGPUComputeDevice, MLNeuralEngineComputeDevice);
-    // describing type(of:) only prints the shared superclass, which is why an earlier version reported "MLComputeDevice"
-    // for every op and told us nothing.
-    if d is MLNeuralEngineComputeDevice { return "ane" }
-    if d is MLGPUComputeDevice { return "gpu" }
-    if d is MLCPUComputeDevice { return "cpu" }
-    return "?"
+    // MLComputeDevice IS AN ENUM on macOS 26, NOT A CLASS WITH SUBCLASSES. The previous version tested
+    // `d is MLNeuralEngineComputeDevice`, which the compiler warned "always fails" and which made every op
+    // report "?" -- so the tool counted operators but never said where they run, and a gate that read
+    // "108 ops" was silently saying nothing about placement. Switching over the enum is the supported form.
+    switch d {
+    case .cpu: return "cpu"
+    case .gpu: return "gpu"
+    case .neuralEngine: return "ane"
+    @unknown default: return "?"
+    }
 }
 
 let args = CommandLine.arguments
