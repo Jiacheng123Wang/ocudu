@@ -214,6 +214,7 @@ argv: --train …/datasets_train_w2 --val …/datasets_monitor_w2 --out …/runs
 | 参数组合 | token | 例 |
 |---|---|---|
 | `--snr-weight w --snr-sigma s`（s 非 3.0）| ★ **`sw<w>s<s>`** | `sw2s3` ＝ weight 2、sigma 3（两者都显式）|
+| ★ `--loss-norm sample` | ★ **`lns`** | 2026-11-09 新增：LLR 项按**每个接收等权**平均（默认 `bits` 按比特等权，不写 token）|
 | `--snr-weight w`（sigma 保持 3.0）| ★ **`sw<w>`** | `sw2` |
 | `--snr-weight 0` | **不写**（默认关）| — |
 
