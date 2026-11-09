@@ -3821,3 +3821,49 @@ $BINARY $unit --phy_pipeline cpu --pusch_receiver_backend classic --out $OUT/sta
 |---|---|
 | 单次（现在）| AI 的"单次解码能力"是否强于经典链；harq 单元上 AI 能救回多少（c128 7/34）|
 | ★★ **HARQ（终局）** | **现网口径**下 AI 是否真的多交付了比特，以及"CPU+HARQ 也失败"的盲区 AI 能不能打开 |
+
+---
+
+## 92. ★★★★★ 2026-11-09 20:45 **HARQ 库的 ground truth 从哪来：**不是** replay，是 `tb_live`（gNB 实时链，带 HARQ 合并）**
+
+**(a) ★★★★ 关键区分：两个不同的问题**
+
+| 问题 | 需要 HARQ 吗 |
+|---|---|
+| **建 harq 库（标签 = CRC-OK 的 TB 比特）** | ★ **不需要 replay 开 HARQ** —— 标签来自 **`tb_live`**，那是 gNB **实时链**（飞行时**有** HARQ 软合并）的产物 ✓ |
+| **PK 对比里 CPU 基准是否公平** | ★ **需要** —— 单次 replay 的经典链比现网弱（§91）✓ |
+
+**(b) ★★★★★ 机制（`harq_backfill.py`）**
+
+```
+输入：① dump 的 index.csv（哪些单元单次解出/失败）
+      ② 采集目录的 PDU 侧车（rnti / harq_id / rv / slot）
+      ③ ★ --live-tb <leg>/tb_live  ← gNB 实时解出的 TB（每成功一次一个 tb_*.bits + dd_meta.csv 的 slot）
+做法：把一个失败的接收，和【同一 HARQ 进程里、之后成功解出】的那次配对，
+      把 donor 的 .bits 复制成 <dump>/tb/<失败单元>.bits，标 label_from=harq
+样本身份：★ X/H 取自【失败的那次接收】，标签取自【donor 的解码结果】 —— 这正是 harq 样本的定义 ✓
+```
+
+**三道保险**（代码里写着）：① 按 slot 间隔切链（harq_id 会被复用，合并两个不同块最危险）；② 块长必须一致；
+③ donor 必须在失败之后，不能在前 ✓
+
+**(c) ★★★★ 实证（`tb_s2_amc_ping_1102a`）**
+
+| 项 | 值 |
+|---|---|
+| `index_harq_only.csv` 行数 | **3 496** |
+| 其中**有 `.bits` 文件**（即标签存在）| ★ **3 496 / 3 496** ✓ |
+| `tb/` 下总 bits 文件 | 44 930（= self 40 810 + harq 3 496 ＋ 少量其它）|
+| 建库脚本是否用了首选 donor 源 | ★ `build_mother_set.sh` 传了 `--live-tb "$CAP/tb_live"` ✓ |
+
+**(d) ★★★ 为什么不能用"replay 的 donor"作首选**
+
+`harq_backfill.py` 的注释写明：**只有 live 链的软合并**才能解出"只在合并后才成立"的重传；
+**离线单次 replay 复现不了那个合并** ⇒ 对这类重传，**live 的 `.bits` 是唯一存在的地方**。
+replay donor 只是 fallback，用在"重传自己也能单次解出"的情形 ✓
+
+**(e) ★★ 于是结论**
+
+1. ★★★ **建 harq 库不需要 dump 开 HARQ** —— 我们的 harq 样本（§89 的 34/500、全腿 3 496 个）**标签是可靠的**；
+2. ★★★ **PK 对比要开 HARQ** —— 那是为了让 CPU 基准等于现网能力（§91）；
+3. ★★ 两者不冲突：**库用 live 标签，PK 用 HARQ replay** ✓
