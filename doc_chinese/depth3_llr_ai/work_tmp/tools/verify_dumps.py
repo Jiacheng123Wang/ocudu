@@ -34,7 +34,18 @@ def main():
             print(f"{name[3:]:38} {'-':>8} {'-':>8} {'-':>8} {'-':>6}  incomplete (no index or units)")
             bad.append(name)
             continue
-        units = [line.strip() for line in open(units_file) if line.strip()]
+        # `units.txt` HOLDS ABSOLUTE PATHS TO THE .txt SIDECARS, NOT BARE UNIT NAMES (dump_tb.sh writes the paths it
+        # scanned). Treating them as names made every leg compare against `<leg>/<abs path>.bin` and fail with
+        # with_bin=0 -- a bug in the checker, not in the dump. Reduce each line to the unit name it denotes.
+        units = []
+        for line in open(units_file):
+            line = line.strip()
+            if not line:
+                continue
+            name = os.path.basename(line)
+            if name.endswith(".txt"):
+                name = name[:-4]
+            units.append(name)
         rows = sum(1 for _ in open(index_file)) - 1
         ok = sum(1 for line in open(index_file) if ",OK," in line)
         tot_units += len(units)

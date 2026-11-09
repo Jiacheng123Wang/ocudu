@@ -60,6 +60,15 @@ for leg_path in "$CORPUS"/*/; do
     running=$(jobs -rp | wc -l | tr -d ' ')
     sleep 5
   done
+  # THE DELETIONS RUN BEHIND THE DUMPS, SO THE DISK IS THE THING THAT CAN RUN OUT. Each leg leaves ~5 GB of scratch
+  # until its background rm catches up; with four legs in flight that is ~20 GB, but a slow disk could accumulate it
+  # across legs. Below the floor the driver waits instead of filling the volume.
+  free_gb=$(df -g "$OUT" 2>/dev/null | awk 'NR==2 {print $4}')
+  while [ "${free_gb:-999}" -lt "${MIN_FREE_GB:-80}" ]; do
+    say "--- waiting for cleanup: free ${free_gb} GB < ${MIN_FREE_GB:-80} GB"
+    sleep 60
+    free_gb=$(df -g "$OUT" 2>/dev/null | awk 'NR==2 {print $4}')
+  done
   bash "$HERE/dump_one_leg.sh" "$CORPUS" "$OUT" "$leg" "$JOBS" "$BINARY" &
   running=$(jobs -rp | wc -l | tr -d ' ')
   say "--- spawned $leg ($running legs in flight)"

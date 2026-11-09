@@ -215,6 +215,7 @@ argv: --train …/datasets_train_w2 --val …/datasets_monitor_w2 --out …/runs
 |---|---|---|
 | `--snr-weight w --snr-sigma s`（s 非 3.0）| ★ **`sw<w>s<s>`** | `sw2s3` ＝ weight 2、sigma 3（两者都显式）|
 | ★ `--loss-norm sample` | ★ **`lns`** | 2026-11-09 新增：LLR 项按**每个接收等权**平均（默认 `bits` 按比特等权，不写 token）|
+| ★ `--loss-norm sample` 且是「同一 case 的修版」| ★ **`_fix`**（后缀，放在 `_e<EP>` 之前）| `…-sw2s3_fix_e40` ＝ 与 `…-sw2s3_e20` 同一配方、只改了损失归一化；比 `lns` 更好认，**正式使用这一种** |
 | `--snr-weight w`（sigma 保持 3.0）| ★ **`sw<w>`** | `sw2` |
 | `--snr-weight 0` | **不写**（默认关）| — |
 
