@@ -44,17 +44,33 @@ import depth3 as D3  # noqa: E402
 
 VAL = os.path.expanduser("~/ai_depth3/w2v1_data/datasets_monitor_w2")
 EDGES = [0, 20, 22, 24, 26, 99]
+# ALLOCATION WIDTH IS THE OTHER AXIS THAT MATTERS. The units the CPU wins are 2 PRB at 24-32 dB and a code rate
+# near one, so the profile has to say whether the error rate at 24-28 dB is the same in a narrow allocation as in a
+# wide one: if it is, the model is not worse there and the block losses come only from the missing redundancy.
+PRB_EDGES = [1, 4, 9, 25, 10 ** 6]
+PRB_LABEL = ["<=3", "4-8", "9-24", ">24"]
 
 
-def analyse(ckpt, limit):
-    val = T.Batches(VAL, "QPSK", 0, seed=20261105, cond=True, layout="spatial")
+def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=10 ** 6):
+    val = T.Batches(data_dir or VAL, "QPSK", 0, seed=20261105, cond=True, layout="spatial")
     model = tf.keras.models.load_model(ckpt, compile=False,
                                        custom_objects={"FoldedScaleConv": T.FoldedScaleConv})
-    idx = [i for i in range(val.n) if val.modulation_of(i) == "256QAM"][:limit]
+    matched = [i for i in range(val.n)
+               if val.modulation_of(i) == modulation
+               and prb_min <= int(val.data["alloc_nof_prb"][i]) <= prb_max]
+    # TAKE A SPREAD, NOT THE HEAD. The datasets are ordered by bin, so `matched[:limit]` is one bin (typically the
+    # first SNR band) and says nothing about the others; every k-th sample covers the whole set at the same cost.
+    if limit and len(matched) > limit:
+        stride = len(matched) // limit
+        matched = matched[::stride][:limit]
+    idx = matched
     par = {0: [0, 0], 1: [0, 0]}
     mod4 = {m: [0, 0] for m in range(4)}
     dist = {}
     band = {k: [0, 0] for k in range(len(EDGES) - 1)}
+    prb_band = {(w, k): [0, 0] for w in range(len(PRB_LABEL)) for k in range(len(EDGES) - 1)}
+    llr_abs = {(w, k): 0.0 for w in range(len(PRB_LABEL)) for k in range(len(EDGES) - 1)}
+    llr_n = {(w, k): 0 for w in range(len(PRB_LABEL)) for k in range(len(EDGES) - 1)}
     per_unit = []
     for i in idx:
         sample = val.sample(i)
@@ -65,7 +81,11 @@ def analyse(ckpt, limit):
         label, weights = sample["llr_shape"], sample["llr_weights"]
         dmrs = val.dmrs_symbols_of(i)
         snr = float(sample["snr"])
-        k = next(j for j in range(len(EDGES) - 1) if EDGES[j] <= snr < EDGES[j + 1])
+        # A few captures publish an implausible SNR (a linear value of 997 appears in the corpus), so the band
+        # lookup must not assume the value is inside the table: clamp it into the last band instead of raising.
+        k = next((j for j in range(len(EDGES) - 1) if EDGES[j] <= snr < EDGES[j + 1]), len(EDGES) - 2)
+        prb = int(val.data["alloc_nof_prb"][i])
+        w = next(j for j in range(len(PRB_LABEL)) if PRB_EDGES[j] <= prb < PRB_EDGES[j + 1])
         unit_err = unit_n = 0
         for c in range(llr.shape[1]):
             symbol = c // D3.COND_STRIDE
@@ -74,9 +94,12 @@ def analyse(ckpt, limit):
                 if weights[sc, c] <= 0:
                     continue
                 err = int((llr[sc, c] > 0) != (label[sc, c] > 0.5))
-                for slot in (par[sc % 2], mod4[sc % 4], band[k], dist.setdefault(min(d, 6), [0, 0])):
+                for slot in (par[sc % 2], mod4[sc % 4], band[k], prb_band[(w, k)],
+                             dist.setdefault(min(d, 6), [0, 0])):
                     slot[0] += err
                     slot[1] += 1
+                llr_abs[(w, k)] += abs(float(llr[sc, c]))
+                llr_n[(w, k)] += 1
                 unit_err += err
                 unit_n += 1
         per_unit.append(unit_err / max(unit_n, 1))
@@ -87,6 +110,21 @@ def analyse(ckpt, limit):
     print("  to DMRS    : " + "  ".join(f"d{k}:{dist[k][0]/dist[k][1]:.4f}" for k in sorted(dist)))
     print("  SNR bands  : " + "  ".join(
         f"{EDGES[b]}-{EDGES[b+1]}:{band[b][0]/band[b][1]:.4f}" for b in range(len(EDGES) - 1) if band[b][1]))
+    print("  BER by width x SNR band (n in brackets):")
+    print("      width  " + "".join(f"{f'{EDGES[k]}-{EDGES[k+1]}':>16}" for k in range(len(EDGES) - 1)))
+    for w, label in enumerate(PRB_LABEL):
+        row = f"      {label:6} "
+        for k in range(len(EDGES) - 1):
+            e, n = prb_band[(w, k)]
+            row += (f"{e/n:10.4f} ({n:4d})" if n else f"{'-':>16}")
+        print(row)
+    print("  mean |LLR| by width x SNR band:")
+    for w, label in enumerate(PRB_LABEL):
+        row = f"      {label:6} "
+        for k in range(len(EDGES) - 1):
+            n = llr_n[(w, k)]
+            row += (f"{llr_abs[(w, k)]/n:16.2f}" if n else f"{'-':>16}")
+        print(row)
     u = np.asarray(per_unit)
     print(f"  per unit   : median {np.median(u):.4f}  p90 {np.percentile(u, 90):.4f}  max {u.max():.4f}")
 
@@ -95,10 +133,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("checkpoints", nargs="+")
     ap.add_argument("--limit", type=int, default=150)
+    ap.add_argument("--data", default=None, help="dataset directory (default: the monitor set)")
+    ap.add_argument("--modulation", default="256QAM")
+    ap.add_argument("--prb-min", type=int, default=0)
+    ap.add_argument("--prb-max", type=int, default=10 ** 6)
     args = ap.parse_args()
     for ckpt in args.checkpoints:
         if os.path.exists(ckpt):
-            analyse(ckpt, args.limit)
+            analyse(ckpt, args.limit, args.data, args.modulation, args.prb_min, args.prb_max)
         else:
             print(f"missing {ckpt}")
 
