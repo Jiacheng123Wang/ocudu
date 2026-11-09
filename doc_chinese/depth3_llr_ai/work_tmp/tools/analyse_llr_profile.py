@@ -85,6 +85,7 @@ def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=
     ll = {j: [0, 0] for j in range(len(LL))}
     llr_n = {(w, k): 0 for w in range(len(PRB_LABEL)) for k in range(len(EDGES) - 1)}
     per_unit = []
+    skipped = 0
     for i in idx:
         sample = val.sample(i)
         out = model(tf.constant(sample["x"][None]), training=False)
@@ -94,9 +95,13 @@ def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=
         label, weights = sample["llr_shape"], sample["llr_weights"]
         dmrs = val.dmrs_symbols_of(i)
         snr = float(sample["snr"])
-        # A few captures publish an implausible SNR (a linear value of 997 appears in the corpus), so the band
-        # lookup must not assume the value is inside the table: clamp it into the last band instead of raising.
-        k = next((j for j in range(len(EDGES) - 1) if EDGES[j] <= snr < EDGES[j + 1]), len(EDGES) - 2)
+        # A SAMPLE OUTSIDE THE TABLE'S RANGE IS SKIPPED, NEVER CLAMPED. Clamping put every reception below the first
+        # edge into the LAST band, which made a 26-99 dB band look catastrophically bad whenever the edges did not
+        # start at zero -- a pure analysis artefact that read like a 60x regression.
+        k = next((j for j in range(len(EDGES) - 1) if EDGES[j] <= snr < EDGES[j + 1]), None)
+        if k is None:
+            skipped += 1
+            continue
         prb = int(val.data["alloc_nof_prb"][i])
         w = next(j for j in range(len(PRB_LABEL)) if PRB_EDGES[j] <= prb < PRB_EDGES[j + 1])
         cols = [sc for sc in range(llr.shape[0]) if weights[sc].any()]
@@ -138,6 +143,8 @@ def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=
             e, n = prb_band[(w, k)]
             row += (f"{e/n:10.4f} ({n:4d})" if n else f"{'-':>16}")
         print(row)
+    if skipped:
+        print(f"  NOTE: {skipped} reception(s) fell outside the SNR table and were skipped (use --edges covering the range)")
     print("  BER by distance to the allocation edge (subcarriers, capped at 8):")
     print("      " + "  ".join(f"d{k}:{edge[k][0]/edge[k][1]:.4f}({edge[k][1]})" for k in sorted(edge)))
     print("  BER conditioned on |LLR| (the model's own confidence):")
