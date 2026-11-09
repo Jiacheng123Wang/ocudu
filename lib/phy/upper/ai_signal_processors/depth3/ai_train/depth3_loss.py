@@ -54,8 +54,29 @@ def llr_from_shape(shape, scale):
     return np.asarray(shape, dtype=np.float64) * float(scale)
 
 
-def bce_loss(llr, labels, weights=None):
+# HOW THE PER-BIT ERROR IS AVERAGED OVER A BATCH IS A DESIGN CHOICE, NOT A DETAIL.
+#   bits   (alpha = 0)  every coded bit counts the same, so a sample's pull on the gradient is proportional to its
+#                       bit count. A 51-PRB 256QAM reception carries ~53 900 bits and a 2-PRB one ~2 100, a factor of
+#                       25 -- measured in the training set the <=3 PRB class is 20.5% of the samples but 2.40% of the
+#                       weight, and the model's BER there is 4.6-8.7% at 24-32 dB (improvement plan section 100).
+#   sample (alpha = 1)  every reception counts the same, so a narrow allocation is no longer drowned out.
+#   sqrt   (alpha = 1/2) a compromise: the weight spread across the training set drops from 62x to 4.6x.
+# The weight of sample i is n_i ** (1 - alpha), where n_i is its number of valid entries, so alpha = 0 reproduces the
+# historical bit-weighted formula exactly.
+LOSS_NORMS = {"bits": 0.0, "sqrt": 0.5, "sample": 1.0}
+
+
+def _norm_alpha(norm):
+    if norm not in LOSS_NORMS:
+        raise ValueError(f"unknown loss norm {norm!r}; expected one of {sorted(LOSS_NORMS)}")
+    return LOSS_NORMS[norm]
+
+
+def bce_loss(llr, labels, weights=None, norm="bits"):
     """Mean binary cross entropy of the coded bits, over the weighted entries.
+
+    `norm` selects how the per-bit error is averaged across the batch: `bits` (the historical form, where a sample's
+    pull is proportional to its bit count), `sample` (one vote per reception) or `sqrt`. See `LOSS_NORMS`.
 
     `llr` is the log-likelihood ratio with the chain's sign (positive means bit 0), `labels` holds
     the BCE target `1 - b` on the same channels, and `weights` is the contract's validity mask. The
@@ -73,7 +94,16 @@ def bce_loss(llr, labels, weights=None):
     total = weights.sum()
     if total <= 0.0:
         raise ValueError("the validity mask is empty: this capture has no coded bits to train on")
-    return float((per_entry * weights).sum() / total)
+    if norm == "bits":
+        return float((per_entry * weights).sum() / total)
+    alpha = _norm_alpha(norm)
+    axes = tuple(range(1, per_entry.ndim))
+    counts = weights.sum(axis=axes)
+    means = (per_entry * weights).sum(axis=axes) / np.maximum(counts, 1e-12)
+    w = np.where(counts > 0, counts ** (1.0 - alpha), 0.0)
+    if w.sum() <= 0.0:
+        raise ValueError("the validity mask is empty: this capture has no coded bits to train on")
+    return float((w * means).sum() / w.sum())
 
 
 def nmse(estimate, target, weights=None):
@@ -161,20 +191,30 @@ def total_loss(llr, llr_labels, llr_weights, ch_est, ch_est_true, ch_est_weights
     return terms
 
 
-def tf_bce_loss(llr, labels, weights=None):
+def tf_bce_loss(llr, labels, weights=None, norm="bits"):
     """TensorFlow form of `bce_loss`, for the training loop.
 
     Kept thin on purpose: `--selfcheck` evaluates both implementations on the same random inputs,
     so a drift between the numpy reference and the one the trainer runs is a test failure rather
-    than a silent change of objective.
+    than a silent change of objective. `norm` means the same thing here as there, and `bits` is the
+    default so a run that does not name it trains exactly the objective it always did.
     """
     import tensorflow as tf
 
     per_entry = tf.nn.sigmoid_cross_entropy_with_logits(labels=labels, logits=llr)
     if weights is None:
+        if norm != "bits":
+            raise ValueError("a norm other than 'bits' needs the validity mask to count entries per sample")
         return tf.reduce_mean(per_entry)
     weights = tf.cast(weights, per_entry.dtype)
-    return tf.reduce_sum(per_entry * weights) / tf.maximum(tf.reduce_sum(weights), 1e-12)
+    if norm == "bits":
+        return tf.reduce_sum(per_entry * weights) / tf.maximum(tf.reduce_sum(weights), 1e-12)
+    alpha = _norm_alpha(norm)
+    axes = list(range(1, len(per_entry.shape)))
+    counts = tf.reduce_sum(weights, axis=axes)
+    means = tf.reduce_sum(per_entry * weights, axis=axes) / tf.maximum(counts, 1e-12)
+    w = tf.where(counts > 0.0, tf.pow(tf.maximum(counts, 1e-12), 1.0 - alpha), tf.zeros_like(counts))
+    return tf.reduce_sum(w * means) / tf.maximum(tf.reduce_sum(w), 1e-12)
 
 
 def tf_nmse(estimate, target, weights=None):
@@ -222,6 +262,48 @@ def selfcheck():
         numeric = (up - down) / (2.0 * delta)
         assert abs(numeric - (0.5 - label)) < 1e-6, (numeric, label)
     assert bce_loss(np.array([0.0]), np.array([1.0])) > 0.0
+
+    # 5. The three normalisations. `bits` must be the historical formula to the last bit (a run that does not name
+    # the norm trains exactly the objective it always did), and the other two must equal their closed forms on a
+    # batch whose samples deliberately have different numbers of valid entries -- which is the situation the norm
+    # exists to change: a 2-PRB reception has about 1/25 of the coded bits of a 51-PRB one.
+    logits = rng.normal(0.0, 4.0, size=(4, 6))
+    lab = (rng.random((4, 6)) < 0.5).astype(np.float64)
+    mask = np.zeros((4, 6))
+    for row, count in enumerate((1, 2, 6, 3)):
+        mask[row, :count] = 1.0
+    per_entry = np.maximum(logits, 0.0) - logits * lab + np.log1p(np.exp(-np.abs(logits)))
+    counts = mask.sum(axis=1)
+    means = (per_entry * mask).sum(axis=1) / counts
+    closed = {"bits": (per_entry * mask).sum() / mask.sum(),
+              "sample": means.mean(),
+              "sqrt": (np.sqrt(counts) * means).sum() / np.sqrt(counts).sum()}
+    for name, want in closed.items():
+        got = bce_loss(logits, lab, mask, norm=name)
+        assert abs(got - want) < 1e-12, (name, got, want)
+    # And the point of it: under `bits` the one-entry sample barely pulls; under `sample` it pulls as hard as the
+    # six-entry one. The ratio of the two gradients is what the training run changes.
+    pull = {}
+    for name in closed:
+        delta = 1e-6
+        probe = logits.copy()
+        probe[0, 0] += delta
+        pull[name] = (bce_loss(probe, lab, mask, norm=name) - closed[name]) / delta
+    assert abs(pull["sample"]) > abs(pull["bits"]), pull
+
+    # 6. The TensorFlow form must agree with the reference on all three, because that is the one the trainer runs.
+    try:
+        import tensorflow as tf
+    except ImportError:
+        tf = None
+    if tf is not None:
+        t_logits = tf.constant(logits, dtype=tf.float32)
+        t_lab = tf.constant(lab, dtype=tf.float32)
+        t_mask = tf.constant(mask, dtype=tf.float32)
+        for name, want in closed.items():
+            got = float(tf_bce_loss(t_logits, t_lab, t_mask, norm=name))
+            assert abs(got - want) < 1e-5, ("tf", name, got, want)
+
 
     # 5. The inverted-label failure is detectable, which is the point of the label convention.
     loss_inverted = bce_loss(perfect, bits, weights)

@@ -958,6 +958,11 @@ def main():
                              "decided by the noise, so training on it cannot converge to a low "
                              "error rate; the high-SNR slice is the one with a reachable answer")
     parser.add_argument("--snr-max", type=float, default=None)
+    # HOW THE LLR TERM IS AVERAGED. "bits" is the historical objective: a sample's pull on the gradient is
+    # proportional to its coded-bit count, which leaves narrow allocations with 2.4% of the weight although they are
+    # 20% of the samples (improvement plan section 100). "sample" gives every reception one vote; "sqrt" is between.
+    parser.add_argument("--loss-norm", choices=sorted(L.LOSS_NORMS), default="bits",
+                        help="average the LLR term per bit (bits), per reception (sample), or in between (sqrt)")
     parser.add_argument("--w-llr", type=float, default=L.DEFAULT_WEIGHTS["llr"])
     parser.add_argument("--w-ch", type=float, default=L.DEFAULT_WEIGHTS["ch_est"])
     parser.add_argument("--w-noise", type=float, default=L.DEFAULT_WEIGHTS["post_eq_noise"])
@@ -1192,7 +1197,7 @@ def main():
                 # THE WEIGHTING APPLIES TO TRAINING ONLY. Validation reports the unweighted loss, so a weighted run stays
                 # comparable with every earlier one and the number in the log still means the same thing.
                 llr_mask = llr_mask * targets["w_snr"][:, None, None]
-            terms = {"llr": L.tf_bce_loss(llr, targets["llr_shape"], llr_mask)}
+            terms = {"llr": L.tf_bce_loss(llr, targets["llr_shape"], llr_mask, norm=args.loss_norm)}
             if not args.no_aux:
                 # THE NOISE HEAD IS ALWAYS IN WHEN aux_heads IS (design section 22.2): it is what scales the logits
                 # into the LLRs the chain quantises, so it is trained even in the bundle that dropped the reporting
