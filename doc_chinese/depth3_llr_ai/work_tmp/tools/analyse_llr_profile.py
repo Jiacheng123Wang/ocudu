@@ -51,7 +51,10 @@ PRB_EDGES = [1, 4, 9, 25, 10 ** 6]
 PRB_LABEL = ["<=3", "4-8", "9-24", ">24"]
 
 
-def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=10 ** 6):
+def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=10 ** 6, edges=None):
+    global EDGES
+    if edges:
+        EDGES = edges
     val = T.Batches(data_dir or VAL, "QPSK", 0, seed=20261105, cond=True, layout="spatial")
     model = tf.keras.models.load_model(ckpt, compile=False,
                                        custom_objects={"FoldedScaleConv": T.FoldedScaleConv})
@@ -137,10 +140,13 @@ def main():
     ap.add_argument("--modulation", default="256QAM")
     ap.add_argument("--prb-min", type=int, default=0)
     ap.add_argument("--prb-max", type=int, default=10 ** 6)
+    ap.add_argument("--edges", default=None,
+                    help="comma separated SNR band edges, e.g. 0,4,8,12,16,18,20,22,24,26,99")
     args = ap.parse_args()
     for ckpt in args.checkpoints:
         if os.path.exists(ckpt):
-            analyse(ckpt, args.limit, args.data, args.modulation, args.prb_min, args.prb_max)
+            edges = [float(x) for x in args.edges.split(",")] if args.edges else None
+            analyse(ckpt, args.limit, args.data, args.modulation, args.prb_min, args.prb_max, edges)
         else:
             print(f"missing {ckpt}")
 
