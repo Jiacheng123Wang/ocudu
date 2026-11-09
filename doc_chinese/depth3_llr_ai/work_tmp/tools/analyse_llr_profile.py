@@ -73,6 +73,16 @@ def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=
     band = {k: [0, 0] for k in range(len(EDGES) - 1)}
     prb_band = {(w, k): [0, 0] for w in range(len(PRB_LABEL)) for k in range(len(EDGES) - 1)}
     llr_abs = {(w, k): 0.0 for w in range(len(PRB_LABEL)) for k in range(len(EDGES) - 1)}
+    # DISTANCE TO THE ALLOCATION EDGE, in subcarriers. A 2-PRB reception occupies 24 of the 612 subcarriers the model
+    # sees, so every one of its REs is close to the zero region outside the allocation while a wide allocation has an
+    # interior. If the error concentrates near the edge, the input representation (zeros reading as deep fades) is the
+    # suspect; if it is flat inside, the suspect is the channel/noise estimate over few REs.
+    edge = {}
+    # BER CONDITIONED ON THE MODEL'S OWN CONFIDENCE. If the errors sit where |LLR| is small, the model is unsure and
+    # the information is missing from the input (channel or noise estimate); if they sit where |LLR| is large, the
+    # model is confidently wrong, which points at a representation or label defect instead.
+    LL = [(0, 1), (1, 2), (2, 4), (4, 8), (8, 16), (16, 1e9)]
+    ll = {j: [0, 0] for j in range(len(LL))}
     llr_n = {(w, k): 0 for w in range(len(PRB_LABEL)) for k in range(len(EDGES) - 1)}
     per_unit = []
     for i in idx:
@@ -89,6 +99,8 @@ def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=
         k = next((j for j in range(len(EDGES) - 1) if EDGES[j] <= snr < EDGES[j + 1]), len(EDGES) - 2)
         prb = int(val.data["alloc_nof_prb"][i])
         w = next(j for j in range(len(PRB_LABEL)) if PRB_EDGES[j] <= prb < PRB_EDGES[j + 1])
+        cols = [sc for sc in range(llr.shape[0]) if weights[sc].any()]
+        lo, hi = (min(cols), max(cols)) if cols else (0, 0)
         unit_err = unit_n = 0
         for c in range(llr.shape[1]):
             symbol = c // D3.COND_STRIDE
@@ -97,7 +109,12 @@ def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=
                 if weights[sc, c] <= 0:
                     continue
                 err = int((llr[sc, c] > 0) != (label[sc, c] > 0.5))
+                d_edge = min(sc - lo, hi - sc)
+                j = next(jj for jj in range(len(LL)) if LL[jj][0] <= abs(float(llr[sc, c])) < LL[jj][1])
+                ll[j][0] += err
+                ll[j][1] += 1
                 for slot in (par[sc % 2], mod4[sc % 4], band[k], prb_band[(w, k)],
+                             edge.setdefault(min(d_edge, 8), [0, 0]),
                              dist.setdefault(min(d, 6), [0, 0])):
                     slot[0] += err
                     slot[1] += 1
@@ -121,6 +138,11 @@ def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=
             e, n = prb_band[(w, k)]
             row += (f"{e/n:10.4f} ({n:4d})" if n else f"{'-':>16}")
         print(row)
+    print("  BER by distance to the allocation edge (subcarriers, capped at 8):")
+    print("      " + "  ".join(f"d{k}:{edge[k][0]/edge[k][1]:.4f}({edge[k][1]})" for k in sorted(edge)))
+    print("  BER conditioned on |LLR| (the model's own confidence):")
+    print("      " + "  ".join(f"{LL[j][0]:g}-{LL[j][1]:g}:{ll[j][0]/ll[j][1]:.4f}({ll[j][1]})"
+                              for j in range(len(LL)) if ll[j][1]))
     print("  mean |LLR| by width x SNR band:")
     for w, label in enumerate(PRB_LABEL):
         row = f"      {label:6} "
