@@ -86,7 +86,7 @@ def main():
         print(f"nothing to audit in {args.dir}")
         return 2
 
-    reports, findings = [], []
+    reports, findings, recovered = [], [], []
     for path in files:
         r = audit_file(path, args.full)
         reports.append(r)
@@ -96,10 +96,19 @@ def main():
             findings.append((r["name"], f"bit fraction {r['bit1']:.3f} (expected 0.45-0.55)"))
         if r["modulation"] and len(r["qm"]) != 1:
             findings.append((r["name"], f"qm is not a single value: {r['qm']}"))
+        # THE WINDOW IS A SELF-SAMPLE RULE. A harq file holds receptions whose transport block was recovered by a LATER
+        # redundancy version: the sample's own SNR can legitimately sit far below anything that decodes alone, because
+        # the decode came from the union of the versions. Those samples are not defective -- they are the ones worth
+        # having, since the live link rarely produces a transport block that bad with a known payload. So they are
+        # reported and never turned into a finding that blocks a build.
+        is_harq = "_harq.npz" in os.path.basename(path)
         if r["modulation"] and r["snr_med"] == r["snr_med"]:
             lo, hi = SNR_SANE[r["modulation"]]
             if not (lo <= r["snr_med"] <= hi):
-                findings.append((r["name"], f"{r['modulation']} median SNR {r['snr_med']:.1f} dB outside {lo}..{hi}"))
+                if is_harq:
+                    recovered.append((r["name"], r["modulation"], r["snr_med"], lo))
+                else:
+                    findings.append((r["name"], f"{r['modulation']} median SNR {r['snr_med']:.1f} dB outside {lo}..{hi}"))
 
     print(f"{len(reports)} file(s), {sum(r['n'] for r in reports)} sample(s)\n")
     print("%-46s %-6s %7s %8s %7s %13s %10s" % ("file", "mod", "n", "shape", "bit1", "snr p5-p95", "prb"))
@@ -120,6 +129,10 @@ def main():
                   (m, len(sel), sum(r["n"] for r in sel), np.mean([r["bit1"] for r in sel]),
                    min(r["snr_med"] for r in sel), max(r["snr_med"] for r in sel)))
 
+    if recovered:
+        print("\n--- harq recovered below the sanity window (expected, keep them) ---")
+        for name, mod, med, lo in recovered:
+            print(f"    {name[:46]:46} {mod:6} self SNR {med:6.1f} dB (alone needs {lo:+.1f}); label from a later RV")
     print("\n--- findings ---")
     for name, why in findings[:20]:
         print("  %-46s %s" % (name[:46], why))
