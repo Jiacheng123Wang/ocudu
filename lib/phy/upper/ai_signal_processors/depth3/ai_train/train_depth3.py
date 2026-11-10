@@ -135,6 +135,7 @@ class MaskedSmooth(tf.keras.layers.Layer):
         return num / (den + 1e-6), den
 
 
+@tf.keras.utils.register_keras_serializable(package="ocudu")
 class FoldedScaleConv(tf.keras.layers.Layer):
     """A 1x1 convolution whose output channels carry a trainable positive gain.
 
