@@ -92,6 +92,39 @@ def receptive_field(blocks, dilations):
 
 
 @tf.keras.utils.register_keras_serializable(package="ocudu")
+class MaskedSmooth(tf.keras.layers.Layer):
+    """A dense local average over one coherence bandwidth, taken only where the allocation actually is.
+
+    WHY THIS AND NOT A BIGGER RECEPTIVE FIELD. The trunk sees 127 subcarriers, but through dilations: its long-range
+    taps are sparse, so it cannot compute the dense average that an MMSE estimator performs inside one coherence
+    bandwidth (measured 150-300 subcarriers, improvement plan section 8). This layer adds exactly that operation, and
+    it is masked: averaging a fixed window at the allocation edge pulls in zeros and would attenuate the estimate,
+    which is the artefact that made a naive smoothing test look harmful (section 106). Dividing the masked sum by the
+    masked window's own coverage removes it.
+
+    The kernel starts as a boxcar of 1/k -- the physical prior, not noise -- and is then learned. It is one shared
+    vector over all channels, so the layer adds k parameters and nothing else.
+    """
+
+    def __init__(self, taps, dtype=None, **kwargs):
+        super().__init__(dtype=dtype, **kwargs)
+        self.taps = int(taps)
+
+    def build(self, input_shape):
+        self.kernel = self.add_weight(name="k", shape=(self.taps, 1, 1),
+                                      initializer=tf.keras.initializers.Constant(1.0 / self.taps),
+                                      trainable=True)
+
+    def call(self, inputs, **kwargs):
+        x, mask = inputs
+        channels = tf.shape(x)[-1]
+        depth_kernel = tf.tile(self.kernel[:, :, None, :], [1, 1, channels, 1])
+        masked = x * mask
+        num = tf.nn.depthwise_conv2d(masked, depth_kernel, strides=[1, 1, 1, 1], padding="SAME")
+        den = tf.nn.conv2d(mask, self.kernel[:, :, :, None], strides=[1, 1, 1, 1], padding="SAME")
+        return num / (den + 1e-6), den
+
+
 class FoldedScaleConv(tf.keras.layers.Layer):
     """A 1x1 convolution whose output channels carry a trainable positive gain.
 
@@ -146,7 +179,7 @@ class FoldedScaleConv(tf.keras.layers.Layer):
 
 
 def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, residual=True,
-          reporting_heads=True, low_rank=0,
+          reporting_heads=True, low_rank=0, smooth_k=0,
           dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False,
           dense_bottleneck=0, fuse_relu=False,
           layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False,
@@ -189,7 +222,26 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         # diagnostic arm that isolated the locality.
         inp = tf.keras.Input(shape=(width, NOF_SYMBOLS, in_channels), batch_size=None,
                              dtype=keras_dtype, name="x")
-        y = tf.keras.layers.Conv2D(c_hid, 1, dtype=keras_dtype, name="entry_1x1")(inp)
+        # A DENSE LOCAL AVERAGE OVER ONE COHERENCE BANDWIDTH. The trunk's receptive field is built from dilations,
+        # so its long-range taps are SPARSE: it can see 127 subcarriers but it cannot compute a dense 63-tap average,
+        # which is the operation an MMSE channel estimator performs inside one coherence bandwidth (measured 150-300
+        # subcarriers, section 8). This branch adds exactly that: one depthwise convolution along frequency whose
+        # kernel starts as a boxcar of the coherence-bandwidth scale and is then learned. It is initialised to
+        # 1/k so the model begins at the physical prior rather than at noise, and it stays inside the network --
+        # nothing classical is bolted on.
+        # The model's input stays the keras Input; the branch only feeds a WIDER tensor to the entry projection.
+        # Reassigning `inp` instead made Keras wrap the concatenation as the model input and drop the branch from the
+        # graph (the model then had a 32-channel input and no smoothing layer at all) -- it looked like the flag was
+        # ignored.
+        src = inp
+        if smooth_k > 0:
+            # The allocation mask is the spatial plane's own channel; the smoothing must not average across its edge.
+            mask = tf.keras.layers.Lambda(lambda t: t[..., D3.SP_ALLOCATION:D3.SP_ALLOCATION + 1],
+                                          name="smooth_mask")(src)
+            sm, _ = MaskedSmooth(smooth_k, dtype=keras_dtype, name="smooth_ms")([src, mask])
+            src = tf.keras.layers.Concatenate(dtype=keras_dtype, name="smooth_cat")([src, sm])
+            in_channels = 2 * in_channels
+        y = tf.keras.layers.Conv2D(c_hid, 1, dtype=keras_dtype, name="entry_1x1")(src)
         y = tf.keras.layers.ReLU(dtype=keras_dtype, name="entry_relu")(y)
         for i in range(blocks):
             dilation = dilations[i % len(dilations)]
@@ -840,7 +892,7 @@ def export_buckets(args, parser, source=None):
         c_hid, in_channels, blocks = args.c_hid, 8, args.blocks
         dense, bottleneck = args.dense_blocks, args.dense_bottleneck
     for width in [int(w) for w in args.export_buckets.split(",") if w.strip()]:
-        narrow = build(width=width, blocks=blocks, qm=D3.BITS_PER_SYMBOL[args.modulation],
+        narrow = build(width=width, blocks=blocks, qm=D3.BITS_PER_SYMBOL[args.modulation], smooth_k=args.smooth_k,
                        aux_heads=aux, c_hid=c_hid, dtype=args.dtype,
                        layout=args.layout, in_channels=in_channels, cond=args.modcond,
                        reporting_heads=reporting, dense=dense, dense_bottleneck=bottleneck,
@@ -961,6 +1013,9 @@ def main():
     # HOW THE LLR TERM IS AVERAGED. "bits" is the historical objective: a sample's pull on the gradient is
     # proportional to its coded-bit count, which leaves narrow allocations with 2.4% of the weight although they are
     # 20% of the samples (improvement plan section 100). "sample" gives every reception one vote; "sqrt" is between.
+    # DENSE frequency smoothing over one coherence bandwidth, added as a parallel branch of the input (0 = off).
+    parser.add_argument("--smooth-k", type=int, default=0, metavar="K",
+                        help="depthwise frequency kernel of K taps added as an input branch (0 disables)")
     parser.add_argument("--loss-norm", choices=sorted(L.LOSS_NORMS), default="bits",
                         help="average the LLR term per bit (bits), per reception (sample), or in between (sqrt)")
     parser.add_argument("--w-llr", type=float, default=L.DEFAULT_WEIGHTS["llr"])
@@ -1119,7 +1174,7 @@ def main():
                             llr_linear=args.llr_linear, dense=args.dense_blocks,
                             dense_bottleneck=args.dense_bottleneck, fuse_relu=args.fuse_relu,
                             layout=args.layout, in_channels=in_channels, cond=args.modcond,
-                            dilations=args.dilations)
+                            dilations=args.dilations, smooth_k=args.smooth_k)
         export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
         return 0
 
@@ -1153,7 +1208,8 @@ def main():
                   fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
                   llr_linear=args.llr_linear, dense=args.dense_blocks,
                   dense_bottleneck=args.dense_bottleneck, layout=args.layout, fuse_relu=args.fuse_relu,
-                  in_channels=in_channels, cond=args.modcond, dilations=args.dilations)
+                  in_channels=in_channels, cond=args.modcond, dilations=args.dilations,
+                  smooth_k=args.smooth_k)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}  heads {sorted(model.output.keys())}")
     # THE RECEPTIVE FIELD IS A DESIGN PARAMETER, SO IT IS PRINTED WITH THE PARAMETER COUNT. It is the
