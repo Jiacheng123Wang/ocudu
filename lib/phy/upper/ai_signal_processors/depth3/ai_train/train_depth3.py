@@ -110,13 +110,23 @@ class MaskedSmooth(tf.keras.layers.Layer):
         super().__init__(dtype=dtype, **kwargs)
         self.taps = int(taps)
 
+    def get_config(self):
+        # Without this the first snapshot save fails: Keras 3 refuses to serialise a custom layer that cannot
+        # describe its constructor, and the training dies at the end of epoch 1 having produced no checkpoint.
+        config = super().get_config()
+        config.update({"taps": self.taps})
+        return config
+
     def build(self, input_shape):
         self.kernel = self.add_weight(name="k", shape=(self.taps, 1, 1),
                                       initializer=tf.keras.initializers.Constant(1.0 / self.taps),
                                       trainable=True)
 
-    def call(self, inputs, **kwargs):
-        x, mask = inputs
+    def call(self, x, **kwargs):
+        # The allocation mask is a channel of the spatial plane itself, so the layer reads it from its own input: a
+        # Lambda slice would make every checkpoint unserialisable (Keras refuses to deserialise Python lambdas), and
+        # the whole measurement pipeline loads these files.
+        mask = x[..., D3.SP_ALLOCATION:D3.SP_ALLOCATION + 1]
         channels = tf.shape(x)[-1]
         depth_kernel = tf.tile(self.kernel[:, :, None, :], [1, 1, channels, 1])
         masked = x * mask
@@ -236,9 +246,7 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         src = inp
         if smooth_k > 0:
             # The allocation mask is the spatial plane's own channel; the smoothing must not average across its edge.
-            mask = tf.keras.layers.Lambda(lambda t: t[..., D3.SP_ALLOCATION:D3.SP_ALLOCATION + 1],
-                                          name="smooth_mask")(src)
-            sm, _ = MaskedSmooth(smooth_k, dtype=keras_dtype, name="smooth_ms")([src, mask])
+            sm, _ = MaskedSmooth(smooth_k, dtype=keras_dtype, name="smooth_ms")(src)
             src = tf.keras.layers.Concatenate(dtype=keras_dtype, name="smooth_cat")([src, sm])
             in_channels = 2 * in_channels
         y = tf.keras.layers.Conv2D(c_hid, 1, dtype=keras_dtype, name="entry_1x1")(src)
