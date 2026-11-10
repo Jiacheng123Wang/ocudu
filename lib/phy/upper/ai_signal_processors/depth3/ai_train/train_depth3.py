@@ -1465,7 +1465,12 @@ def main():
         last_path = os.path.join(args.out, "depth3_last.keras")
         state_path = os.path.join(args.out, "resume.json")
         if os.path.exists(last_path) and os.path.exists(state_path):
-            model = tf.keras.models.load_model(last_path)
+            # A RESUME MUST BE ABLE TO LOAD ITS OWN CHECKPOINT. `FoldedScaleConv` is not registered with the
+            # serialization registry, so the bare load_model below failed with "Could not locate class
+            # 'FoldedScaleConv'" on any run that used --scale-init (i.e. every dense arm), and the resume died before
+            # epoch 8 rather than continuing. Naming the custom classes here fixes it for every existing file.
+            model = tf.keras.models.load_model(
+                last_path, custom_objects={"FoldedScaleConv": FoldedScaleConv, "MaskedSmooth": MaskedSmooth})
             state = json.load(open(state_path))
             start_epoch = int(state.get("epoch", 1)) + 1
             best = float(state.get("best", best))
