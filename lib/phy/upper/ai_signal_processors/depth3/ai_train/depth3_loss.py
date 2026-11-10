@@ -63,7 +63,11 @@ def llr_from_shape(shape, scale):
 #   sqrt   (alpha = 1/2) a compromise: the weight spread across the training set drops from 62x to 4.6x.
 # The weight of sample i is n_i ** (1 - alpha), where n_i is its number of valid entries, so alpha = 0 reproduces the
 # historical bit-weighted formula exactly.
-LOSS_NORMS = {"bits": 0.0, "sqrt": 0.5, "sample": 1.0}
+LOSS_NORMS = {"bits": 0.0, "re": 2.0, "sqrt": 0.5, "sample": 1.0}
+# "re" is the third unit of account: one vote per DECISION rather than per bit. A 256QAM symbol resolves eight bits
+# and a QPSK symbol two, so per-bit weighting gives a 256QAM RE four times the gradient of a QPSK RE even though both
+# are one demapping decision. Weighting by the number of occupied REs (the alpha = 2 row of the same family, since
+# n_bits = n_re * qm) removes that modulation bias while keeping the natural "a wider allocation is more work".
 
 
 def _norm_alpha(norm):
@@ -98,9 +102,18 @@ def bce_loss(llr, labels, weights=None, norm="bits"):
         return float((per_entry * weights).sum() / total)
     alpha = _norm_alpha(norm)
     axes = tuple(range(1, per_entry.ndim))
-    counts = weights.sum(axis=axes)
-    means = (per_entry * weights).sum(axis=axes) / np.maximum(counts, 1e-12)
-    w = np.where(counts > 0, counts ** (1.0 - alpha), 0.0)
+    # THE PER-SAMPLE MEAN IS ALWAYS PER BIT; only the WEIGHT across samples changes with the norm. Dividing the mean
+    # by the RE count instead was the first version's bug: with 8 bits per 256QAM symbol it scaled the loss by qm.
+    bits = weights.sum(axis=axes)
+    means = (per_entry * weights).sum(axis=axes) / np.maximum(bits, 1e-12)
+    if norm == "re":
+        # One occupied subcarrier-symbol is one decision; collapse the stride-8 block to a single yes/no.
+        blocks = weights.reshape(weights.shape[0], weights.shape[1], -1, 8)
+        counts = (blocks.max(axis=-1) > 0).sum(axis=(1, 2)).astype(np.float64)
+    else:
+        counts = bits
+    exponent = 1.0 if norm == "re" else (1.0 - alpha)
+    w = np.where(counts > 0, counts ** exponent, 0.0)
     if w.sum() <= 0.0:
         raise ValueError("the validity mask is empty: this capture has no coded bits to train on")
     return float((w * means).sum() / w.sum())
@@ -211,9 +224,16 @@ def tf_bce_loss(llr, labels, weights=None, norm="bits"):
         return tf.reduce_sum(per_entry * weights) / tf.maximum(tf.reduce_sum(weights), 1e-12)
     alpha = _norm_alpha(norm)
     axes = list(range(1, len(per_entry.shape)))
-    counts = tf.reduce_sum(weights, axis=axes)
-    means = tf.reduce_sum(per_entry * weights, axis=axes) / tf.maximum(counts, 1e-12)
-    w = tf.where(counts > 0.0, tf.pow(tf.maximum(counts, 1e-12), 1.0 - alpha), tf.zeros_like(counts))
+    bits = tf.reduce_sum(weights, axis=axes)
+    means = tf.reduce_sum(per_entry * weights, axis=axes) / tf.maximum(bits, 1e-12)
+    if norm == "re":
+        shape = tf.concat([tf.shape(weights)[:2], [-1, 8]], axis=0)
+        blocks = tf.reshape(weights, shape)
+        counts = tf.reduce_sum(tf.cast(tf.reduce_max(blocks, axis=-1) > 0, per_entry.dtype), axis=[1, 2])
+    else:
+        counts = bits
+    exponent = 1.0 if norm == "re" else (1.0 - alpha)
+    w = tf.where(counts > 0.0, tf.pow(tf.maximum(counts, 1e-12), exponent), tf.zeros_like(counts))
     return tf.reduce_sum(w * means) / tf.maximum(tf.reduce_sum(w), 1e-12)
 
 
@@ -267,17 +287,24 @@ def selfcheck():
     # the norm trains exactly the objective it always did), and the other two must equal their closed forms on a
     # batch whose samples deliberately have different numbers of valid entries -- which is the situation the norm
     # exists to change: a 2-PRB reception has about 1/25 of the coded bits of a 51-PRB one.
-    logits = rng.normal(0.0, 4.0, size=(4, 6))
-    lab = (rng.random((4, 6)) < 0.5).astype(np.float64)
-    mask = np.zeros((4, 6))
-    for row, count in enumerate((1, 2, 6, 3)):
-        mask[row, :count] = 1.0
+    # A trailing axis of 8 so that the per-decision ("re") unit is well defined: one stride-8 block is one symbol.
+    logits = rng.normal(0.0, 4.0, size=(4, 6, 8))
+    lab = (rng.random((4, 6, 8)) < 0.5).astype(np.float64)
+    mask = np.zeros((4, 6, 8))
+    for row, count in enumerate((1, 8, 40, 3)):
+        flat = mask[row].reshape(-1)
+        flat[:min(count, flat.size)] = 1.0
     per_entry = np.maximum(logits, 0.0) - logits * lab + np.log1p(np.exp(-np.abs(logits)))
-    counts = mask.sum(axis=1)
-    means = (per_entry * mask).sum(axis=1) / counts
+    counts = mask.sum(axis=(1, 2))
+    means = (per_entry * mask).sum(axis=(1, 2)) / np.maximum(counts, 1e-12)
+    # "re" weights one vote per occupied subcarrier-symbol (one demapping decision) instead of per bit, so a 256QAM
+    # symbol -- eight bits -- stops counting four times as much as a QPSK symbol.
+    blocks = mask.reshape(mask.shape[0], mask.shape[1], -1, 8)
+    re_counts = (blocks.max(axis=-1) > 0).sum(axis=(1, 2)).astype(np.float64)
     closed = {"bits": (per_entry * mask).sum() / mask.sum(),
               "sample": means.mean(),
-              "sqrt": (np.sqrt(counts) * means).sum() / np.sqrt(counts).sum()}
+              "sqrt": (np.sqrt(counts) * means).sum() / np.sqrt(counts).sum(),
+              "re": (re_counts * means).sum() / re_counts.sum()}
     for name, want in closed.items():
         got = bce_loss(logits, lab, mask, norm=name)
         assert abs(got - want) < 1e-12, (name, got, want)
