@@ -805,3 +805,57 @@ ssh jwang@192.168.31.211 'mkdir -p /mnt/corpus/restore && tar -C /mnt/corpus/res
 | 有 50 000 个接收 | 与全腿测量口径一致 |
 | 覆盖四个调制 | 探针/尺子的调制分布 |
 | ★ **与训练语料不同批** | 避免同域记忆（本例的教训）|
+
+
+---
+
+## 18. ★★★★★ 2026-11-13：**建库必须基于 `crc_ok`（真实样本），"高 MCS 低 SNR" 的腿要用合成路线才吃得到**
+
+**(a) 规则（代码为准）**
+
+`build_depth3_dataset.py` 的 `candidate_units()` 里写得很直白：
+
+```python
+# The CRC column decides whether a REAL sample can be built (the payload is the dump).
+if need_tb and fields[2] != "OK":
+    continue
+```
+
+**⇒ 真实样本（`need_tb=True`）的 ground truth 是**dump 里解出来的 TB**（`cap_*.bits`）；
+CRC 不过 ⇒ 解出来的比特不是真的 ⇒ 这条单元不能做训练样本。**
+所以"按 `crc_ok` 建库"不是可选项，是**前提**（★ 2026-11-13 曾一度误判为"crc_ok 只是测量口径"，已纠正）。
+
+**(b) 但这不代表"高 MCS 低 SNR 的腿没用"**
+
+同一段注释的后半句说明了另一条路：
+
+> *A synthetic sample brings its own payload, so a capture the reference chain could not decode is still a
+> perfectly good CHANNEL -- and those are exactly the captures a failing cell is made of.*（design 19.209(e)）
+
+| 路线 | `need_tb` | 需要 crc_ok？| 用途 |
+|---|---|---|---|
+| ★ **真实样本** | `True` | ★ **必须** | 常规训练集（本流程的默认）|
+| ★ **合成样本** | `False`（payload 自己选）| ★ **不需要** | 用捕获当"信道"，专门教**经典链路也解不出的单元** |
+
+**⇒ 结论**：
+1. 高 MCS 低 SNR 的腿**保留在语料里**（自由调度极少出现这种组合，是主动采集的稀有样本）；
+2. 它们的**真实样本数天然很少**（受 `crc_ok` 限制，mcs20 有 673/50 000 的例子）；
+3. 想吃这部分数据，应另建**合成本数据集**（`need_tb=False`），而不是指望真实样本。
+
+**(c) 当前进度（2026-11-13）**
+
+| 项 | 状态 |
+|---|---|
+| s2_mcs 已完成 dump+建库 | **70 条腿**（mcs00–mcs22 的一部分）|
+| ★ **MCS 22 / 24 / 26** | ★ **尚未开始采集** |
+| 真实样本总量 | 2 532 426 个 dump 单元 → 建库后按 `crc_ok` 取用 |
+| 另有被拒 | dump 的 **DM-RS 一致性检查**拒掉一部分（单腿最多 3 893 个），日志理由 `the DM-RS convention is wrong` |
+
+**(d) 实践口径**
+
+| 场景 | 用什么 |
+|---|---|
+| 建真实训练集 | ★ 只取 `index.csv` 里 `crc=OK` 的单元（脚本已如此）|
+| 统计"这条腿值不值" | 看 **`crc_ok`**（决定真实样本上限），不要看 `units` |
+| 想把"经典解不出"的捕获也用上 | ★ 建**合成**数据集（`need_tb=False`）|
+| 对账 | `units == rows`（本次 70 条腿全通过 ✓）|
