@@ -1681,3 +1681,31 @@ source ~/work/ai_phy_train/env.sh
 | PCIe 显示 Gen1 x4 | 空闲省电（ASPM）| 负载下再看，应是 **Gen3 x4** |
 | 训练中掉卡/重启 | 供电（菊花链过载）| 限功耗 `-pl 220` 或加第二根 PCIe 线 |
 | 温度 > 85 °C 降频 | 盒子散热不足 | 加风扇/开盖；`nvidia-smi dmon -s pucvmet` 观察 |
+
+
+### D.8 ★ 2026-11-13：Pascal 卡（GTX 1070 Mobile）不能直接跑当前的 TF —— cuDNN 9 已放弃 sm_61
+
+**机况**：Lenovo Y920-17IKB（192.168.100.126），Ubuntu 24.04，8 核 / 31 GB / 430 GB 空闲；
+**GTX 1070 Mobile（GP104BM，8 GB，115 W，sm_61）**，驱动 **580.178.04**（CUDA 13.0）装好、`nvidia-smi` 正常。
+
+**实测失败**：在 venv 里装 `tensorflow[and-cuda]`（**TF 2.21 / CUDA 12.9 / cuDNN 9.28**）后，
+TF 能看到 GPU（`compute capability: 6.1`），但一跑卷积就报：
+
+```
+Graph execution error at node .../relu0_1/Relu
+in external/xla/xla/stream_executor/cuda/cuda_dnn.cc(5270): 'status'
+```
+
+**根因**：★ **cuDNN 9.x 已不再支持 Pascal（sm_61）**，TF 2.21 的预编译包因此没有可用的卷积内核。
+
+**两条出路**
+
+| 方案 | 做法 | 代价 |
+|---|---|---|
+| ★ A | 建**第二个 venv** 装 **TF 2.15**（CUDA 12.2 / **cuDNN 8.9**，仍支持 sm_61）| 下载 ~2 GB；★ **Keras 2 vs 3** —— 训练器按 Keras 3 写，可能需要小改 |
+| B | 这台只做 **CPU 评估 / 数据准备**（31 GB 内存够装 w2v1）| 0 |
+
+**性能预期（若走 A）**：GTX 1070 Mobile FP32 ≈ 6.5 TFLOP/s，Pascal 的 **FP16 只有 1/64 速率** ⇒
+训练必须 `--dtype float32`，估计 **60–100 样本/s**（3060 Ti 是 438、107 的 3060 Laptop 端到端 136）。
+
+**⇒ 建议**：这台**不值得**投入做训练主力；留在北京/广州当**评估机**即可。
