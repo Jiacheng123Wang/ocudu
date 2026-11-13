@@ -1862,3 +1862,58 @@ XLA = **Accelerated Linear Algebra**，TensorFlow 自带的**图编译器**（�
 
 ★ **注意**：c128 那次**没有**开 XLA（c128 是算力受限，收益有限）；所以这三组**不是**"XLA vs 非 XLA"的对照实验，
 它们同时差着**模型宽度（c32/c128）与机器（3060 Ti / 1070 / 3060 Laptop）**——比较时要分开看。
+
+
+### D.11 ★ 2026-11-13：**笔记本合盖不影响训练（107 与 126 都已配置）**
+
+**(a) 问题**
+
+笔记本默认 `HandleLidSwitch=suspend` ⇒ **一合盖系统就挂起**，训练进程被冻住（夜里跑的训练会白跑）。
+
+**(b) 配置（两台机器同一套）**
+
+```bash
+# 1) drop-in（不要改主配置文件 /etc/systemd/logind.conf，升级会被覆盖）
+sudo mkdir -p /etc/systemd/logind.conf.d
+sudo tee /etc/systemd/logind.conf.d/99-lid-ignore.conf >/dev/null <<'EOF'
+[Login]
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+IdleAction=ignore
+EOF
+
+# 2) 让 logind 重读配置
+sudo systemctl reload systemd-logind      # ★ 不要用 restart：会掐断图形会话
+
+# 3) 保险：屏蔽睡眠/休眠目标（即使有人手动点"挂起"也会被拒绝）
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+```
+
+**(c) 验证**
+
+```bash
+systemd-analyze cat-config systemd/logind.conf | grep -E "^HandleLidSwitch|^IdleAction"
+#   期望：四行都是 =ignore（不带 #）
+systemctl is-enabled sleep.target suspend.target hibernate.target hybrid-sleep.target
+#   期望：masked masked masked masked
+pgrep -fa "[t]rain_depth3"        # 合盖 1 分钟后仍应有 PID
+```
+
+★ 实测（2026-11-13）：126 配置后 `masked×4`、训练 PID 11608 持续运行 ✓
+
+**(d) 可选：给训练套一层 inhibitor（训练期间拒绝任何睡眠请求）**
+
+```bash
+nohup systemd-inhibit --what=sleep:handle-lid-switch --who=depth3-train \
+  --why="depth3 training" bash run126_w2v3c_c32.sh \
+  > logs/d3_w2v3c_c32_jit_e40.log 2>&1 < /dev/null &
+systemd-inhibit --list              # 查看当前的 inhibitor
+```
+
+**(e) 两个注意**
+
+| 项 | 说明 |
+|---|---|
+| ★ 散热 | 合盖后键盘区散热变差 ⇒ 把屏幕开后倾一点，或垫高底部 |
+| ★ 不要 `restart systemd-logind` | 会掉图形会话（训练进程本身不受影响）|
