@@ -269,7 +269,7 @@ ANE 的 int8 峰值是 fp16 的 2×（38 TOPS vs 19 TFLOPS）。**同样的时�
 
 **(c) ★★★★★ 三条"物理上很合理"的假设，被一次分析全部证伪（2026-11-08）**
 
-工具：`work_tmp/tools/analyse_llr_profile.py`（1 分钟，138 个 256QAM 接收，monitor 集）。
+工具：`work_tmp/analysis/analyse_llr_profile.py`（1 分钟，138 个 256QAM 接收，monitor 集）。
 
 | 假设 | 预期形状 | 实测 | 结论 |
 |---|---|---|---|

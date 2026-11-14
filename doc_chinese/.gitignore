@@ -26,8 +26,24 @@ work_tmp/
 # ... EXCEPT the workflow's development tools, which are code rather than scratch (user rule, 2026-11-06: tools go in
 # work_tmp so they are greppable beside the docs, while the large artefacts stay in ~/ai_depth3 on each host).
 !depth3_llr_ai/work_tmp/
-!depth3_llr_ai/work_tmp/tools/
-!depth3_llr_ai/work_tmp/tools/**
+# The scripts live in purpose-shaped directories (corpus_pipeline, dataset_build, measurement, analysis, training,
+# benchmarks) rather than one generic "tools"; the data directories beside them stay ignored.
+!depth3_llr_ai/work_tmp/analysis/
+!depth3_llr_ai/work_tmp/analysis/**
+!depth3_llr_ai/work_tmp/benchmarks/
+!depth3_llr_ai/work_tmp/benchmarks/**
+!depth3_llr_ai/work_tmp/corpus_pipeline/
+!depth3_llr_ai/work_tmp/corpus_pipeline/**
+!depth3_llr_ai/work_tmp/dataset_build/
+!depth3_llr_ai/work_tmp/dataset_build/**
+!depth3_llr_ai/work_tmp/inventory/
+!depth3_llr_ai/work_tmp/inventory/**
+!depth3_llr_ai/work_tmp/measurement/
+!depth3_llr_ai/work_tmp/measurement/**
+!depth3_llr_ai/work_tmp/training/
+!depth3_llr_ai/work_tmp/training/**
+!depth3_llr_ai/work_tmp/history/
+!depth3_llr_ai/work_tmp/history/README.md
 */gates/
 */ref/
 */corpus/

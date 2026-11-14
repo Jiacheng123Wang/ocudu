@@ -60,7 +60,7 @@ NOF_SYMBOLS = D3.NOF_SYMBOLS
 # which is why one leg is not enough. Adding the twenty-five fixed-MCS legs (776,514 more receptions, all QPSK) moves QPSK by
 # 0.06 dB and the other three by nothing. The values are on `snr_nominal` -- the same variable the datasets carry -- and the
 # measured-SINR variant of the same table is 9 dB away on QPSK, so mixing the two scales would be a silent error.
-# Recompute with `work_tmp/tools/measure_thresholds.py` when more captures land.
+# Recompute with `work_tmp/measurement/measure_thresholds.py` when more captures land.
 THR_QM = {"QPSK": -3.16, "16QAM": 6.61, "64QAM": 13.38, "256QAM": 20.91}
 
 DILATIONS = (1, 2, 4, 8)
@@ -85,9 +85,13 @@ def parse_dilations(text):
     return values
 
 
-def receptive_field(blocks, dilations):
-    """Subcarriers one output position can see: 1 + sum(2*d) over the block cycle."""
-    return 1 + 2 * sum(dilations[i % len(dilations)] for i in range(blocks))
+def receptive_field(blocks, dilations, ksize=3):
+    """Subcarriers one output position can see: 1 + sum((k-1)*d) over the block cycle.
+
+    The kernel side matters: a k=5 mixing layer reaches two subcarriers further each side per unit of dilation,
+    so the same dilation cycle buys twice the field. The report would otherwise understate a k=5 run.
+    """
+    return 1 + (ksize - 1) * sum(dilations[i % len(dilations)] for i in range(blocks))
 
 
 
@@ -194,7 +198,7 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
           dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False,
           dense_bottleneck=0, fuse_relu=False,
           layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False,
-          dilations=DILATIONS):
+          dilations=DILATIONS, ksize=3, groups=1):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -266,20 +270,27 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
                 block = tf.keras.layers.Conv2D(narrow, 1, dtype=keras_dtype,
                                                name=f"sq{i}_1x1")(y)
                 block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}a")(block)
-                block = tf.keras.layers.Conv2D(narrow, 3, padding="same",
+                block = tf.keras.layers.Conv2D(narrow, ksize, padding="same",
                                                dilation_rate=(dilation, 1), dtype=keras_dtype,
                                                activation="relu" if fuse_relu else None,
-                                               name=f"cv{i}_3x3_d{dilation}")(block)
+                                               name=f"cv{i}_{ksize}x{ksize}_d{dilation}")(block)
             elif dense:
-                block = tf.keras.layers.Conv2D(c_hid, 3, padding="same",
+                # THE KERNEL IS A LEVER, NOT A CONSTRAINT (architecture_levers L2): k=5 widens the
+                # spatial mixing reach from 3 to 5 at 25/9 the weights of a k=3 depthwise, and on the
+                # ANE a k=5 depthwise measured 219-229 us. Depthwise uses it too, so the two recipes
+                # can be compared with everything else held fixed.
+                # GROUPS IS THE DIAL BETWEEN DEPTHWISE AND DENSE (architecture_levers L3): g channels per
+                # group means g=C is depthwise and g=1 is the dense 3x3 that bought +18.6%. The kernel side
+                # stays a separate knob so the two levers can be measured independently.
+                block = tf.keras.layers.Conv2D(c_hid, ksize, padding="same", groups=groups,
                                                dilation_rate=(dilation, 1), dtype=keras_dtype,
                                                activation="relu" if fuse_relu else None,
-                                               name=f"cv{i}_3x3_d{dilation}")(y)
+                                               name=f"cv{i}_{ksize}x{ksize}_d{dilation}")(y)
             else:
                 block = tf.keras.layers.DepthwiseConv2D(
-                    3, padding="same", dilation_rate=(dilation, 1), dtype=keras_dtype,
+                    ksize, padding="same", dilation_rate=(dilation, 1), dtype=keras_dtype,
                     activation="relu" if fuse_relu else None,
-                    name=f"dw{i}_3x3_d{dilation}")(y)
+                    name=f"dw{i}_{ksize}x{ksize}_d{dilation}")(y)
             if not fuse_relu:
                 block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}")(block)
             block = FoldedScaleConv(c_hid, initial_gain=scale_init, rank=low_rank,
@@ -345,11 +356,11 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
             block = tf.keras.layers.Conv2D(narrow, 1, dtype=keras_dtype,
                                            name=f"sq{i}_1x1")(y)
             block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}a")(block)
-            block = tf.keras.layers.Conv2D(narrow, 3, padding="same", dilation_rate=(dilation, 1),
-                                           dtype=keras_dtype, name=f"cv{i}_3x3_d{dilation}")(block)
+            block = tf.keras.layers.Conv2D(narrow, ksize, padding="same", dilation_rate=(dilation, 1),
+                                           dtype=keras_dtype, name=f"cv{i}_{ksize}x{ksize}_d{dilation}")(block)
         elif dense:
-            block = tf.keras.layers.Conv2D(c_hid, 3, padding="same", dilation_rate=(dilation, 1),
-                                           dtype=keras_dtype, name=f"cv{i}_3x3_d{dilation}")(y)
+            block = tf.keras.layers.Conv2D(c_hid, ksize, padding="same", dilation_rate=(dilation, 1),
+                                           dtype=keras_dtype, name=f"cv{i}_{ksize}x{ksize}_d{dilation}")(y)
         else:
             block = tf.keras.layers.DepthwiseConv2D(
                 3, padding="same", dilation_rate=(dilation, 1), dtype=keras_dtype,
@@ -905,7 +916,7 @@ def export_buckets(args, parser, source=None):
                        aux_heads=aux, c_hid=c_hid, dtype=args.dtype,
                        layout=args.layout, in_channels=in_channels, cond=args.modcond,
                        reporting_heads=reporting, dense=dense, dense_bottleneck=bottleneck,
-                       dilations=args.dilations)
+                       dilations=args.dilations, ksize=args.kernel_size, groups=args.groups)
         # WEIGHTS ARE COPIED, NOT RELOADED. A `.keras` archive carries the width the graph was built with, and loading
         # it into a graph built for another width fails on every layer past the divergence (41 objects in the first
         # attempt). The tensor shapes do not depend on the width -- they are 1x1 and depthwise convolutions -- so
@@ -970,6 +981,16 @@ def main():
     parser.add_argument("--dilations", default="",
                         help="comma-separated dilation cycle along the subcarrier axis "
                              "(default: 1,2,4,8 from the module constant)")
+    # THE KERNEL SIDE IS A LEVER (architecture_levers_beyond_width L2): k=5 gives each mixing layer a
+    # 5-subcarrier reach instead of 3 at 25/9 the weights of a k=3 depthwise, and a k=5 ANE kernel was
+    # measured at 219-229 us. Default 3 keeps every old command line and checkpoint unchanged.
+    parser.add_argument("--kernel-size", type=int, choices=(3, 5, 7), default=3, metavar="K",
+                        help="spatial kernel side of the trunk's mixing layers (default 3)")
+    # g=1 IS THE DENSE 3x3 that bought +18.6% and g=c-hid is depthwise; the doc lists 2 and 4 as the useful
+    # middle. Kept separate from --kernel-size so the two levers are measured one at a time.
+    parser.add_argument("--groups", type=int, default=1, metavar="G",
+                        help="groups of the trunk's mixing conv (1 = dense, c-hid = depthwise); "
+                             "must divide the channel count")
     parser.add_argument("--layout", choices=("folded", "spatial", "probe8", "unfolded"),
                         default="spatial",
                         help="'folded' is the superseded 64-channel contract, kept so the recorded "
@@ -1116,6 +1137,13 @@ def main():
                              "256QAM receptions at 25 dB carried the whole six percent gap between two epochs -- while the "
                              "global loss averages them away. Validation always reports the unweighted loss so runs stay "
                              "comparable. 0 disables the weighting")
+    # THE WINDOW CAN BE MOVED OFF THE MEASURED THRESHOLD. --snr-weight centres on each modulation's own 50% crossing,
+    # which for 256QAM is 20.91 dB; the whole-leg attribution puts 96% of the delivered-bit deficit at 20-26 dB, i.e.
+    # ABOVE that centre, where the Gaussian has already decayed to about 1.1x. This knob moves the 256QAM centre only;
+    # every other modulation keeps its measured threshold.
+    parser.add_argument("--snr-center", type=float, default=None, metavar="DB",
+                        help="override the SNR-weight centre for 256QAM only (default: that modulation's measured "
+                             "threshold, 20.91 dB)")
     parser.add_argument("--snr-sigma", type=float, default=3.0, metavar="DB",
                         help="width of the threshold window for --snr-weight, in dB (default 3.0)")
     parser.add_argument("--group-report", type=int, default=5, metavar="N",
@@ -1183,7 +1211,7 @@ def main():
                             llr_linear=args.llr_linear, dense=args.dense_blocks,
                             dense_bottleneck=args.dense_bottleneck, fuse_relu=args.fuse_relu,
                             layout=args.layout, in_channels=in_channels, cond=args.modcond,
-                            dilations=args.dilations, smooth_k=args.smooth_k)
+                            dilations=args.dilations, ksize=args.kernel_size, groups=args.groups, smooth_k=args.smooth_k)
         export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
         return 0
 
@@ -1217,7 +1245,7 @@ def main():
                   fold_scale=not args.no_fold_scale, scale_init=args.scale_init,
                   llr_linear=args.llr_linear, dense=args.dense_blocks,
                   dense_bottleneck=args.dense_bottleneck, layout=args.layout, fuse_relu=args.fuse_relu,
-                  in_channels=in_channels, cond=args.modcond, dilations=args.dilations,
+                  in_channels=in_channels, cond=args.modcond, dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
                   smooth_k=args.smooth_k)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}  heads {sorted(model.output.keys())}")
@@ -1225,8 +1253,9 @@ def main():
     # one architecture number that costs nothing (dilation adds no weights and no multiply-adds), and
     # it was the only one that had no record in the run logs: the cycle lived in a module constant, so
     # two runs could differ in it and look identical in the log.
-    print(f"receptive field {receptive_field(args.blocks, args.dilations)} subcarriers "
-          f"(cycle {','.join(str(d) for d in args.dilations)} x {args.blocks} blocks)")
+    print(f"receptive field {receptive_field(args.blocks, args.dilations, args.kernel_size)} subcarriers "
+          f"(cycle {','.join(str(d) for d in args.dilations)} x {args.blocks} blocks, kernel "
+          f"{args.kernel_size}x{args.kernel_size})")
     if args.init:
         model.load_weights(args.init)
         print(f"started from {args.init}")
@@ -1305,10 +1334,13 @@ def main():
         sigma = max(1e-3, float(args.snr_sigma))
         out = np.empty(len(samples), dtype=np.float32)
         for i, sample in enumerate(samples):
-            thr = THR_QM.get(str(sample["modulation"]))
+            mod = str(sample["modulation"])
+            thr = THR_QM.get(mod)
             if thr is None:
                 out[i] = 1.0
                 continue
+            if args.snr_center is not None and mod == "256QAM":
+                thr = float(args.snr_center)
             d = (float(sample["snr"]) - thr) / sigma
             out[i] = 1.0 + args.snr_weight * np.exp(-d * d)
         return out

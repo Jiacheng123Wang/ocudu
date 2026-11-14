@@ -524,7 +524,7 @@ ls ~/dev/ocudu/build/lib/phy/upper/channel_processors/metal/ul_chain_replay   # 
 
 | 路径（203）| 内容 |
 |---|---|
-| ★ `~/ai_depth3/bin/` | **只放包装器 ＋ 主机路径**：`probe_env.sh`（本机路径）与指向仓库的 `*.sh` 包装器 ✓<br>★★ **工具本体在仓库**：`doc_chinese/depth3_llr_ai/work_tmp/tools/`（见 §15.3）|
+| ★ `~/ai_depth3/bin/` | **只放包装器 ＋ 主机路径**：`probe_env.sh`（本机路径）与指向仓库的 `*.sh` 包装器 ✓<br>★★ **工具本体在仓库**：`doc_chinese/depth3_llr_ai/work_tmp/`（按用途分：`corpus_pipeline/` `dataset_build/` `measurement/` `analysis/` `training/` `benchmarks/`）（见 §15.3）|
 | ★ `~/ai_depth3/gate_ai_models/bundles/` | 所有可用 **`.mlmodelc`**（c32／c128／两段式／E4 等）|
 | ★ `~/ai_depth3/replay_bits_1102/corpus/` | **尺子 5 000** 的捕获（20 000 文件）＋ 历史测量 CSV ＋ `run_arm_ext.py` |
 | ★ `~/ai_depth3/corpus/s2_amc_ping_1102a/` | **全腿 50 000** 的捕获（200 002 文件 / 8.6 GB）|
@@ -544,18 +544,18 @@ RUN_ARM=$HOME/ai_depth3/replay_bits_1102/e17_1104/run_arm_ext.py
 
 | 类别 | 位置 | 理由 |
 |---|---|---|
-| ★★ **开发工具**（探针、尺子/全腿脚本、飞行包装、备份驱动、宽度扫描…）| ★ **仓库 `doc_chinese/depth3_llr_ai/work_tmp/tools/`** | 工具是**代码**：要**可 grep、可版本化**，并和文档放一起 ✓ |
+| ★★ **开发工具**（探针、尺子/全腿脚本、飞行包装、备份驱动、宽度扫描…）| ★ **仓库 `doc_chinese/depth3_llr_ai/work_tmp/`（按用途分：`corpus_pipeline/` `dataset_build/` `measurement/` `analysis/` `training/` `benchmarks/`）** | 工具是**代码**：要**可 grep、可版本化**，并和文档放一起 ✓ |
 | ★ **大数据/多文件产物**（采集、数据集、dump、bundle、日志）| `~/ai_depth3/`（两台机器各一份）| 这些是**数据**：体积大、文件多，放在仓库外 ✓ |
 | ★ **主机差异配置** | `~/ai_depth3/bin/probe_env.sh` | 每台机器的解释器/corpus 路径不同 ✓ |
 | **兼容入口** | `~/ai_depth3/bin/*.sh` 是**3 行包装器**，`exec` 仓库里的本体 | 旧命令与旧文档照常可用 ✓ |
 
-**⇒ ★★ 飞行用 `work_tmp/tools/fly.sh <腿名> [config] [model] [秒数]`**（★ **腿名第一，且只有它是必填**）：
+**⇒ ★★ 飞行用 `work_tmp/training/fly.sh <腿名> [config] [model] [秒数]`**（★ **腿名第一，且只有它是必填**）：
 **console 与文件同时输出**（用 `script` 分配 pty，避免管道缓冲导致"看起来没输出"）；日志落
 `~/ai_depth3/flight_logs/<leg>/`；**停止请只按一次 Ctrl-C** 并等 `Stopping...` —— 阶段时延与块表在**退出时**打印，
 按第二次会杀掉进程、日志里就没有测量数据了（脚本事后会检查 `[ul_pipeline]` 并警告）✓
 
 **⇒ ★★ 收益（用户指出的）**：`~/ai_depth3` 里有几万个文件，**放脚本会让 grep 变慢且无法版本化** ✓
-**⇒ 工具清单见** `doc_chinese/depth3_llr_ai/work_tmp/tools/README.md` ✓
+**⇒ 工具清单见** `doc_chinese/depth3_llr_ai/work_tmp/README.md` ✓
 
 ### 15.2 规则
 

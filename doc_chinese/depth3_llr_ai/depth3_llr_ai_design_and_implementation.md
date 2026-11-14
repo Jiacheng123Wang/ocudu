@@ -2933,7 +2933,7 @@ sudo newfs_exfat -v T7_Corpus /dev/diskN sX
 | ★ **`lib/phy/.../ai_train/`** | ★ **正式工具** ✓ | ★ **会被反复使用的工具**（`dump_tb.sh`、`queue_build_datasets.sh`、`classify_harq_chains.py` …）|
 
 **⇒ 本次已抢救**：`/tmp` 下 **34 个脚本** 全部复制到
-★ **`doc_chinese/depth3_llr_ai/work_tmp/tmp_rescue/`** ✓
+★ **`doc_chinese/depth3_llr_ai/work_tmp/history/`** ✓
 其中两个重要工具同时入库到正式位置：
 - ★ `classify_harq_chains.py`（原 `/tmp/classify_rv2.py`）⇒ **`ai_train/classify_harq_chains.py`**
 - `build_parallel_211.sh`、`relocate/monitor_misplaced.sh` 早已在 `ai_train/` ✓

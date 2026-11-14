@@ -2059,7 +2059,7 @@ THR_QM = {"QPSK": -3.16, "16QAM": 6.61, "64QAM": 13.38, "256QAM": 20.91}   # dB,
 **(b) ★★★ 复现方式（已归档工具）**
 
 ```bash
-doc_chinese/depth3_llr_ai/work_tmp/tools/measure_thresholds.py
+doc_chinese/depth3_llr_ai/work_tmp/measurement/measure_thresholds.py
 # 只读两个来源：母集 npz（unit/qm/snr_nominal）＋ dump 索引（经典链 CRC）
 # 不需要原始采集；采集增加后重跑即可核验
 ```

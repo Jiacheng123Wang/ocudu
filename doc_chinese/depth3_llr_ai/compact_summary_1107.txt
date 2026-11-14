@@ -1,0 +1,50 @@
+Primary Request and Intent
+Standing rules: append-only docs (never rewrite historical sections); English outside doc_chinese/; no band-aids; never sudo; never delete without explicit authorization; commands >5 min in background; only the dev Mac may git push; do not modify original gNB code — the replay chain is independent.
+Phase: beat the classical CPU chain with the depth3 AI receiver, measured in delivered bits (Σ tbs_bytes×8 over crc=OK), at three scales (probe 500 / ruler 5 000 / full leg 50 000).
+Latest explicit instructions: "目前先这样跑着，让107 跑完e20后，继续跑到e60"; "107上的这个c128的意义已经不是太大了…可以先停掉（以后需要可以续跑），把211的那个加权train拿过来跑"; "请注意，107需要更新代码"; "那还是用N卡吧。请检查一下211的雷电接口…"; "211是小几箱，我有一个全尺寸的N卡，没法查，只能加一个外置的盒子"; "RTX3050 半高的卡可以直接安装在211 的NUC小机箱吗？"; "RTX 4070 8G如何"; "请检查一下107上的训练进展"; then "请继续".
+Key Technical Concepts
+口径 (npu): --phy_pipeline npu = PHY on CPU/DSP + network on ANE; implies pusch_receiver_backend=ai and OCUDU_DEPTH3_FALLBACK=none (PURE); decoder named explicitly (--pusch_ldpc_decoder_type generic = CPU neon).
+CPU baselines: probe 500 = 1 149 352; ruler 5 000 = 11 565 432; full 50 000 = 114 122 976 (dump tb_s2_amc_ping_1102a, binary b68ef309).
+Narrow-band buckets: arm probes <bundle>/buckets/base_w{108,180,252,324,396,468,540,612}.mlmodelc, picks smallest covering 12*prb+96; bit-exact vs full band; miss ⇒ falls back to 612.
+ANE cost model (measured): per-predict fixed cost ≈ 89 µs; marginal ≈ 0.33–0.67 µs/op; activation volume, not FLOPs, dominates. c32 dw 137 µs, c32 dense 208, c64 dense 363, c64 bn2 219, c96 bn2 313, c96 dense 610, c128 dw 307, c128 bn2 452, c128 dense 952 µs (w108).
+Effective TFLOPS vs 19 TFLOPS fp16 peak: 0.52 (c32 dw) → 9.36 (c128 dense); "38 TOPS" is int8.
+--scale-init (LayerScale initial gain): dense needs 0.03; at 1.0 dense collapses (Glorot variance 4× depthwise: fan-in 288 vs 9) — measured train 10.34/BER 0.4997/|LLR| 20.7 vs dw 0.32/0.073/5.
+Measured LDPC thresholds (snr_nominal, classical chain, BLER 50%): QPSK −3.16, 16QAM 6.61, 64QAM 13.38, 256QAM 20.91 dB over 1 890 606 receptions (AMC 35 legs 1 114 092 + MCS 25 legs 776 514, MCS = QPSK only, shifts QPSK 0.06 dB). Per-leg 256QAM spread 17.76–23.53 (sd 1.47). Measured-SINR variant differs by up to 9 dB on QPSK.
+Metric reality: delivered bits decided by a cliff — 485/500 units identical between two epochs; 15 differing units all 256QAM, 24.3–26.1 dB, all 4 992-bit TBs.
+val ranking is weak: probe best at val rank 5; probe order = ranks 5,2,9,7,1,3,8,6,4,10.
+M6 vs M4 Pro: M6 = dual 16-core ANE (2× compute), 170 GB/s, N2; M4 Pro = 16-core ANE ~38 TOPS, 273 GB/s, 14 cores (Mac16,11). M6 trades bandwidth for ANE ⇒ dw won't speed up, dense ~2×.
+211 = Intel NUC9VXQNB / product NUC9VXQNX (Xeon E-2286M, 31 GB, 2× TB3 Titan Ridge, one port on a Lenovo dock, boltctl/thunderbolt present, no dGPU, 500 W PSU + x16 slot, ~203 mm card limit). 66 = iMac x86, TF 2.16.2, 16 cores.
+Files and Code
+lib/phy/upper/ai_signal_processors/depth3/ai_train/train_depth3.py — spatial trunk now honours dense/dense_bottleneck/fuse_relu; THR_QM table + provenance; --snr-weight/--snr-sigma (training-only, val stays unweighted); --group-report N per (modulation × SNR band × TB band) with monotone-safe worst-group print; export_buckets now reads block type and bottleneck factor from the source.
+depth3/ai_train/make_bucket_bundle.sh — venv discovery, export errors kept, --dense, --dense-bottleneck N; do NOT pass --scale-init (unsupported, gets eaten as positional KERAS).
+depth3/ai_train/draw_train_set_w2.py — --qm-budget (proportional) and --qm-budget-capped (w2-style per-bin caps, bisection); latter produced w2v1.
+doc_chinese/depth3_llr_ai/work_tmp/tools/ — fly.sh (<leg> [config] [model] [seconds], pty+tee), rename_run.sh (mv + symlink, sidecar from last argv:), measure_thresholds.py (reproduces table exactly; prints skipped legs), measure_abs.py, measure_arm.py, measure_full.py, narrow_models.py, plan.swift, probe_snapshot.sh; README documents the tools-vs-data rule.
+Docs: ane_latency_curve.md (§11–§20: weight residency, 952 µs, sweet spot, M6), depth3_network_improvement_plan.md (§1–§61: diagnosis, LLR scale, thresholds, 2×2, dense collapse/fix, cliff, P1/P2, fleet), model_naming_convention.md (§7 arch segment, §8 non-default rule + defaults table), depth3_training_recipe_memo.md (§11 estimate serialisation + reporting heads).
+Errors and Fixes
+--layout spatial ignored --dense-blocks ⇒ every "dense" run was depthwise (26 185 params) — fixed; all pre-2026-11-06 dense conclusions retracted.
+export_tokens/export_buckets built 0-block graphs for dense (counted only dw{i}) and used boolean for bottleneck ⇒ fixed to infer type/factor from source.
+Dense collapse at --scale-init 1.0 ⇒ fixed with 0.03 after a 5k×1-epoch 2×2 sweep.
+Per-modulation table printed with columns swapped ⇒ corrected (+19.5% on 256QAM, later superseded).
+--init silently accepts wrong-shaped weights (dense graph from a dw checkpoint) ⇒ never warm-start across architectures.
+Launcher copied from 211 lacked source env.sh ⇒ TF silently trained on CPU at 1011% while nvidia-smi showed 0% ⇒ fixed + rule: judge by nvidia-smi utilization/memory.
+macOS has no setsid; sed -i needs ''; .keras md5 differs for identical weights (HDF5 metadata) ⇒ compare by measurement.
+107 resume.json + depth3_last.keras confirmed present before stopping c128 ⇒ resumable.
+Python heredocs broke twice on ASCII quotes inside double-quoted strings ⇒ use single-quoted Python strings.
+Pending Jobs
+107 (GPU): d3_w2v1_c32b18dw_sw2_e20 — c32 dw + w2v1 + --snr-weight 2 --snr-sigma 3 --group-report 5, 20 epochs, ~18 min/epoch; at e8 (8 669 s) ⇒ ETA ~18:40.
+Mac (CPU, nice 20, 10 threads): d3_w2v1_c32b18dense_sc003_e2e-cond-norep_e20 — 14/20 epochs (e14 val 0.10459), ~75 min/epoch ⇒ ETA ~23:00.
+107 parked: d3_w2v1_c128b18_e2e-cond-norep_e40 (c128 dw + w2v1) stopped at 3/40, resumable via --resume.
+211/66 idle; 211 code at 8c0b820c; P2 duplicate stopped.
+Current Work
+Comparing P2 (threshold-weighted) vs unweighted w2v1 dw arm at matched epochs; the unweighted control lacks --group-report logs, so the plan is to regenerate them from snapshots with --init <snap> --lr 0 --epochs 1 (zero-step trick).
+Mac dense e10 already probed: 933 680 vs dw 816 720 = +14.3%, 256QAM 371 544 vs 256 256 = +45%, OK 68→97.
+Next Step
+Report 107 status (e8/20, 18 min/epoch, ETA ~18:40; group report printing) and Mac dense (14/20, ETA ~23:00), then at e10 of P2 probe it against the unweighted e10 (816 720) and regenerate the control's group table with the --lr 0 --epochs 1 --init trick.
+Critical Context
+Best measured: d3_w2_c128b18_e2e-cond-norep_e40 1 114 664 bits, −3.02% probe (ruler −2.56/−2.68, full leg −2.85%).
+w2v1 dw curve (probe): e10 816 720, e20 959 736, e30 968 824, e40 1 003 288, e44 1 022 992, e50 1 000 184, e52 1 025 592 (−10.76%, best), e60 951 000. w2 dw: e20 928 656, e40 879 872, e46 983 320, e60 999 200. Means 949 959 vs 947 762 ⇒ data advantage at best ≈ +0.4% to +2.6%, within probe noise; ruler needed.
+Dense (sc0.03) at e10 = +14.3% over dw ⇒ dense is the large variable; needs ruler confirmation and an e20 point.
+Run history: d3_w2v1_c32b18dw_e2e-cond-norep_e20 best = e52; depth3_best.keras = e40 (probe-identical).
+Naming: d3_<ds>_c<C>b<B><arch>_<recipe>_e<EP>[best]; arch omitted = dw, dense, bn<N>; non-default values must appear (e.g. sc003, lr3e-4); sidecar model.json written by rename_run.sh.
+Hardware decisions: RTX 4070 desktop = 12 GB, 244 mm+ ⇒ does not fit NUC9 (~203 mm); 8 GB 4070 is laptop-only; recommended = RTX 4060 low-profile 8 GB (~182 mm, 115 W, 1×8-pin); 4070-class needs an eGPU enclosure (TB3 ×4 fine for 1.2 MB/step).
+Reports: probe ±1.4 pp, ruler ±0.5 pp; single-point comparisons forbidden; pick val top 3–5 and probe each; every epoch must snapshot.
