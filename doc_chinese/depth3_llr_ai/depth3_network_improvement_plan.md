@@ -5123,3 +5123,79 @@ c128 dense 才跑到 e13/40；若它延续 c32 的"20 轮后进入平台"的规�
    或专门**保留一条腿只做评测**；
 2. ★★ 每次出"新最好"之前，先做本节的**重叠检查**：`探针单元 ∩ 训练单元` 必须为 **0**；
 3. ★ 历史上 w2v1 的模型（c32+sw e38、c128 e33）**没有**这个问题（训练只用 w2，评测腿 1102a 与它不重叠）✓
+
+---
+
+## 118. ★★★★★ 2026-11-14 **当前最强模型的完整配方（可重跑）**：w2v3c ＋ c32 dense ＋ sw2s3 ＋ XLA ＋ 40 轮
+
+**(a) 成绩（203，与历史同口径）**
+
+| 尺度 | 解码数 | 交付比特 | vs CPU | unique wins |
+|---|---|---|---|---|
+| 探针 500 | **408** | ★ **1 138 872** | ★ **−0.91%** | 0 |
+| ★ 尺子 5 000 | ★ **4 099** | ★ **11 490 416** | ★ **−0.65%** | ★ **6 个 / 13 264 bit** |
+
+★ 交付比特比原最好（c128 dense e33，11 269 472）多 **220 944 bit**，且**保住了 6 个 unique wins** ——
+**第一次两个指标同时在手**。
+
+模型文件：`~/ai_depth3/models/d3_w2v3c_c32b18dense_sc003_sw2s3_jit_e40.keras`
+★ md5 **`d6353ed5e63c3207b9f6485ce5a8cb4`**（1 049 647 B）
+
+**(b) 数据：w2v3c**
+
+| 项 | 值 |
+|---|---|
+| 构成 | **w2v1 全量（160 014）** ＋ **s2_amc 补集（23 610）** = **183 624** |
+| 补集条件 | **256QAM × 2 PRB × `snr_nominal ≥ 22 dB`**（25 266 个，其中 23 610 与 w2v1 不重复）|
+| ★ 关键 | ★ **母集 `datasets_full_s2_amc` 必须不含 `s2_amc_ping_1102a`**（它是保留评测腿，已移到 `datasets_eval_reserved_1102a/`）|
+| 19 个 .npy / 23 280 036 776 B | ★ 校验指纹 **`f6c27b8bae52f7d57d19476a2a95606d`**（`md5sum *.npy \| sort \| md5sum`）|
+| 窄块占比 | 256QAM（PRB≤3）**19.8%** |
+
+**(c) 架构与训练超参**
+
+| 项 | 值 |
+|---|---|
+| 架构 | `--c-hid 32 --blocks 18 --layout spatial --dense-blocks --scale-init 0.03 --no-reporting-heads --modcond` |
+| 训练 | `--batch 16 --workers 6 --lr 1e-3 --epochs 40 --patience 0 --snapshot-every 1 --max-val 1000 --bler-samples 0 --seed 20261105` |
+| 加权 | ★ `--snr-weight 2 --snr-sigma 3`（中心=各调制自己的 50% 交叉点；**不是**悬崖带）|
+| 损失 | `--loss-norm bits --smooth-k 0` |
+| 编译 | ★ **`--jit`（XLA）** |
+| ★ 取哪一轮 | ★ **第 40 轮（last）**，**不是 val-best** |
+
+**(d) ★ 完整命令行（逐字，126 上实际运行的 argv）**
+
+```bash
+cd ~/work/ai_phy_train
+source env.sh                      # 或手动 export LD_LIBRARY_PATH=<venv>/lib/python3.12/site-packages/nvidia/*/lib
+.venv216/bin/python -u lib/phy/upper/ai_signal_processors/depth3/ai_train/train_depth3.py \
+  --train data/datasets_train_w2v3c --val data/datasets_monitor_w2 \
+  --out runs/d3_w2v3c_c32b18dense_sc003_sw2s3_jit_e40 \
+  --modulation QPSK --modcond --no-reporting-heads --c-hid 32 --blocks 18 --layout spatial \
+  --dense-blocks --scale-init 0.03 --snr-weight 2 --snr-sigma 3 --loss-norm bits --smooth-k 0 \
+  --epochs 40 --patience 0 --snapshot-every 1 --batch 16 --workers 6 --max-val 1000 \
+  --bler-samples 0 --seed 20261105 --lr 1e-3 --jit
+```
+
+**(e) 运行环境（★ 卡不同，venv 不同）**
+
+| 宿主 | venv | 版本 | 说明 |
+|---|---|---|---|
+| ★ **126（GTX 1070，Pascal）** | `.venv216` | **TF 2.16.1 ＋ cuDNN 8.9.7 ＋ Keras 3.15** | ★ **Pascal 必须用 2.16**（cuDNN 9 不支持 sm_61，见 memo D.8）|
+| 153 / 107 | `.venv` | TF 2.21 ＋ cuDNN 9 | 同样的命令可跑，`--jit` 同样有效 |
+
+**耗时（126）**：**23 min/轮 × 40 ≈ 15.3 h**，显存 7.6 GB（batch 16）。
+
+**(f) 复现步骤**
+
+1. ★ **确认 1102a 不在母集里**：`ls ~/ai_depth3/datasets_full_s2_amc/*1102a*` 应为空；
+2. 建 w2v3c（母集 → 训练集）：`python build_w2v3c.py`（逻辑：w2v1 全量 ＋ 母集里 `qm==8 & alloc_nof_prb==2 & snr≥22` 且 unit 不在 w2v1 的记录）；
+3. ★ 校验指纹必须等于 `f6c27b8bae52f7d57d19476a2a95606d`（否则不要跑，先查数据）；
+4. 按 (d) 启动（换机器时把 `--workers` 提到 8 可减少数据管线等待）；
+5. 跑完取 **last**（第 40 轮），按 (a) 的两个尺度测，并核对 md5。
+
+**(g) 三条注意**
+
+1. ★ **不要按 val 选轮**：本 run 的 val-best 是第 20 轮（0.09894），探针只有 1 120 728；
+   **第 40 轮 val 0.1004 却交付 1 138 872** —— 第 8 次记录到 val 与交付比特的反转；
+2. ★ **`--jit` 不是可选项**：c32 上它把每步从 36.6 ms 压到 18.0 ms（memo D.10），没有它 40 轮要 30+ h；
+3. ★ **补集必须排除评测腿**：w2v3b 曾把 1102a 混进训练，探针虚高 −1.30%（62% 增益来自背过的单元，见 §117）。
