@@ -50,6 +50,7 @@ d3_w2_c128b18_2st-cond_e9              ← 现在的 w2_cond_c128_b18_e9（同 r
 | `s<seed>` | 种子**非** 20261105 时才写 | 默认省略 |
 | `pat<n>` | 早停耐心**非** 0 时才写 | `pat3`（早期）／省略＝不早停 |
 | ★ `k<n>` | ★ **主干空间核边长非 3 时才写**（architecture_levers L2 的大核）| `k5`／`k7`；省略＝3 |
+| ★ `g<n>` | ★ **主干卷积分组数非 1 时才写**（architecture_levers L3）| `g4`（g=32 即 depthwise，`dw`）；省略＝1（dense）|
 
 **⇒ 不进名字、进 sidecar 的**：`batch`（8/16）、`workers`、`max-val`、`epochs`（总计划）、`snr-range`、`layout`、`nsc`。
 
