@@ -51,7 +51,30 @@ PRB_EDGES = [1, 4, 9, 25, 10 ** 6]
 PRB_LABEL = ["<=3", "4-8", "9-24", ">24"]
 
 
-def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=10 ** 6, edges=None):
+def report_paired(recs, name, pick, B):
+    """Paired bootstrap over RECEPTIONS: the BER difference between two groups, with a 5-95% interval.
+
+    Both groups are measured inside the same reception, so the channel and noise realisation cancel; resampling the
+    differences over receptions then answers "would this sign survive a different draw of channels", which pooling
+    bits cannot.
+    """
+    diffs = []
+    for r in recs:
+        a, b = pick(r)
+        ea, na = r.get(a, (0, 0)); eb, nb = r.get(b, (0, 0))
+        if na and nb:
+            diffs.append(ea / na - eb / nb)
+    if len(diffs) < 5:
+        print(f"  {name:12}: too few paired receptions ({len(diffs)})"); return
+    d = np.asarray(diffs)
+    rng = np.random.default_rng(20261105)
+    boot = np.array([rng.choice(d, size=d.size, replace=True).mean() for _ in range(B)])
+    lo, hi = np.percentile(boot, [5, 95])
+    verdict = "SIGNIFICANT" if (lo > 0 or hi < 0) else "not significant"
+    print(f"  {name:12}: {d.mean():+.4f}  90% CI [{lo:+.4f}, {hi:+.4f}]  n={d.size} receptions  -> {verdict}")
+
+
+def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=10 ** 6, edges=None, bootstrap=0):
     global EDGES
     if edges:
         EDGES = edges
@@ -85,6 +108,10 @@ def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=
     ll = {j: [0, 0] for j in range(len(LL))}
     llr_n = {(w, k): 0 for w in range(len(PRB_LABEL)) for k in range(len(EDGES) - 1)}
     per_unit = []
+    # PER-RECEPTION COUNTS, so every comparison can be bootstrapped over receptions rather than over bits. Bits
+    # inside one reception share a channel and a noise realisation, so treating them as independent overstates the
+    # sample size by two orders of magnitude and turns noise into "falsified hypotheses".
+    rec_par, rec_dist, rec_mod4, rec_edge = [], [], [], []
     skipped = 0
     for i in idx:
         sample = val.sample(i)
@@ -107,6 +134,10 @@ def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=
         cols = [sc for sc in range(llr.shape[0]) if weights[sc].any()]
         lo, hi = (min(cols), max(cols)) if cols else (0, 0)
         unit_err = unit_n = 0
+        rp = {0: [0, 0], 1: [0, 0]}
+        rd = {}
+        rm = {m: [0, 0] for m in range(4)}
+        re_ = {}
         for c in range(llr.shape[1]):
             symbol = c // D3.COND_STRIDE
             d = min(abs(symbol - s) for s in dmrs)
@@ -118,6 +149,10 @@ def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=
                 j = next(jj for jj in range(len(LL)) if LL[jj][0] <= abs(float(llr[sc, c])) < LL[jj][1])
                 ll[j][0] += err
                 ll[j][1] += 1
+                rp[sc % 2][0] += err; rp[sc % 2][1] += 1
+                rm[sc % 4][0] += err; rm[sc % 4][1] += 1
+                rd.setdefault(min(d, 8), [0, 0])[0] += err; rd[min(d, 8)][1] += 1
+                re_.setdefault(min(d_edge, 8), [0, 0])[0] += err; re_[min(d_edge, 8)][1] += 1
                 for slot in (par[sc % 2], mod4[sc % 4], band[k], prb_band[(w, k)],
                              edge.setdefault(min(d_edge, 8), [0, 0]),
                              dist.setdefault(min(d, 6), [0, 0])):
@@ -128,6 +163,7 @@ def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=
                 unit_err += err
                 unit_n += 1
         per_unit.append(unit_err / max(unit_n, 1))
+        rec_par.append(rp); rec_dist.append(rd); rec_mod4.append(rm); rec_edge.append(re_)
     head = os.path.basename(ckpt)
     print(f"\n=== {head}  (256QAM receptions: {len(idx)})")
     print(f"  parity 0/1 : {par[0][0]/par[0][1]:.4f} / {par[1][0]/par[1][1]:.4f}")
@@ -159,6 +195,11 @@ def analyse(ckpt, limit, data_dir=None, modulation="256QAM", prb_min=0, prb_max=
         print(row)
     u = np.asarray(per_unit)
     print(f"  per unit   : median {np.median(u):.4f}  p90 {np.percentile(u, 90):.4f}  max {u.max():.4f}")
+    if bootstrap:
+        report_paired(rec_par, "parity 0-1", lambda r: (0, 1), bootstrap)
+        report_paired(rec_dist, "DMRS d1-d4", lambda r: (1, 4), bootstrap)
+        report_paired(rec_edge, "EDGE 0-1", lambda r: (0, 1), bootstrap)
+        report_paired(rec_edge, "EDGE 0-4", lambda r: (0, 4), bootstrap)
 
 
 def main():
@@ -166,6 +207,8 @@ def main():
     ap.add_argument("checkpoints", nargs="+")
     ap.add_argument("--limit", type=int, default=150)
     ap.add_argument("--data", default=None, help="dataset directory (default: the monitor set)")
+    ap.add_argument("--bootstrap", type=int, default=0, metavar="B",
+                    help="paired bootstrap over receptions for the parity / DMRS-distance / edge comparisons")
     ap.add_argument("--modulation", default="256QAM")
     ap.add_argument("--prb-min", type=int, default=0)
     ap.add_argument("--prb-max", type=int, default=10 ** 6)
@@ -175,7 +218,7 @@ def main():
     for ckpt in args.checkpoints:
         if os.path.exists(ckpt):
             edges = [float(x) for x in args.edges.split(",")] if args.edges else None
-            analyse(ckpt, args.limit, args.data, args.modulation, args.prb_min, args.prb_max, edges)
+            analyse(ckpt, args.limit, args.data, args.modulation, args.prb_min, args.prb_max, edges, args.bootstrap)
         else:
             print(f"missing {ckpt}")
 
