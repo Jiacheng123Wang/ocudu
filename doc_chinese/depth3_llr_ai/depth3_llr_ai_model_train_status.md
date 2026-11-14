@@ -419,3 +419,49 @@ epoch    1  train 0.20216  val 0.10876  uncoded BER 0.0342  coded BLER nan  mean
 **⇒ ★★★ 所以**：★ **广州两台现在**没有**训练任务在跑** ✓；**要在这里开工，得先把代码与语料同步到 106/221**（它们上面是 10-28 的 scp 副本，不是 git checkout）✓
 
 ★ 状态 ✓：★★ **两条 c128 均为 ✅ 完成（10-31）并已改正 §1 登记** ✓；★★ **完整 12 轮曲线已录** ✓；★★★ **同验证集、干净比较："多 2.3 倍语料 val 反而略高"已记，并标注了早停的限制** ✓；★★ **采样数 99 097／43 523 与文档不同，已按实测更正** ✓；★★ **香港 107 不可达，最后已知状态与推断写明"未经确认"** ✓。
+
+---
+
+## 8. ★★★★★ 2026-11-14 13:10 **三机现状、c128 现场打包（可带到广州/香港续训）、以及新的最好模型**
+
+**(a) 现在在跑什么 / 跑到哪了**
+
+| 机器 | 运行 ID | 配置 | 进度 | best val | ETA |
+|---|---|---|---|---|---|
+| **126**（GTX 1070）| `d3_w2v3c_c32b18_e2e-cond-norep-sw2s3-k5_e40` | c32／b18／**dense＋k=5**（RF 253）／sw2s3／XLA | ★ **e4 / 40** | 0.11612 | ~11-14（约 20–27 h）|
+| **107**（3060 Laptop）| `d3_w2v3c_c32b18_e2e-cond-norep-sw2s3-g4_e40` | c32／b18／**分组 g=4**（62 473 参数）／sw2s3／**无 XLA** | ★ **e5 / 40** | 0.12727 | ~11-15（约 15 h）|
+| **153**（eGPU 3060 Ti）| `d3_w2v3c_c128b18dense_sc003_sw2s3_e10` | c128／dense／sw2s3 | ⛔ **停在 e14 / 20** | ★ **0.09473** | 已停（现场已备份）|
+
+**(b) ★★★ c128 现场已打包（可带到广州/香港续训）**
+
+| 项 | 值 |
+|---|---|
+| ★ 归档 | ★ `~/ai_depth3/d3_w2v3c_c128b18dense_sc003_sw2s3_e10_e14.tar.gz`（**170 MB**）|
+| ★ 副本 | ★ `/Volumes/CORPUS/d3_w2v3c_c128b18dense_sc003_sw2s3_e10_e14.tar.gz` |
+| 内容 | **e1–e14 全部快照** ＋ `depth3_last/best.keras` ＋ `resume.json`（epoch 14, best 0.09473）＋ `history.json` ＋ `README_RESUME.md`（续训命令与前置条件）|
+| ★ 校验 | ★ `md5sum snapshots/*.keras depth3_last.keras depth3_best.keras resume.json \| awk '{print $1}' \| sort \| md5sum` = **`583e29b4505369b087ecd6813474f0d3`** |
+| 续训 | 解包到 `<repo>/runs/`，用同一命令加 `--resume`、`--epochs 20`（★ `--out` 必须指向该目录）|
+| 前置 | `datasets_train_w2v3c`（23 280 036 776 B，指纹 `f6c27b8bae…`）＋ 含 `--kernel-size/--groups` 的最新 `ai_train/` ＋ `datasets_monitor_w2` |
+| 现场另一份 | 126 的 `~/work/ai_phy_train/runs/d3_w2v3c_c128b18dense_sc003_sw2s3_e10/`（186 MB）|
+
+**(c) ★ 新的最好模型（2026-11-14，w2v3c 数据线）**
+
+| 尺度 | 结果 |
+|---|---|
+| 探针 500 | **1 138 872（−0.91%）**，408 OK |
+| ★ 尺子 5 000 | ★ **11 490 416（−0.65%）**，4 099 OK |
+| ★ unique wins | ★ **6 个 / 13 264 bit** |
+| 模型 | `d3_w2v3c_c32b18dense_sc003_sw2s3_jit_e40`，md5 `d6353ed5e63c3207b9f6485ce5a8cb4`（保存在 `~/ai_depth3/models/`）|
+| 配方 | 见 `depth3_network_improvement_plan.md` **§118** |
+
+**(d) 机器迁移（用户 2026-11-14 决定）**
+
+- ★ **153 留在北京**；**eGPU（3060 Ti 盒子）带到广州/香港**，接 **106 / 211** 继续训练；
+- ⇒ c128 的续训将在 106/211 上进行，用 (b) 的归档恢复；
+- ★ 迁移到新宿主前按 `machine_compute_capability_and_model_train_memo.md` **D.6** 清单走（驱动 → `nvidia-smi` → venv → 数据/代码 → `bench3.py` 校验）。
+
+**(e) 下一步**
+
+1. 等 126 的 **k=5** 与 107 的 **g=4** 跑完 → 按 runbook §16 先校验再测（探针＋尺子＋unique）；
+2. 106/211 可用后，恢复 c128（e15→e20）；
+3. ★ 判据：k=5 与 g=4 分别回答"大核能否与 dense 叠加""分组能否以 1/3 参数保住性能"。
