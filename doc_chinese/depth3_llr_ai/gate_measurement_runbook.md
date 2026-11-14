@@ -562,3 +562,68 @@ RUN_ARM=$HOME/ai_depth3/replay_bits_1102/e17_1104/run_arm_ext.py
 1. ★ **新东西只往 `~/ai_depth3/` 里放**；`~` 根目录不再新增工作目录 ✓
 2. ★ 删除任何东西前**先确认不属于上面任何一类**；本工作流**从不自动删除**（用户授权才删）✓
 3. ★ 本机（Mac）的对应布局：`~/ai_depth3/` 同样是工作根目录（`probe/`、`corpus/`、`gate_ai_models/`、`exp_bits_1102/`）✓
+
+---
+
+## 16. ★★★★★ 2026-11-14 更新：**203 的现状、今天真正可用的命令、实测计时、三个坑与校验规程**
+
+> §0 与 §3 写于 2026-11-04（广州，203＝`192.168.0.228`）。**今天 203 的地址与可跑通的命令都变了**，以本段为准。
+
+**(a) 现状**
+
+| 项 | 值 |
+|---|---|
+| ★ 203 地址 | ★ **`192.168.100.105`**（用户 `jiachengwang`，Apple **M2**，8 核）|
+| 回放二进制 | `~/dev/ocudu/build/lib/phy/upper/channel_processors/metal/ul_chain_replay`（`BIN_SHA 12f55d11…`）|
+| ★ 尺子单元 | ★ `~/ai_depth3/ruler_s2_amc_5000_units.txt`（5 000 行）|
+| ★ 尺子语料 | ★ `~/ai_depth3/corpus/s2_amc_ping_1102a`（**200 002 个文件**；`measure_arm.py` 里写死的是
+  `~/dev/ocudu/lib/phy/upper/ai_signal_processors/test/ruler_s2_amc_5000_corpus`，已用软链指过去）|
+| ★ 测量脚本 | ★ **`~/ai_depth3/measure_arm.py`**（3 个参数：units / model / out.csv）|
+
+**(b) ★ 今天可用的两条命令**
+
+```bash
+# 尺子 5 000（回放机 203）
+cd ~/ai_depth3
+python3 measure_arm.py ~/ai_depth3/ruler_s2_amc_5000_units.txt \
+        w2v3c_c32_XLA_e40/w2v3c_c32_XLA_e40.mlmodelc \
+        ~/ai_depth3/ruler_<臂>.csv
+# 输出一行：ruler_<臂>.csv: n=5000 OK=<k> bits=<K>
+
+# 探针 500（一键：export → compile → calibrate → replay → 打分）
+NAME="<臂名>" ~/ai_depth3/bin/probe_snapshot.sh <snapshot.keras | user@host:/path/snapshot.keras> 500
+```
+
+★ **bundle 目录必须同时含** `<名字>.mlmodelc` **和** `depth3_scales.txt`（后者由 `calibrate_depth3.py --write-scales` 生成；
+探针目录 `~/ai_depth3/probe/<tag>/` 里两样都有，直接 `cp -R` 出来即可）。
+
+**(c) ★ 实测计时（2026-11-14，203 M2）**
+
+| 尺度 | 耗时 | 说明 |
+|---|---|---|
+| 探针 500 | **约 3 分钟** | ★ 大部分是 **export ＋ coremlcompiler 编译**（~2.5 min），回放 500 单元本身约 1 分钟 |
+| ★ 尺子 5 000 | ★ **8 分 42 秒**（e60 实测）| 每单元约 **104 ms**；**不是 1 分钟** |
+
+**(d) ★★★ 三个坑（都真实踩过）**
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| ★ 尺子报 `OK=0 bits=0`，跑满 5 000 单元才暴露 | ★ `measure_arm.py` 的第三个参数必须是 **`.mlmodelc` 的路径**，给**父目录**时静默失败 | 传 `.../x.mlmodelc`，不要传 `.../x/` |
+| ★ `run_arm_ext.py` 在 203 上 `ok=0`（§0/§3 的写法）| 当前的 bundle/scales 布局与它期望的不一致 | ★ 今天用 `measure_arm.py`（已验证可复现 PK 数字）|
+| AI 臂数字"变好" | 忘了 `OCUDU_DEPTH3_FALLBACK=none`（经典链在帮忙）| `measure_arm.py` 已设 PURE；自己写脚本时要显式设 |
+
+**(e) ★ 校验规程（跑完任何尺子都要做一次）**
+
+1. **复跑一个已知模型**，与 PK 记录逐位比对 —— 今天用 `w2c32_b18_e60`：
+   实测 **`OK=3705 / 10 214 096`**，与 PK 的 `10 214 096 / 3 705` **完全一致** ✓；
+2. 同一模型跑**两次**，结果必须逐位相同（e40 已复核：`4 099 / 11 490 416` 两次一致）；
+3. 记录 `BIN_SHA` 与 `UNITS_SHA`（探针脚本会打印），不同二进制之间**不可直接比较**（见脚本头部注释）。
+
+**(f) 与旧章节的关系**
+
+| 旧内容 | 现状 |
+|---|---|
+| §0 ③ / §3 的 `run_arm_ext.py --arm ai …` | 保留作参考；**今天改用 `measure_arm.py`** |
+| §0 的 203 IP `192.168.0.228` / `192.168.31.203` | ★ **已过时**，现在是 `192.168.100.105` |
+| §1.3 从分片 tar 还原尺子 | 仍然有效（不依赖语料）|
+| ★ 训练集**不得**含 `s2_amc_ping_1102a` | 见 `corpus_to_training_to_measurement_db_manual.md` **§17**（评测腿保留规则）|
