@@ -635,7 +635,7 @@ NAME="<臂名>" ~/ai_depth3/bin/probe_snapshot.sh <snapshot.keras | user@host:/p
 | 机器 | ★ 新地址 | 备注 |
 |---|---|---|
 | 本机（Mac，开发/编译）| ★ **192.168.0.155** | 探针脚本、coremlcompiler、`ai_ce_work/venv` 都在这 |
-| ★ 203（M2，回放机）| ★ **192.168.0.151** | ★ **ICMP 被挡，ping 不通但 ssh 正常**；`probe_snapshot.sh`、`corpus/s2_amc_ping_1102a`、`ruler_s2_amc_5000_units.txt` 都在原位 |
+| ★ 203（M2，回放机）| ★ **192.168.0.115**（2026-11-15 起；旧 .151 作废）| ★ **ICMP 被挡，ping 不通但 ssh 正常**；`probe_snapshot.sh`、`corpus/s2_amc_ping_1102a`、`ruler_s2_amc_5000_units.txt` 都在原位 |
 | 107（ASUS，3060 Laptop）| **192.168.0.152** | 训练机 |
 | 126（Lenovo，GTX 1070）| **192.168.0.153** | 训练机 |
 | 153（eGPU 宿主）| — | ★ **已留在北京，不在本网段** |
