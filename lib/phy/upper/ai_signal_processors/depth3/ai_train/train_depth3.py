@@ -198,7 +198,7 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
           dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False,
           dense_bottleneck=0, fuse_relu=False,
           layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False,
-          dilations=DILATIONS, ksize=3, groups=1):
+          dilations=DILATIONS, ksize=3, groups=1, noise_to_llr=False):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -302,15 +302,29 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         # count, so a layout that renamed them would be a contract change rather than a choice
         # inside the network. Only the spatial axes differ, and every one of them is flattened back
         # to the contract's `[width, channels]` before the head leaves the model.
-        llr = tf.keras.layers.Conv2D(head_qm, 1, dtype=keras_dtype, name="llr_1x1")(y)
+        # ★ L6: THE NOISE HEAD BECOMES AN INPUT OF THE DEMAPPER INSTEAD OF ONLY A SIDE OUTPUT.
+        # The screen of 2026-11-15 showed the head separates errors at FIXED |LLR| (8.2% -> 30.2% across its
+        # quintiles inside the low-confidence band), so it carries per-RE information the LLR magnitude does not.
+        # Feeding it back costs one input channel (+head_qm weights) and no structure: the demapper can then
+        # sharpen exactly the REs it knows are noisy.
+        llr_src = y
+        if noise_to_llr:
+            nz = tf.keras.layers.Activation("tanh", dtype=keras_dtype, name="post_eq_noise")(
+                tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="noise_1x1")(y))
+            llr_src = tf.keras.layers.Concatenate(dtype=keras_dtype, name="llr_with_noise")([y, nz])
+        llr = tf.keras.layers.Conv2D(head_qm, 1, dtype=keras_dtype, name="llr_1x1")(llr_src)
         llr = tf.keras.layers.Activation("linear" if llr_linear else "tanh", dtype=keras_dtype,
                                          name="llr")(llr)
         # [batch, width, symbols, qm] -> [batch, width, symbols * qm]: the contract's channel order,
         # symbol major and bit fastest, which is what the label plane already holds.
         outputs = {"llr": tf.keras.layers.Reshape((width, NOF_SYMBOLS * head_qm), name="llr_flat")(llr)}
         if aux_heads:
-            noise = tf.keras.layers.Activation("tanh", dtype=keras_dtype, name="post_eq_noise")(
-                tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="noise_1x1")(y))
+            if noise_to_llr:
+                # Already built above and wired into the demapper; here it only needs its output head.
+                noise = nz
+            else:
+                noise = tf.keras.layers.Activation("tanh", dtype=keras_dtype, name="post_eq_noise")(
+                    tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="noise_1x1")(y))
             outputs["post_eq_noise"] = tf.keras.layers.Reshape((width, NOF_SYMBOLS),
                                                                name="noise_flat")(noise)
             # THE REPORTING HEADS ARE OPTIONAL (design section 22.2). There are TWO head-construction sites in
@@ -916,7 +930,8 @@ def export_buckets(args, parser, source=None):
                        aux_heads=aux, c_hid=c_hid, dtype=args.dtype,
                        layout=args.layout, in_channels=in_channels, cond=args.modcond,
                        reporting_heads=reporting, dense=dense, dense_bottleneck=bottleneck,
-                       dilations=args.dilations, ksize=args.kernel_size, groups=args.groups)
+                       dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
+                       noise_to_llr=args.noise_to_llr)
         # WEIGHTS ARE COPIED, NOT RELOADED. A `.keras` archive carries the width the graph was built with, and loading
         # it into a graph built for another width fails on every layer past the divergence (41 objects in the first
         # attempt). The tensor shapes do not depend on the width -- they are 1x1 and depthwise convolutions -- so
@@ -988,6 +1003,9 @@ def main():
                         help="spatial kernel side of the trunk's mixing layers (default 3)")
     # g=1 IS THE DENSE 3x3 that bought +18.6% and g=c-hid is depthwise; the doc lists 2 and 4 as the useful
     # middle. Kept separate from --kernel-size so the two levers are measured one at a time.
+    parser.add_argument("--noise-to-llr", action="store_true",
+                        help="feed the post_eq_noise head back as an extra input channel of the LLR demapper "
+                             "(lever L6; the head separates errors at fixed |LLR|, see architecture_levers section 11)")
     parser.add_argument("--groups", type=int, default=1, metavar="G",
                         help="groups of the trunk's mixing conv (1 = dense, c-hid = depthwise); "
                              "must divide the channel count")
@@ -1211,7 +1229,8 @@ def main():
                             llr_linear=args.llr_linear, dense=args.dense_blocks,
                             dense_bottleneck=args.dense_bottleneck, fuse_relu=args.fuse_relu,
                             layout=args.layout, in_channels=in_channels, cond=args.modcond,
-                            dilations=args.dilations, ksize=args.kernel_size, groups=args.groups, smooth_k=args.smooth_k)
+                            dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
+                            noise_to_llr=args.noise_to_llr, smooth_k=args.smooth_k)
         export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
         return 0
 
@@ -1246,6 +1265,7 @@ def main():
                   llr_linear=args.llr_linear, dense=args.dense_blocks,
                   dense_bottleneck=args.dense_bottleneck, layout=args.layout, fuse_relu=args.fuse_relu,
                   in_channels=in_channels, cond=args.modcond, dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
+                  noise_to_llr=args.noise_to_llr,
                   smooth_k=args.smooth_k)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}  heads {sorted(model.output.keys())}")
