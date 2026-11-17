@@ -465,3 +465,59 @@ epoch    1  train 0.20216  val 0.10876  uncoded BER 0.0342  coded BLER nan  mean
 1. 等 126 的 **k=5** 与 107 的 **g=4** 跑完 → 按 runbook §16 先校验再测（探针＋尺子＋unique）；
 2. 106/211 可用后，恢复 c128（e15→e20）；
 3. ★ 判据：k=5 与 g=4 分别回答"大核能否与 dense 叠加""分组能否以 1/3 参数保住性能"。
+
+
+---
+
+## 9. ★★★★★ 2026-11-18 00:20 **106：c256 停训并保现场；外置 eGPU 盒子已接到 106（★ 同时保持纯 CPU 可跑）**
+
+**(a) c256 停训（106，CPU）**
+
+| 项 | 值 |
+|---|---|
+| 运行 | `runs/c256_b18_s2`（c256 / b18 / 空间 / batch 8 / `--epochs 100` / 旧语料 `datasets_train_s2`）|
+| 停在 | ★ **第 10 轮**（10 个快照）|
+| ★ best val | ★ **0.09795（第 6 轮）** —— 之后 4 轮未改善 |
+| 实测速度 | ★ **≈29.5 h/轮**（10 轮共 12.3 天）|
+| ★ 现场 | ★ 已停；`depth3_best_e6.keras` **另存一份**（防 resume 覆盖）；`resume.json` 完好，可 `--resume` 续 |
+| 判定 | ★ 100 轮需 ~110 天 ⇒ **不可行**；且曲线自 e6 起失稳 |
+
+**(b) 外置 eGPU 盒子接到 106（硬件已通）**
+
+| 项 | 值 |
+|---|---|
+| 雷电 | **XYJ-LINK，TB3，40 Gb/s，authorized** ✓ |
+| PCIe | ★ **`08:00.0 NVIDIA GA104 [GeForce RTX 3060 Ti]`** 已枚举 ✓（音频 08:00.1）|
+| 宿主 | NUC9VXQNX，Ubuntu 24.04.3，内核 6.8.0-147，16 核，282 GB 空闲 |
+| ★ 缺 | ★ **NVIDIA 驱动未装**（`dpkg -l | grep nvidia` = 0，`nvidia-smi` 不存在）|
+
+**(c) ★★ 双模式要求（用户 2026-11-18 明确）**
+
+> **盒子不是常在 106 上** ⇒ 同一台机器必须**既能用 eGPU、也能纯 CPU 跑**。
+
+| 做法 | 说明 |
+|---|---|
+| ★ `env.sh`（已写）| 只在 nvidia wheels 存在时加 `LD_LIBRARY_PATH`；`OCUDU_FORCE_CPU=1` 时清空 `CUDA_VISIBLE_DEVICES`；启动时打印 `mode: GPU 名字` 或 `mode: CPU` |
+| ★ venv | 装 `tensorflow[and-cuda]`；无 GPU 时 TF 自动用 CPU，代码零改动 |
+| ★ 训练命令 | 两种模式**同一条命令**（不写死设备），由 TF 自动选择 |
+| 验证 | `source env.sh` 看 mode 行；`python -c "tf.config.list_physical_devices()"` |
+
+**(d) 已完成的准备（不需 sudo）**
+
+| 项 | 状态 |
+|---|---|
+| 代码两棵树同步（含 `--kernel-size/--groups/--noise-to-llr/--ce-head`）| ✓ |
+| `env.sh`（双模式）| ✓ 实测两种模式都报 `CPU`（驱动未装，符合预期）|
+| `tensorflow[and-cuda]` 的 CUDA wheels | ⏳ 安装中（网络慢，正在断点续传）|
+| `datasets_train_w2v3c`（23 GB，126 → 106）| ⏳ 复制中（局域网 ~2–3 MB/s ⇒ 约 2–3 h）|
+
+**(e) 还需用户执行（需要 sudo）**
+
+```bash
+sudo apt update
+sudo apt install -y nvidia-driver-595-open
+sudo reboot
+```
+
+**重启后我做**：`nvidia-smi` 核对（3060 Ti / 8192 MiB / 200 W）→ `source env.sh` 应报
+`mode: NVIDIA GeForce RTX 3060 Ti` → 用 `benchmarks/bench_depth3_gpu.py` 实测样本/s → 与 153（438）／126（108）／107（136）对比。
