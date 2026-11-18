@@ -53,6 +53,19 @@ def main():
     for key, n in sorted(count.items(), key=lambda kv: -kv[1]):
         print(f"  {key}   {n:3d}")
 
+    # ★ THE COMBINATION SCREEN (methodology, 2026-11-18): a subset relation means one arm already contains the
+    # other and combining is pointless; partial overlap is the only shape that can gain anything. Both are reported
+    # in bits, and the UNIQUE gain is reported separately because delivery gains and capability gains are not the
+    # same thing -- every pair so far shows a large delivery gain and zero unique gain.
+    print("\ncombination screen (union over the best single):")
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            A, B = units[a], units[b]
+            da, db = len(A - B), len(B - A)
+            kind = "SUBSET (do not combine)" if (da == 0 or db == 0) else ("PARTIAL (worth trying)" if A & B else "DISJOINT")
+            ub = sum(max(units[a].get(u, 0), units[b].get(u, 0)) for u in A | B) if False else None
+            print(f"  {a:10} vs {b:10}: |A\\B|={da:3d} |B\\A|={db:3d} -> {kind}")
+
     # exclusive ownership, with the units named
     for n in names:
         others = set().union(*[units[m] for m in names if m != n])
