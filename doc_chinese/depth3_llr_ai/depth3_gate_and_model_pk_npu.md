@@ -275,6 +275,21 @@
 | 13 | s2_e40 | 1× | 4 017 | 11 096 072 | −4.06% | 4 | — |
 | 14 | k=5 e40（大核）| 1× | 3 998 | 11 045 304 | −4.50% | 4 | — |
 
+**★ s1 / s2 等缩写的模型全称（run 目录名，可在各机器 `~/work/ai_phy_train/runs/` 下找到）**
+
+| 缩写 | 全称 | 种子 | 用到的 checkpoint |
+|---|---|---|---|
+| **s1** | `d3_w2v3c_c32b18dense_sc003_sw2s3_jit_e40`（126）| 20261105 | e37 / e38 / e39 / e40 |
+| **s2** | `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3_s20261106_e40`（107）| 20261106 | e32 / e37 / e38 / e39 / e40 |
+| ★ **s1 末端 SWA** | 上表 s1 的 **e37+e38+e39+e40** 权重平均 | — | 产物 `~/ai_depth3/models/avg_s1_within4.keras` |
+| ★ **s2 末端 SWA** | 上表 s2 的 **e38+e39+e40** 权重平均 | — | 产物 `~/ai_depth3/models/swa_s2_tail.keras` |
+| **L6** | `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3-nzllr_e40`（107）| 20261105 | e40 |
+| **CE** | `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3-ceh_e40`（107）| 20261105 | e40 |
+| **k=5** | `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3-k5_e40`（126）| 20261105 | e40 |
+
+★ 注：**s1 与 s2 只差种子**（其余参数一致，均 batch 16 / workers 6 / 40 轮 / 固定 LR 1e-3）；
+**s1 的 run 名里没有 `e2e-cond-norep`** 是历史命名差异，配方相同。
+
 **★ 排行榜的三条读法**
 
 | 结论 | 依据 |
