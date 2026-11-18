@@ -32,6 +32,7 @@ import depth3_paths
 depth3_paths.add_ce_shared()
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -1133,6 +1134,14 @@ def main():
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr-decay", choices=("none", "cosine"), default="none",
+                        help="cosine: decay the learning rate from --lr to --lr-min across this run's epochs; the "
+                             "schedule is computed from the epoch number, so a resumed run continues it correctly")
+    parser.add_argument("--lr-min", type=float, default=None,
+                        help="final learning rate for --lr-decay cosine (default: --lr / 10)")
+    parser.add_argument("--lr-decay-from", type=int, default=1,
+                        help="epoch at which the decay starts at --lr; use the first epoch of a continuation so the "
+                             "whole continuation is decayed instead of inheriting the position of the original run")
     parser.add_argument("--max-train", type=int, default=0, help="cap the training samples")
     parser.add_argument("--max-val", type=int, default=64)
     parser.add_argument("--jit", action="store_true",
@@ -1653,7 +1662,25 @@ def main():
     # even if the loop is entered with a control file that cannot be read: the variables are re-read
     # every epoch, but the write must not depend on that read having happened.
     patience_now, min_delta_now, control_src = float(args.patience), float(args.min_delta), "argv"
+    # ★ A DECAYED LEARNING RATE MAKES THE END OF TRAINING TIGHT. With a constant rate the model keeps wandering in a
+    # ball, and consecutive checkpoints differ by several percentage points of delivered bits (measured: 4.0 pp within
+    # one run). A cosine decay shrinks that ball towards the end, so the final epochs are close to each other -- which
+    # is exactly the condition the tail weight-averaging (SWA) needs to work.
+    #
+    # It is computed FROM THE EPOCH NUMBER rather than from a step counter, so a resumed run picks the schedule up
+    # where it left off instead of restarting the decay from the top.
+    lr_min = args.lr_min if args.lr_min is not None else args.lr / 10.0
+    def learning_rate_for(ep):
+        if args.lr_decay == "none":
+            return args.lr
+        first = max(1, args.lr_decay_from)
+        span = max(1, args.epochs - first)
+        frac = min(1.0, max(0.0, (ep - first) / span))
+        return lr_min + 0.5 * (args.lr - lr_min) * (1.0 + math.cos(math.pi * frac))
+
     for epoch in range(start_epoch, args.epochs + 1):
+        if args.lr_decay != "none":
+            optimizer.learning_rate.assign(learning_rate_for(epoch))
         losses = []
         for samples in train.epoch(args.batch, args.workers, args.prefetch or (2 * args.workers)):
             x, targets = tensors(samples)
