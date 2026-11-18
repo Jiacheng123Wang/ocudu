@@ -198,7 +198,8 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
           dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False,
           dense_bottleneck=0, fuse_relu=False,
           layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False,
-          dilations=DILATIONS, ksize=3, groups=1, noise_to_llr=False, ce_aux=False, llr_post=False):
+          dilations=DILATIONS, ksize=3, groups=1, noise_to_llr=False, ce_aux=False, llr_post=False,
+          cst_head=False):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -312,7 +313,38 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
             nz = tf.keras.layers.Activation("tanh", dtype=keras_dtype, name="post_eq_noise")(
                 tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="noise_1x1")(y))
             llr_src = tf.keras.layers.Concatenate(dtype=keras_dtype, name="llr_with_noise")([y, nz])
-        llr = tf.keras.layers.Conv2D(head_qm, 1, dtype=keras_dtype, name="llr_1x1")(llr_src)
+        if cst_head:
+            # ★ LEVER A: A CONSTELLATION-AWARE HEAD, IN ITS HONEST FORM.
+            # The exact max-log demapper needs the symbol posterior of the modulation IN USE, and a single conditioned
+            # graph cannot express that: the contract's channel order for 256QAM is (I0..I3,Q0..Q3) while QPSK's two
+            # bits are (I,Q), i.e. channels 0 and 4 of the same head. A static graph cannot permute channels per
+            # sample, so an exact posterior head would need one graph per modulation or a contract change.
+            #
+            # What is expressible, and what this builds, is the ANALYTIC LINEAR TERM of the demapper:
+            #     LLR_k ~= 4 * s_dim / sigma^2      (s_dim = the soft symbol's I or Q component)
+            # followed by a learned residual that supplies everything the linear term cannot (the per-bit offsets of
+            # the inner PAM levels, and the per-bit sign patterns). The prior is what the classical chain gets for
+            # free; the residual keeps the capacity the current head already has.
+            s_i = tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="cst_si")(llr_src)
+            s_q = tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="cst_sq")(llr_src)
+            log_s2 = tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="cst_ls2",
+                                            kernel_initializer="zeros", bias_initializer="zeros")(llr_src)
+            # THE EXPONENT IS BOUNDED BY THE ACTIVATION, NOT BY A CLIP. A Lambda cannot be deserialized at export
+            # time and a Rescaling layer puts a float32 constant next to a float16 tensor (coremltools refuses the
+            # mixed dtype), so tanh bounds the log-variance and the analytic term divides by its exponential. The
+            # head starts at exactly sigma^2 = 1 (`cst_ls2` is zero-initialised), i.e. as the plain linear demapper,
+            # and moves away only if the data asks for it.
+            log_s2 = tf.keras.layers.Activation("tanh", dtype=keras_dtype, name="cst_clip")(log_s2)
+            sigma2 = tf.keras.layers.Activation("exponential", dtype=keras_dtype, name="cst_s2")(log_s2)
+            si_llr = 4.0 * s_i / sigma2
+            sq_llr = 4.0 * s_q / sigma2
+            half = head_qm // 2
+            analytic = tf.keras.layers.Concatenate(dtype=keras_dtype, name="cst_base")(
+                [si_llr] * half + [sq_llr] * (head_qm - half))
+            residual = tf.keras.layers.Conv2D(head_qm, 1, dtype=keras_dtype, name="cst_res")(llr_src)
+            llr = tf.keras.layers.Add(dtype=keras_dtype, name="cst_add")([analytic, residual])
+        else:
+            llr = tf.keras.layers.Conv2D(head_qm, 1, dtype=keras_dtype, name="llr_1x1")(llr_src)
         if llr_post:
             # ★ LEVER B: A RESIDUAL FILTER ON THE LLR PLANE. Everything tried so far acted on the trunk's features;
             # this acts on the ANSWER -- a depthwise 3-tap along the subcarrier axis plus a 1x1 that mixes the bits of
@@ -970,7 +1002,7 @@ def export_buckets(args, parser, source=None):
                        layout=args.layout, in_channels=in_channels, cond=args.modcond,
                        reporting_heads=reporting, dense=dense, dense_bottleneck=bottleneck,
                        dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                       noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post)
+                       noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head)
         # WEIGHTS ARE COPIED, NOT RELOADED. A `.keras` archive carries the width the graph was built with, and loading
         # it into a graph built for another width fails on every layer past the divergence (41 objects in the first
         # attempt). The tensor shapes do not depend on the width -- they are 1x1 and depthwise convolutions -- so
@@ -1052,6 +1084,9 @@ def main():
                         help="spatial kernel side of the trunk's mixing layers (default 3)")
     # g=1 IS THE DENSE 3x3 that bought +18.6% and g=c-hid is depthwise; the doc lists 2 and 4 as the useful
     # middle. Kept separate from --kernel-size so the two levers are measured one at a time.
+    parser.add_argument("--cst-head", action="store_true",
+                        help="constellation-aware head: analytic 4*s/sigma^2 linear term plus a learned residual "
+                             "(lever A; the exact max-log posterior needs one graph per modulation)")
     parser.add_argument("--llr-post", action="store_true",
                         help="add a residual 3-tap filter on the LLR plane (lever B; ~13 k parameters, applied on the "
                              "logits so the contract's bound is unchanged)")
@@ -1285,7 +1320,7 @@ def main():
                             dense_bottleneck=args.dense_bottleneck, fuse_relu=args.fuse_relu,
                             layout=args.layout, in_channels=in_channels, cond=args.modcond,
                             dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                            noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post,
+                            noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head,
                             smooth_k=args.smooth_k)
         export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
         return 0
@@ -1321,7 +1356,7 @@ def main():
                   llr_linear=args.llr_linear, dense=args.dense_blocks,
                   dense_bottleneck=args.dense_bottleneck, layout=args.layout, fuse_relu=args.fuse_relu,
                   in_channels=in_channels, cond=args.modcond, dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                  noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post,
+                  noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head,
                   smooth_k=args.smooth_k)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}  heads {sorted(model.output.keys())}")
