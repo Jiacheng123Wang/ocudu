@@ -198,7 +198,7 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
           dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False,
           dense_bottleneck=0, fuse_relu=False,
           layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False,
-          dilations=DILATIONS, ksize=3, groups=1, noise_to_llr=False):
+          dilations=DILATIONS, ksize=3, groups=1, noise_to_llr=False, ce_aux=False, llr_post=False):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -313,6 +313,20 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
                 tf.keras.layers.Conv2D(1, 1, dtype=keras_dtype, name="noise_1x1")(y))
             llr_src = tf.keras.layers.Concatenate(dtype=keras_dtype, name="llr_with_noise")([y, nz])
         llr = tf.keras.layers.Conv2D(head_qm, 1, dtype=keras_dtype, name="llr_1x1")(llr_src)
+        if llr_post:
+            # ★ LEVER B: A RESIDUAL FILTER ON THE LLR PLANE. Everything tried so far acted on the trunk's features;
+            # this acts on the ANSWER -- a depthwise 3-tap along the subcarrier axis plus a 1x1 that mixes the bits of
+            # one symbol position, added back to the logits. ~13 k parameters, and it is deliberately applied BEFORE
+            # the bounding activation so the deployed contract's range still holds.
+            #
+            # WHY IT COULD HELP. The residual encoder and the demapper see the channel through the trunk, but the
+            # LLR field itself is spatially correlated (a faded subcarrier takes its neighbours with it) and nothing
+            # in the current head can exploit that: each LLR is computed from its own position only.
+            res = llr
+            post = tf.keras.layers.DepthwiseConv2D((3, 1), padding="same", dtype=keras_dtype,
+                                                   name="llrp_dw")(res)
+            post = tf.keras.layers.Conv2D(head_qm, 1, dtype=keras_dtype, name="llrp_pw")(post)
+            llr = tf.keras.layers.Add(dtype=keras_dtype, name="llrp_add")([res, post])
         llr = tf.keras.layers.Activation("linear" if llr_linear else "tanh", dtype=keras_dtype,
                                          name="llr")(llr)
         # [batch, width, symbols, qm] -> [batch, width, symbols * qm]: the contract's channel order,
@@ -330,6 +344,16 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
             # THE REPORTING HEADS ARE OPTIONAL (design section 22.2). There are TWO head-construction sites in
             # this function, one per layout, and guarding only the spatial one left the flag silently inert --
             # which is how a run asked for two heads produced a bundle with four.
+            if ce_aux and not reporting_heads:
+                # ★ TRAINING-ONLY CHANNEL HEAD (lever: CE refinement). It predicts the channel itself (Re/Im) and is
+                # supervised by the corpus's true H, which forces the trunk to carry an explicit channel estimate.
+                # It is deliberately named `ce_res_*` rather than `ch_est*`: the exporter decides what to ship by
+                # looking for `ch_est`/`dmrs_noise` LAYER names, so this head stays out of the deployed graph while
+                # the trainer still finds it under the `ch_est` output key and applies the nmse term.
+                ce = tf.keras.layers.Activation("linear", dtype=keras_dtype, name="ce_res")(
+                    tf.keras.layers.Conv2D(2, 1, dtype=keras_dtype, name="ce_res_1x1")(y))
+                outputs["ch_est"] = tf.keras.layers.Reshape((width, 2 * NOF_SYMBOLS),
+                                                            name="ce_res_flat")(ce)
             if reporting_heads:
                 # Linear for the channel: it must reach deep fades as well as peaks.
                 ch_est = tf.keras.layers.Activation("linear", dtype=keras_dtype, name="ch_est")(
@@ -762,6 +786,21 @@ def export_deployment(model, qm, path, cond=False, snr_range=None, sinr_cal=None
     still pass every shape check.
     """
     import coremltools as ct
+    # ★ TRAINING-ONLY HEADS ARE CUT OFF HERE. A head that exists to shape the trunk (the CE refinement head) has
+    # no contract slot, so it must not reach the bundle: the conversion is given a graph whose outputs are exactly
+    # the deployed ones, and the dropped heads' weights simply do not exist in the artifact.
+    keep = {"llr_flat", "noise_flat", "ch_est_flat", "dmrs_noise"}
+    extra = [n for n in model.output_names if n not in keep]
+    if extra:
+        print(f"export drops training-only output(s): {', '.join(extra)}")
+        def produced_by(tensor):
+            """The layer that produced this output tensor (Keras 3 keeps it in `_keras_history`)."""
+            try:
+                return tensor._keras_history[0].name          # noqa: SLF001 - Keras exposes no public route
+            except Exception:                                  # noqa: BLE001 - fall back to "keep it"
+                return ""
+        kept = {k: v for k, v in model.output.items() if produced_by(v) not in extra}
+        model = tf.keras.Model(model.inputs, kept)
     # The input shape is taken from the model rather than from the folded contract: the spatialised
     # trunk has a different one, and a hardcoded shape produces a bundle that converts cleanly and
     # then fails at the binding point, which is the one place the check has to hold.
@@ -931,15 +970,25 @@ def export_buckets(args, parser, source=None):
                        layout=args.layout, in_channels=in_channels, cond=args.modcond,
                        reporting_heads=reporting, dense=dense, dense_bottleneck=bottleneck,
                        dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                       noise_to_llr=args.noise_to_llr)
+                       noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post)
         # WEIGHTS ARE COPIED, NOT RELOADED. A `.keras` archive carries the width the graph was built with, and loading
         # it into a graph built for another width fails on every layer past the divergence (41 objects in the first
         # attempt). The tensor shapes do not depend on the width -- they are 1x1 and depthwise convolutions -- so
         # assigning them in order is both correct and explicit about why.
         if source is not None:
-            if len(source.weights) != len(narrow.weights):
-                raise ValueError(f"the bucket graph has {len(narrow.weights)} weights, the source {len(source.weights)}")
-            for w_src, w_dst in zip(source.weights, narrow.weights):
+            # TRAINING-ONLY HEADS ARE DROPPED HERE. A head that exists to shape the trunk (the CE refinement head)
+            # has no place in the deployed graph, so the source carries a few weights the bucket does not. They are
+            # filtered out by layer name and reported, rather than failing the whole export on a count mismatch.
+            dst_layers = {w.path.rsplit("/", 1)[0] for w in narrow.weights}
+            kept = [w for w in source.weights if w.path.rsplit("/", 1)[0] in dst_layers]
+            dropped = sorted({w.path.rsplit("/", 1)[0] for w in source.weights
+                              if w.path.rsplit("/", 1)[0] not in dst_layers})
+            if dropped:
+                print(f"export drops training-only layer(s): {', '.join(dropped)}")
+            if len(kept) != len(narrow.weights):
+                raise ValueError(f"the bucket graph has {len(narrow.weights)} weights, the source {len(kept)} "
+                                 f"after dropping {dropped}")
+            for w_src, w_dst in zip(kept, narrow.weights):
                 if tuple(w_src.shape) != tuple(w_dst.shape):
                     raise ValueError(f"weight shape mismatch: {w_src.path} {tuple(w_src.shape)} against "
                                      f"{w_dst.path} {tuple(w_dst.shape)}")
@@ -1003,6 +1052,12 @@ def main():
                         help="spatial kernel side of the trunk's mixing layers (default 3)")
     # g=1 IS THE DENSE 3x3 that bought +18.6% and g=c-hid is depthwise; the doc lists 2 and 4 as the useful
     # middle. Kept separate from --kernel-size so the two levers are measured one at a time.
+    parser.add_argument("--llr-post", action="store_true",
+                        help="add a residual 3-tap filter on the LLR plane (lever B; ~13 k parameters, applied on the "
+                             "logits so the contract's bound is unchanged)")
+    parser.add_argument("--ce-head", action="store_true",
+                        help="add a TRAINING-ONLY channel-estimation head (supervised by the true H, weight --w-ch); "
+                             "it is dropped at export, so the bundle is unchanged")
     parser.add_argument("--noise-to-llr", action="store_true",
                         help="feed the post_eq_noise head back as an extra input channel of the LLR demapper "
                              "(lever L6; the head separates errors at fixed |LLR|, see architecture_levers section 11)")
@@ -1230,7 +1285,8 @@ def main():
                             dense_bottleneck=args.dense_bottleneck, fuse_relu=args.fuse_relu,
                             layout=args.layout, in_channels=in_channels, cond=args.modcond,
                             dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                            noise_to_llr=args.noise_to_llr, smooth_k=args.smooth_k)
+                            noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post,
+                            smooth_k=args.smooth_k)
         export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
         return 0
 
@@ -1265,7 +1321,7 @@ def main():
                   llr_linear=args.llr_linear, dense=args.dense_blocks,
                   dense_bottleneck=args.dense_bottleneck, layout=args.layout, fuse_relu=args.fuse_relu,
                   in_channels=in_channels, cond=args.modcond, dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                  noise_to_llr=args.noise_to_llr,
+                  noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post,
                   smooth_k=args.smooth_k)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}  heads {sorted(model.output.keys())}")
