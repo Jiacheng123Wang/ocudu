@@ -521,3 +521,19 @@ sudo reboot
 
 **重启后我做**：`nvidia-smi` 核对（3060 Ti / 8192 MiB / 200 W）→ `source env.sh` 应报
 `mode: NVIDIA GeForce RTX 3060 Ti` → 用 `benchmarks/bench_depth3_gpu.py` 实测样本/s → 与 153（438）／126（108）／107（136）对比。
+
+
+---
+
+## 10. ★★★★ 2026-11-19 19:00 **已排队的两个后续 run（watcher 自动接续）**
+
+| 机器 | 等谁结束 | ★ 接下来跑什么 | 判据（对照）|
+|---|---|---|---|
+| **107** | `…-llrp-symaux_e40`（D，e28/40）| ★ **A 单独**：`--mlp-expand 2`（batch 16、seed 20261105、40 轮）| ★ 对 **s1 末端 SWA 11 651 632**：> 它 ⇒ **A 有效** |
+| **126** | `…-llrp_b16_e40`（llrp 干净对照，e28/40）| ★ **A ＋ llrp ＋ 余弦衰减**：`--llr-post --mlp-expand 2 --lr-decay cosine`（batch 16、seed 20261105、40 轮）| ★ 对 **llrp_b16**（同机、同 seed、同 batch）：> 它 ⇒ A 与衰减的叠加有效 |
+
+**实现**：每台机器上一个 `watch*_mlp2.sh`（`setsid` 起的独立会话，不随 SSH 断开而死）轮询当前训练进程，
+结束后直接启动下一个 run。★ **风险：机器重启会让 watcher 消失，需要重新挂上。**
+
+**为什么要 A 单独 ＋ A 叠加 两个版本**：前者回答"A 本身有没有用"（对照 s1），后者回答"A 在 llrp 之上还有没有用"（对照 llrp_b16）。
+若 A 单独立不住，126 那条仍能验证"llrp ＋ 衰减"（预期 +1.8~2.0%），不会白跑。
