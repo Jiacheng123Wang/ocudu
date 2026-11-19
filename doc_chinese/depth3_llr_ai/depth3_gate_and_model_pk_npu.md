@@ -344,18 +344,20 @@
 
 **★ s1 / s2 等缩写的模型全称（run 目录名，可在各机器 `~/work/ai_phy_train/runs/` 下找到）**
 
-| 缩写 | 全称 | 种子 | 用到的 checkpoint |
-|---|---|---|---|
-| **s1** | `d3_w2v3c_c32b18dense_sc003_sw2s3_jit_e40`（126）| 20261105 | e37 / e38 / e39 / e40 |
-| **s2** | `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3_s20261106_e40`（107）| 20261106 | e32 / e37 / e38 / e39 / e40 |
+| 缩写 | ★ 按约定应写的全名（`model_naming_convention.md`）| 实际 run 目录名 | 种子 | 用到的 checkpoint |
+|---|---|---|---|---|
+| **s1** | ★ `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3_e40` | `d3_w2v3c_c32b18dense_sc003_sw2s3_jit_e40`（126）★ 缺 `e2e-cond-norep`、多 `sc003`/`jit` | 20261105 | e37 / e38 / e39 / e40 |
+| **s2** | `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3_s20261106_e40` | 同名（107）✓ | 20261106 | e32 / e37 / e38 / e39 / e40 |
 | ★ **s1 末端 SWA** | 上表 s1 的 **e37+e38+e39+e40** 权重平均 | — | 产物 `~/ai_depth3/models/avg_s1_within4.keras` |
 | ★ **s2 末端 SWA** | 上表 s2 的 **e38+e39+e40** 权重平均 | — | 产物 `~/ai_depth3/models/swa_s2_tail.keras` |
 | **L6** | `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3-nzllr_e40`（107）| 20261105 | e40 |
 | **CE** | `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3-ceh_e40`（107）| 20261105 | e40 |
 | **k=5** | `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3-k5_e40`（126）| 20261105 | e40 |
 
-★ 注：**s1 与 s2 只差种子**（其余参数一致，均 batch 16 / workers 6 / 40 轮 / 固定 LR 1e-3）；
-**s1 的 run 名里没有 `e2e-cond-norep`** 是历史命名差异，配方相同。
+★ 注：**s1 与 s2 只差种子**（其余参数一致，均 batch 16 / workers 6 / 40 轮 / 固定 LR 1e-3）。
+★ **命名规则以 `model_naming_convention.md` 为准**：`sc003`（scale-init）与 `jit`（XLA）**不进名字**（前者属 sidecar、后者是训练选择）；
+`e2e`/`cond`/`norep` 是配方标签，**必须写**。⇒ **s1 与 `c128` 的实际目录名是历史遗留，引用时以"约定全名"为准、目录名放括号里。**
+★ 完整对照表见 `models_above_cpu_delivery.md` §0。
 
 **★ 排行榜的三条读法**
 
