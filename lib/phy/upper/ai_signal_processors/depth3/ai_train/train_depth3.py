@@ -200,7 +200,7 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
           dense_bottleneck=0, fuse_relu=False,
           layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False,
           dilations=DILATIONS, ksize=3, groups=1, noise_to_llr=False, ce_aux=False, llr_post=False,
-          cst_head=False):
+          cst_head=False, sym_aux=False):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -387,6 +387,16 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
                     tf.keras.layers.Conv2D(2, 1, dtype=keras_dtype, name="ce_res_1x1")(y))
                 outputs["ch_est"] = tf.keras.layers.Reshape((width, 2 * NOF_SYMBOLS),
                                                             name="ce_res_flat")(ce)
+            if sym_aux:
+                # ★ LEVER D: A SYMBOL-LEVEL AUXILIARY TASK, training only. The head regresses the transmitted QAM
+                # symbol (I/Q) at each data RE while the trunk is also learning the bit LLRs. The point is the
+                # objective, not the head: predicting symbols forces the trunk to keep a per-RE constellation
+                # estimate, which the bit-wise BCE alone does not require. The head is named `sym_aux_*` so the
+                # exporter drops it (it is not one of the contract's heads) and the bundle is unchanged.
+                sym = tf.keras.layers.Activation("linear", dtype=keras_dtype, name="sym_aux")(
+                    tf.keras.layers.Conv2D(2, 1, dtype=keras_dtype, name="sym_aux_1x1")(y))
+                outputs["sym_est"] = tf.keras.layers.Reshape((width, 2 * NOF_SYMBOLS),
+                                                             name="sym_aux_flat")(sym)
             if reporting_heads:
                 # Linear for the channel: it must reach deep fades as well as peaks.
                 ch_est = tf.keras.layers.Activation("linear", dtype=keras_dtype, name="ch_est")(
@@ -587,6 +597,16 @@ class Batches:
         plane = data["X"][index].astype(np.float32)
         channel = (data["H"][index][:, :, 0].astype(np.float32)
                    + 1j * data["H"][index][:, :, 1].astype(np.float32))
+        # THE SYMBOL LABEL. `bits` are the transmitted bits in data-RE order, so `modulate` turns them into the
+        # transmitted QAM symbol per RE; both come from the same CRC-OK transport block the bit plane uses.
+        sub_re, sym_re = D3.data_re_indices(alloc, dmrs_symbols, uci)
+        sym = np.asarray(DL.modulate(np.asarray(bits).tolist(), D3.BITS_PER_SYMBOL[modulation]),
+                         dtype=np.complex64)
+        sym_plane = np.zeros((D3.NOF_SUBCARRIERS, NOF_SYMBOLS, 2), dtype=np.float32)
+        sym_plane[sub_re, sym_re, 0] = sym.real
+        sym_plane[sub_re, sym_re, 1] = sym.imag
+        sym_weights = np.zeros((D3.NOF_SUBCARRIERS, NOF_SYMBOLS), dtype=np.float32)
+        sym_weights[sub_re, sym_re] = 1.0
         label = (D3.label_plane_cond(bits, alloc, dmrs_symbols, modulation, uci) if self.cond
                  else D3.label_plane(bits, alloc, dmrs_symbols, modulation, uci))
         if self.target == "genie":
@@ -628,6 +648,8 @@ class Batches:
             "ch_weights": ch_weights,
             "noise": noise_target[0],
             "noise_weights": noise_weights.astype(np.float32),
+            "sym": sym_plane,
+            "sym_weights": sym_weights,
             "sigma2_over_r2": np.float32(sigma2_norm),
             # The DM-RS domain noise variance is the same scalar the post-equalization head is
             # derived from, so its target is the same `log10` shape of it, computed on the scalar
@@ -1003,7 +1025,7 @@ def export_buckets(args, parser, source=None):
                        layout=args.layout, in_channels=in_channels, cond=args.modcond,
                        reporting_heads=reporting, dense=dense, dense_bottleneck=bottleneck,
                        dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                       noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head)
+                       noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux)
         # WEIGHTS ARE COPIED, NOT RELOADED. A `.keras` archive carries the width the graph was built with, and loading
         # it into a graph built for another width fails on every layer past the divergence (41 objects in the first
         # attempt). The tensor shapes do not depend on the width -- they are 1x1 and depthwise convolutions -- so
@@ -1088,6 +1110,11 @@ def main():
     parser.add_argument("--cst-head", action="store_true",
                         help="constellation-aware head: analytic 4*s/sigma^2 linear term plus a learned residual "
                              "(lever A; the exact max-log posterior needs one graph per modulation)")
+    parser.add_argument("--sym-aux", action="store_true",
+                        help="add a TRAINING-ONLY symbol-regression head (lever D); the loss weight is --w-sym and "
+                             "the head is dropped at export, so the bundle is unchanged")
+    parser.add_argument("--w-sym", type=float, default=0.1,
+                        help="loss weight of the symbol head (only used with --sym-aux)")
     parser.add_argument("--llr-post", action="store_true",
                         help="add a residual 3-tap filter on the LLR plane (lever B; ~13 k parameters, applied on the "
                              "logits so the contract's bound is unchanged)")
@@ -1329,7 +1356,7 @@ def main():
                             dense_bottleneck=args.dense_bottleneck, fuse_relu=args.fuse_relu,
                             layout=args.layout, in_channels=in_channels, cond=args.modcond,
                             dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                            noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head,
+                            noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux,
                             smooth_k=args.smooth_k)
         export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
         return 0
@@ -1365,7 +1392,7 @@ def main():
                   llr_linear=args.llr_linear, dense=args.dense_blocks,
                   dense_bottleneck=args.dense_bottleneck, layout=args.layout, fuse_relu=args.fuse_relu,
                   in_channels=in_channels, cond=args.modcond, dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                  noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head,
+                  noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux,
                   smooth_k=args.smooth_k)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}  heads {sorted(model.output.keys())}")
@@ -1388,7 +1415,7 @@ def main():
     head_channels = NOF_SYMBOLS * (D3.COND_STRIDE if args.modcond else qm)
     optimizer = tf.keras.optimizers.Adam(args.lr)
     weights = {"llr": args.w_llr, "ch_est": args.w_ch, "post_eq_noise": args.w_noise,
-               "dmrs_noise": args.w_noise}
+               "dmrs_noise": args.w_noise, "sym_est": args.w_sym}
 
     # XLA is a TRAINING choice and cannot reach the deployed graph: the bundle is exported from the Keras
     # layer structure and the trained weights, so compiling the step changes nothing about what the ANE
@@ -1423,6 +1450,12 @@ def main():
                         tf.complex(ch[:, :, 0::2], ch[:, :, 1::2]),
                         tf.complex(targets["ch"][:, :, :, 0], targets["ch"][:, :, :, 1]),
                         targets["ch_weights"])
+                if "sym_est" in outputs:
+                    se = tf.reshape(tf.cast(outputs["sym_est"], tf.float32),
+                                    (-1, D3.NOF_SUBCARRIERS, NOF_SYMBOLS, 2))
+                    err = tf.reduce_sum((se - targets["sym"]) ** 2, axis=-1)
+                    terms["sym_est"] = (tf.reduce_sum(err * targets["sym_weights"])
+                                        / tf.maximum(tf.reduce_sum(targets["sym_weights"]), 1.0))
                 noise = tf.reshape(tf.cast(outputs["post_eq_noise"], tf.float32),
                                    (-1, D3.NOF_SUBCARRIERS, NOF_SYMBOLS))
                 error = (noise - targets["noise"]) ** 2
@@ -1475,6 +1508,8 @@ def main():
                 "ch_weights": tf.constant(stack(samples, "ch_weights")),
                 "noise": tf.constant(stack(samples, "noise")),
                 "noise_weights": tf.constant(stack(samples, "noise_weights")),
+                "sym": tf.constant(stack(samples, "sym")),
+                "sym_weights": tf.constant(stack(samples, "sym_weights")),
                 "dmrs_noise": tf.constant(stack(samples, "dmrs_noise")),
                 "scale": tf.constant(stack(samples, "scale")),
                 # THE THRESHOLD WEIGHT, one number per sample (always ones unless --snr-weight is on, so a run without it
@@ -1681,6 +1716,10 @@ def main():
     for epoch in range(start_epoch, args.epochs + 1):
         if args.lr_decay != "none":
             optimizer.learning_rate.assign(learning_rate_for(epoch))
+            # The rate is part of the run's identity: a reader of the log must be able to tell a decayed epoch from a
+            # constant one without reproducing the schedule by hand.
+            if epoch == start_epoch or epoch % max(1, args.epochs // 20) == 0 or epoch == args.epochs:
+                print(f"  lr {float(optimizer.learning_rate):.6g} (cosine, from epoch {args.lr_decay_from})", flush=True)
         losses = []
         for samples in train.epoch(args.batch, args.workers, args.prefetch or (2 * args.workers)):
             x, targets = tensors(samples)
