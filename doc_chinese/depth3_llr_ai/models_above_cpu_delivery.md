@@ -7,6 +7,32 @@
 
 ---
 
+## 0. ★ 模型名称对照表（**以 `model_naming_convention.md` 为准**）
+
+**约定格式**：`d3_<ds>_c<C>b<B>_<recipe>_e<EP>`（`recipe` 用 `-` 连接；`best` 仅在 val-best 快照时追加）。
+**⇒ 本节给出"本文档使用的短名 → 按约定的全名 → 实际 run 目录名"**，因为**部分早期 run 的目录名早于约定**（缺 `e2e-cond-norep`、多了 `sc003`/`jit`）。
+
+| 短名 | ★ 按约定应写的全名 | 实际 run 目录名（所在机器）| 差异说明 |
+|---|---|---|---|
+| `s1` | `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3_e40` | `d3_w2v3c_c32b18dense_sc003_sw2s3_jit_e40`（126）| ★ **缺 `e2e-cond-norep`**；多了 `sc003`（scale-init 0.03）与 `jit`（XLA）—— 按约定这两项**不进名字** |
+| `s2` | `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3_s20261106_e40` | 同名（107）| ✓ 一致 |
+| `s3` | `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3_s20261107_e40` | 同名（106）| ✓ 一致 |
+| `llrp` | `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3-llrp_e40` | 同名（106）| ✓ 一致 |
+| `llrp_b16` | 同上（**batch 不进名字**，写 sidecar）| `…-llrp_b16_e40`（126）| ★ 目录名带 `_b16` 以便区分，**约定里 batch 不进名字** |
+| `cst` | `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3-cst_e40` | 同名（106）| ✓ 一致 |
+| `k5` | `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3-k5_e40` | 同名（126）| ✓ 一致 |
+| `c128` | `d3_w2v3c_c128b18dense_e2e-cond-norep-sw2s3_e40` | `d3_w2v3c_c128b18dense_sc003_sw2s3_e10`（126）| ★ **缺 `e2e-cond-norep`**；`e10` 是**最初的计划轮数**，不是快照轮（快照到 e40）|
+| `s1` 末端 SWA | —（权重平均没有新 run，产物命名 `<短名>_SWA`）| `models/avg_s1_within4.keras` | 由 s1 的 e37+e38+e39+e40 平均 |
+| `s2` 末端 SWA | — | `models/swa_s2_tail.keras` | s2 的 e38+e39+e40 |
+| `s3` 末端 SWA | — | `models/swa_s3_tail.keras` | s3 的 e38+e39+e40 |
+| `llrp` 末端 SWA | — | `models/swa_llrp_tail.keras` | llrp 的 e38+e39+e40 |
+| `c128` 末端 SWA | — | `models/swa_c128_tail.keras` | c128 的 e38+e39+e40 |
+| `llrp_SWA ∪ s1_SWA` | —（并集是组合，不是 run）| 两个产物模型 | 2 模型并集（c32 允许的上限）|
+
+**★ 本文档表格里出现的短名一律对应上表；★ 需要引用"可复现的 run"时，用**按约定应写的全名**＋括号里的实际目录名。**
+
+---
+
 ## 1. 部署约束（2026-11-19 用户确定，本文档按此筛选）
 
 | 模型族 | 允许的组合方式 |
