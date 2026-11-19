@@ -107,7 +107,7 @@
 | 项 | 值 |
 |---|---|
 | 单元表 | `~/ai_depth3/full_leg_units.txt`（50 000，由语料文件名重建）|
-| 语料 | 本机 `~/ai_depth3/corpus_s2_amc_ping_1102a/`（8.6 GB）；203 上为 `~/ai_depth3/corpus/s2_amc_ping_1102a/` |
+| 语料 | ★ **本机 `~/ai_depth3/corpus_s2_amc_ping_1102a/`（内置盘，8.6 GB）**；203 上为 `~/ai_depth3/corpus/s2_amc_ping_1102a/` |
 | 脚本 | `work_tmp/measurement/measure_fulllegen.py <units> <bundle.mlmodelc> <out.csv> <corpus>` |
 | 耗时 | 本机约 **80 分钟**/模型；203 约 **80 分钟**/模型（两台并行）|
 | 复跑 | 第二个模型（llrp 末端 SWA）在 203 上进行中 |
