@@ -200,7 +200,7 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
           dense_bottleneck=0, fuse_relu=False,
           layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False,
           dilations=DILATIONS, ksize=3, groups=1, noise_to_llr=False, ce_aux=False, llr_post=False,
-          cst_head=False, sym_aux=False):
+          cst_head=False, sym_aux=False, mlp_expand=1):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -295,8 +295,21 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
                     name=f"dw{i}_{ksize}x{ksize}_d{dilation}")(y)
             if not fuse_relu:
                 block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}")(block)
-            block = FoldedScaleConv(c_hid, initial_gain=scale_init, rank=low_rank,
-                                    dtype=keras_dtype, name=f"pw{i}_1x1")(block)
+            if mlp_expand > 1:
+                # ★ THE DENSE LEVER, PUSHED FURTHER: an expand-project MLP in place of the single 1x1.
+                # The one lever with a large measured effect is full channel mixing (+18.6% for dense over
+                # depthwise), and the block currently mixes ONCE per residual. A 1x1 to ratio*C, a ReLU, and a
+                # 1x1 back mix twice, at the same position, so the spatial receptive field is untouched --
+                # which is the part that every dilation/kernel experiment already showed does not help.
+                wide = int(round(c_hid * mlp_expand))
+                block = FoldedScaleConv(wide, initial_gain=scale_init, rank=low_rank,
+                                        dtype=keras_dtype, name=f"pw{i}a_1x1")(block)
+                block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"pw{i}a_relu")(block)
+                block = FoldedScaleConv(c_hid, initial_gain=scale_init, rank=low_rank,
+                                        dtype=keras_dtype, name=f"pw{i}b_1x1")(block)
+            else:
+                block = FoldedScaleConv(c_hid, initial_gain=scale_init, rank=low_rank,
+                                        dtype=keras_dtype, name=f"pw{i}_1x1")(block)
             block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}b")(block)
             y = tf.keras.layers.Add(name=f"add{i}", dtype=keras_dtype)([y, block])
         # The heads keep the CONTRACT's channel counts (14*Qm, 14, 28, 1) whatever the trunk's
@@ -1025,7 +1038,7 @@ def export_buckets(args, parser, source=None):
                        layout=args.layout, in_channels=in_channels, cond=args.modcond,
                        reporting_heads=reporting, dense=dense, dense_bottleneck=bottleneck,
                        dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                       noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux)
+                       noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand)
         # WEIGHTS ARE COPIED, NOT RELOADED. A `.keras` archive carries the width the graph was built with, and loading
         # it into a graph built for another width fails on every layer past the divergence (41 objects in the first
         # attempt). The tensor shapes do not depend on the width -- they are 1x1 and depthwise convolutions -- so
@@ -1110,6 +1123,9 @@ def main():
     parser.add_argument("--cst-head", action="store_true",
                         help="constellation-aware head: analytic 4*s/sigma^2 linear term plus a learned residual "
                              "(lever A; the exact max-log posterior needs one graph per modulation)")
+    parser.add_argument("--mlp-expand", type=float, default=1.0, metavar="R",
+                        help="expansion ratio of the pointwise block (1 = the current single 1x1; 2 doubles the "
+                             "channel width inside the residual, adding a second 1x1 and a ReLU per block)")
     parser.add_argument("--sym-aux", action="store_true",
                         help="add a TRAINING-ONLY symbol-regression head (lever D); the loss weight is --w-sym and "
                              "the head is dropped at export, so the bundle is unchanged")
@@ -1171,10 +1187,14 @@ def main():
                              "whole continuation is decayed instead of inheriting the position of the original run")
     parser.add_argument("--max-train", type=int, default=0, help="cap the training samples")
     parser.add_argument("--max-val", type=int, default=64)
-    parser.add_argument("--jit", action="store_true",
-                        help="compile the training step with XLA. TRAINING ONLY -- the bundle is exported "
-                             "from the Keras layers and the weights, so this cannot change what the ANE "
-                             "runs (design section 19.218)")
+    # XLA IS ON BY DEFAULT, AND `--no-jit` TURNS IT OFF. It changes only how the step is compiled, never the
+    # exported bundle, and it is worth 1.3x to 2x of the epoch time. Leaving it opt-in meant every hand-written
+    # command that forgot the flag trained at half speed with no visible symptom -- one arm of a comparison was
+    # measured that way (the cliff run), which is exactly the confound a default is supposed to prevent.
+    parser.add_argument("--jit", action=argparse.BooleanOptionalAction, default=True,
+                        help="compile the training step with XLA (default: on; use --no-jit to disable). "
+                             "TRAINING ONLY -- the bundle is exported from the Keras layers and the weights, so "
+                             "this cannot change what the ANE runs (design section 19.218)")
     parser.add_argument("--target", choices=("coded", "genie"), default="coded",
                         help="'coded' is the contract's task. 'genie' replaces the label with the "
                              "hard decisions a receiver with the true channel would make, which "
@@ -1308,6 +1328,7 @@ def main():
     # took over, and the first decode killed a run that had been healthy for fourteen epochs. The old
     # per-modulation logs cannot say what their batch was for exactly this reason.
     print("argv: " + " ".join(sys.argv[1:]), flush=True)
+    print(f"xla: {'on' if args.jit else 'off'}", flush=True)
 
     tf.get_logger().setLevel("ERROR")
     tf.random.set_seed(args.seed)
@@ -1356,7 +1377,7 @@ def main():
                             dense_bottleneck=args.dense_bottleneck, fuse_relu=args.fuse_relu,
                             layout=args.layout, in_channels=in_channels, cond=args.modcond,
                             dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                            noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux,
+                            noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand,
                             smooth_k=args.smooth_k)
         export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
         return 0
@@ -1392,7 +1413,7 @@ def main():
                   llr_linear=args.llr_linear, dense=args.dense_blocks,
                   dense_bottleneck=args.dense_bottleneck, layout=args.layout, fuse_relu=args.fuse_relu,
                   in_channels=in_channels, cond=args.modcond, dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                  noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux,
+                  noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand,
                   smooth_k=args.smooth_k)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}  heads {sorted(model.output.keys())}")
