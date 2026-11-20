@@ -1308,3 +1308,12 @@ NAME="<臂名>" ~/ai_depth3/bin/probe_snapshot.sh <snapshot.keras | user@host:/p
 | 126（Lenovo）| **192.168.0.102** |
 
 ★ 提示：**ping 对某些机器被挡（如 126）**，以 `ssh` 是否通为准；地址表以本节为最新。
+
+**(j) ★ 2026-11-20：训练用监控集换成 `datasets_monitor_1102a`**
+
+| 项 | 值 |
+|---|---|
+| 路径（各训练机需同步）| `~/ai_depth3/datasets_monitor_1102a`（108 样本，13.7 MB）|
+| ★ 与训练集/探针/尺子 | ★ **交集全为 0**（旧 `monitor_w2` 与训练集重叠 **37%**）|
+| 标准参数 | `--val <上面路径> --no-val --monitor-every 5 --bler-samples 24 --select-on none` |
+| ★ 用途 | ★ **健康检查**；**不用它排名**（实测与尺子的 Spearman 仅 −0.62、n=5 不显著）|
