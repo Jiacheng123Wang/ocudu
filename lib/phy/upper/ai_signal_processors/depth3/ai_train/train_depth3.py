@@ -97,6 +97,29 @@ def receptive_field(blocks, dilations, ksize=3):
 
 
 @tf.keras.utils.register_keras_serializable(package="ocudu")
+class ChannelGate(tf.keras.layers.Layer):
+    """Scale a feature map by a per-channel gate.
+
+    WHY A LAYER AND NOT A MULTIPLY. A broadcast `Multiply` of the fp16 map by the fp16 gate converts to a coreml
+    `mul` whose gate operand comes out as float32, and the conversion fails with "the named input y must have the
+    same data type as the named input x". Casting here keeps both operands in the map's dtype all the way through.
+    """
+
+    def call(self, inputs):
+        # THE PRODUCT IS TAKEN IN FP32 AND CAST BACK. Matching the gate to the map's dtype is not enough: the
+        # converter lowers the sigmoid path to fp32 on its own, so whichever operand is cast, the `mul` still ends up
+        # with one fp32 and one fp16 input and conversion refuses it. Promoting both operands makes the multiplication
+        # unambiguous, and the single cast back to the map's dtype is exact for a value in [0, 1].
+        x, gate = inputs
+        scaled = tf.cast(x, tf.float32) * tf.cast(gate, tf.float32)
+        return tf.cast(scaled, x.dtype)
+
+    def get_config(self):
+        # Keras refuses to serialize a Layer subclass that has no get_config, and a .keras file that cannot be
+        # written is a run whose checkpoints cannot be averaged or exported.
+        return super().get_config()
+
+
 class MaskedSmooth(tf.keras.layers.Layer):
     """A dense local average over one coherence bandwidth, taken only where the allocation actually is.
 
@@ -200,7 +223,7 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
           dense_bottleneck=0, fuse_relu=False,
           layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False,
           dilations=DILATIONS, ksize=3, groups=1, noise_to_llr=False, ce_aux=False, llr_post=False,
-          cst_head=False, sym_aux=False, mlp_expand=1):
+          cst_head=False, sym_aux=False, mlp_expand=1, se=False, se_ratio=8):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -311,6 +334,18 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
                 block = FoldedScaleConv(c_hid, initial_gain=scale_init, rank=low_rank,
                                         dtype=keras_dtype, name=f"pw{i}_1x1")(block)
             block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}b")(block)
+            if se:
+                # ★ LEVER B: CHANNEL ATTENTION, NOT MORE MIXING. Lever A mixes the channels twice per block; this
+                # instead lets the block re-weight its own channels from a global summary. It is orthogonal to A
+                # (which is why they can stack), and it costs about two hundred parameters and no extra MACs per
+                # element, so it cannot move the 500 us budget. The squeeze is a global average over the allocation
+                # plane, the excite is a two-layer bottleneck, and the gate multiplies the block's output.
+                z = tf.keras.layers.GlobalAveragePooling2D(dtype=keras_dtype, name=f"se{i}_gap")(block)
+                z = tf.keras.layers.Dense(max(4, c_hid // se_ratio), activation="relu",
+                                          dtype=keras_dtype, name=f"se{i}_fc1")(z)
+                z = tf.keras.layers.Dense(c_hid, activation="sigmoid", dtype=keras_dtype, name=f"se{i}_fc2")(z)
+                z = tf.keras.layers.Reshape((1, 1, c_hid), dtype=keras_dtype, name=f"se{i}_gate")(z)
+                block = ChannelGate(dtype=keras_dtype, name=f"se{i}_scale")([block, z])
             y = tf.keras.layers.Add(name=f"add{i}", dtype=keras_dtype)([y, block])
         # The heads keep the CONTRACT's channel counts (14*Qm, 14, 28, 1) whatever the trunk's
         # internal layout is. The seam binds them by name and the engine checks them by channel
@@ -1038,7 +1073,8 @@ def export_buckets(args, parser, source=None):
                        layout=args.layout, in_channels=in_channels, cond=args.modcond,
                        reporting_heads=reporting, dense=dense, dense_bottleneck=bottleneck,
                        dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                       noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand)
+                       noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand, se=args.se,
+                    se_ratio=args.se_ratio)
         # WEIGHTS ARE COPIED, NOT RELOADED. A `.keras` archive carries the width the graph was built with, and loading
         # it into a graph built for another width fails on every layer past the divergence (41 objects in the first
         # attempt). The tensor shapes do not depend on the width -- they are 1x1 and depthwise convolutions -- so
@@ -1123,6 +1159,12 @@ def main():
     parser.add_argument("--cst-head", action="store_true",
                         help="constellation-aware head: analytic 4*s/sigma^2 linear term plus a learned residual "
                              "(lever A; the exact max-log posterior needs one graph per modulation)")
+    parser.add_argument("--se", action="store_true",
+                        help="add squeeze-excite channel attention to every block (lever B). It re-weights the "
+                             "channels from a global average instead of mixing them more, so it stacks with "
+                             "--mlp-expand; about two hundred parameters and no extra per-element MACs")
+    parser.add_argument("--se-ratio", type=int, default=8, metavar="R",
+                        help="bottleneck ratio of the squeeze-excite gate (channels // R); default 8")
     parser.add_argument("--mlp-expand", type=float, default=1.0, metavar="R",
                         help="expansion ratio of the pointwise block (1 = the current single 1x1; 2 doubles the "
                              "channel width inside the residual, adding a second 1x1 and a ReLU per block)")
@@ -1346,7 +1388,7 @@ def main():
     if args.export_only:
         exported = tf.keras.models.load_model(
             args.export_only, compile=False,
-            custom_objects={"FoldedScaleConv": FoldedScaleConv})
+            custom_objects={"FoldedScaleConv": FoldedScaleConv, "ChannelGate": ChannelGate})
         if not args.export_probe:
             parser.error("--export-only needs --export-probe")
         # The range has to come from the knob on this path: --export-only loads a `.keras` and no dataset, so
@@ -1383,7 +1425,7 @@ def main():
                             dense_bottleneck=args.dense_bottleneck, fuse_relu=args.fuse_relu,
                             layout=args.layout, in_channels=in_channels, cond=args.modcond,
                             dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                            noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand,
+                            noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand, se=args.se, se_ratio=args.se_ratio,
                             smooth_k=args.smooth_k)
         export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
         return 0
@@ -1419,7 +1461,7 @@ def main():
                   llr_linear=args.llr_linear, dense=args.dense_blocks,
                   dense_bottleneck=args.dense_bottleneck, layout=args.layout, fuse_relu=args.fuse_relu,
                   in_channels=in_channels, cond=args.modcond, dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                  noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand,
+                  noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand, se=args.se, se_ratio=args.se_ratio,
                   smooth_k=args.smooth_k)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}  heads {sorted(model.output.keys())}")
@@ -1685,7 +1727,8 @@ def main():
             # 'FoldedScaleConv'" on any run that used --scale-init (i.e. every dense arm), and the resume died before
             # epoch 8 rather than continuing. Naming the custom classes here fixes it for every existing file.
             model = tf.keras.models.load_model(
-                last_path, custom_objects={"FoldedScaleConv": FoldedScaleConv, "MaskedSmooth": MaskedSmooth})
+                last_path, custom_objects={"FoldedScaleConv": FoldedScaleConv, "MaskedSmooth": MaskedSmooth,
+                                    "ChannelGate": ChannelGate})
             state = json.load(open(state_path))
             start_epoch = int(state.get("epoch", 1)) + 1
             best = float(state.get("best", best))
