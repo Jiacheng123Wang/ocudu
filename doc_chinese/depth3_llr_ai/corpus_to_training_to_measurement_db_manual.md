@@ -910,3 +910,14 @@ CRC 不过 ⇒ 解出来的比特不是真的 ⇒ 这条单元不能做训练样
 
 **⇒ 结论：监控集的用途是"**健康与趋势**"（是否发散、是否在改善），**不是"给模型排名"**；
 排名仍然只能靠**尺子（5 000 单元）**。**
+
+**(e) ★ 2026-11-20 统一的工作目录（四台机器一致）**
+
+| 路径 | 内容 |
+|---|---|
+| `$HOME/work/ai_phy_train/data` | 数据集（`datasets_train_w2v3c`、`datasets_monitor_1102a`、语料…）|
+| `$HOME/work/ai_phy_train/lib` | depth3 训练/分析代码 |
+| `$HOME/work/ai_phy_train/runs` | 训练 run 目录 |
+
+**⇒ Mac 与 203 上这三项是**符号链接**（分别指向 `~/ai_depth3`、`~/dev/ocudu/lib`、`~/ai_depth3/runs`），
+所以**同一条命令在四台机器上都能直接跑**，不必再区分 `~/ai_depth3` 与 `~/work/ai_phy_train`。**

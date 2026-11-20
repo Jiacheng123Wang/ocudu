@@ -1317,3 +1317,18 @@ NAME="<臂名>" ~/ai_depth3/bin/probe_snapshot.sh <snapshot.keras | user@host:/p
 | ★ 与训练集/探针/尺子 | ★ **交集全为 0**（旧 `monitor_w2` 与训练集重叠 **37%**）|
 | 标准参数 | `--val <上面路径> --no-val --monitor-every 5 --bler-samples 24 --select-on none` |
 | ★ 用途 | ★ **健康检查**；**不用它排名**（实测与尺子的 Spearman 仅 −0.62、n=5 不显著）|
+
+**(k) ★ 2026-11-20 10:50 统一目录约定（本机与 203 已按此建好）**
+
+**动机**：训练机用 `~/work/ai_phy_train/{data,lib,runs}`，而 Mac/203 用 `~/ai_depth3/...` 与 `~/dev/ocudu/lib/...`，
+同一条命令在两处跑要改路径 ⇒ 已在本机与 203 建立**同名链接**，四台机器路径一致。
+
+| 路径 | 本机 / 203（新增）| 106 / 126 / 107（原有）|
+|---|---|---|
+| ★ `$HOME/work/ai_phy_train/data` | ★ **符号链接 → `$HOME/ai_depth3`** | 真实目录（含 datasets_*）|
+| ★ `$HOME/work/ai_phy_train/lib` | ★ **符号链接 → `$HOME/dev/ocudu/lib`** | 真实目录（代码副本）|
+| ★ `$HOME/work/ai_phy_train/runs` | ★ **符号链接 → `$HOME/ai_depth3/runs`** | 真实目录 |
+
+**⇒ 于是四台机器可以跑**同一条命令**（例：`--val $HOME/work/ai_phy_train/data/datasets_monitor_1102a`）。**
+
+**施工记录**：本机与 203 原有的 `data` 目录已改名为 `data_old_20261120`（**未删除**，内容仍在；本机上它是 0 B 的空壳＋旧的部分拷贝）。
