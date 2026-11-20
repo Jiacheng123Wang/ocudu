@@ -1216,7 +1216,13 @@ def main():
     parser.add_argument("--w-ch", type=float, default=L.DEFAULT_WEIGHTS["ch_est"])
     parser.add_argument("--w-noise", type=float, default=L.DEFAULT_WEIGHTS["post_eq_noise"])
     parser.add_argument("--no-aux", action="store_true", help="LLR head only, for the R2.4 ablation")
-    parser.add_argument("--select-on", choices=("val", "band"), default="val",
+    parser.add_argument("--no-val", action="store_true",
+                        help="skip the per-epoch validation pass. Selection is then meaningless and the run relies on "
+                             "the tail weight average at the end; `--monitor-every` still gives a periodic health check")
+    parser.add_argument("--monitor-every", type=int, default=0, metavar="N",
+                        help="with --no-val: run the validation/BLER pass every N epochs (0 = never). This is the "
+                             "health check that replaces the per-epoch number")
+    parser.add_argument("--select-on", choices=("val", "band", "none"), default="val",
                         help="which epoch is the best one: the validation loss, or the BER of the low-SNR band")
     parser.add_argument("--resume", action="store_true",
                         help="continue from <out>/depth3_last.keras if it exists, instead of starting over")
@@ -1746,9 +1752,19 @@ def main():
             x, targets = tensors(samples)
             total, _, _ = step(x, targets, training=True)
             losses.append(float(total))
+        # ★ VAL IS OPTIONAL. It has failed as a selector ten times over (>=10 recorded inversions between val and
+        # delivered bits), and the deployment decision is now made by averaging the tail weights, which needs no
+        # metric at all. `--no-val` therefore skips the pass; the run keeps only the train loss and, if asked, a
+        # periodic health check via `--monitor-every`.
+        monitored = (not args.no_val) or (args.monitor_every > 0 and
+                                          (epoch % args.monitor_every == 0 or epoch == args.epochs))
         want_bler = args.bler_samples > 0 and (epoch % max(1, args.bler_every) == 0
-                                               or epoch == args.epochs)
-        val_loss, val_ber, val_mag, val_bler, val_skipped, val_band, val_groups = evaluate(want_bler)
+                                               or epoch == args.epochs) and monitored
+        if monitored:
+            val_loss, val_ber, val_mag, val_bler, val_skipped, val_band, val_groups = evaluate(want_bler)
+        else:
+            val_loss, val_ber, val_mag, val_bler = float("nan"), float("nan"), float("nan"), float("nan")
+            val_skipped, val_band, val_groups = 0, float("nan"), {}
         history.append({"epoch": epoch, "train": float(np.mean(losses)), "val": val_loss,
                         "val_ber": val_ber, "val_llr_mean": val_mag, "val_bler": val_bler,
                         "val_bler_skipped": val_skipped})
@@ -1778,7 +1794,10 @@ def main():
         # still leave a checkpoint one epoch old rather than none, so `depth3_last` is written here; the state
         # that says which epoch was BEST is written below, once that is known.
         model.save(os.path.join(args.out, "depth3_last.keras"))
-        chosen = val_band if (args.select_on == "band" and np.isfinite(val_band)) else val_loss
+        # `--select-on none` keeps no best checkpoint: the tail average is the model, and a selection metric that
+        # has been wrong ten times should not get a vote.
+        chosen = (float("inf") if args.select_on == "none" else
+                  val_band if (args.select_on == "band" and np.isfinite(val_band)) else val_loss)
         # THE TRIGGER'S TWO VARIABLES, RE-READ EVERY EPOCH (2026-11-03). A run that must be restarted to change
         # its patience cannot be used to find out what the patience should be: the restart costs the epochs
         # already spent and changes the noise the comparison would have to be made under. The file is optional
