@@ -224,7 +224,7 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
           dense_bottleneck=0, fuse_relu=False,
           layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False,
           dilations=DILATIONS, ksize=3, groups=1, noise_to_llr=False, ce_aux=False, llr_post=False,
-          cst_head=False, sym_aux=False, mlp_expand=1, se=False, se_ratio=8):
+          cst_head=False, sym_aux=False, mlp_expand=1, se=False, se_ratio=8, dense_skip=False):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -347,7 +347,22 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
                 z = tf.keras.layers.Dense(c_hid, activation="sigmoid", dtype=keras_dtype, name=f"se{i}_fc2")(z)
                 z = tf.keras.layers.Reshape((1, 1, c_hid), dtype=keras_dtype, name=f"se{i}_gate")(z)
                 block = ChannelGate(dtype=keras_dtype, name=f"se{i}_scale")([block, z])
-            y = tf.keras.layers.Add(name=f"add{i}", dtype=keras_dtype)([y, block])
+            if dense_skip:
+                # ★ LEVER C: A DENSE CROSS-BLOCK CONNECTION INSTEAD OF A RESIDUAL. The block's output is
+                # concatenated with the running state and a 1x1 projects the pair back to c_hid, so every later
+                # block sees the earlier features directly rather than through a sum. That is the DenseNet idea
+                # without unbounded growth: the projection keeps the trunk at c_hid channels, at the cost of one
+                # 1x1 of 2*c_hid -> c_hid per block. Levers A and B change what a block computes; this changes
+                # what a block can see.
+                pair = tf.keras.layers.Concatenate(dtype=keras_dtype, name=f"dcat{i}")([y, block])
+                # THE PROJECTION MUST NOT SHRINK THE STATE. With the trunk's residual gain (0.03) it would scale
+                # every block's output by thirty and the state would decay to zero over eighteen blocks -- the
+                # first smoke run sat at chance loss (0.693) exactly because of that. Unit gain keeps the
+                # magnitude, which is what a path-through projection has to do.
+                y = FoldedScaleConv(c_hid, initial_gain=1.0, rank=low_rank,
+                                    dtype=keras_dtype, name=f"dproj{i}_1x1")(pair)
+            else:
+                y = tf.keras.layers.Add(name=f"add{i}", dtype=keras_dtype)([y, block])
         # The heads keep the CONTRACT's channel counts (14*Qm, 14, 28, 1) whatever the trunk's
         # internal layout is. The seam binds them by name and the engine checks them by channel
         # count, so a layout that renamed them would be a contract change rather than a choice
@@ -1077,7 +1092,7 @@ def export_buckets(args, parser, source=None):
                        reporting_heads=reporting, dense=dense, dense_bottleneck=bottleneck,
                        dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
                        noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand, se=args.se,
-                    se_ratio=args.se_ratio)
+                    se_ratio=args.se_ratio, dense_skip=args.dense_skip)
         # WEIGHTS ARE COPIED, NOT RELOADED. A `.keras` archive carries the width the graph was built with, and loading
         # it into a graph built for another width fails on every layer past the divergence (41 objects in the first
         # attempt). The tensor shapes do not depend on the width -- they are 1x1 and depthwise convolutions -- so
@@ -1162,6 +1177,10 @@ def main():
     parser.add_argument("--cst-head", action="store_true",
                         help="constellation-aware head: analytic 4*s/sigma^2 linear term plus a learned residual "
                              "(lever A; the exact max-log posterior needs one graph per modulation)")
+    parser.add_argument("--dense-skip", action="store_true",
+                        help="replace each residual sum with a dense cross-block connection: concatenate the block "
+                             "output with the running state and project the pair back to c_hid with a 1x1. Later "
+                             "blocks then see earlier features directly (lever C)")
     parser.add_argument("--se", action="store_true",
                         help="add squeeze-excite channel attention to every block (lever B). It re-weights the "
                              "channels from a global average instead of mixing them more, so it stacks with "
@@ -1428,7 +1447,7 @@ def main():
                             dense_bottleneck=args.dense_bottleneck, fuse_relu=args.fuse_relu,
                             layout=args.layout, in_channels=in_channels, cond=args.modcond,
                             dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                            noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand, se=args.se, se_ratio=args.se_ratio,
+                            noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand, se=args.se, se_ratio=args.se_ratio, dense_skip=args.dense_skip,
                             smooth_k=args.smooth_k)
         export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
         return 0
@@ -1464,7 +1483,7 @@ def main():
                   llr_linear=args.llr_linear, dense=args.dense_blocks,
                   dense_bottleneck=args.dense_bottleneck, layout=args.layout, fuse_relu=args.fuse_relu,
                   in_channels=in_channels, cond=args.modcond, dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                  noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand, se=args.se, se_ratio=args.se_ratio,
+                  noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand, se=args.se, se_ratio=args.se_ratio, dense_skip=args.dense_skip,
                   smooth_k=args.smooth_k)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}  heads {sorted(model.output.keys())}")
