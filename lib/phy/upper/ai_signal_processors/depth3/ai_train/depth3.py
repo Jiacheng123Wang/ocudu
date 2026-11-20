@@ -156,6 +156,10 @@ def llr_channel_cond(symbol, bit):
 
 
 def llr_valid_mask_cond(alloc_prb, dmrs_symbols, modulation, uci=None):
+    """Memoised facade over `llr_valid_mask_cond_uncached` (see `_cached`)."""
+    return _cached('llr_valid_mask_cond', alloc_prb, dmrs_symbols, modulation, uci, build=lambda: llr_valid_mask_cond_uncached(alloc_prb, dmrs_symbols, modulation, uci))
+
+def llr_valid_mask_cond_uncached(alloc_prb, dmrs_symbols, modulation, uci=None):
     """Boolean mask of the conditioned head's channels that carry a coded bit for this modulation."""
     mask = np.zeros((NOF_SUBCARRIERS, llr_channels_cond()), dtype=bool)
     data = data_re_mask(alloc_prb, dmrs_symbols, uci)
@@ -188,6 +192,10 @@ def llr_gather_cond(plane, alloc_prb, dmrs_symbols, modulation, uci=None):
 
 
 def loss_weights_cond(alloc_prb, dmrs_symbols, modulation, uci=None):
+    """Memoised facade over `loss_weights_cond_uncached` (see `_cached`)."""
+    return _cached('loss_weights_cond', alloc_prb, dmrs_symbols, modulation, uci, build=lambda: loss_weights_cond_uncached(alloc_prb, dmrs_symbols, modulation, uci))
+
+def loss_weights_cond_uncached(alloc_prb, dmrs_symbols, modulation, uci=None):
     """Per-channel BCE weights for the conditioned head: zero outside this modulation's channels."""
     return llr_valid_mask_cond(alloc_prb, dmrs_symbols, modulation, uci).astype(np.float32)
 
@@ -207,6 +215,10 @@ def dmrs_amplitude_scaling(nof_cdm_groups_without_data):
 
 
 def allocated_subcarriers(alloc_prb):
+    """Memoised facade over `allocated_subcarriers_uncached` (see `_cached`)."""
+    return _cached('allocated_subcarriers', alloc_prb, build=lambda: allocated_subcarriers_uncached(alloc_prb))
+
+def allocated_subcarriers_uncached(alloc_prb):
     """Boolean mask over the 612 subcarriers of the allocation, in absolute indexing."""
     mask = np.zeros(NOF_SUBCARRIERS, dtype=bool)
     for prb in alloc_prb:
@@ -485,7 +497,55 @@ def llr_channel(symbol, bit, modulation):
     return int(symbol) * BITS_PER_SYMBOL[modulation] + int(bit)
 
 
+
+# THE GEOMETRY-ONLY HELPERS ARE MEMOISED. `data_re_mask`, `data_re_indices`, `loss_weights_cond`,
+# `llr_valid_mask_cond` and `allocated_subcarriers` depend only on (allocation, DM-RS pattern, modulation, UCI) -- a
+# handful of distinct combinations across a 183k-sample set -- but they were recomputed for every sample, which the
+# 2026-11-20 profile put at roughly a fifth of the per-sample preparation time. The cache is keyed on a hashable
+# summary of the arguments, and the returned arrays are marked read-only so a caller cannot corrupt the shared copy.
+_GEOMETRY_CACHE = {}
+
+
+def _geometry_key(*parts):
+    out = []
+    for part in parts:
+        if part is None:
+            out.append(None)
+        elif isinstance(part, (int, float, str)):
+            out.append(part)
+        elif isinstance(part, np.ndarray):
+            out.append((part.shape, part.tobytes()))
+        else:
+            # ALLOCATION AND UCI STRUCTURES. The allocation is summarised by its (first, nof) pair; a UCI layout has no
+            # such summary and is not iterable, so its repr is the key -- it is a small frozen record, and two layouts
+            # that differ at all must produce different keys.
+            fields = tuple(getattr(part, name) for name in ("first", "nof") if hasattr(part, name))
+            if fields:
+                out.append(fields)
+            else:
+                try:
+                    out.append(tuple(part))
+                except TypeError:
+                    out.append(repr(part))
+    return tuple(out)
+
+
+def _cached(name, *parts, build=None):
+    key = (name,) + _geometry_key(*parts)
+    hit = _GEOMETRY_CACHE.get(key)
+    if hit is None:
+        hit = build()
+        if isinstance(hit, np.ndarray):
+            hit.flags.writeable = False
+        _GEOMETRY_CACHE[key] = hit
+    return hit
+
+
 def data_re_mask(alloc_prb, dmrs_symbols, uci=None):
+    """Memoised facade over `data_re_mask_uncached` (see `_cached`)."""
+    return _cached('data_re_mask', alloc_prb, dmrs_symbols, uci, build=lambda: data_re_mask_uncached(alloc_prb, dmrs_symbols, uci))
+
+def data_re_mask_uncached(alloc_prb, dmrs_symbols, uci=None):
     """Boolean `[subcarrier, symbol]` mask of the REs that carry a shared-channel symbol.
 
     A DM-RS symbol carries no data when the CDM groups without data cover the allocation, which
@@ -516,6 +576,10 @@ def data_re_mask(alloc_prb, dmrs_symbols, uci=None):
 
 
 def data_re_indices(alloc_prb, dmrs_symbols, uci=None):
+    """Memoised facade over `data_re_indices_uncached` (see `_cached`)."""
+    return _cached('data_re_indices', alloc_prb, dmrs_symbols, uci, build=lambda: data_re_indices_uncached(alloc_prb, dmrs_symbols, uci))
+
+def data_re_indices_uncached(alloc_prb, dmrs_symbols, uci=None):
     """The data resource elements in the chain's order, as `(subcarrier, symbol)` index arrays.
 
     Symbol major, then ascending allocated subcarrier, which is the order the chain maps

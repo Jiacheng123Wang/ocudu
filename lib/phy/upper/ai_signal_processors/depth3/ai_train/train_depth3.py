@@ -45,7 +45,8 @@ sys.path.insert(0, HERE)
 import tensorflow as tf
 
 import dd_label as DL              # noqa: E402
-import depth3 as D3                # noqa: E402
+import depth3 as D3
+import fast_label as FL                # noqa: E402
 import pusch_uci as UCI            # noqa: E402
 import depth3_loss as L            # noqa: E402
 import ldpc_decode as LD           # noqa: E402
@@ -648,8 +649,10 @@ class Batches:
         # THE SYMBOL LABEL. `bits` are the transmitted bits in data-RE order, so `modulate` turns them into the
         # transmitted QAM symbol per RE; both come from the same CRC-OK transport block the bit plane uses.
         sub_re, sym_re = D3.data_re_indices(alloc, dmrs_symbols, uci)
-        sym = np.asarray(DL.modulate(np.asarray(bits).tolist(), D3.BITS_PER_SYMBOL[modulation]),
-                         dtype=np.complex64)
+        # THE SAME SYMBOLS, COMPUTED OVER THE WHOLE BLOCK. `DL.modulate` loops over every symbol in Python -- 52% of
+        # the per-sample time, and it holds the GIL, which is why six loader threads measured slower than one. The
+        # NumPy version is verified equal to the reference (fast_label.verify_agreement).
+        sym = FL.modulate(bits, D3.BITS_PER_SYMBOL[modulation])
         sym_plane = np.zeros((D3.NOF_SUBCARRIERS, NOF_SYMBOLS, 2), dtype=np.float32)
         sym_plane[sub_re, sym_re, 0] = sym.real
         sym_plane[sub_re, sym_re, 1] = sym.imag
