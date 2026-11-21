@@ -1432,3 +1432,14 @@ NAME="<臂名>" ~/ai_depth3/bin/probe_snapshot.sh <snapshot.keras | user@host:/p
 
 **★ 2026-11-20 17:10 三个 run 已全部"新代码 + 断点续训"重启**（`--resume`），并把 `--bler-samples` 从 24 降到 **0**
 （训练内的 LDPC 解码会让某个监控轮额外占用数十分钟；健康检查改用离线的 `analyse_llr_profile.py`）。
+
+**(p) ★ 2026-11-21 23:05 HARQ：AI 臂也能做重传合并，且必须做对等比较**
+
+| 项 | 说明 |
+|---|---|
+| ★ 工具支持 | `ul_chain_replay --also <donor> --harq-chain`：把同一 HARQ 进程的多次传输**合并软比特**，与后端无关 |
+| ★ 我们的历史数据 | **全部是 self-only（没用 HARQ）** ⇒ "vs CPU+HARQ" 是不对等比较 |
+| ★ 新脚本 | `work_tmp/measurement/measure_harq.py <index_harq_only.csv> <bundle> <out.csv> <corpus> [limit]` |
+| CPU 基线口径 | self = 114 122 976；+HARQ = **124 839 376**（3 496 个 HARQ-only 单元贡献 10 716 400）|
+| ★ 对等比较 | **AI self ＋ AI(HARQ-only units) vs 124 839 376** |
+
