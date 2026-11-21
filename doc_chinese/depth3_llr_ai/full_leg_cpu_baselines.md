@@ -20,6 +20,7 @@
 
 ```
 ~/ai_depth3/full_leg_measurement/
+├── corpus/    corpus_s2_amc_ping_<腿>/              ← 原始采集（每腿 9–10 GB，回放用）
 ├── units/     corpus_s2_amc_ping_<腿>_units.txt      ← 回放用的单元表（测量唯一必需）
 ├── dumps/     corpus_s2_amc_ping_<腿>/               ← CPU 基线：index*.csv ＋ units.txt
 └── results/   full_<模型>.csv                        ← 模型全腿结果（self）与 *_harq.csv
@@ -27,6 +28,7 @@
 
 | 目录 | 内容 | 用途 |
 |---|---|---|
+| ★ `full_leg_measurement/corpus/` | 4 条腿的原始采集 | 回放的输入（模型与 CPU 都用它）|
 | ★ `full_leg_measurement/units/` | 4 份单元表 | ★ 模型全腿回放的输入 |
 | ★ `full_leg_measurement/dumps/` | 4 条腿的 `index.csv` / `index_self.csv` / `index_harq.csv` / `index_harq_only.csv` / `units.txt` | ★ CPU 基线（`stage/rows/tb` 已删，测量不需要）|
 | ★ `full_leg_measurement/results/` | `full_A.csv`、`full_c128.csv`、`full_llrp.csv`、`full_swa_s2decay_tail.csv`、`full_swa_s3_tail.csv` … | ★ 模型结果（每单元 status/bits）|
@@ -38,7 +40,7 @@
 
 | 用途 | 命名 | 例 |
 |---|---|---|
-| ★ **全腿测量专用**（单元表、测量用 dump）| ★ **`corpus_<腿名>`** | `~/ai_depth3/corpus_s2_amc_ping_1121a_units.txt`、`~/ai_depth3/full_leg_measurement/dumps/corpus_s2_amc_ping_1121a/` |
+| ★ **全腿测量专用**（单元表、测量用 dump）| ★ **`corpus_<腿名>`** | `~/ai_depth3/full_leg_measurement/corpus/corpus_s2_amc_ping_1121a_units.txt`、`~/ai_depth3/full_leg_measurement/dumps/corpus_s2_amc_ping_1121a/` |
 | 训练数据（母集/数据集）| `datasets_*` / `<腿>_<MOD>_<self|harq>.npz` | `datasets_train_w2v3c` |
 
 **⇒ 一眼就能分清"这条腿是拿来测的"还是"拿来训的"；训练用的 dump 仍沿用 `tb_<腿>` 的历史命名（见数据手册 §6）。**
@@ -47,10 +49,10 @@
 
 | 腿 | 单元数 | CRC-OK | OK 率 | ★ CPU 交付比特 | bits/OK 单元 | 语料位置 |
 |---|---|---|---|---|---|---|
-| **1102a** | 50 000 | 40 810 | 81.6% | ★ **114 122 976** | 2 796 | `~/ai_depth3/corpus_s2_amc_ping_1102a` |
-| **1121a** | 50 000 | 38 020 | 76.0% | ★ **649 723 608** | 17 089 | `~/ai_depth3/corpus_s2_amc_ping_1121a` |
-| **1121b** | 50 000 | 28 970 | **57.9%** | ★ **323 140 584** | 11 154 | `~/ai_depth3/corpus_s2_amc_ping_1121b` |
-| **1121c** | 49 880 | 41 428 | **83.1%** | ★ **562 540 672** | 13 578 | `~/ai_depth3/corpus_s2_amc_ping_1121c` |
+| **1102a** | 50 000 | 40 810 | 81.6% | ★ **114 122 976** | 2 796 | `~/ai_depth3/full_leg_measurement/corpus/corpus_s2_amc_ping_1102a` |
+| **1121a** | 50 000 | 38 020 | 76.0% | ★ **649 723 608** | 17 089 | `~/ai_depth3/full_leg_measurement/corpus/corpus_s2_amc_ping_1121a` |
+| **1121b** | 50 000 | 28 970 | **57.9%** | ★ **323 140 584** | 11 154 | `~/ai_depth3/full_leg_measurement/corpus/corpus_s2_amc_ping_1121b` |
+| **1121c** | 49 880 | 41 428 | **83.1%** | ★ **562 540 672** | 13 578 | `~/ai_depth3/full_leg_measurement/corpus/corpus_s2_amc_ping_1121c` |
 
 **dump 产物**：`~/ai_depth3/full_leg_measurement/dumps/corpus_s2_amc_ping_1121{a,b,c}/index.csv`（1102a 在 `dump_s2_amc/`）。
 
@@ -140,10 +142,10 @@
 
 ```bash
 # 单元表（每腿一份）
-~/ai_depth3/corpus_s2_amc_ping_1121a_units.txt      # 50 000
-~/ai_depth3/corpus_s2_amc_ping_1121b_units.txt      # 50 000
-~/ai_depth3/corpus_s2_amc_ping_1121c_units.txt      # 49 880
-~/ai_depth3/corpus_s2_amc_ping_1102a_units.txt            # 1102a，50 000
+~/ai_depth3/full_leg_measurement/corpus/corpus_s2_amc_ping_1121a_units.txt      # 50 000
+~/ai_depth3/full_leg_measurement/corpus/corpus_s2_amc_ping_1121b_units.txt      # 50 000
+~/ai_depth3/full_leg_measurement/corpus/corpus_s2_amc_ping_1121c_units.txt      # 49 880
+~/ai_depth3/full_leg_measurement/corpus/corpus_s2_amc_ping_1102a_units.txt            # 1102a，50 000
 
 # 回放（模型侧）
 python3 work_tmp/measurement/measure_fulllegen.py \
@@ -153,7 +155,7 @@ python3 work_tmp/measurement/measure_fulllegen.py \
 bash lib/phy/upper/ai_signal_processors/depth3/ai_train/dump_tb.sh \
     --corpus ~/ai_depth3 --out ~/ai_depth3/full_leg_measurement/dumps/corpus_s2_amc_ping_1121a \
     --jobs 4 --binary build/lib/phy/upper/channel_processors/ul_chain_replay_cpu \
-    ~/ai_depth3/corpus_s2_amc_ping_1121a
+    ~/ai_depth3/full_leg_measurement/corpus/corpus_s2_amc_ping_1121a
 ```
 
 **耗时实测**：CPU dump **3 腿并行（各 4 worker）约 26 分钟**；模型全腿约 **80–95 min/模型/腿**。
@@ -168,7 +170,7 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/dump_tb.sh \
 **(a) CPU 侧：把"重传救回"的块补上（产出本表 §1b）**
 
 ```bash
-python3 lib/phy/upper/ai_signal_processors/depth3/ai_train/harq_backfill.py     --leg      ~/ai_depth3/corpus_s2_amc_ping_1121a     --index    ~/ai_depth3/full_leg_measurement/dumps/corpus_s2_amc_ping_1121a/index.csv     --out      ~/ai_depth3/full_leg_measurement/dumps/corpus_s2_amc_ping_1121a     --live-tb  ~/ai_depth3/corpus_s2_amc_ping_1121a/tb_live
+python3 lib/phy/upper/ai_signal_processors/depth3/ai_train/harq_backfill.py     --leg      ~/ai_depth3/full_leg_measurement/corpus/corpus_s2_amc_ping_1121a     --index    ~/ai_depth3/full_leg_measurement/dumps/corpus_s2_amc_ping_1121a/index.csv     --out      ~/ai_depth3/full_leg_measurement/dumps/corpus_s2_amc_ping_1121a     --live-tb  ~/ai_depth3/full_leg_measurement/corpus/corpus_s2_amc_ping_1121a/tb_live
 ```
 
 | 项 | 说明 |

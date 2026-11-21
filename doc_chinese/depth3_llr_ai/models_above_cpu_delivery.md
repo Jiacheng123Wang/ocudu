@@ -198,8 +198,8 @@
 
 | 项 | 值 |
 |---|---|
-| 单元表 | `~/ai_depth3/corpus_s2_amc_ping_1102a_units.txt`（50 000，由语料文件名重建）|
-| 语料 | ★ **本机 `~/ai_depth3/corpus_s2_amc_ping_1102a/`（内置盘，8.6 GB）**；203 上为 `~/ai_depth3/corpus/s2_amc_ping_1102a/` |
+| 单元表 | `~/ai_depth3/full_leg_measurement/corpus/corpus_s2_amc_ping_1102a_units.txt`（50 000，由语料文件名重建）|
+| 语料 | ★ **本机 `~/ai_depth3/full_leg_measurement/corpus/corpus_s2_amc_ping_1102a/`（内置盘，8.6 GB）**；203 上为 `~/ai_depth3/corpus/s2_amc_ping_1102a/` |
 | 脚本 | `work_tmp/measurement/measure_fulllegen.py <units> <bundle.mlmodelc> <out.csv> <corpus>` |
 | 耗时 | 本机/203 各约 **80 分钟**/模型；两台并行 ⇒ 4 个单模型全腿约 3 小时 |
 | 并集 | 由各模型的 CSV 逐单元取最大，无需再回放 |
