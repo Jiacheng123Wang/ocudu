@@ -128,3 +128,54 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/dump_tb.sh \
 ```
 
 **耗时实测**：CPU dump **3 腿并行（各 4 worker）约 26 分钟**；模型全腿约 **80–95 min/模型/腿**。
+
+---
+
+## 4b. ★★★★ HARQ 测量方法（**对等比较的另一半，必做**）
+
+**为什么必须做**：`self-only` 只统计"该单元自己的首传就解出"的比特；把重传合并算进来后，四条腿的 CPU 交付分别
+涨 **+9.4% / +31.6% / +99.6% / +23.2%**（§1b）⇒ **只比 self-only 会高估 AI 的相对优势。**
+
+**(a) CPU 侧：把"重传救回"的块补上（产出本表 §1b）**
+
+```bash
+python3 lib/phy/upper/ai_signal_processors/depth3/ai_train/harq_backfill.py     --leg      ~/ai_depth3/corpus_s2_amc_ping_1121a     --index    ~/ai_depth3/dump_s2/tb_s2_amc_ping_1121a/index.csv     --out      ~/ai_depth3/dump_s2/tb_s2_amc_ping_1121a     --live-tb  ~/ai_depth3/corpus_s2_amc_ping_1121a/tb_live
+```
+
+| 项 | 说明 |
+|---|---|
+| ★ `--live-tb` | ★ **飞行中 gNB 的真实解码**（`tb_live/dd_meta.csv` ＋ `tb_*.bits`）：这些解码**用了实时链的 HARQ 软合并**，离线回放复现不了 |
+| 产物 | `index_self.csv`（自己解出的）、★ `index_harq_only.csv`（**靠重传救回的单元 ＋ donor 列**）|
+| 判据 | `label_from ∈ {self, harq, none}`；★ **交付 = self ＋ harq** |
+| 实测耗时 | 纯 Python 后处理，**每腿 1–2 分钟** |
+| 实测数量 | 1102a 3 496 / 1121a 4 972 / 1121b 8 867 / 1121c 4 094 个 HARQ 单元 |
+
+**(b) AI 侧：把同样的重传单元也跑一遍（`--harq-chain`）**
+
+```bash
+python3 work_tmp/measurement/measure_harq.py     ~/ai_depth3/dump_s2/tb_s2_amc_ping_1121a/index_harq_only.csv     <bundle.mlmodelc>  <out_harq.csv>  <corpus 目录>  [limit]
+```
+
+| 项 | 说明 |
+|---|---|
+| ★ 底层命令 | `ul_chain_replay <donor> --also <unit> --harq-chain --phy_pipeline npu --pusch_receiver_backend ai --pusch_ldpc_decoder_type generic` |
+| ★ 机制 | ★ **把同一 HARQ 进程的多次传输喂给同一个 processor ⇒ 重传与先前的软比特合并**（与后端无关，AI 臂同样可用）|
+| 产物 | `unit,status,bits`，与全腿 CSV 同格式 ⇒ **可直接相加** |
+| 实测耗时 | 约 **1 s/单元** ⇒ 1102a ~1 h、1121b ~2.5 h（可并行 `--jobs`-style 拆分）|
+
+**(c) ★ 对等比较的三个数字（每腿每模型都要报）**
+
+```
+AI self        = measure_fulllegen.py 的 OK 比特和
+AI ＋HARQ      = AI self ＋ measure_harq.py 的 OK 比特和
+CPU ＋HARQ     = 本表 §1b                       ← 只有这个才与 AI＋HARQ 对等
+```
+
+**(d) 已知道的坑**
+
+| 坑 | 说明 |
+|---|---|
+| ★ 参数顺序 | `--harq-chain` 由工具按 slot 自行排序，**主参数与 `--also` 的先后不影响结果**（本机两种顺序实测同结论）|
+| ★ donor 可能跨腿 | `index_harq_only.csv` 的 donor 可能落在**同一腿**内（本表四条腿均如此）；跨腿时需把两条腿的语料都挂上 |
+| ★ 首传 OK 的单元**不要**再跑 HARQ | 它们已在 self 里计过，重复计会虚高 |
+
