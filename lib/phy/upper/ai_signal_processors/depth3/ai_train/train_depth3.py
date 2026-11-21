@@ -319,13 +319,17 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
                     name=f"dw{i}_{ksize}x{ksize}_d{dilation}")(y)
             if not fuse_relu:
                 block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}")(block)
-            if mlp_expand > 1:
+            if mlp_expand != 1:
                 # ★ THE DENSE LEVER, PUSHED FURTHER: an expand-project MLP in place of the single 1x1.
                 # The one lever with a large measured effect is full channel mixing (+18.6% for dense over
                 # depthwise), and the block currently mixes ONCE per residual. A 1x1 to ratio*C, a ReLU, and a
                 # 1x1 back mix twice, at the same position, so the spatial receptive field is untouched --
                 # which is the part that every dilation/kernel experiment already showed does not help.
-                wide = int(round(c_hid * mlp_expand))
+                # A RATIO BELOW 1 IS A BOTTLENECK, NOT AN ERROR. `> 1` silently ignored `--mlp-expand 0.25`, which is
+                # the one setting that separates "more channels" from "one more nonlinearity": a C -> C/4 -> C pair
+                # uses FEWER parameters than the plain 1x1 while still adding a second linear layer and its
+                # activation. The width is floored at 4 so a small ratio stays a real layer.
+                wide = max(4, int(round(c_hid * mlp_expand)))
                 block = FoldedScaleConv(wide, initial_gain=scale_init, rank=low_rank,
                                         dtype=keras_dtype, name=f"pw{i}a_1x1")(block)
                 block = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"pw{i}a_relu")(block)
