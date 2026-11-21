@@ -21,7 +21,7 @@
 | 目录 | 内容 | 用途 |
 |---|---|---|
 | ★ `~/ai_depth3/dump_s2_corpus/corpus_<腿名>/` | `index*.csv` ＋ `units.txt`（`stage/rows/tb` 已删）| ★ **全腿测量专用**（1121a/b/c）|
-| `~/ai_depth3/dump_s2_amc/corpus_s2_amc_ping_1102a/` | 同上（1102a 的测量 dump）| ★ 全腿测量（1102a）|
+| `~/ai_depth3/dump_s2_corpus/corpus_s2_amc_ping_1102a/` | 同上（1102a 的测量 dump）| ★ 全腿测量（1102a）|
 | `~/ai_depth3/dump_s2/tb_<腿名>/` | `tb/*.bits` ＋ 索引 | 训练用 dump（历史命名，见数据手册 §6）|
 
 **⇒ 一眼分离：`dump_s2_corpus` / `corpus_` 前缀＝测量；`dump_s2` / `tb_` 前缀＝训练。**

@@ -3637,7 +3637,7 @@ dw 主干保留（收益/风险比划算），但**上线前要用现场的 BLER
 500 个探针单元是从 `s2_amc_ping_1102a` 里抽的，而**该腿的 dump 记录了每个单元的 CPU 路径 replay**：
 
 ```
-~/ai_depth3/dump_s2_amc/corpus_s2_amc_ping_1102a/index.csv  →  过滤到那 500 个单元
+~/ai_depth3/dump_s2_corpus/corpus_s2_amc_ping_1102a/index.csv  →  过滤到那 500 个单元
 ⇒ 覆盖 500/500，OK 409，比特 1 149 352   ← 与探针的 CPU_REF 完全一致（精确复现）
 ```
 
