@@ -921,3 +921,47 @@ CRC 不过 ⇒ 解出来的比特不是真的 ⇒ 这条单元不能做训练样
 
 **⇒ Mac 与 203 上这三项是**符号链接**（分别指向 `~/ai_depth3`、`~/dev/ocudu/lib`、`~/ai_depth3/runs`），
 所以**同一条命令在四台机器上都能直接跑**，不必再区分 `~/ai_depth3` 与 `~/work/ai_phy_train`。**
+
+---
+
+## 20. ★ 2026-11-22 批处理：MCS 22/24/26/27 共 53 腿的 dump ＋ 归档 ＋ 建库
+
+**任务**：把 `~/ai_depth3/corpus/s2_mcs{22,24,26,27}_*` 共 **53 腿、2 622 624 单元**做完整流程（**amc 腿不做**）。
+
+| 步 | 产物 | 位置 |
+|---|---|---|
+| dump | `tb_<腿>/`（`index.csv` ＋ `tb/*.bits`）| `~/ai_depth3/dump_s2_mcs/` |
+| 归档 | `tb_<腿>.tar.gz` | **`/Volumes/CORPUS/s2_mcs_tb_tarballs/`** |
+| 建库 | `<腿>_<MOD>_<self\|harq>.npz` | **`/Volumes/CORPUS/datasets_full_s2_mcs/`** |
+
+**执行器**：`/tmp/mcs_groups.sh`（生成脚本，**每 4 腿一组、组间 `wait` 作屏障**）＋ `/tmp/one_leg.sh`（单腿：dump → tar → build）。
+每组 4 腿 × `--jobs 3` = **12 个 replay 进程**，匹配本机 14 核。
+
+**可恢复**：tarball 存在 ⇒ 跳过 dump；npz 存在 ⇒ 跳过 build。
+
+**(a) ★ 踩过的坑（两次把 load 推到 75）**
+
+| 尝试 | 做法 | 结果 |
+|---|---|---|
+| 1 | `xargs -a`（macOS 无此选项）| 立即退出，没干活 |
+| 2 | `xargs -I{} -P 4` | ★ **`-I` 使 `-P` 失效 ⇒ 20 腿同时启动，load 75** |
+| 3 | `jobs -rp \| wc -l` 计数 | ★ **命令替换是子 shell，job 表为空 ⇒ 计数恒 0 ⇒ 又是 20 腿** |
+| ★ 4 | ★ **静态分组脚本 ＋ `wait`** | ★ **验证：4 个 dump 实例、load ≈ 15** ✓ |
+
+**(b) 实测速率与 ETA**
+
+| 项 | 值 |
+|---|---|
+| 单腿 dump（50 000 单元，3 worker）| 约 **50 min**（≈1 000 单元/min）|
+| 4 腿并行 | 同上（4 × 3 = 12 进程）|
+| 53 腿 dump 总计 | ★ **约 11 h** |
+| 建库 | 每腿约 40 min（4 腿并行）⇒ 约 **9 h**，与 dump 交错进行 |
+
+**(c) 监控**
+
+```bash
+tail -f ~/ai_depth3/logs_mcs_pipeline/<腿>.log
+ls /Volumes/CORPUS/s2_mcs_tb_tarballs/tb_s2_mcs2*.tar.gz | wc -l   # 已归档腿数
+ls /Volumes/CORPUS/datasets_full_s2_mcs/s2_mcs2*_*.npz | wc -l     # 已建库腿数
+```
+
