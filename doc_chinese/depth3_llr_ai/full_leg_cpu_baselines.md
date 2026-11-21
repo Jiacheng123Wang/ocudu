@@ -16,21 +16,29 @@
 
 
 
-**(★ 目录命名，2026-11-21 23:50 更新）**
+**(★ 目录结构，2026-11-22 00:05 更新：四条腿的测量产物统一在 `full_leg_measurement/`）**
+
+```
+~/ai_depth3/full_leg_measurement/
+├── units/     corpus_s2_amc_ping_<腿>_units.txt      ← 回放用的单元表（测量唯一必需）
+├── dumps/     corpus_s2_amc_ping_<腿>/               ← CPU 基线：index*.csv ＋ units.txt
+└── results/   full_<模型>.csv                        ← 模型全腿结果（self）与 *_harq.csv
+```
 
 | 目录 | 内容 | 用途 |
 |---|---|---|
-| ★ `~/ai_depth3/dump_s2_corpus/corpus_<腿名>/` | `index*.csv` ＋ `units.txt`（`stage/rows/tb` 已删）| ★ **全腿测量专用**（1121a/b/c）|
-| `~/ai_depth3/dump_s2_corpus/corpus_s2_amc_ping_1102a/` | 同上（1102a 的测量 dump）| ★ 全腿测量（1102a）|
-| `~/ai_depth3/dump_s2/tb_<腿名>/` | `tb/*.bits` ＋ 索引 | 训练用 dump（历史命名，见数据手册 §6）|
+| ★ `full_leg_measurement/units/` | 4 份单元表 | ★ 模型全腿回放的输入 |
+| ★ `full_leg_measurement/dumps/` | 4 条腿的 `index.csv` / `index_self.csv` / `index_harq.csv` / `index_harq_only.csv` / `units.txt` | ★ CPU 基线（`stage/rows/tb` 已删，测量不需要）|
+| ★ `full_leg_measurement/results/` | `full_A.csv`、`full_c128.csv`、`full_llrp.csv`、`full_swa_s2decay_tail.csv`、`full_swa_s3_tail.csv` … | ★ 模型结果（每单元 status/bits）|
+| 训练用 dump（另一条线）| `~/ai_depth3/dump_s2/tb_<腿>/`、`dump_s2_amc/tb_*` | 不是测量，用 `tb_` 前缀 |
 
-**⇒ 一眼分离：`dump_s2_corpus` / `corpus_` 前缀＝测量；`dump_s2` / `tb_` 前缀＝训练。**
+**⇒ 规则：测量产物一律在 `full_leg_measurement/` 下（`units/`、`dumps/`、`results/`）；`dump_s2*` 下的 `tb_` 前缀是训练用。**
 
 **(★ 命名约定，2026-11-21 由项目负责人确定）**
 
 | 用途 | 命名 | 例 |
 |---|---|---|
-| ★ **全腿测量专用**（单元表、测量用 dump）| ★ **`corpus_<腿名>`** | `~/ai_depth3/corpus_s2_amc_ping_1121a_units.txt`、`~/ai_depth3/dump_s2_corpus/corpus_s2_amc_ping_1121a/` |
+| ★ **全腿测量专用**（单元表、测量用 dump）| ★ **`corpus_<腿名>`** | `~/ai_depth3/corpus_s2_amc_ping_1121a_units.txt`、`~/ai_depth3/full_leg_measurement/dumps/corpus_s2_amc_ping_1121a/` |
 | 训练数据（母集/数据集）| `datasets_*` / `<腿>_<MOD>_<self|harq>.npz` | `datasets_train_w2v3c` |
 
 **⇒ 一眼就能分清"这条腿是拿来测的"还是"拿来训的"；训练用的 dump 仍沿用 `tb_<腿>` 的历史命名（见数据手册 §6）。**
@@ -44,7 +52,7 @@
 | **1121b** | 50 000 | 28 970 | **57.9%** | ★ **323 140 584** | 11 154 | `~/ai_depth3/corpus_s2_amc_ping_1121b` |
 | **1121c** | 49 880 | 41 428 | **83.1%** | ★ **562 540 672** | 13 578 | `~/ai_depth3/corpus_s2_amc_ping_1121c` |
 
-**dump 产物**：`~/ai_depth3/dump_s2_corpus/corpus_s2_amc_ping_1121{a,b,c}/index.csv`（1102a 在 `dump_s2_amc/`）。
+**dump 产物**：`~/ai_depth3/full_leg_measurement/dumps/corpus_s2_amc_ping_1121{a,b,c}/index.csv`（1102a 在 `dump_s2_amc/`）。
 
 **⇒ 四条腿的"每 OK 单元比特数"差 6 倍（2 796 vs 17 089）⇒ 它们**不是同一难度的腿**，
 ⇒ 跨腿比较**只能用"相对 CPU 的百分比"**，绝不能直接比绝对比特数。**
@@ -143,7 +151,7 @@ python3 work_tmp/measurement/measure_fulllegen.py \
 
 # CPU 基线（本表第 1 节）
 bash lib/phy/upper/ai_signal_processors/depth3/ai_train/dump_tb.sh \
-    --corpus ~/ai_depth3 --out ~/ai_depth3/dump_s2_corpus/corpus_s2_amc_ping_1121a \
+    --corpus ~/ai_depth3 --out ~/ai_depth3/full_leg_measurement/dumps/corpus_s2_amc_ping_1121a \
     --jobs 4 --binary build/lib/phy/upper/channel_processors/ul_chain_replay_cpu \
     ~/ai_depth3/corpus_s2_amc_ping_1121a
 ```
@@ -160,7 +168,7 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/dump_tb.sh \
 **(a) CPU 侧：把"重传救回"的块补上（产出本表 §1b）**
 
 ```bash
-python3 lib/phy/upper/ai_signal_processors/depth3/ai_train/harq_backfill.py     --leg      ~/ai_depth3/corpus_s2_amc_ping_1121a     --index    ~/ai_depth3/dump_s2_corpus/corpus_s2_amc_ping_1121a/index.csv     --out      ~/ai_depth3/dump_s2_corpus/corpus_s2_amc_ping_1121a     --live-tb  ~/ai_depth3/corpus_s2_amc_ping_1121a/tb_live
+python3 lib/phy/upper/ai_signal_processors/depth3/ai_train/harq_backfill.py     --leg      ~/ai_depth3/corpus_s2_amc_ping_1121a     --index    ~/ai_depth3/full_leg_measurement/dumps/corpus_s2_amc_ping_1121a/index.csv     --out      ~/ai_depth3/full_leg_measurement/dumps/corpus_s2_amc_ping_1121a     --live-tb  ~/ai_depth3/corpus_s2_amc_ping_1121a/tb_live
 ```
 
 | 项 | 说明 |
@@ -174,7 +182,7 @@ python3 lib/phy/upper/ai_signal_processors/depth3/ai_train/harq_backfill.py     
 **(b) AI 侧：把同样的重传单元也跑一遍（`--harq-chain`）**
 
 ```bash
-python3 work_tmp/measurement/measure_harq.py     ~/ai_depth3/dump_s2_corpus/corpus_s2_amc_ping_1121a/index_harq_only.csv     <bundle.mlmodelc>  <out_harq.csv>  <corpus 目录>  [limit]
+python3 work_tmp/measurement/measure_harq.py     ~/ai_depth3/full_leg_measurement/dumps/corpus_s2_amc_ping_1121a/index_harq_only.csv     <bundle.mlmodelc>  <out_harq.csv>  <corpus 目录>  [limit]
 ```
 
 | 项 | 说明 |
