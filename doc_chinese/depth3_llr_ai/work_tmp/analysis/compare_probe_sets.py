@@ -17,7 +17,7 @@ import os
 import numpy as np
 
 HOME = os.path.expanduser("~")
-BASE = os.path.join(HOME, "ai_depth3/dump_s2_amc/tb_s2_amc_ping_1102a")
+BASE = os.path.join(HOME, "ai_depth3/dump_s2_amc/corpus_s2_amc_ping_1102a")
 RES = os.path.join(HOME, "ai_depth3/datasets_eval_reserved_1102a")
 PROBE = os.path.join(HOME, "ai_depth3/exp_bits_1102/units_probe_500.txt")
 
