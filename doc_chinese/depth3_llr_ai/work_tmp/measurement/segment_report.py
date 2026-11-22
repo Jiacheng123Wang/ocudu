@@ -15,7 +15,11 @@ Measuring the model therefore needs two passes (its own transmission, and the HA
 report has to say which of the two produced each segment's bits.
 
 Usage:
-    segment_report.py <label> <dump dir> <self csv> [<harq csv>]
+    segment_report.py <label> <dump dir> <self csv> [<harq csv>] [--units <units.txt>]
+
+`--units` restricts the report to the units that were actually measured. Without it the report covers every unit in the
+dump, which is right for a full-leg pass and wrong for a 5000-unit ruler pass: the chain's bits would be summed over all
+50,000 units while the model only had 5,000 of them.
 
 The dump directory supplies the chain's verdict (index.csv) and the HARQ list (index_harq_only.csv); the CSVs are
 measure_fulllegen.py / measure_harq.py output (unit,status,bits).
@@ -33,10 +37,19 @@ def load_ok(path):
 
 
 def main():
-    label, dump, self_csv = sys.argv[1], sys.argv[2], sys.argv[3]
-    harq_csv = sys.argv[4] if len(sys.argv) > 4 else None
+    argv = list(sys.argv[1:])
+    units_file = None
+    if "--units" in argv:
+        k = argv.index("--units")
+        units_file = argv[k + 1]
+        del argv[k:k + 2]
+    label, dump, self_csv = argv[0], argv[1], argv[2]
+    harq_csv = argv[3] if len(argv) > 3 else None
 
     index = {r["unit"]: r for r in csv.DictReader(open(os.path.join(dump, "index.csv")))}
+    if units_file:
+        keep = {l.strip() for l in open(units_file) if l.strip()}
+        index = {u: r for u, r in index.items() if u in keep}
     harq_path = os.path.join(dump, "index_harq_only.csv")
     harq_rows = {r["unit"]: r for r in csv.DictReader(open(harq_path))} if os.path.exists(harq_path) else {}
     self_ok = load_ok(self_csv)
