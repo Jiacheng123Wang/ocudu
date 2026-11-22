@@ -293,7 +293,11 @@ def candidate_units(index_path, tb_dir, corpus_dir, modulation, min_prb, min_slo
                 continue
             if require_off_prb0 and min(alloc) == 0:
                 continue
-            units.append((name, prefix, cfg, alloc, tb_path))
+            # The chain's own LDPC iteration count is the one field that says how close to the cliff the block was
+            # (1-2 iterations is a block any receiver gets; 4+ is where the AI's losses live). It costs one integer
+            # per sample and is the only difficulty signal the dump records, so it travels with the sample.
+            iterations = int(fields[4]) if len(fields) > 4 and fields[4].isdigit() else -1
+            units.append((name, prefix, cfg, alloc, tb_path, iterations))
     return units
 
 
@@ -602,7 +606,7 @@ def assemble(samples, keys_arrays):
     out["tb_bits"] = transport
     for name in ("nof_bits", "nof_tb_bits", "alloc_first_prb", "alloc_nof_prb", "dmrs_bitmap",
                  "qm", "snr_nominal", "rnti", "n_id", "rv", "uci_nof_harq_ack", "uci_ack_re",
-                 "uci_ack_rvd_re", "uci_csi1_re"):
+                 "uci_ack_rvd_re", "uci_csi1_re", "iterations"):
         out[name] = np.array([s[name] for s in samples])
     out["source"] = np.array([s["source"] for s in samples], dtype=np.uint8)
     out["unit"] = np.array(keys_arrays, dtype=object)
@@ -840,7 +844,7 @@ def main():
 
     snrs = [float(x) for x in args.snrs.split(",") if x] if args.snrs else []
     samples, names, skipped = [], [], []
-    for index, (name, prefix, cfg, alloc, tb_path) in enumerate(units):
+    for index, (name, prefix, cfg, alloc, tb_path, iterations) in enumerate(units):
         points = list(snrs) if snrs else [None]
         if args.include_natural and snrs:
             points = [None] + points
@@ -866,6 +870,7 @@ def main():
                     break
                 continue
             sample["source"] = 0 if args.source == "real" else 1
+            sample["iterations"] = iterations
             if args.source == "real":
                 # Record what the chain measured; nothing is added to the grid.
                 sample["snr_nominal"] = np.float32(measured_snr_db(prefix))
