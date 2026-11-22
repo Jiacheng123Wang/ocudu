@@ -1020,3 +1020,32 @@ ls /Volumes/CORPUS/s2_mcs_tb_tarballs/tb_s2_mcs2*.tar.gz | wc -l   # 已归档�
 ls /Volumes/CORPUS/datasets_full_s2_mcs/s2_mcs2*_*.npz | wc -l     # 已建库腿数
 ```
 
+---
+
+## 21. ★★★ 2026-11-22 11:45 **在 macOS 上"降低优先级"的正确做法：只 `nice`，不要 `taskpolicy -b`**
+
+**事故**：为了让 53 腿建库"让路"，我对整个进程树同时做了 `renice +19` **和** `taskpolicy -b`（后台 QoS）。
+结果：★ **10 个性能核几乎完全空闲**（CPU 历史图上前 4 个核在跑、5–14 号核全空），建库速度骤降。
+
+**原因**：
+
+| 手段 | 实际效果 |
+|---|---|
+| ★ `renice +19` | ★ **只降调度优先级**，仍可跑在任何核上 ✓ 正确做法 |
+| ★ `taskpolicy -b`（后台 QoS）| ★ **把线程标记为"后台"**：Apple Silicon 上会被**限制到能效核**并大幅节流 ⇒ **性能核拿不到活** ✗ |
+
+**正确做法**：
+
+```bash
+# 只降优先级（对整棵进程树；子进程会继承 nice）
+pids=$(ps -eo pid,ppid | ... )        # 或直接对根进程
+renice +19 $pids
+
+# 如果之前设过后台 QoS，撤销它
+taskpolicy -B -p <pid>                # -B = 取消 background 策略
+```
+
+**判据**：`uptime` 的 load 若 **长期 < 能效核数（本机 4）**，说明任务被压到只剩能效核 ⇒ 检查是否有后台 QoS。
+
+**结论**：★ **"降优先级但不停止调度" = `nice`；"停止调度" 才是 `-STOP`/后台 QoS —— 两者不要混用。**
+
