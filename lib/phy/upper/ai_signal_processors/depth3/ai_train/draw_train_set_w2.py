@@ -128,6 +128,15 @@ def main():
                          "across its own bins in proportion to how many samples they hold, so the width "
                          "and SNR shape inside a modulation is preserved and only its share changes.")
     ap.add_argument("--seed", type=int, default=20261103)
+    ap.add_argument("--w-critical", type=float, default=1.0,
+                    help="sampling weight for samples the chain needed >=4 LDPC iterations for. 1.0 keeps the "
+                         "uniform-per-bin draw; 4.0 makes such a sample four times as likely to be picked inside "
+                         "its bin, so the cap is spent on the difficulty the model actually loses on")
+    ap.add_argument("--w-critical5", type=float, default=None,
+                    help="weight for >=5 iterations; defaults to --w-critical")
+    ap.add_argument("--keep-unit", action="store_true",
+                    help="also write iterations.npy and unit.npy beside the arrays, so a draw can be audited and "
+                         "joined back to the dump. The trainer ignores extra files, so this changes nothing for it")
     ap.add_argument("--dry-run", action="store_true", help="report the draw without writing anything")
     args = ap.parse_args()
 
@@ -138,17 +147,25 @@ def main():
     print(f"{len(files)} dataset file(s) under {args.src}")
 
     # ---- 1. bin every sample, remembering where it came from ---------------------------------------
-    bins = collections.defaultdict(list)          # (qm, width, snr, harq) -> [(file_idx, sample_idx)]
+    bins = collections.defaultdict(list)          # (qm, width, snr, harq) -> [(file_idx, sample_idx, iterations)]
+    have_iterations = True
     for fi, path in enumerate(files):
         harq = is_harq(path)
-        with np.load(path, allow_pickle=False) as z:
+        with np.load(path, allow_pickle=True) as z:
             qm = z["qm"]
             prb = z["alloc_nof_prb"]
             snr = z["snr_nominal"]
             n = qm.shape[0]
+            # A file built before the field existed has no count; -1 means unknown and is treated as easy, so a
+            # mixed mother set still draws and the weighting degrades to the uniform one instead of failing.
+            if "iterations" in z.files:
+                its = z["iterations"]
+            else:
+                its = np.full(n, -1, dtype=np.int16)
+                have_iterations = False
             for i in range(n):
                 key = (int(qm[i]), width_band(int(prb[i])), snr_band(float(snr[i])), harq)
-                bins[key].append((fi, i))
+                bins[key].append((fi, i, int(its[i])))
     total = sum(len(v) for v in bins.values())
     print(f"{total} sample(s) across {len(bins)} non-empty bin(s)")
 
@@ -163,12 +180,51 @@ def main():
     rng = np.random.default_rng(args.seed)
     drawn = {}
 
+    want_critical = args.w_critical if args.w_critical > 1.0 else 1.0
+    want_critical5 = args.w_critical5 if args.w_critical5 is not None else want_critical
+
     def draw_bin(key, count):
+        """Draw `count` members from a bin, spending the cap in proportion to the sample weights.
+
+        WEIGHTED, NOT RESHUFFLED. The caps exist so every bin contributes; inside a bin the only thing worth
+        preferring is difficulty, and the dump's LDPC iteration count is the one measure of it we have. The cap is
+        therefore split between the strata in proportion to weight x size, each stratum is drawn without replacement,
+        and any shortfall (a stratum smaller than its share) is handed to the others. With all weights 1.0 this is
+        exactly the old uniform draw.
+        """
         members = bins[key]
         if len(members) <= count:
             return list(members)
-        pick = rng.choice(len(members), size=count, replace=False)
-        return [members[j] for j in sorted(pick)]
+        if want_critical <= 1.0:
+            pick = rng.choice(len(members), size=count, replace=False)
+            return [members[j] for j in sorted(pick)]
+        strata = collections.defaultdict(list)
+        for m in members:
+            it = m[2]
+            strata["c5" if it >= 5 else "c4" if it >= 4 else "easy"].append(m)
+        weights = {"c5": want_critical5, "c4": want_critical, "easy": 1.0}
+        # largest-remainder allocation of the cap
+        shares = {k: weights[k] * len(v) for k, v in strata.items()}
+        total_share = sum(shares.values()) or 1.0
+        quota = {k: count * shares[k] / total_share for k in strata}
+        take = {k: min(len(strata[k]), int(quota[k])) for k in strata}
+        left = count - sum(take.values())
+        # hand the remainder to the strata with room, largest fractional part first
+        for k in sorted(strata, key=lambda k: -(quota[k] - int(quota[k]))):
+            if left <= 0:
+                break
+            room = len(strata[k]) - take[k]
+            add = min(room, left)
+            take[k] += add
+            left -= add
+        out = []
+        for k, members_k in strata.items():
+            if take[k] <= 0:
+                continue
+            pick = rng.choice(len(members_k), size=take[k], replace=False)
+            out.extend(members_k[j] for j in sorted(pick))
+        out.sort(key=lambda m: (m[0], m[1]))
+        return out
 
     if args.qm_budget_capped:
         # W2'S OWN METHOD, PER MODULATION. w2 capped every bin at the same number, which makes each
@@ -264,17 +320,24 @@ def main():
             f"{QM_NAME.get(qm, qm)} {by_qm[qm]} ({by_qm[qm] / kept * 100:.1f}%)" for qm in sorted(by_qm)))
     else:
         for key in sorted(bins):
-            members = bins[key]
             cap = args.harq_cap if key[3] else args.self_cap
-            if len(members) <= cap:
-                drawn[key] = members
-            else:
-                pick = rng.choice(len(members), size=cap, replace=False)
-                drawn[key] = [members[j] for j in sorted(pick)]
+            # draw_bin handles the below-cap case, the uniform draw and the weighted one, so the two paths
+            # (per-bin caps and per-modulation budgets) cannot disagree about how a bin is sampled.
+            drawn[key] = draw_bin(key, cap)
 
         kept = sum(len(v) for v in drawn.values())
         print(f"drew {kept} sample(s) ({kept / total * 100:.1f}% of the mother set) "
               f"with self<={args.self_cap}, harq<={args.harq_cap}")
+
+    if have_iterations:
+        picked = [m[2] for v in drawn.values() for m in v]
+        crit = sum(1 for x in picked if x >= 4)
+        crit5 = sum(1 for x in picked if x >= 5)
+        mother = [m[2] for v in bins.values() for m in v]
+        mcrit = sum(1 for x in mother if x >= 4)
+        print(f"critical (>=4 iterations): draw {100 * crit / max(len(picked), 1):.1f}% "
+              f"vs mother set {100 * mcrit / max(len(mother), 1):.1f}%;  >=5: "
+              f"{100 * crit5 / max(len(picked), 1):.1f}%")
 
     # ---- 3. report per bin, in section 10.2's shape -------------------------------------------------
     print("\n  modulation  width   " + "".join(f"{s:>15s}" for _, _, s in SNR_EDGES))
@@ -297,7 +360,7 @@ def main():
     # ---- 4. flatten the draw into output order: file ascending, row ascending -----------------------
     by_file = collections.defaultdict(list)
     for key in sorted(drawn):
-        for fi, si in drawn[key]:
+        for fi, si, _it in drawn[key]:
             by_file[fi].append(si)
     for fi in by_file:
         by_file[fi] = np.asarray(sorted(by_file[fi]), dtype=np.int64)
@@ -370,6 +433,23 @@ def main():
                     out[pos:pos + m] = chunk
         pos += m
     assert pos == kept
+
+    if args.keep_unit:
+        # The trainer ignores files it does not ask for, so these two are audit trail rather than data: they let a
+        # draw be checked against the dump (which unit, how hard it was) without re-reading the mother set.
+        its = np.zeros(kept, dtype=np.int16)
+        names = []
+        pos = 0
+        for fi in order:
+            rows = by_file[fi]
+            with np.load(files[fi], allow_pickle=True) as z:
+                if "iterations" in z.files:
+                    its[pos:pos + len(rows)] = z["iterations"][rows]
+                names.extend(str(x) for x in z["unit"][rows])
+            pos += len(rows)
+        np.save(os.path.join(args.dst, "iterations.npy"), its)
+        np.save(os.path.join(args.dst, "unit.npy"), np.array(names, dtype=object), allow_pickle=True)
+        print(f"wrote iterations.npy and unit.npy ({kept} rows)")
 
     # The packed arrays count BITS per sample while storing BYTES, so the bound that must hold is
     # ceil(nof_bits / 8) <= width, not nof_bits <= width. 14 634 rows of the real draw have bit counts
