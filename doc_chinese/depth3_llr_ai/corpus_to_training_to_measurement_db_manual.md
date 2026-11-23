@@ -1077,3 +1077,55 @@ taskpolicy -B -p <pid>                # -B = 取消 background 策略
 
 **⇒ 同时释放**：本机 `dump_s2_mcs/` 里前 44 腿的 `stage/` 已删 ⇒ **释放约 200 GB 内置盘**。
 
+---
+
+## 23. ★★★★★ 2026-11-23 09:00 **规则：读归档要**流式按成员读**，不要解整包**
+
+**(a) 规则**
+
+★ **需要归档里的某个文件时，用 `tar -xOzf <archive> <member>` 直接流到 stdout**，**不要**先 `tar xzf` 解包再读：
+
+```bash
+# ★ 正确：只把需要的成员读进内存/管道，磁盘零产物
+tar -xOzf /Volumes/CORPUS/s2_mcs_tb_tarballs/tb_s2_mcs00_ping_1031a.tar.gz \
+    tb_s2_mcs00_ping_1031a/index.csv | head
+
+# ✗ 错误：先解整包（一条腿约 200 MB，53 条腿约 10 GB；全库 tar 会到 500 GB 级）
+mkdir -p /tmp/x && tar xzf <archive> -C /tmp/x
+```
+
+**(b) ★ 为什么（实测，2026-11-23 的 `iterations` 回填）**
+
+| 项 | 实测 |
+|---|---|
+| 用流式读完 **586 个归档**里的 `index.csv` | ★ **零临时文件** |
+| `/tmp` 条目数（前后）| **52 597 → 52 597（不变）** |
+| 归档文件 mtime | ★ **未被改动** |
+| ★ 整轮回填的磁盘增量 | ★ **< 10 MB**（每个 npz 追加一个 `iterations.npy` 成员）|
+| 若改为解整包 | ★ **数百 GB 级**且要事后清理 |
+
+**(c) ★ 实现要点（Python）**
+
+```python
+proc = subprocess.run(["tar", "-xOzf", archive, member], capture_output=True, text=True)
+if proc.returncode == 0 and proc.stdout:
+    rows = csv.DictReader(io.StringIO(proc.stdout))    # 直接在内存里解析
+```
+
+**⇒ 现成例子：`ai_train/backfill_iterations.py`（本机 dump 优先，缺失时流式读归档）。**
+
+**(d) ★ 什么时候才真的需要解包**
+
+| 场景 | 做法 |
+|---|---|
+| ★ 只读其中一两个文件 | ★ **流式按成员读**（本规则）|
+| 需要同时访问大量成员（如重跑 dump 的全量校验）| 解到**专用临时目录** `…/_extract_tmp/`，**用完立即删**，并在文档里记下占用 |
+| 离线机器没有本机 dump、必须重建母集 | 同上，且**优先只解 `index.csv` ＋ `tb/*.bits`**（真正的契约产物），**不要解 `stage/`**（§22）|
+
+**(e) ★ 判据（一条命令自查是否“流式”）**
+
+```bash
+# 读归档期间，下面的数量应当不增长
+ls /tmp | wc -l
+```
+
