@@ -1,6 +1,7 @@
 # 语料采集 → dump → 建库 → 训练 → **测量**：全过程说明书
 
-> **版本**：2026-11-06（香港，**更名**：原名 `corpus_to_training_db_manual.md`；内容已含**测量**与**实链时延**）｜
+> **版本**：2026-11-06（香港，**更名**：原名 `corpus_to_training_db_manual.md`；内容已含**测量**与**实链时延**）；
+> **2026-11-23 增补 §9.2**（macOS/Apple Silicon 训练路径：两轮改动、实测账、对 CUDA 路径的逐条影响）｜
 > **范围**：从 gNB 起飞采集一条腿 → dump → 建库 → 训练数据集 → 训练 → **测量（交付比特 ＋ 实链时延）**。
 > **性质**：操作手册。每一步都写清**命令**、**判据**、**产物**与**坑**。
 > **本文的权威性来自两处**：① 文档里**时间最晚**的那一份（见 §0 的时间线）；② **2026-11-04 在机器上实测过的**（凡实测处标 ★实测）。
@@ -544,6 +545,9 @@ export LD_LIBRARY_PATH=$(ls -d .venv/lib/python*/site-packages/nvidia/*/lib | tr
 | `--snapshot-every` | 每 N 轮存一份**可续训的完整站点** | ★★ **研究早停是否有用时设 1**（每轮都留）；产物在 `<out>/snapshots/epoch_NNNN_periodic.{keras,json}` |
 | `--resume` | 从 `depth3_last.keras` ＋ `resume.json` 续训 | ★ 状态文件在**最佳决策之后**写；加载时还会用 history 校正 `best/since` |
 | `--bler-samples` | 每 `--bler-every` 轮解码多少个验证样本 | 0 = 不解码（选模型靠 val loss，判优劣靠尺子）|
+| `--workers` | 组批线程数 | ★ Linux 默认 **0＝串行**（原有行为，未改）；macOS 默认 `min(3, 核数/4)` —— 实测 6 线程反而比串行慢，见 §9.2.3 |
+| `--jit` | 用 XLA 编译训练步 | ★ Linux 默认 **on**（未改）；**macOS 默认 off**（`tensorflow-metal` 没有 XLA device），显式给出会先自检、失败自动降级，见 §9.2.3 |
+| `--no-gpu` | 隐藏全部 GPU，强制 CPU | 默认关（Ubuntu 命令行照旧选 GPU）；★ macOS 上 c32 用它是**更快**路径（GPU 慢 1.87×）|
 
 **产物**：`depth3_best.keras`（每次 val 改善）、`depth3_last.keras`（每轮）、`resume.json`（续训状态）、
 `history.json`（跑完才写）、`snapshots/`。
@@ -566,6 +570,152 @@ export LD_LIBRARY_PATH=$(ls -d .venv/lib/python*/site-packages/nvidia/*/lib | tr
 **代价**：每个快照约 **1.6 MB（c128）／6 MB（c256）／24 MB（c512）** —— 四轮十几个快照也就几百 MB ✓。
 
 **★ 起飞前先看日志头三行**：`parameters N`、`layout`、`train/val` 样本数 —— 架构错在这里就能发现，不必等一轮。
+
+### 9.2 macOS（Apple Silicon）训练路径：两轮改动、实测账、对 CUDA 的影响（2026-11-23）
+
+> **为什么单列**：本机（**Mac M4 Pro，14 核/64 GB，macOS 26.6.2**）既是开发机，也是唯一能回答"这条训练在 Mac 上能不能跑、值不值得跑"的机器。
+> 2026-11-22/23 的两轮改动只做一件事：**让同一条命令行在 macOS 上跑得对、跑得稳，同时不动 Ubuntu 的任何一个数值**。
+> 本节把**改了什么**、**实测多少**、"**什么时候别用 Mac 训练**"的判据、以及**对 CUDA 路径的逐条影响**写在一起，避免下次重新踩。
+
+#### 9.2.1 本机唯一能跑 TF 的环境
+
+| 项 | 值 |
+|---|---|
+| 解释器 | `python3.11` ＋ venv **`~/.venvs/tf-metal-2.18`**（★ 不要装进全局 3.11：TF 2.18 要求 `numpy<2.1`，会降级现有环境）|
+| 版本 | `tensorflow 2.18.1` ＋ `tensorflow-metal 1.2.0` ＋ `keras 3.15.1` ＋ `numpy 2.0.2` |
+| 设备 | `tf.config.list_physical_devices()` → `CPU:0` ＋ `GPU:0`（Metal 以 PluggableDevice 注册，**0 MB 显存**是它的正常报法，走统一内存）|
+| 为什么锁 2.18 | Apple 的对照表把 `tensorflow-metal` 1.1/1.2 配对在 **TF 2.14–2.18**，**2.19+ 没有配对** —— 直接 `pip install tensorflow`（会装到 2.21）**永远看不到 GPU**。见 <https://pypi.org/project/tensorflow-metal/> |
+| 唯一可信的判据 | 训练器启动横幅的 `platform: compute placement: a 64x64 matmul lands on …`。`list_physical_devices()` **不能**作为判据：`--no-gpu` 之后插件仍然列出 `GPU:0`，但算子落在 `CPU:0` |
+
+#### 9.2.2 改了什么（`train_depth3.py`，两轮合计）
+
+| 类别 | 改动 | 仅 macOS？ | 为什么 |
+|---|---|---|---|
+| 平台闸门 | `IS_DARWIN = sys.platform == "darwin"` | — | 所有平台相关决定只读它 |
+| XLA | `resolve_xla`：Linux 原样返回请求值；macOS 未显式 `--jit` 则关。`xla_self_test` 先编译一个 2×2 探针；`compile_step` 工厂 ＋ `step` 包装做**一次性**运行期降级 | ★ | `tensorflow-metal` 无 XLA device（见 §9.2.3(e)）|
+| 设备选择 | `--no-gpu` ＋ `hide_gpus()`：在任何 op 之前 `set_visible_devices([], "GPU")` | 跨平台 | 本机 c32 上 CPU 比 GPU 快 1.87×；没有它只能卸载插件才能走快路 |
+| 数值护栏 | macOS 上 `--dtype float16` 直接报错（`DEPTH3_ALLOW_METAL_FP16=1` 可越过）| ★ | 插件 fp16 段错误（§9.2.3(e)）|
+| 诊断 | 启动横幅打印设备、**算子落点**、XLA 生效值、组批线程数、ANE 不参与反传 | ★ | "装了插件 ≠ 用上 GPU"；日志必须自证 |
+| 组批 | `pipeline_defaults`：Linux ＝命令行原值；macOS `--workers 0` → `min(3, 核数/4)`，`prefetch` 默认 `2×workers` | ★ | 实测 6 线程比串行还慢（§9.2.3）|
+| 数据 | 一维元数据列（`alloc_*`/`qm`/`nof_bits`/`snr_nominal`/UCI…）一次性读进内存；`X/H/bits/tb_bits` 仍 mmap | 跨平台 | 随机页错误的元数据访问占 per-sample 时间的可观部分，10 万样本约 8 MB |
+| 数据 | 几何常量缓存（`_GeometryCache`：有界 FIFO ＋ 锁，命中无锁，未命中在锁内构建）；掩码只读 | 跨平台 | 256QAM 掩码 612×112＝274 KB／样本，原来每样本重建；`clear()` 式淘汰会造成未命中风暴 |
+| 数据 | `unpackbits(count=nof_bits)`；`X` 用 `asarray` 不再复制；复用的调制名映射 | 跨平台 | 纯 host 侧省工，值不变 |
+| Host↔Device | 损失每 `LOSS_ACCUMULATION=64` 个 batch 回读一次（原来是每 batch `float(total)` 同步）；`tensors()` 只打包图里有的 head 的 target；`evaluate` 每 batch 只 `.numpy()` 一次；`--select-on val` 时不算 low-SNR band | 跨平台 | 同步与重复转换是 GPU 队列的停顿；band 只在 `--select-on band` 时有人读 |
+| 序列化 | `CUSTOM_OBJECTS` 统一（补上 `MaskedSmooth`）：`--export-only` 不再加载失败 | 跨平台 | 原来是**必然失败**的路径（训练完才炸）|
+| 修复 | `genie_labels` 星座图**按 qm 缓存并冻结** | 跨平台 | 原实现只缓存第一次的 qm：`--modcond --target genie` 的混合调制数据会用错星座，**标签是错的且静默** |
+
+#### 9.2.3 实测账（本机）
+
+**(a) 数据流水线（CPU 侧，`Batches.epoch`，best-of-3）**
+
+| 夹具（batch 8 除注明外）| HEAD | 现在（串行）| 现在（多线程）|
+|---|---|---|---|
+| 51 PRB 全带，8 样本（best-of-3）| 0.744 ms/样本 | 0.650（1.14×）| 6 线程 0.658 |
+| 51 PRB 全带，200 样本 | — | 0.650 | **0.412（3 线程，1.58×）** |
+| 混合 2–51 PRB，200 样本 | 0.480 | 0.401（1.20×）| **0.310（2 线程，1.55×）**；3 线程 0.360、6 线程 0.516 |
+| 1–51 PRB 均匀，batch 16，`--modcond`，400 样本 | — | 0.589 | **0.483（3 线程）** |
+
+线程数**不是越多越好**：同一 51 PRB 200 样本夹具上，2 线程 0.430、3 线程 0.412、4 线程 0.419、**6 线程 0.552（比串行还慢）** —— GIL ＋ 统一内存带宽。
+**判据**：160K 样本跑 32 分钟只需 **~80 samples/s ≈ 18 MB/s 磁盘**，而加载实测 2 000 samples/s ⇒ **数据加载不在关键路径上**。
+
+**(b) step 微基准**（c32，18 blocks，spatial，**4 个输出头、非 cond**，随机 target，预热后 10 次均值）
+
+| 配置 | CPU | Metal GPU | GPU/CPU |
+|---|---|---|---|
+| batch 8（4 头微基准）| 105.5 ms/step | 193.8 | 0.54× |
+| batch 16 | 188.3 | 325.7 | 0.58× |
+| batch 32 | 438.9 | 578.9 | 0.76× |
+| batch 128 | 1 743.4 | 2 025.0 | 0.86× |
+| **c128** batch 16 | 954.5 | 738.8 | **1.29×** |
+| **c128** batch 32 | 1 880.3 | 1 369.0 | **1.37×** |
+
+端到端（**同一模型** c32/c128、18 blocks、4 个输出头、非 cond；200 样本/epoch；1-vs-7 epoch 斜率；c128 用随机权重仅计时）：
+
+| 配置 | CPU | Metal GPU |
+|---|---|---|
+| c32 batch 8 | 2.63 s/epoch | 4.93 s/epoch（0.53×）|
+| c128 batch 16 | 12.13 s/epoch | 10.08 s/epoch（1.20×）|
+
+**⇒ c32（部署宽度）在任何 batch 下都是 CPU 快；GPU 只有 c128 以上 ＋ 大 batch 才赢。** 原因：18 个 3×3 depthwise ＋ 1×1 的链在 612×14×32 上算术强度低，Metal 每 kernel 的命令开销压过计算；CPU 走的是 Accelerate/Eigen 的成熟 kernel。
+
+**(c) 本机一轮要多久**（160 000 样本，PRB 1–51 均匀分布，c32 真实配方 `--modcond --no-reporting-heads`）
+
+| 配方 | 每样本 | 160K/轮 |
+|---|---|---|
+| c32 batch 8 | 12.13 ms | **32.3 min** |
+| c32 batch 16 | 12.42 | **33.1 min** |
+| c32 batch 16，**全 51 PRB**（对照）| 12.32 | 32.9 min ⇒ **PRB 不进入 step 时间**（平面恒为 612×14）|
+| c32 batch 8，第二轮改动后复测 | 12.14 | 32.4 min ⇒ 改动前后一致（无回归）|
+| c32 batch 16，**GPU**（参考）| 21.5 ms | 57.3 min ⇒ 别用 GPU |
+
+**(d) 为什么没有继续加码（全是实测，不是判断）**
+
+| 探针 | 数字 | 结论 |
+|---|---|---|
+| `tensors()` 主线程打包（7 个 target，batch 16，19 MB）| stack 0.37 ＋ `tf.constant` 0.37 ＝ **0.74 ms**，对 199 ms 的 step 是 **0.37%** | **不值得**引入后台打包线程（还要在 Metal 上冒"第二个 TF 线程"的风险）|
+| `stack` 微优化 | 0.382 → 0.376 ms（1.02×）| 中性，保留只为语义清楚 |
+| TF intra-op 线程 | 默认 14 最优；8 → 慢 12%，4 → 慢 55%，2 → 慢 148% | **不能动** |
+| `--fuse-relu` | 12.13 → 12.34 ms/样本（**慢 1.7%**）| 不采用 |
+| `--jit`（XLA 跑在 CPU）| 12.1 → 89.5 ms/样本（**慢 7.4×**）| 与 README §3 的 6.2× 一致；macOS 默认关是对的 |
+
+**(e) 两个会让进程直接死的坑（本机都发生过）**
+
+| 现象 | 栈/报错 | 触发条件 | 处置 |
+|---|---|---|---|
+| macOS 弹「Python 意外退出」 | `EXC_BAD_ACCESS` in `metal_plugin::MPSBinaryOpBase<Eigen::half>::Compute` → `MetalBinaryGraph::Compute` → `mpsGraphTensorDataFromTensor` | **`--dtype float16` ＋ Metal GPU**，第一个训练步 | 代码已拦截（macOS 上 `--dtype float16` 一行报错、进程不崩；`DEPTH3_ALLOW_METAL_FP16=1` 可越过）。**未修改的 HEAD 脚本同样崩** ⇒ 插件缺陷，不是训练代码。崩溃报告在 `~/Library/Logs/DiagnosticReports/Python-*.ips` |
+| Metal 上开 XLA | `NotFoundError: could not find registered platform with id: 0x…` `[Op:__inference_step_…]` | 用 HEAD 的默认（XLA on）在装了 Metal 的 Mac 上训练 | 现在的默认（macOS 关 XLA）已避开；**不要**在 Metal 上显式 `--jit` |
+
+#### 9.2.4 什么时候用 Mac、什么时候别用
+
+| 场景 | 结论 |
+|---|---|
+| c32（部署配方）任何 batch | **用 CPU**：`--no-gpu`（或别装 `tensorflow-metal`）。GPU 慢 1.87× |
+| c128 且 batch ≥ 16 | 可以用 GPU（1.2–1.37×），但仍要 `--dtype float32` |
+| 任何 fp16 | macOS 上**禁止**（段错误）；导出包本来就是 fp16 |
+| 需要与 Ubuntu 逐位对齐 | 用 `--init` 固定初始权重再比。★ **Keras 3 的初始化器不受 `tf.random.set_seed` 控制**，同一命令两次运行的初始权重本来就不同（这是既有事实，本机实测两次 `train` 为 3.38864 vs 3.58929）|
+| 要跑 160K 样本 | c32/batch 8 约 **32 分钟/轮**；60 轮约 32 小时。数据 ~36 GB > 15 GB 内存 ⇒ 必须用 mmap 目录形式 |
+
+#### 9.2.5 对 Ubuntu / NVIDIA-CUDA 的潜在影响（逐条）
+
+| 改动 | Linux 默认是否生效 | 潜在风险 | 复核方法 |
+|---|---|---|---|
+| XLA 解析 | **否**：`resolve_xla` 在非 darwin 直接返回请求值（默认仍 `on`）| 无 | Ubuntu 日志头仍应是 `xla: on` |
+| `--workers` / `--prefetch` 默认 | **否**：Linux 仍 `0` ＝串行，`prefetch` 仍 `2×workers` | 无 | 日志无 `platform:` 行；去掉 `--workers` 后仍是串行 |
+| `--no-gpu` | 默认关 ⇒ **不产生任何 TF 调用** | 无 | 不传该参数时行为逐字未变 |
+| 损失回读节流（每 64 batch）| 是 | ★ 两个可感知点：① **NaN/Inf 最多晚 64 步才被看到**（程序本来也不 in-loop 检查）；② 第 64 步才发生一次同步，若显存不足崩溃，前 63 步的 loss 不会出现在日志里 | CUDA 上跑 2 轮，核对 `history.json` 的 `train` 与改动前逐位相同（本机 CPU 已验：逐位相同）|
+| 几何缓存 FIFO＋锁 | 是 | 内存上限仍是 64 条（≈22 MB），**未增**；`--workers 0` 时锁永不争用。外部脚本若**写** `sample()["llr_weights"]` 等只读掩码会抛 `ValueError`（仓库内已核查：`eval_depth3`/各 probe 只读）| `grep -rn '\["llr_weights"\]\s*=' lib doc_chinese` 应为空 |
+| 元数据常驻内存 | 是 | +~8 MB/10 万样本；万一一维列 > 32 MB 会被跳过（有守卫）| 大语料上观察 RSS |
+| `--select-on val` 时不算 band | 是 | `val_band` 内部变 `nan`；它**不在** `history.json`、也不打印，只有 `--select-on band` 读它 | `--select-on band` 跑一轮，`best` 应来自 band |
+| `tensors()` 只打包存在的 head | 是 | 将来若新增 head 而忘了登记 target ⇒ **trace 期 KeyError**（响亮失败，不静默）| 新增 head 时同步改 `read_*` |
+| `genie_labels` 按 qm 缓存 | 是 | ★ **行为变更（修正）**：`--modcond --target genie` 的混合调制语料以前用错星座、标签是错的。**用该组合训过的旧 run 的数值不可比**，需要重训或至少重新评估 | 用混合 qm 语料跑 `--target genie`，逐样本检查 stride-8 块尾全 0 |
+| `CUSTOM_OBJECTS` 补 `MaskedSmooth` | 是 | 只修复原本必然失败的 `--export-only` 路径 | `--smooth-k>0` 训一轮再 `--export-only` |
+| `epoch` 索引 `.tolist()`、`stack` itemgetter | 是 | 无（同一批整数、同一数组）| 与 HEAD 的逐样本对比（混合布局/调制/UCI）应逐位相同 |
+| 导出契约 | 未改 | 无 | 对比 `.mlpackage` 的 output 名与 `depth3_*` `userDefined` 键 |
+
+**一句话**：跨平台改动都落在 **host 侧与缓存淘汰**上，而它们的不变量（"算出来的数"）已被逐样本 bit-identical 对拍守住；唯一**故意改变数值**的是 `--modcond --target genie` 的标签修正（以前是错的）。
+
+#### 9.2.6 两端的验收命令
+
+```bash
+# —— Ubuntu / CUDA：数值与契约不变 ——
+# 1) 同一命令、同一 --init 权重，各跑 2 epoch，history 必须逐位相同
+python train_depth3.py --train … --val … --out runs/after --modcond --layout spatial \
+  --in-channels 12 --c-hid 32 --blocks 18 --batch 8 --epochs 2 --max-train 400 --max-val 100 \
+  --init fixed.keras --bler-samples 0
+diff <(python -c "import json;print(json.load(open('runs/after/history.json'))['history'])") \
+     <(python -c "import json;print(json.load(open('runs/before/history.json'))['history'])")
+# 2) 默认路径：不传 --workers 时仍串行；xla: on；日志无 platform: 行
+# 3) --select-on band --max-val 1000 ：best 仍来自低 SNR band
+# 4) --export-only … --export-probe … --export-buckets 12,24 ：output 名与 depth3_* metadata 未变
+
+# —— macOS：设备与止血逻辑 ——
+P=~/.venvs/tf-metal-2.18/bin/python
+$P train_depth3.py …                 # xla: off + 原因；compute placement: GPU:0
+$P train_depth3.py … --no-gpu        # gpus: … hidden；placement CPU:0；epoch 时间约 GPU 的 0.5×
+$P train_depth3.py … --dtype float16 # 一行 parser error，进程不崩（不产生崩溃报告）
+# 并发/缓存正确性：把 Batches.GEOMETRY_ENTRIES 临时改小（如 3），6 线程重放 800 个样本，
+# 与串行结果逐位对比；缓存长度必须 <= 上限，掩码必须只读（写入应抛 ValueError）
+```
 
 ---
 
@@ -635,6 +785,10 @@ export LD_LIBRARY_PATH=$(ls -d .venv/lib/python*/site-packages/nvidia/*/lib | tr
 | 用旧 monitor 验证新训练集 | 训练/验证不同源，val 不可信 | monitor 从**同一个母集**抽、不同种子 |
 | 只看"采了多少条" | 全在同一种格子 | 每段跑宽度/调制/SNR 分布 |
 | 重启训练丢了 `--bler-samples 0` | 默认 24 开启，撞上带控样本 | 用启动脚本（参数写死）；`argv:` 日志自查 |
+| macOS 上 `--dtype float16` | 进程**段错误**、弹「Python 意外退出」，无 traceback（Metal 插件的半精度算子）| 训练用默认 float32（导出包本来就是 fp16）；代码已拦截，别用 `DEPTH3_ALLOW_METAL_FP16=1` 绕过 |
+| macOS 上显式 `--jit` | `NotFoundError: could not find registered platform with id: …` | 默认已关 XLA；需要 `--jit` 时先看 `xla_self_test` 的结果与回退日志 |
+| 以为装了 `tensorflow-metal` 就在用 GPU | epoch 时间反而变长；`list_physical_devices()` 也列出 `GPU:0` | 看横幅 `platform: compute placement:`；c32 用 `--no-gpu`（实测 GPU 慢 1.87×）|
+| 用同一 `--seed` 比两条臂 | 两次运行的 loss 不同 —— Keras 3 的初始化器不受 `tf.random.set_seed` 控制 | A/B **必须**用 `--init` 固定同一份权重（§9.2.4）|
 
 ---
 
@@ -1128,4 +1282,84 @@ if proc.returncode == 0 and proc.stdout:
 # 读归档期间，下面的数量应当不增长
 ls /tmp | wc -l
 ```
+
+---
+
+## 24. ★★★★ 2026-11-23 **macOS 训练路径已单列成节（§9.2）：三句话结论 ＋ 去哪看**
+
+> 本节只是**指针 ＋ 摘要**，细节（改动清单、逐项实测、对 CUDA 的逐条影响、验收命令）全在 **§9.2**。
+
+| 一句话 | 结论 |
+|---|---|
+| ① Mac 上到底该用谁 | **c32 用 CPU**（`--no-gpu`）：本机 Metal GPU 慢 **1.87×**；只有 c128 且 batch ≥ 16 时 GPU 才赢（1.20–1.37×）|
+| ② 本机一轮多久 | 160 000 样本、PRB 1–51、c32：**32–33 分钟/轮**（batch 8 最快）；60 轮约 32 小时 |
+| ③ 两个会"崩"的配置 | macOS 上 **`--dtype float16`**（Metal 插件段错误，已被代码拦截）与 **`--jit`**（XLA 在 Metal 上 `NotFoundError`，默认已关）|
+
+**⇒ 装 GPU 插件的前提**：`tensorflow` **2.18** ＋ `tensorflow-metal` **1.2**（Apple 的对照表只到 2.18；装 2.21 永远看不到 GPU）。**用不用得上，只看横幅 `platform: compute placement:`，不看 `list_physical_devices()`。**
+
+---
+
+## 9.2.5 ★★★★★ 2026-11-23 14:30 **对 Ubuntu/CUDA 路径的逐条复核 ＋ 本机实测速度**
+
+**(a) ★ 复核方法**
+
+1. `train_depth3.py` 的 macOS 改动**尚未提交**（`git diff`：+837 / −157）；逐条读 diff；
+2. 检查每个平台相关决定是否**被 `IS_DARWIN` 挡住**（Linux 走原路径）；
+3. 检查跨平台改动是否可能改变**数值**（而不是只改 host 侧耗时）；
+4. 本机用**同一配方**（c32 / 18 块 / batch 16 / `--dense-skip-entry --se` ＝ Ce＋B）实测。
+
+**(b) ★★ 平台闸门（Linux 全部走原路径）**
+
+| 位置 | Linux 行为 |
+|---|---|
+| `resolve_xla` | ★ `if not IS_DARWIN: return bool(requested), None` ⇒ **Linux 完全按命令行** |
+| `pipeline_defaults` | ★ Linux：`--workers`/`--prefetch` 原值（`0` 仍是串行）|
+| `hide_gpus` | 只有写了 `--no-gpu` 才调用 |
+| `configure_macos_runtime` / `report_macos_runtime` | 只在 `IS_DARWIN` 时执行 |
+| dtype 护栏 | 只在 macOS 报错 |
+| `xla_self_test` | 只在 macOS 且 `--jit` 时跑 |
+| 验证集 workers | ★ Linux `(0, 0)`（串行，**与改动前一致**）|
+
+**(c) ★★ 跨平台改动：只省 host 时间，不改数值**
+
+| 改动 | 为什么不改数值 |
+|---|---|
+| ★ `LOSS_ACCUMULATION=64` | 每 64 个 batch 才 `tf.stack(...).numpy()` 回读一次；**列表内容与逐个回读逐元素相同** ⇒ `np.mean(losses)`、history、快照全部不变（注释里也写明了为什么不用 float32 running sum）|
+| 元数据列一次性读入内存 | 只是减少随机页错误；数组内容不变 |
+| `_GeometryCache`（有界 FIFO ＋ 锁）| 缓存的是**只读**几何（掩码/索引/权重），未命中时在锁内构建；256QAM 掩码 274 KB/样本不再重建 |
+| `unpackbits(count=nof_bits)`、`asarray` 不复制 | 与原来结果相同 |
+| `tensors()` 只打包图里有的 head | 同一命令行 ⇒ 同一个图 ⇒ 打包的键**与原来一致** |
+| `genie_labels` 按 qm 缓存并冻结 | **修复**（原来混合调制会用错星座，标签静默错误）|
+| `CUSTOM_OBJECTS` 补 `MaskedSmooth` | **修复** `--export-only` 必然失败的路径 |
+
+**(d) ★ 三条**有意的**跨平台行为变化（不是破坏，但要知道）**
+
+| # | 变化 | 影响 |
+|---|---|---|
+| ★ 1 | ★ **XLA 默认改为 on**（`2b48a73b2a`）| Linux 上 **变快**（1.3–2×），但**与历史 run 的执行方式不同**；要复现旧行为请写 `--no-jit` |
+| ★ 2 | 损失回读从"每 batch 同步"改为"每 64 batch" | ★ **CUDA 上会提升利用率**（注释称旧写法只到 47%）|
+| ★ 3 | 数据侧优化 | host 时间下降，所有平台都受益 |
+
+**(e) ★★ 一个必须点出的事实：GPU 机器上跑的是**旧文件**
+
+| 机器 | `train_depth3.py` sha256（前 16）| 含 macOS 改动 |
+|---|---|---|
+| 本机（工作树）| `898ab426e8cc500c` | ✓ |
+| 106 / 107 / 126 | `b67c078b5917ea20` | ★ **✗ 不含**（`IS_DARWIN`／`_GeometryCache` 出现 0 次）|
+
+**⇒ 所以"GPU 上已经跑了几小时没问题"**不能**作为本文件的证据** —— 它们跑的是旧版本。
+**⇒ 建议：任一台 GPU 空闲时，用本文件跑一次 20 步的 smoke（`--epochs 1` ＋ 小数据集），确认能训起来再上线。**
+
+**(f) ★★ 本机实测（2026-11-23，c32 / 18 块 / batch 16 / Ce＋B 配方；2 000 样本夹具）**
+
+| 设备 | epoch 2（125 步）| ★ ms/样本 | 全量 183 624 样本/轮（推算）|
+|---|---|---|---|
+| ★ **Metal GPU**（`GPU:0`）| **50 s** | ★ **25.0 ms** | ★ **≈ 77 min** |
+| CPU（14 核，`--no-gpu`）| 77 s | **38.5 ms** | ≈ 118 min |
+
+| 对照 | 值 |
+|---|---|
+| 3060 Ti（106）/ c32 18 块 batch 16 | **≈ 13 min/轮** |
+| **结论** | ★ **Mac 比 3060 Ti 慢约 5–6×** ⇒ **只用于 smoke 与功能验证，不做正式训练** |
+| ★ 顺带验证 | ★ **batch 16 时 GPU 比 CPU 快 1.54×**（memo §9.2.3 的"c32 batch 8 上 CPU 更快"只在更小 batch 成立）|
 
