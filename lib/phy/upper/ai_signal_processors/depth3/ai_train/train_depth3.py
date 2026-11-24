@@ -24,6 +24,38 @@ Usage
 -----
     train_depth3.py --train <npz> --val <npz> --out <dir> [--epochs 150] [--max-train N]
                     [--blocks 18] [--modulation 256QAM] [--no-aux]
+
+Platforms
+---------
+The same command line runs on Ubuntu (CUDA) and on macOS (Apple Silicon), and the training arithmetic is
+the same on both: the loss, the gradients and the LLR scaling are float32, `--dtype` means what it always
+meant, `ChannelGate` keeps its fp32 product, and every custom layer serialises exactly as before. Only
+three decisions are taken per platform, and none of them can change a number the model computes:
+
+* `--jit` still defaults to on. On Linux the resolved value is the requested one, because XLA there is the
+  measured 1.3x-2x of the epoch time. On macOS XLA is off unless `--jit` is written out: `tensorflow-metal`
+  registers no XLA device, so a compiled step is either rejected or run on the CPU with copies around it.
+  An explicit `--jit` is honoured, self-tested before the first batch, and degraded with a printed reason
+  if the compiled graph still cannot run.
+* `--workers 0` keeps the serial batch loop on Linux, which is what was measured there. On macOS it selects
+  a small thread count (a quarter of the cores, capped at three) instead, because the per-sample work is
+  NumPy and releases the GIL while the accelerator waits; more threads than that measured SLOWER, since only
+  one can hold the GIL. An explicit `--workers N` is respected on both platforms.
+* the Apple Neural Engine does NOT train anything. It has no backward-pass kernels and this loop never
+  schedules onto it: the step runs on the Apple GPU (through `tensorflow-metal`) and on the CPU. The ANE is
+  the INFERENCE target of `export_deployment()` / `export_buckets()`, whose fp16 `mlprogram` CoreML
+  schedules on it -- the folded gains, the avoided extra operators and the static-width buckets exist for
+  that graph, not for training.
+* the Apple GPU is used only when `tensorflow-metal` is installed AND `--no-gpu` is not given, and on this
+  project's measurements it is usually the WRONG choice for the deployment network. On an M4 Pro with
+  tensorflow-metal 1.2.0 and TensorFlow 2.18.1: 4.93 s/epoch on the Metal GPU against 2.63 s/epoch on the
+  CPU at c_hid 32 and batch 8, closing to 1.16x at batch 128, and only overtaking the CPU at c_hid 128 with
+  batch 32 (1.37x). The reason is arithmetic intensity: eighteen 3x3 depthwise blocks over 612x14 elements
+  are a long chain of small kernels, and Metal's per-kernel command overhead dominates. The startup banner
+  therefore prints the PLACEMENT, so every run says which device it actually got. `--dtype float16` is
+  refused on macOS: `tensorflow-metal` segfaults in its half-precision binary op (upstream bug, the
+  unmodified script crashes the same way), and training in float32 costs nothing because the exported
+  bundle is fp16 regardless.
 """
 
 # The shared DSP utilities (dmrs, synth, labels, LDPC) still live in the AI-CE training tree; this is
@@ -31,11 +63,16 @@ Usage
 import depth3_paths
 depth3_paths.add_ce_shared()
 import argparse
+import collections
 import json
 import math
+import operator
 import os
+import platform
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -67,6 +104,25 @@ THR_QM = {"QPSK": -3.16, "16QAM": 6.61, "64QAM": 13.38, "256QAM": 20.91}
 
 DILATIONS = (1, 2, 4, 8)
 
+# THE ONE PLATFORM FLAG. Every decision that may differ between the Ubuntu/CUDA reference box and an Apple
+# Silicon machine reads this, and every one of those decisions is outside the numbers the model computes.
+IS_DARWIN = sys.platform == "darwin"
+
+# The reverse of `D3.BITS_PER_SYMBOL`, built once. `Batches.modulation_of` used to rebuild it on every call,
+# and it is called once per sample by the loader and once per row by the coded-BLER path.
+_MODULATION_OF_QM = {bits: name for name, bits in D3.BITS_PER_SYMBOL.items()}
+
+# HOW MANY PER-BATCH LOSSES ARE ACCUMULATED BEFORE ONE DEVICE-TO-HOST TRANSFER (see the epoch loop).
+# ONE FLUSH PER SIXTY-FOUR BATCHES, RATHER THAN ONE PER BATCH AND RATHER THAN ONE PER EPOCH, because the two
+# extremes both cost something real: `float(total)` per batch is a device synchronisation that stops the host
+# from running ahead into the next batch (the original form), and one transfer per epoch either keeps one
+# device tensor per batch alive or -- as a `tf.Variable` slice write, which measured 60 us a batch against
+# 0.3 us for `float()` on an idle CPU -- pays an eager assignment per batch. At 64 the host still pipelines
+# 64 steps ahead, at most 64 scalar tensors are alive, and the read-back is one `tf.stack` plus one copy.
+# Measured on the CPU backend: 1.1 us a batch, against 0.3 for the per-batch `float()` and 60 for the
+# variable; on the GPU backends this replaces a full synchronisation per batch, which is the point.
+LOSS_ACCUMULATION = 64
+
 
 def parse_dilations(text):
     """`--dilations "1,2,4,8,16,32"` as a tuple, or the default cycle when the flag is empty.
@@ -96,6 +152,193 @@ def receptive_field(blocks, dilations, ksize=3):
     return 1 + (ksize - 1) * sum(dilations[i % len(dilations)] for i in range(blocks))
 
 
+def _flag_was_given(argv, *flags):
+    """Whether one of `flags` was written on the command line, in the `--flag` or the `--flag=v` form.
+
+    argparse cannot answer this: `--jit` is a `BooleanOptionalAction` whose default is `True`, so the parsed
+    value is `True` whether the user asked for XLA or said nothing at all. macOS has to tell those apart --
+    silence means "take the safe default here", an explicit `--jit` means "I want to measure it" -- and the
+    presence of the token in argv is the only place that distinction still exists.
+    """
+    for token in argv:
+        for flag in flags:
+            if token == flag or token.startswith(flag + "="):
+                return True
+    return False
+
+
+def resolve_xla(requested, argv):
+    """The `jit_compile` state this run will use, plus the reason when it differs from the request.
+
+    LINUX IS UNCHANGED: the request is the answer. XLA there is the measured 1.3x-2x of the epoch time and
+    the CUDA build's XLA produced those numbers, so this function must not be able to touch it.
+    MACOS RESOLVES INSTEAD. `tensorflow-metal` registers no XLA device, so `jit_compile=True` compiles the
+    step for whatever backend XLA can find (the CPU) and then copies every tensor across for the Metal ops;
+    a graph this wide can also fail to compile outright. The project has already measured what XLA-on-a-CPU
+    costs: 1.43-1.48x on the CUDA box and 6.2x SLOWER on the laptop CPU (README section 3, design section
+    19.219). That was measured again on an M4 Pro with TF 2.18.1: compiling the c32 step with XLA and running
+    it on the CPU took 89.5 ms a sample against 12.1 ms without, 7.4x slower, so leaving it off is not merely
+    the safe choice there -- it is the fast one. XLA is therefore off unless `--jit` is written out, and an
+    explicit request is honoured -- `xla_self_test` then proves the backend can compile at all before the
+    first batch is paid for.
+    """
+    if not IS_DARWIN:
+        return bool(requested), None
+    if _flag_was_given(argv, "--jit", "--no-jit"):
+        return bool(requested), None
+    return False, ("off by default on macOS: tensorflow-metal exposes no XLA device, so a compiled step "
+                   "runs on the CPU with copies around it; pass --jit to force it")
+
+
+def xla_self_test():
+    """Compile one trivial function with XLA, and report whether this backend can do it at all.
+
+    Called only when XLA was asked for ON MACOS. Without it, a run whose step cannot be compiled fails at
+    the first batch, after the dataset is mapped and the model built; the same failure is available here in
+    a few milliseconds, where it degrades the run instead of ending it.
+    """
+    try:
+        @tf.function(jit_compile=True)
+        def probe(value):
+            return tf.reduce_sum(value * value)
+        probe(tf.ones((2, 2), dtype=tf.float32)).numpy()
+        return True, ""
+    except Exception as err:  # noqa: BLE001 - a compile failure must degrade, never kill the run
+        return False, f"{type(err).__name__}: {err}"
+
+
+def configure_macos_runtime():
+    """The backend settings an Apple Silicon run wants, and a description of what was found.
+
+    Called on macOS only, before anything is built or run. Nothing here changes a number: it asks the Metal
+    plugin for growth-based allocation (so a long run does not claim the whole unified-memory pool up front)
+    and records which devices accepted it. Both calls are guarded -- a trainer that refuses to start because
+    a memory hint is unsupported on this plugin version would be worse than one that trains.
+    """
+    facts = {"machine": platform.machine(), "tensorflow": tf.__version__, "numpy": np.__version__,
+             "gpus": [], "growth": []}
+    try:
+        gpus = tf.config.list_physical_devices("GPU")
+    except Exception:  # noqa: BLE001 - a device query must never decide whether the run happens
+        gpus = []
+    facts["gpus"] = [device.name for device in gpus]
+    for device in gpus:
+        try:
+            tf.config.experimental.set_memory_growth(device, True)
+            facts["growth"].append(device.name)
+        except Exception:  # noqa: BLE001 - not every plugin implements it, and that is not an error
+            pass
+    return facts
+
+
+def pipeline_defaults(args):
+    """The `(workers, prefetch)` the batch loader will run with.
+
+    LINUX IS THE COMMAND LINE, UNCHANGED: `--workers 0` keeps the serial loop and `--prefetch 0` means twice
+    the worker count, exactly as the call sites used to spell it.
+    MACOS SUBSTITUTES A DEFAULT FOR `--workers 0`, AND IT IS A SMALL ONE. The per-sample work is NumPy and
+    releases the GIL, so a second thread genuinely overlaps the first one's C time with its Python time -- but
+    only one thread can hold the GIL, and past the point where that is the limiter every extra thread adds
+    context switches and competes for the same unified-memory bandwidth. Measured on a 14-core Apple Silicon
+    host, 200 samples, `Batches.epoch` at batch 8: 0.650 ms/sample serially, 0.430 at two threads, 0.412 at
+    three, 0.419 at four and 0.552 at six (51-PRB samples), with the same shape on a mixed-allocation set
+    (0.401 / 0.308 / 0.360 / 0.408 / 0.516). Six threads is therefore WORSE than no threads, which is the trap
+    this default exists to avoid: a quarter of the cores, capped at three. An explicit `--workers N` is
+    respected exactly as on Linux -- including `--workers 1`, which is how a serial loader is asked for on
+    macOS, since 0 there selects this default.
+    """
+    workers = int(args.workers)
+    if IS_DARWIN and workers == 0:
+        workers = max(1, min(3, (os.cpu_count() or 1) // 4))
+    prefetch = int(args.prefetch) or (2 * workers)
+    return workers, prefetch
+
+
+# True when `--no-gpu` successfully hid the GPUs; the banner says so rather than pretending the device
+# list is empty, because the Metal plugin keeps listing its GPU after it has been made invisible.
+_GPU_HIDDEN = False
+
+
+def hide_gpus():
+    """Make every GPU device invisible to this process, before the runtime is initialised.
+
+    THE GPU IS NOT AUTOMATICALLY THE FASTER DEVICE FOR THIS NETWORK. Measured on an M4 Pro with
+    tensorflow-metal 1.2.0 and TensorFlow 2.18.1 at c_hid 32, batch 8: 4.93 s/epoch on the Metal GPU
+    against 2.63 s/epoch on the CPU; the GPU only overtakes at c_hid 128 with batch 32. Without this
+    switch the only way to get the faster path on a machine that has the plugin installed is to uninstall
+    it. `set_visible_devices` only works before the first op, which is why `main` calls this immediately
+    after parsing, ahead of the memory-growth request and the XLA self-test.
+    """
+    global _GPU_HIDDEN
+    try:
+        tf.config.set_visible_devices([], "GPU")
+        _GPU_HIDDEN = True
+        return True
+    except Exception as err:  # noqa: BLE001 - a failed switch must not end the run
+        print(f"gpus: --no-gpu could not hide the GPU ({type(err).__name__}: {err}); TensorFlow will "
+              f"place ops wherever it decides", flush=True)
+        return False
+
+
+def allow_metal_fp16():
+    """Whether the user has explicitly accepted the macOS fp16 crash path (see the guard in `main`)."""
+    return os.environ.get("DEPTH3_ALLOW_METAL_FP16") == "1"
+
+
+def probe_compute_device():
+    """The device a matrix multiply is actually placed on, asked of TensorFlow instead of assumed.
+
+    THIS SCRIPT CANNOT TURN THE GPU ON. `tensorflow-metal` is a separate pluggable device: a plain `tensorflow`
+    wheel on macOS has no GPU device at all, and every op then runs on the CPU, several times slower per epoch,
+    without a single line in the log saying so. That is how a CPU-only "macOS run" gets recorded as if it were a
+    GPU measurement. `Tensor.device` reports the placement TensorFlow chose for a 64x64 matmul -- `GPU:0` when
+    the Metal plugin is loaded, `CPU:0` when it is not -- and that placement is what the training step gets too:
+    the step is made of the same convolutions and matrix multiplies.
+    """
+    try:
+        product = tf.linalg.matmul(tf.ones((64, 64)), tf.ones((64, 64)))
+        return str(product.device).rsplit("device:", 1)[-1]
+    except Exception as err:  # noqa: BLE001 - a diagnostic must never end a run
+        return f"unknown ({type(err).__name__})"
+
+
+def report_macos_runtime(facts, workers, prefetch, jit):
+    """Say what this process is running on, in one block, ON MACOS ONLY.
+
+    The Ubuntu log lines are the record of recorded runs and gain nothing from a platform banner, so the
+    banner exists only where the platform is the new variable. These lines answer "why is this run different"
+    before the model is built, and they state the one thing about the Apple Neural Engine that has to be
+    unambiguous: it does not run a backward pass, so nothing in this loop schedules onto it.
+    """
+    if not IS_DARWIN:
+        return
+    gpu = facts["gpus"][0] if facts["gpus"] else "none (CPU only)"
+    if _GPU_HIDDEN:
+        # The plugin still lists the device, so the list alone would claim a GPU this run cannot use.
+        gpu = f"{gpu} (hidden by --no-gpu)"
+    growth = ", memory growth on" if facts["growth"] else ""
+    # THE PLACEMENT, NOT THE INTENTION. Without `tensorflow-metal` there is no GPU device to place anything on,
+    # and a GPU device with a matmul still placed on the CPU is a plugin problem -- both are said here rather
+    # than left to be inferred from a slow epoch (see `probe_compute_device`).
+    placement = probe_compute_device()
+    if _GPU_HIDDEN:
+        carries = "hidden by --no-gpu, so the CPU carries the step"
+    elif placement.startswith("GPU"):
+        carries = "the Apple GPU carries the step"
+    else:
+        carries = "the CPU carries the step -- install tensorflow-metal to use the Apple GPU"
+    print(f"platform: macOS ({facts['machine']}), tensorflow {facts['tensorflow']}, numpy {facts['numpy']}")
+    print(f"platform: Apple GPU: {gpu}{growth}")
+    print(f"platform: compute placement: a 64x64 matmul lands on {placement} ({carries})")
+    print(f"platform: training runs on the {'Apple GPU and the CPU' if placement.startswith('GPU') else 'CPU'}, "
+          f"xla {'on' if jit else 'off'}; the Apple Neural Engine does NOT train -- it has no "
+          f"backward-pass kernels")
+    print("platform: the ANE serves INFERENCE only: CoreML schedules the mlprogram written by "
+          "export_deployment()/--export-buckets")
+    print(f"platform: batch pipeline {workers} thread(s), prefetch {prefetch} batch(es); the per-sample "
+          f"NumPy work releases the GIL")
+
+
 
 @tf.keras.utils.register_keras_serializable(package="ocudu")
 class ChannelGate(tf.keras.layers.Layer):
@@ -111,6 +354,11 @@ class ChannelGate(tf.keras.layers.Layer):
         # converter lowers the sigmoid path to fp32 on its own, so whichever operand is cast, the `mul` still ends up
         # with one fp32 and one fp16 input and conversion refuses it. Promoting both operands makes the multiplication
         # unambiguous, and the single cast back to the map's dtype is exact for a value in [0, 1].
+        #
+        # THIS IS ALSO WHAT MAKES A MIXED-PRECISION RUN SAFE, ON EITHER PLATFORM. `--dtype float16` under
+        # `--se` keeps the gate's arithmetic in fp32 and the map's dtype at the output, so the macOS work
+        # (which does not touch this call) cannot make the exported graph's `mul` operands disagree, and the
+        # gate's gradient cannot be taken in a half precision that underflows.
         x, gate = inputs
         scaled = tf.cast(x, tf.float32) * tf.cast(gate, tf.float32)
         return tf.cast(scaled, x.dtype)
@@ -218,13 +466,64 @@ class FoldedScaleConv(tf.keras.layers.Layer):
         return tf.nn.conv2d(inputs, kernel, strides=1, padding="SAME") + gamma * self.bias
 
 
+# THE CUSTOM OBJECTS EVERY DESERIALISATION SITE MUST PASS. There are three of them -- the resume path, the
+# `--export-only` path and every probe script that loads these checkpoints -- and they did not agree: resume
+# passed all three classes, `--export-only` passed two and then failed to load any model trained with
+# `--smooth-k` ("Could not locate class 'MaskedSmooth'") after training had already been paid for. One dict, so
+# a fourth custom layer cannot be added to one site and forgotten at the other. The names are unchanged, which is
+# what keeps `depth3_best.keras`, `depth3_last.keras` and `snapshots/*.keras` loadable exactly as before.
+CUSTOM_OBJECTS = {"FoldedScaleConv": FoldedScaleConv, "MaskedSmooth": MaskedSmooth,
+                  "ChannelGate": ChannelGate}
+
+
+def init_dense_skip_as_sum(model):
+    """Make every dense-connection projection start as a plain sum, so epoch zero IS the residual baseline.
+
+    WHY THIS IS A CURRICULUM AND NOT A CHANGE OF MODEL. The dense connection replaces `y + h` with a learned
+    `W [y; h] + b`, whose default start is a random mix. Initialising `W = [I; I]`, `b = 0` and leaving the layer's gain
+    at one makes the first step compute exactly the baseline's residual stream; training then decides whether to leave
+    that solution. The parameter count, the graph and the export are identical, which is what makes a comparison against
+    the random-start run a statement about the start rather than about the architecture.
+    """
+    touched = 0
+    for layer in model.layers:
+        if not layer.name.startswith("dproj"):
+            continue
+        weights = layer.get_weights()
+        if not weights:
+            continue
+        kernel = weights[0]
+        if kernel.ndim != 4:
+            raise SystemExit(f"{layer.name}: kernel {kernel.shape} is not a 1x1 projection")
+        channels = kernel.shape[3]
+        inputs = kernel.shape[2]
+        if inputs % channels != 0 or inputs // channels < 2:
+            raise SystemExit(f"{layer.name}: kernel {kernel.shape} does not start with at least two C-blocks")
+        # The visible list is [y, block] followed by optional extras (recent blocks, the entry plane); the first two
+        # blocks are the ones a plain residual adds, so they get the identity and everything else starts at zero --
+        # at step zero the block then computes exactly `y + h`.
+        fresh = np.zeros_like(kernel)
+        eye = np.eye(channels, dtype=kernel.dtype)
+        fresh[0, 0, :channels, :] = eye
+        fresh[0, 0, channels:2 * channels, :] = eye
+        rest = list(weights[1:])
+        if rest:
+            rest[0] = np.zeros_like(rest[0])
+        layer.set_weights([fresh] + rest)
+        touched += 1
+    if not touched:
+        raise SystemExit("--dense-skip-init sum found no dproj layers; is --dense-skip or --dense-skip-entry set?")
+    print(f"dense-skip init: {touched} projection(s) set to the plain sum (first two C-blocks identity, rest zero, b=0)", flush=True)
+    return model
+
+
 def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, residual=True,
           reporting_heads=True, low_rank=0, smooth_k=0,
           dtype="float32", fold_scale=True, scale_init=1.0, llr_linear=False, dense=False,
           dense_bottleneck=0, fuse_relu=False,
           layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False,
           dilations=DILATIONS, ksize=3, groups=1, noise_to_llr=False, ce_aux=False, llr_post=False,
-          cst_head=False, sym_aux=False, mlp_expand=1, se=False, se_ratio=8, dense_skip=False, dense_skip_entry=False):
+          cst_head=False, sym_aux=False, mlp_expand=1, se=False, se_ratio=8, dense_skip=False, dense_skip_entry=False, dense_skip_depth=1):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -286,6 +585,11 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         # times; without this handle the entry plane (the received signal plus the Qm conditioning, before any
         # nonlinearity) would be reachable only through the compression of every projection in between.
         y_entry = y
+        # ★ VISIBILITY DEPTH (architecture_levers section 47). `y` carries the whole history, but compressed by every
+        # projection on the way; keeping the last few raw block outputs gives them an undiluted path into the next
+        # blocks. `--dense-skip-depth 1` is the plain C (state + own output), 2 adds the previous block's output, and
+        # so on. The list is bounded by the depth, so memory does not grow with the block count.
+        recent = []
         for i in range(blocks):
             dilation = dilations[i % len(dilations)]
             # THE BLOCK TYPE HAS TO BE HONOURED ON THIS PATH TOO. The spatial layout has its own trunk
@@ -366,7 +670,9 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
                 # two: the running state, the block's own output, and the entry features. The projection is 1.0-gain
                 # and full rank, so how much of each is used is learned, not fixed -- the measurement on the plain
                 # C model showed the model putting 38% of the weight norm on the running state.
-                visible = [y, block, y_entry] if dense_skip_entry else [y, block]
+                visible = [y, block] + recent
+                if dense_skip_entry:
+                    visible = visible + [y_entry]
                 pair = tf.keras.layers.Concatenate(dtype=keras_dtype, name=f"dcat{i}")(visible)
                 # THE PROJECTION MUST NOT SHRINK THE STATE. With the trunk's residual gain (0.03) it would scale
                 # every block's output by thirty and the state would decay to zero over eighteen blocks -- the
@@ -374,6 +680,7 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
                 # magnitude, which is what a path-through projection has to do.
                 y = FoldedScaleConv(c_hid, initial_gain=1.0, rank=low_rank,
                                     dtype=keras_dtype, name=f"dproj{i}_1x1")(pair)
+                recent = (recent + [block])[-(max(1, int(dense_skip_depth)) - 1):] if dense_skip_depth > 1 else []
             else:
                 y = tf.keras.layers.Add(name=f"add{i}", dtype=keras_dtype)([y, block])
         # The heads keep the CONTRACT's channel counts (14*Qm, 14, 28, 1) whatever the trunk's
@@ -573,12 +880,69 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
     return finish(tf.keras.Model(inp, outputs))
 
 
+class _GeometryCache:
+    """The bounded, thread-safe home of the per-allocation constants (see `Batches`).
+
+    RETIRE ONE ENTRY AT A TIME; NEVER CLEAR THE TABLE. The previous form called `clear()` on reaching the cap,
+    so the sample that overflowed it discarded every other geometry as well and the next samples all missed --
+    a burst of misses exactly when the loader could least afford one, and on a corpus with more allocations
+    than the cap (fifty-one widths times three DM-RS patterns is already a hundred and fifty-three) it could
+    repeat indefinitely. Retirement is FIFO, which needs no bookkeeping per hit and therefore no lock on the hot
+    path; the cap is a count, so the worst-case footprint (about 340 KB an entry) is the same as before.
+
+    READS ARE LOCK-FREE, MISSES ARE SERIALISED. `dict.get` is atomic under the GIL, so `sample()` on six loader
+    threads never blocks on a hit. On a miss the lock covers the build as well as the insert: two threads that
+    want the same new geometry then do the work once instead of twice, and the eviction decision cannot see a
+    table that another thread is inserting into. The records are immutable and their arrays are marked read-only
+    before publication, so a reader that receives one cannot be affected by a later eviction.
+    """
+
+    def __init__(self, max_entries):
+        self._entries = {}
+        self._max_entries = max(1, int(max_entries))
+        self._lock = threading.Lock()
+
+    def __len__(self):
+        return len(self._entries)
+
+    def get_or_build(self, key, build):
+        """The record for `key`, building it under the lock on a miss."""
+        hit = self._entries.get(key)
+        if hit is not None:
+            return hit
+        with self._lock:
+            hit = self._entries.get(key)
+            if hit is not None:
+                return hit
+            value = build()
+            while len(self._entries) >= self._max_entries:
+                # The oldest insertion is the first key a plain dict yields; popping it is O(1).
+                self._entries.pop(next(iter(self._entries)))
+            self._entries[key] = value
+            return value
+
+
 class Batches:
     """Builds training tensors from a dataset file, on the fly.
 
     The label planes are derived per sample from the stored coded bits and masks instead of being
     stored, so the file stays small and the mapping from bits to channels has exactly one
     implementation (`depth3.label_plane`).
+
+    WHAT IS CACHED AND WHAT IS NOT. Everything a sample allocates falls into two classes. The PER-ALLOCATION
+    constants -- the data-RE index walk, the BCE validity mask, the channel-target mask, the symbol-target
+    mask -- depend only on (allocation, DM-RS pattern, modulation, control layout), of which a whole corpus
+    holds a handful, and they were being rebuilt for every sample: the 256QAM validity mask alone is
+    612 x 112 floats, so a 51-PRB sample paid a 274 KB zero-fill and a 14-slice copy for a mask that never
+    changed. Those are cached (`_geometry`). The LABEL PLANE is not, because it is a function of the coded
+    bits and therefore genuinely per sample.
+
+    THE CACHE IS SHARED BY THE LOADER THREADS (`--workers N`) AND OWNS ITS OWN LOCK (`_GeometryCache`). Hits are
+    lock-free (`dict.get` is atomic under the GIL) and misses build under the lock, so two threads never pay for
+    the same geometry twice and eviction cannot race an insert. Eviction retires the OLDEST entry instead of
+    clearing the table, and every array is marked read-only before it is published, so a caller that tries to
+    write through a shared mask fails loudly instead of corrupting every later batch. The one piece of state that
+    is *not* shared is the shuffle order: `self.rng` is only touched by `epoch()` on the consumer's thread.
     """
 
     ARRAYS = ("X", "H", "bits", "nof_bits", "alloc_first_prb", "alloc_nof_prb", "dmrs_bitmap",
@@ -588,6 +952,17 @@ class Batches:
     # A dataset built before those fields existed has no control information in its element map,
     # and `uci_of` then returns the empty layout, which is the same map.
     UCI_ARRAYS = ("uci_nof_harq_ack", "uci_ack_re", "uci_ack_rvd_re", "uci_csi1_re")
+    # The geometry cache holds one entry per distinct (allocation, DM-RS pattern, modulation, control
+    # layout), each about 340 KB because the BCE mask is the whole 612 x 112 plane. Sixty-four is ~22 MB, and
+    # it is a COUNT, not a byte budget, precisely because the entries are all the same size. Past the cap the
+    # OLDEST entry is retired (`_GeometryCache`), never the table: dropping it all at once turned one overflow
+    # into a burst of misses across every geometry the run had just been using.
+    GEOMETRY_ENTRIES = 64
+    # THE PER-ALLOCATION CONSTANTS, as one record. Kept as plain attributes so a reader can see exactly what
+    # the cache holds: the walk, the three masks, and the lists the contract functions take.
+    _Geometry = collections.namedtuple(
+        "_Geometry", "alloc dmrs modulation uci sub_re sym_re llr_weights ch_weights sym_weights "
+                     "allocated")
 
     def __init__(self, path, modulation, max_samples=0, seed=0, snr_min=None, snr_max=None, cond=False,
                  target="coded", layout="folded"):
@@ -615,6 +990,13 @@ class Batches:
             self.mmap = False
         self.modulation = modulation
         self.qm = D3.BITS_PER_SYMBOL[modulation]
+        # THE METADATA COLUMNS ARE LOADED, THE PLANES STAY MAPPED. `alloc_first_prb`, `dmrs_bitmap`, `qm`,
+        # `nof_bits`, `sigma2_over_r2` and the rest are one number per sample: a few hundred kilobytes for a
+        # corpus of a hundred thousand. Read through the mapping they cost a page fault each, at a random
+        # offset, several times per sample and twice more per decoded sample; read once into RAM they cost
+        # nothing. `X`, `H`, `bits` and `tb_bits` stay mapped -- those are the arrays whose size is the reason
+        # the mapping exists. The values are the same bytes either way.
+        self._load_small_columns()
         # A CONDITIONED dataset feeds one model that serves every modulation: the samples carry their own Qm (the
         # file already does), the label plane uses the stride-8 layout, and the Qm is appended as a one-hot.
         self.cond = cond
@@ -641,6 +1023,23 @@ class Batches:
             self.n = min(self.n, max_samples)
         self.order = self.order[:self.n]
         self.rng = np.random.default_rng(seed)
+        # The per-allocation constants (see `_geometry`). Per instance, because `cond` changes what the
+        # validity mask is and the training and validation sets are separate files.
+        self._geometry_cache = _GeometryCache(self.GEOMETRY_ENTRIES)
+
+    def _load_small_columns(self):
+        """Copy every one-dimensional column into RAM, leaving the per-sample planes mapped.
+
+        Only the memory-mapped form needs this, and only for the columns whose whole point is to be read at a
+        random index: `X` is 612 x 64 floats a sample and stays on disk. The size guard is there so a dataset
+        with an unexpectedly long one-dimensional array cannot be silently pulled into memory.
+        """
+        if not self.mmap:
+            return
+        for table in (self.data, self.uci or {}):
+            for name, column in list(table.items()):
+                if getattr(column, "ndim", 0) == 1 and column.nbytes <= 32 * 1024 * 1024:
+                    table[name] = np.array(column)
 
     def allocation_of(self, index):
         first_prb = int(self.data["alloc_first_prb"][index])
@@ -651,7 +1050,7 @@ class Batches:
         return [s for s in range(NOF_SYMBOLS) if (bitmap >> s) & 1]
 
     def modulation_of(self, index):
-        return {v: k for k, v in D3.BITS_PER_SYMBOL.items()}[int(self.data["qm"][index])]
+        return _MODULATION_OF_QM[int(self.data["qm"][index])]
 
     def uci_of(self, index):
         """The control payload of one sample, or None when its element map holds no control."""
@@ -663,20 +1062,89 @@ class Batches:
                                int(self.uci["uci_csi1_re"][index]))
         return None if layout.is_empty else layout
 
-    def sample(self, index):
-        data = self.data
+    def plane_channels(self):
+        """Input channels `sample()` puts in `x`, WITHOUT building a sample.
+
+        `main` needs this one number to check that `--layout` agrees with the file, and it used to read it off
+        `train.sample(0)`: unpack the bits, build the label plane, the masks and the noise target, take the last
+        dimension, throw all of it away. The first epoch then built the same sample again. The number is a
+        property of the LAYOUT and of the file's own plane width, so it is read from the shapes instead, and it
+        is the same number the old call returned for every layout: the folded plane keeps the file's channel
+        count, `respaciate` always produces `NOF_CHANNELS_SPATIAL`, and `unfold_plane` always produces eight.
+        """
+        if self.layout == "probe8":
+            return 8
+        if self.layout == "spatial":
+            return D3.NOF_CHANNELS_SPATIAL
+        return int(self.data["X"].shape[-1])
+
+    def _geometry_key(self, index):
+        """A hashable summary of the inputs every cached constant depends on.
+
+        (allocation, DM-RS pattern, modulation, control layout) and nothing else. The bit sequence is
+        deliberately absent: the label plane depends on it, which is exactly why the label plane is the one
+        array that is not cached.
+        """
+        key = (int(self.data["alloc_first_prb"][index]), int(self.data["alloc_nof_prb"][index]),
+               int(self.data["dmrs_bitmap"][index]), int(self.data["qm"][index]))
+        if self.uci is None:
+            return key + (None,)
+        return key + (int(self.uci["uci_nof_harq_ack"][index]), int(self.uci["uci_ack_re"][index]),
+                      int(self.uci["uci_ack_rvd_re"][index]), int(self.uci["uci_csi1_re"][index]))
+
+    def _geometry(self, index):
+        """The per-allocation constants for `index`, built once per combination (see the class docstring)."""
+        return self._geometry_cache.get_or_build(self._geometry_key(index),
+                                                 lambda: self._build_geometry(index))
+
+    def _build_geometry(self, index):
+        """Build (and freeze) one `_Geometry` record. Called by `_GeometryCache` on a miss, under its lock."""
         alloc = self.allocation_of(index)
         dmrs_symbols = self.dmrs_symbols_of(index)
         modulation = self.modulation_of(index)
-        bits = np.unpackbits(data["bits"][index])[:int(data["nof_bits"][index])]
         uci = self.uci_of(index)
+        sub_re, sym_re = D3.data_re_indices(alloc, dmrs_symbols, uci)
+        llr_weights = (D3.loss_weights_cond(alloc, dmrs_symbols, modulation, uci) if self.cond
+                       else D3.loss_weights(alloc, dmrs_symbols, modulation, uci))
+        allocated = D3.allocated_subcarriers(alloc)
+        ch_weights = np.zeros((D3.NOF_SUBCARRIERS, NOF_SYMBOLS), dtype=np.float32)
+        ch_weights[np.flatnonzero(allocated), :] = 1.0
+        sym_weights = np.zeros((D3.NOF_SUBCARRIERS, NOF_SYMBOLS), dtype=np.float32)
+        sym_weights[sub_re, sym_re] = 1.0
+        record = self._Geometry(alloc, dmrs_symbols, modulation, uci, sub_re, sym_re, llr_weights,
+                                ch_weights, sym_weights, allocated)
+        # FROZEN BEFORE PUBLICATION. A reader can hold this record while another thread evicts the key, and a
+        # write through a shared mask would then be invisible to the next sample: refusing the write keeps the
+        # failure local and loud instead.
+        for array in (sub_re, sym_re, llr_weights, ch_weights, sym_weights, allocated):
+            array.flags.writeable = False
+        return record
 
-        plane = data["X"][index].astype(np.float32)
-        channel = (data["H"][index][:, :, 0].astype(np.float32)
-                   + 1j * data["H"][index][:, :, 1].astype(np.float32))
+    def sample(self, index):
+        data = self.data
+        geometry = self._geometry(index)
+        alloc = geometry.alloc
+        dmrs_symbols = geometry.dmrs
+        modulation = geometry.modulation
+        uci = geometry.uci
+        # `count=` INSTEAD OF UNPACK-AND-SLICE. The stored column is as wide as the widest reception in the
+        # file, so a narrow allocation was unpacking up to tens of kilobytes of padding and then slicing it
+        # off -- on the files whose bit plane is a fixed width, that is most of the work. The first `nof_bits`
+        # bits are the same bits either way.
+        bits = np.unpackbits(data["bits"][index], count=int(data["nof_bits"][index]))
+
+        # NO COPY OF A PLANE THAT IS ONLY READ. `asarray(dtype=float32)` returns the mapped array itself when
+        # the file is already float32, and every consumer (`respaciate`, `unfold_plane`, `unpack_input`,
+        # `np.concatenate`) only reads it; the old `astype` copied 39 KB per sample to guarantee that.
+        plane = np.asarray(data["X"][index], dtype=np.float32)
+        # THE SAME EXPRESSION THE ORIGINAL USED, WITHOUT ITS TWO REDUNDANT COPIES: `1j * H[..., 1]` is already
+        # the complex64 array the sum needs, so `asarray` on the two components is enough to pin the dtype.
+        h = data["H"][index]
+        channel = (np.asarray(h[:, :, 0], dtype=np.float32)
+                   + 1j * np.asarray(h[:, :, 1], dtype=np.float32))
         # THE SYMBOL LABEL. `bits` are the transmitted bits in data-RE order, so `modulate` turns them into the
         # transmitted QAM symbol per RE; both come from the same CRC-OK transport block the bit plane uses.
-        sub_re, sym_re = D3.data_re_indices(alloc, dmrs_symbols, uci)
+        sub_re, sym_re = geometry.sub_re, geometry.sym_re
         # THE SAME SYMBOLS, COMPUTED OVER THE WHOLE BLOCK. `DL.modulate` loops over every symbol in Python -- 52% of
         # the per-sample time, and it holds the GIL, which is why six loader threads measured slower than one. The
         # NumPy version is verified equal to the reference (fast_label.verify_agreement).
@@ -684,20 +1152,16 @@ class Batches:
         sym_plane = np.zeros((D3.NOF_SUBCARRIERS, NOF_SYMBOLS, 2), dtype=np.float32)
         sym_plane[sub_re, sym_re, 0] = sym.real
         sym_plane[sub_re, sym_re, 1] = sym.imag
-        sym_weights = np.zeros((D3.NOF_SUBCARRIERS, NOF_SYMBOLS), dtype=np.float32)
-        sym_weights[sub_re, sym_re] = 1.0
+        sym_weights = geometry.sym_weights
         label = (D3.label_plane_cond(bits, alloc, dmrs_symbols, modulation, uci) if self.cond
                  else D3.label_plane(bits, alloc, dmrs_symbols, modulation, uci))
         if self.target == "genie":
             label = genie_labels(plane, channel, alloc, dmrs_symbols, modulation, cond=self.cond,
                                  uci=uci)
-        llr_weights = (D3.loss_weights_cond(alloc, dmrs_symbols, modulation, uci) if self.cond
-                       else D3.loss_weights(alloc, dmrs_symbols, modulation, uci))
+        llr_weights = geometry.llr_weights
         # The channel head is only constrained where the allocation is, and the target is already
         # divided by the reference amplitude, which is what the head produces.
-        subcarriers = np.flatnonzero(D3.allocated_subcarriers(alloc))
-        ch_weights = np.zeros((D3.NOF_SUBCARRIERS, NOF_SYMBOLS), dtype=np.float32)
-        ch_weights[subcarriers, :] = 1.0
+        ch_weights = geometry.ch_weights
 
         sigma2_norm = float(data["sigma2_over_r2"][index])
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -735,6 +1199,9 @@ class Batches:
             # rather than per resource element.
             "dmrs_noise": np.float32(L.noise_shape_target(np.asarray([sigma2_norm]))[0][0]),
             "snr": float(data["snr_nominal"][index]),
+            # THE ALLOCATION WIDTH, for the second axis of the loss weight. One small int per sample; the array it comes
+            # from is already resident (it is one of the per-sample metadata columns loaded once), so this costs a cast.
+            "alloc_nof_prb": int(data["alloc_nof_prb"][index]),
             # The modulation NAME, so the loss can look up that modulation's measured decoder threshold. It is the same
             # variable the one-hot conditioning and the LLR scale were built from two lines above.
             "modulation": modulation,
@@ -753,38 +1220,112 @@ class Batches:
         target -- is numpy and therefore releases the GIL, so threads genuinely overlap it with the device. Measured
         on the RTX 3060 box, the card sat at 47 percent utilisation with this loop serial, which is what this exists
         to fix (design section 19.367(d)).
+
+        THE ORDER OF THE BATCHES IS THE SERIAL ORDER, WHATEVER THE WORKERS DO. The pool only looks ahead; the
+        generator still yields the batches in the order `self.order` was shuffled into, so a run with workers
+        computes exactly the sequence of updates it would have computed without them, and the epoch's numbers
+        cannot depend on the thread count.
         """
         self.rng.shuffle(self.order)
+        # THE INDICES LEAVE NUMPY HERE, ONCE PER BATCH. `self.order` is an int64 array, so the old form paid an
+        # `int()` conversion per sample and handed `sample()` a numpy scalar; `tolist()` does the same widening in
+        # C for the whole slice. The values are identical (they are the same integers), and `sample()`'s contract
+        # is unchanged -- it takes whatever a Python list of indices contains.
+        def build(start):
+            return [self.sample(i) for i in self.order[start:start + batch_size].tolist()]
+
         if workers <= 0:
             for start in range(0, self.n, batch_size):
-                indices = self.order[start:start + batch_size]
-                yield [self.sample(int(i)) for i in indices]
+                yield build(start)
             return
 
-        from concurrent.futures import ThreadPoolExecutor
-        from collections import deque
-
-        def build(indices):
-            return [self.sample(int(i)) for i in indices]
-
         starts = list(range(0, self.n, batch_size))
-        ahead = max(prefetch, 1)
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            pending = deque()
+        # `ahead` IS AT LEAST THE WORKER COUNT. A `--prefetch 1` next to six workers used to keep exactly one
+        # batch in flight, so five of the six threads were never given anything to do; the window cannot be
+        # narrower than the pool that fills it.
+        ahead = max(prefetch, workers, 1)
+        with ThreadPoolExecutor(max_workers=min(workers, max(len(starts), 1))) as pool:
+            pending = collections.deque()
             for start in starts[:ahead]:
-                pending.append(pool.submit(build, self.order[start:start + batch_size]))
+                pending.append(pool.submit(build, start))
             for index, start in enumerate(starts):
                 batch = pending.popleft().result()
                 nxt = index + ahead
                 if nxt < len(starts):
-                    pending.append(pool.submit(build, self.order[starts[nxt]:starts[nxt] + batch_size]))
+                    pending.append(pool.submit(build, starts[nxt]))
                 yield batch
 
 
 
 
 def stack(samples, key):
-    return np.stack([s[key] for s in samples]).astype(np.float32)
+    """One batch's `key` as a float32 array.
+
+    IT IS ONE ALLOCATION AND ONE PASS WHEN THE DTYPE ALREADY MATCHES. Every array a sample builds is float32, and
+    `astype` copies by default, so the old form stacked and then allocated again to convert a dtype that was
+    already correct -- nineteen megabytes a batch at batch 16 for the seven targets this recipe reads. The dtype
+    is now checked once on the stacked result instead of being converted blindly, and the per-sample fetch is
+    `operator.itemgetter`, which does the dictionary lookup in C instead of running a Python `LOAD_SUBSCR` per
+    element. Both are pure host-side savings; the returned array is the same array either way.
+    """
+    stacked = np.stack(list(map(operator.itemgetter(key), samples)))
+    if stacked.dtype == np.float32:
+        return stacked
+    return stacked.astype(np.float32, copy=False)
+
+
+def threshold_weights(samples, weight, sigma, center=None, width_weight=0.0, width_max=8):
+    """The per-sample factor of `--snr-weight`: large near the decoder threshold, one everywhere else.
+
+    A reception is delivered or lost as a whole block around that threshold, so the samples whose distance to it is
+    small are the ones that switch delivered bits; the ones far from it teach the same lesson whatever the model
+    does. The window is in `snr_nominal`, the variable the datasets carry, and the threshold is that modulation's
+    own measured 50% crossing (`THR_QM`). `center` overrides the centre for 256QAM only, as its flag documents.
+
+    VECTORISED, AND ARITHMETICALLY THE SAME AS THE LOOP IT REPLACED. That loop looked up a dict and called `np.exp`
+    once per sample, in Python floats; this evaluates the same expression over the batch in float64 and casts into
+    the same float32 output, so the values are identical. The batch is eight samples, so this is not where an epoch
+    is won -- but it is host time sitting between two device steps, and removing it is free.
+    """
+    if weight <= 0.0 and width_weight <= 0.0:
+        return np.ones(len(samples), dtype=np.float32)
+    sigma = max(1e-3, float(sigma))
+    modulations = np.asarray([str(sample["modulation"]) for sample in samples])
+    snr = np.asarray([float(sample["snr"]) for sample in samples], dtype=np.float64)
+    threshold = np.asarray([THR_QM.get(str(mod), np.nan) for mod in modulations], dtype=np.float64)
+    if center is not None:
+        threshold = np.where(modulations == "256QAM", float(center), threshold)
+    out = np.ones(len(samples), dtype=np.float32)
+    if weight <= 0.0:
+        # A width-only run must not build the SNR window: its factor is exactly one, and skipping the per-sample
+        # modulation and SNR gather keeps the arithmetic identical to the unweighted case.
+        return _width_factor(samples, width_weight, width_max, out)
+    known = np.isfinite(threshold)
+    if known.any():
+        # An unknown modulation keeps its weight of one: the distance to a threshold that does not exist is not
+        # something to scale a reception by, which is what the original's `continue` said.
+        distance = (snr[known] - threshold[known]) / sigma
+        out[known] = 1.0 + weight * np.exp(-distance * distance)
+    return _width_factor(samples, width_weight, width_max, out)
+
+
+def _width_factor(samples, width_weight, width_max, base):
+    """The second axis of the loss weight: how NARROW the allocation is.
+
+    WHY WIDTH AND NOT ANOTHER SNR TERM. The whole-leg attribution puts the model's remaining losses on the narrowest
+    allocations: every one of the 118 units it lost in the census was 256QAM at three or eight PRBs (section 49), and a
+    narrow allocation is where the channel estimate has the fewest subcarriers to average over. Raising the weight of
+    those samples asks the optimiser for accuracy where the delivered bits are actually being lost, instead of on the
+    wide allocations that already decode.
+
+    A STEP RATHER THAN A RAMP, because the census is a step: the losses do not fade out between eight and nine PRBs, the
+    bins are `<= 3`, `<= 8`, `<= 24` and `> 24` and the first two carry them. `width_max` is therefore a bin edge, not a
+    centre. The factor multiplies the SNR factor when both are on, so the two selections intersect rather than average.
+    """
+    if width_weight <= 0.0:
+        return base
+    width = np.asarray([float(sample["alloc_nof_prb"]) for sample in samples], dtype=np.float64)
+    return base * (1.0 + width_weight * (width <= float(width_max))).astype(np.float32)
 
 
 def decode_metrics(llr, labels, weights):
@@ -826,6 +1367,34 @@ def unfold_plane(plane, alloc, dmrs_symbols):
     return unfolded
 
 
+_CONSTELLATIONS = {}
+_CONSTELLATION_LOCK = threading.Lock()
+
+
+def _constellation(qm):
+    """`(points, labels)` for one modulation, built once per process and frozen before publication.
+
+    `eval_depth3` imports THIS module, so the import has to stay inside the call rather than at module level;
+    the cache therefore lives here, keyed by the modulation, and is guarded because the loader may call
+    `genie_labels` from several threads. The two arrays are shared by every thread that labels a genie batch, so
+    they are marked read-only exactly as the geometry records are: `genie_labels` only reads them, and a stray
+    write would otherwise retarget every later sample's labels.
+    """
+    hit = _CONSTELLATIONS.get(int(qm))
+    if hit is not None:
+        return hit
+    import eval_depth3 as E
+    with _CONSTELLATION_LOCK:
+        hit = _CONSTELLATIONS.get(int(qm))
+        if hit is None:
+            points, labels = E.constellation(int(qm))
+            points.flags.writeable = False
+            labels.flags.writeable = False
+            hit = (points, labels)
+            _CONSTELLATIONS[int(qm)] = hit
+    return hit
+
+
 def genie_labels(plane, channel, alloc, dmrs_symbols, modulation, cond=False, uci=None):
     """The bits a receiver with the TRUE channel would decide, in the contract's label layout.
 
@@ -834,16 +1403,18 @@ def genie_labels(plane, channel, alloc, dmrs_symbols, modulation, cond=False, uc
     that cannot fit THIS is blocked by its per-position capacity rather than by interpolation across
     frequency; a model that fits it but not the coded bits is blocked by the estimation step.
     """
-    import eval_depth3 as E
     qm = D3.BITS_PER_SYMBOL[modulation]
-    # The constellation is the same for every sample; rebuilding it per call dominated the cost.
-    if not hasattr(genie_labels, "points"):
-        genie_labels.points, genie_labels.labels = E.constellation(qm)
+    # THE CONSTELLATION IS CACHED PER MODULATION, UNDER A LOCK. The previous form cached it in a function
+    # attribute and checked only `hasattr`, which is wrong twice over: a conditioned dataset mixes the four
+    # modulations in one batch, so after the first sample every QPSK reception would have been labelled against
+    # the 256QAM constellation (a wrong target, silently), and the lazy write is not safe under the loader's
+    # thread pool. `E.constellation` is pure, so the lock is held only around a dictionary lookup and a build.
+    points, labels = _constellation(qm)
     grid = D3.unpack_input(plane, alloc, dmrs_symbols, 1)["grid"]
     subcarriers, symbols = D3.data_re_indices(alloc, dmrs_symbols, uci)
     equalized = grid[symbols, subcarriers] / channel[subcarriers, symbols]
-    nearest = np.argmin(np.abs(equalized[:, None] - genie_labels.points[None, :]), axis=1)
-    bits = genie_labels.labels[nearest].reshape(-1)
+    nearest = np.argmin(np.abs(equalized[:, None] - points[None, :]), axis=1)
+    bits = labels[nearest].reshape(-1)
     # The layout follows the MODEL's, not the modulation's: a conditioned head strides by COND_STRIDE for every
     # reception, so a genie target scattered with the per-modulation stride would put the bits in channels the
     # head does not label -- and the loss would quietly train on a plane whose non-zero entries moved.
@@ -1190,6 +1761,14 @@ def main():
     parser.add_argument("--cst-head", action="store_true",
                         help="constellation-aware head: analytic 4*s/sigma^2 linear term plus a learned residual "
                              "(lever A; the exact max-log posterior needs one graph per modulation)")
+    parser.add_argument("--dense-skip-init", choices=("random", "sum"), default="random",
+                        help="how the dense connection's 2C->C projection starts. `sum` sets its kernel to [I; I] and "
+                             "its bias to zero, so at step zero the block reproduces the baseline's residual y + h -- a "
+                             "curriculum start rather than a change of graph")
+    parser.add_argument("--dense-skip-depth", type=int, default=1, metavar="K",
+                        help="how many earlier block outputs the dense connection also exposes (1 = current C: state "
+                             "plus the block's own output; 2 also shows the previous block's output). Each extra "
+                             "level costs one more C->C slice in the projection")
     parser.add_argument("--dense-skip-entry", action="store_true",
                         help="with the dense skip, also feed each block the ENTRY features (the received signal plus "
                              "the Qm conditioning, before any nonlinearity). Implies --dense-skip; costs one more "
@@ -1272,10 +1851,27 @@ def main():
     # exported bundle, and it is worth 1.3x to 2x of the epoch time. Leaving it opt-in meant every hand-written
     # command that forgot the flag trained at half speed with no visible symptom -- one arm of a comparison was
     # measured that way (the cliff run), which is exactly the confound a default is supposed to prevent.
+    #
+    # THE DEFAULT IS RESOLVED PER PLATFORM, NOT CHANGED: on Linux it is exactly "on", as it always was; on macOS it
+    # is off unless this flag is written out, because tensorflow-metal has no XLA device (`resolve_xla`). Writing
+    # `--jit` there still compiles, after a self-test and with a one-shot fallback.
     parser.add_argument("--jit", action=argparse.BooleanOptionalAction, default=True,
                         help="compile the training step with XLA (default: on; use --no-jit to disable). "
+                             "On macOS the resolved default is off, because tensorflow-metal exposes no XLA "
+                             "device; an explicit --jit there is honoured and self-tested. "
                              "TRAINING ONLY -- the bundle is exported from the Keras layers and the weights, so "
                              "this cannot change what the ANE runs (design section 19.218)")
+    # THE DEVICE IS A CHOICE BECAUSE THE FASTER ONE IS NOT ALWAYS THE GPU. Measured on an M4 Pro with
+    # tensorflow-metal 1.2.0 / TensorFlow 2.18.1, c_hid 32 and batch 8: 4.93 s/epoch on the Metal GPU against
+    # 2.63 s/epoch on the CPU. Nothing about the graph changes here -- only which device the runtime may use.
+    parser.add_argument("--no-gpu", action="store_true",
+                        help="hide every GPU device and run on the CPU. OFF by default on every platform, so an "
+                             "existing Ubuntu/CUDA command line keeps selecting its GPU exactly as before; "
+                             "when it IS given the devices are hidden on Linux too. On macOS it is the faster "
+                             "path for this network at the deployment width -- the Metal plugin measured 1.87x "
+                             "SLOWER than the CPU at c_hid 32, batch 8, and only wins at c_hid 128 with "
+                             "batch 32 -- and the plugin still lists its GPU after being hidden, which is why "
+                             "the startup banner prints the placement rather than the device list")
     parser.add_argument("--target", choices=("coded", "genie"), default="coded",
                         help="'coded' is the contract's task. 'genie' replaces the label with the "
                              "hard decisions a receiver with the true channel would make, which "
@@ -1328,7 +1924,10 @@ def main():
                              "points a training recipe can be compared at: same weights, same optimizer state, same "
                              "history up to that epoch")
     parser.add_argument("--workers", type=int, default=0,
-                        help="threads that build batches while the accelerator runs; 0 keeps the loop serial")
+                        help="threads that build batches while the accelerator runs; 0 keeps the loop serial on "
+                             "Linux and selects a quarter of the cores (capped at three) on macOS, where the "
+                             "loader is what the GPU waits on and more threads measured slower; an explicit N is "
+                             "used as given on both")
     parser.add_argument("--prefetch", type=int, default=0,
                         help="batches to build ahead when --workers is set (defaults to 2x the workers)")
     parser.add_argument("--low-rank", type=int, default=0,
@@ -1395,6 +1994,15 @@ def main():
     parser.add_argument("--snr-center", type=float, default=None, metavar="DB",
                         help="override the SNR-weight centre for 256QAM only (default: that modulation's measured "
                              "threshold, 20.91 dB)")
+    parser.add_argument("--width-weight", type=float, default=0.0, metavar="LAMBDA_W",
+                        help="the SECOND axis of the loss weight: multiply each TRAINING sample's weight by "
+                             "1 + LAMBDA_W for allocations of at most --width-max PRBs. The census puts every unit "
+                             "the model loses on the narrowest allocations (256QAM at 3 or 8 PRBs), where the channel "
+                             "estimate has the fewest subcarriers to average. Multiplies --snr-weight when both are "
+                             "on. Validation stays unweighted. 0 disables it")
+    parser.add_argument("--width-max", type=int, default=8, metavar="PRB",
+                        help="the allocation width, in PRBs, at or below which --width-weight applies (default 8, "
+                             "which is the census bin edge that carries the losses)")
     parser.add_argument("--snr-sigma", type=float, default=3.0, metavar="DB",
                         help="width of the threshold window for --snr-weight, in dB (default 3.0)")
     parser.add_argument("--group-report", type=int, default=5, metavar="N",
@@ -1415,10 +2023,45 @@ def main():
     # took over, and the first decode killed a run that had been healthy for fourteen epochs. The old
     # per-modulation logs cannot say what their batch was for exactly this reason.
     print("argv: " + " ".join(sys.argv[1:]), flush=True)
-    print(f"xla: {'on' if args.jit else 'off'}", flush=True)
-
+    # THE LOGGER IS QUIET BEFORE THE FIRST TENSOR IS BUILT. It used to be set below, after the two banner lines;
+    # it moves up by two statements so the macOS self-test below cannot print framework chatter into a log that
+    # is the record of a multi-hour run. Nothing between the old and the new position produces output.
     tf.get_logger().setLevel("ERROR")
+    # ★ THE DEVICE CHOICE COMES FIRST, BEFORE ANY OP. `set_visible_devices` is only honoured before the
+    # runtime is initialised, so `--no-gpu` cannot wait until the model is built (see `hide_gpus`).
+    if args.no_gpu and hide_gpus():
+        print("gpus: all GPU devices hidden (--no-gpu); the step will run on the CPU", flush=True)
+    # ★ THE MACOS BACKEND IS ASKED FOR BEFORE ANY OP RUNS, AND ITS BANNER IS PRINTED LATER. Growth-based allocation
+    # has to be requested before the runtime is initialised, and the XLA self-test a few lines down builds tensors
+    # -- taking the setting here is what keeps a `--jit` run from having its memory-growth request silently
+    # refused. What was found is reported below, once the XLA and pipeline decisions it describes are known.
+    runtime = configure_macos_runtime() if IS_DARWIN else None
+    # ★ THE XLA DECISION, BEFORE ANYTHING IS BUILT. On Linux this resolves to the flag's value, unchanged. macOS
+    # takes it here because the graph it affects is the training step and the reason for a change has to be in
+    # the log before the first epoch, not in a traceback at the first batch (see `resolve_xla`).
+    args.jit, xla_note = resolve_xla(args.jit, sys.argv[1:])
+    if IS_DARWIN and args.jit:
+        xla_ok, xla_why = xla_self_test()
+        if not xla_ok:
+            args.jit = False
+            xla_note = f"off -- the requested XLA step could not be compiled on this backend ({xla_why})"
+    print(f"xla: {'on' if args.jit else 'off'}", flush=True)
+    if xla_note:
+        print(f"xla: {xla_note}", flush=True)
+    # ★ THE BATCH-PIPELINE CONCURRENCY, RESOLVED ONCE. On Linux this is exactly the `args.workers` /
+    # `args.prefetch or 2 * args.workers` pair the epoch loop used to spell out; on macOS it supplies the
+    # default thread count that stops the Apple GPU waiting for batches (see `pipeline_defaults`).
+    workers, prefetch = pipeline_defaults(args)
     tf.random.set_seed(args.seed)
+    if IS_DARWIN:
+        report_macos_runtime(runtime, workers, prefetch, args.jit)
+        if args.dtype != "float32":
+            # NOT A WARNING ABOUT A CHANGE: the arithmetic is the Ubuntu arithmetic. It says so, because a reader of a
+            # macOS log has to be able to tell that `--dtype float16` here means the same graph and the same loss
+            # precision as it does there, and that build()'s warning about fp16 stalling still applies.
+            print(f"platform: --dtype {args.dtype}: the loss and the LLR scaling are still computed in float32 and "
+                  f"ChannelGate still multiplies in float32 before casting back, so this run's numbers are the "
+                  f"Ubuntu run's; build() still documents that fp16 training stalls", flush=True)
     if args.layout == "unfolded":
         # The name the R4.4 runs were recorded under. Kept so their command lines still run.
         print("--layout unfolded is the old name of probe8")
@@ -1426,8 +2069,7 @@ def main():
 
     if args.export_only:
         exported = tf.keras.models.load_model(
-            args.export_only, compile=False,
-            custom_objects={"FoldedScaleConv": FoldedScaleConv, "ChannelGate": ChannelGate})
+            args.export_only, compile=False, custom_objects=CUSTOM_OBJECTS)
         if not args.export_probe:
             parser.error("--export-only needs --export-probe")
         # The range has to come from the knob on this path: --export-only loads a `.keras` and no dataset, so
@@ -1464,11 +2106,27 @@ def main():
                             dense_bottleneck=args.dense_bottleneck, fuse_relu=args.fuse_relu,
                             layout=args.layout, in_channels=in_channels, cond=args.modcond,
                             dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                            noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand, se=args.se, se_ratio=args.se_ratio, dense_skip=args.dense_skip or args.dense_skip_entry,
+                            noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand, se=args.se, se_ratio=args.se_ratio, dense_skip=args.dense_skip or args.dense_skip_entry or args.dense_skip_depth > 1,
                     dense_skip_entry=args.dense_skip_entry,
+                    dense_skip_depth=args.dense_skip_depth,
                             smooth_k=args.smooth_k)
         export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
         return 0
+
+    # ★ THE ONE MACOS CONFIGURATION THAT CANNOT RUN. `--dtype float16` takes the Metal plugin into its
+    # half-precision MPSGraph path, which SEGFAULTS on the first training step (EXC_BAD_ACCESS inside
+    # `metal_plugin::MPSBinaryOpBase<Eigen::half>::Compute`, i.e. an fp16 multiply) -- reproduced with the
+    # UNMODIFIED script, so it is an upstream plugin bug and not something this trainer can work around.
+    # A segfault leaves no traceback, only a macOS crash dialog, which is how five of them were produced while
+    # measuring this; refusing here turns that into one line with the reason. Training in float32 costs
+    # nothing at deployment: `export_deployment` converts the bundle to fp16 regardless.
+    if IS_DARWIN and args.dtype != "float32" and not allow_metal_fp16():
+        parser.error(
+            f"--dtype {args.dtype} on macOS: tensorflow-metal segfaults on the first training step "
+            f"(EXC_BAD_ACCESS in libmetal_plugin's half-precision binary op; the unmodified script crashes "
+            f"the same way, so it is an upstream bug). Train in float32 -- the exported bundle is fp16 "
+            f"either way -- or set DEPTH3_ALLOW_METAL_FP16=1 to try it anyway and expect a crash report "
+            f"rather than a traceback")
 
     if not args.train or not args.val or not args.out:
         parser.error("--train, --val and --out are required unless --export-only or --probe-graph "
@@ -1489,7 +2147,15 @@ def main():
     else:
         print(f"train {train.n} samples, val {val.n} samples, {args.modulation} (Qm={qm})")
 
-    from_data = int(train.sample(0)["x"].shape[-1])
+    # ★ THE DATA'S CHANNEL COUNT, WITHOUT BUILDING A SAMPLE. The old form called `train.sample(0)` for this one
+    # integer and threw the rest away -- the bit unpack, the label plane, the masks and the noise target, which is
+    # most of a sample's cost -- and the first epoch then rebuilt the same sample. `plane_channels()` reads the
+    # layout and the file's own width, and returns the same number for every layout.
+    from_data = int(train.plane_channels())
+    if args.modcond:
+        # The sample appends the four conditioning channels itself, so the model's input width is the data's plus
+        # those four. Kept here rather than inside `plane_channels` so the two widths stay visibly different.
+        from_data += len(D3.COND_QM_ORDER)
     if from_data != in_channels:
         parser.error(f"--layout {args.layout} builds {in_channels} input channels but the data "
                      f"carries {from_data}")
@@ -1501,9 +2167,12 @@ def main():
                   llr_linear=args.llr_linear, dense=args.dense_blocks,
                   dense_bottleneck=args.dense_bottleneck, layout=args.layout, fuse_relu=args.fuse_relu,
                   in_channels=in_channels, cond=args.modcond, dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                  noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand, se=args.se, se_ratio=args.se_ratio, dense_skip=args.dense_skip or args.dense_skip_entry,
+                  noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand, se=args.se, se_ratio=args.se_ratio, dense_skip=args.dense_skip or args.dense_skip_entry or args.dense_skip_depth > 1,
                     dense_skip_entry=args.dense_skip_entry,
+                    dense_skip_depth=args.dense_skip_depth,
                   smooth_k=args.smooth_k)
+    if args.dense_skip_init == "sum":
+        model = init_dense_skip_as_sum(model)
     parameters = int(sum(np.prod(w.shape) for w in model.weights))
     print(f"parameters {parameters}  heads {sorted(model.output.keys())}")
     # THE RECEPTIVE FIELD IS A DESIGN PARAMETER, SO IT IS PRINTED WITH THE PARAMETER COUNT. It is the
@@ -1531,102 +2200,156 @@ def main():
     # layer structure and the trained weights, so compiling the step changes nothing about what the ANE
     # runs (design section 19.218). It is here because the step is latency-bound on small ops, which is
     # exactly what a fused compilation can cut.
-    @tf.function(jit_compile=bool(args.jit))
+    #
+    # IT IS A FACTORY AND NOT A DECORATOR BECAUSE MACOS MAY HAVE TO BUILD IT TWICE. `--jit` there is honoured
+    # only after `xla_self_test` has compiled something, and if the real graph is still rejected the first call
+    # rebuilds the body without XLA instead of ending a run whose dataset and weights are already in memory.
+    # Both forms come from the same body, so they cannot disagree about what the loss is -- which is why there
+    # is no second, eager implementation to keep in step. On Linux `compile_step` is called once, with the
+    # resolved flag, and the function below is that compiled step.
+    def compile_step(jit):
+        @tf.function(jit_compile=bool(jit))
+        def compiled(x, targets, training):
+            with tf.GradientTape() as tape:
+                outputs = model(x, training=training)
+                # Every head leaves the model with the contract's `[width, channels]` tail, so one
+                # reshape reads each of them and the loss cannot drift with the trunk's layout: the
+                # spatial axes are an implementation detail that stops at the head.
+                # THE LOSS IS FLOAT32 WHATEVER THE MODEL'S DTYPE. The heads are cast before anything is
+                # computed, so `--dtype float16` narrows the graph and not the objective; on macOS, where the
+                # Metal plugin's fp16 path is the one with the most caveats, this keeps the number in the log
+                # comparable with the Ubuntu run of the same command line.
+                llr = tf.reshape(tf.cast(outputs["llr"], tf.float32),
+                                 (-1, D3.NOF_SUBCARRIERS, head_channels)) * targets["scale"][:, None, None]
+                if args.llr_linear:
+                    # The bound the contract asks for, applied where it is differentiable, per sample.
+                    llr = tf.clip_by_value(llr, -targets["scale"][:, None, None], targets["scale"][:, None, None])
+                llr_mask = targets["llr_weights"]
+                if training and (args.snr_weight > 0.0 or args.width_weight > 0.0):
+                    # THE WEIGHTING APPLIES TO TRAINING ONLY. Validation reports the unweighted loss, so a weighted run stays
+                    # comparable with every earlier one and the number in the log still means the same thing.
+                    llr_mask = llr_mask * targets["w_snr"][:, None, None]
+                terms = {"llr": L.tf_bce_loss(llr, targets["llr_shape"], llr_mask, norm=args.loss_norm)}
+                if not args.no_aux:
+                    # THE NOISE HEAD IS ALWAYS IN WHEN aux_heads IS (design section 22.2): it is what scales the logits
+                    # into the LLRs the chain quantises, so it is trained even in the bundle that dropped the reporting
+                    # heads. The channel and DM-RS heads are read only when the graph carries them.
+                    if "ch_est" in outputs:
+                        ch = tf.reshape(tf.cast(outputs["ch_est"], tf.float32),
+                                        (-1, D3.NOF_SUBCARRIERS, 2 * NOF_SYMBOLS))
+                        terms["ch_est"] = L.tf_nmse(
+                            tf.complex(ch[:, :, 0::2], ch[:, :, 1::2]),
+                            tf.complex(targets["ch"][:, :, :, 0], targets["ch"][:, :, :, 1]),
+                            targets["ch_weights"])
+                    if "sym_est" in outputs:
+                        se = tf.reshape(tf.cast(outputs["sym_est"], tf.float32),
+                                        (-1, D3.NOF_SUBCARRIERS, NOF_SYMBOLS, 2))
+                        err = tf.reduce_sum((se - targets["sym"]) ** 2, axis=-1)
+                        terms["sym_est"] = (tf.reduce_sum(err * targets["sym_weights"])
+                                            / tf.maximum(tf.reduce_sum(targets["sym_weights"]), 1.0))
+                    noise = tf.reshape(tf.cast(outputs["post_eq_noise"], tf.float32),
+                                       (-1, D3.NOF_SUBCARRIERS, NOF_SYMBOLS))
+                    error = (noise - targets["noise"]) ** 2
+                    terms["post_eq_noise"] = (tf.reduce_sum(error * targets["noise_weights"])
+                                              / tf.maximum(tf.reduce_sum(targets["noise_weights"]), 1.0))
+                    if "dmrs_noise" in outputs:
+                        dmrs = tf.reshape(tf.cast(outputs["dmrs_noise"], tf.float32), (-1,))
+                        terms["dmrs_noise"] = tf.reduce_mean((dmrs - targets["dmrs_noise"]) ** 2)
+                total = sum(weights[name] * terms[name] for name in terms)
+            if training:
+                gradients = tape.gradient(total, model.trainable_variables)
+                optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+            return total, terms, llr
+        return compiled
+
+    _step_state = {"fn": compile_step(args.jit), "jit": bool(args.jit), "ran": False}
+
     def step(x, targets, training):
-        with tf.GradientTape() as tape:
-            outputs = model(x, training=training)
-            # Every head leaves the model with the contract's `[width, channels]` tail, so one
-            # reshape reads each of them and the loss cannot drift with the trunk's layout: the
-            # spatial axes are an implementation detail that stops at the head.
-            llr = tf.reshape(tf.cast(outputs["llr"], tf.float32),
-                             (-1, D3.NOF_SUBCARRIERS, head_channels)) * targets["scale"][:, None, None]
-            if args.llr_linear:
-                # The bound the contract asks for, applied where it is differentiable, per sample.
-                llr = tf.clip_by_value(llr, -targets["scale"][:, None, None], targets["scale"][:, None, None])
-            llr_mask = targets["llr_weights"]
-            if training and args.snr_weight > 0.0:
-                # THE WEIGHTING APPLIES TO TRAINING ONLY. Validation reports the unweighted loss, so a weighted run stays
-                # comparable with every earlier one and the number in the log still means the same thing.
-                llr_mask = llr_mask * targets["w_snr"][:, None, None]
-            terms = {"llr": L.tf_bce_loss(llr, targets["llr_shape"], llr_mask, norm=args.loss_norm)}
-            if not args.no_aux:
-                # THE NOISE HEAD IS ALWAYS IN WHEN aux_heads IS (design section 22.2): it is what scales the logits
-                # into the LLRs the chain quantises, so it is trained even in the bundle that dropped the reporting
-                # heads. The channel and DM-RS heads are read only when the graph carries them.
-                if "ch_est" in outputs:
-                    ch = tf.reshape(tf.cast(outputs["ch_est"], tf.float32),
-                                    (-1, D3.NOF_SUBCARRIERS, 2 * NOF_SYMBOLS))
-                    terms["ch_est"] = L.tf_nmse(
-                        tf.complex(ch[:, :, 0::2], ch[:, :, 1::2]),
-                        tf.complex(targets["ch"][:, :, :, 0], targets["ch"][:, :, :, 1]),
-                        targets["ch_weights"])
-                if "sym_est" in outputs:
-                    se = tf.reshape(tf.cast(outputs["sym_est"], tf.float32),
-                                    (-1, D3.NOF_SUBCARRIERS, NOF_SYMBOLS, 2))
-                    err = tf.reduce_sum((se - targets["sym"]) ** 2, axis=-1)
-                    terms["sym_est"] = (tf.reduce_sum(err * targets["sym_weights"])
-                                        / tf.maximum(tf.reduce_sum(targets["sym_weights"]), 1.0))
-                noise = tf.reshape(tf.cast(outputs["post_eq_noise"], tf.float32),
-                                   (-1, D3.NOF_SUBCARRIERS, NOF_SYMBOLS))
-                error = (noise - targets["noise"]) ** 2
-                terms["post_eq_noise"] = (tf.reduce_sum(error * targets["noise_weights"])
-                                          / tf.maximum(tf.reduce_sum(targets["noise_weights"]), 1.0))
-                if "dmrs_noise" in outputs:
-                    dmrs = tf.reshape(tf.cast(outputs["dmrs_noise"], tf.float32), (-1,))
-                    terms["dmrs_noise"] = tf.reduce_mean((dmrs - targets["dmrs_noise"]) ** 2)
-            total = sum(weights[name] * terms[name] for name in terms)
-        if training:
-            gradients = tape.gradient(total, model.trainable_variables)
-            optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-        return total, terms, llr
+        """One training or evaluation step, degrading an unusable XLA compilation ONCE.
+
+        THE DEGRADATION IS MACOS-ONLY AND HAPPENS BEFORE ANY STEP HAS SUCCEEDED, so there is no optimizer state
+        that could have been half-applied when it happens. On Linux the first call is the compiled function and a
+        failure there raises exactly as it always did -- that path is not allowed to change how a CUDA run fails.
+        """
+        try:
+            result = _step_state["fn"](x, targets, training)
+        except Exception as first:  # noqa: BLE001 - an XLA compile failure surfaces in many forms
+            if _step_state["ran"] or not (IS_DARWIN and _step_state["jit"]):
+                raise
+            print(f"platform: the XLA step failed on its first call ({type(first).__name__}: {first}); "
+                  f"rebuilding it without XLA", flush=True)
+            _step_state["fn"] = compile_step(False)
+            _step_state["jit"] = False
+            try:
+                result = _step_state["fn"](x, targets, training)
+            except Exception as second:  # noqa: BLE001 - report both: the first is the cause
+                raise second from first
+        _step_state["ran"] = True
+        return result
 
     # The gather rule follows the MODEL: a conditioned head carries every modulation in one stride-8 layout, so
     # the LLRs it produces must be gathered with that layout rather than with the reception's own Qm.
     GATHER = D3.llr_gather_cond if getattr(val, "cond", False) else D3.llr_gather
 
     def snr_weights(samples):
-        """The per-sample weight of `--snr-weight`: near the decoder threshold, and one everywhere else.
+        """The per-sample weight of `--snr-weight` for one batch (see `threshold_weights`).
 
-        A reception is delivered or lost as a whole block around that threshold, so the samples whose distance to it is
-        small are the ones that switch delivered bits; the ones far from it teach the same lesson whatever the model
-        does. The window is in `snr_nominal`, the variable the datasets carry, and the threshold is that modulation's
-        own measured 50% crossing.
+        Kept as a closure because it is the one place that knows which flag values apply; the arithmetic and its
+        explanation live in the module-level function, so it can be checked without building a model.
         """
-        if args.snr_weight <= 0.0:
-            return np.ones(len(samples), dtype=np.float32)
-        sigma = max(1e-3, float(args.snr_sigma))
-        out = np.empty(len(samples), dtype=np.float32)
-        for i, sample in enumerate(samples):
-            mod = str(sample["modulation"])
-            thr = THR_QM.get(mod)
-            if thr is None:
-                out[i] = 1.0
-                continue
-            if args.snr_center is not None and mod == "256QAM":
-                thr = float(args.snr_center)
-            d = (float(sample["snr"]) - thr) / sigma
-            out[i] = 1.0 + args.snr_weight * np.exp(-d * d)
-        return out
+        return threshold_weights(samples, args.snr_weight, args.snr_sigma, args.snr_center,
+                                 args.width_weight, args.width_max)
+
+    # ★ WHICH TARGETS THE GRAPH ACTUALLY READS. `step` reads a target only when the model carries the head that
+    # consumes it, so a run without `--sym-aux` was stacking and copying a 612 x 14 x 2 symbol plane for every
+    # batch, and a run with `--no-reporting-heads` was copying the channel plane, both of them tensors the loss
+    # never looked at. The keys are the MODEL's own output dict keys, which is exactly what `step` tests. If the
+    # model is not returning a dict -- it always is here, both layouts build one -- every target is provided, so a
+    # future graph cannot silently lose one.
+    head_keys = set(model.output) if isinstance(model.output, dict) else None
+    read_ch = (head_keys is None) or ("ch_est" in head_keys)
+    read_sym = (head_keys is None) or ("sym_est" in head_keys)
+    read_dmrs = (head_keys is None) or ("dmrs_noise" in head_keys)
+    read_noise = not args.no_aux
 
     def tensors(samples):
-        return (
-            tf.constant(stack(samples, "x")),
-            {
-                "llr_shape": tf.constant(stack(samples, "llr_shape")),
-                "llr_weights": tf.constant(stack(samples, "llr_weights")),
-                "ch": tf.constant(stack(samples, "ch")),
-                "ch_weights": tf.constant(stack(samples, "ch_weights")),
-                "noise": tf.constant(stack(samples, "noise")),
-                "noise_weights": tf.constant(stack(samples, "noise_weights")),
-                "sym": tf.constant(stack(samples, "sym")),
-                "sym_weights": tf.constant(stack(samples, "sym_weights")),
-                "dmrs_noise": tf.constant(stack(samples, "dmrs_noise")),
-                "scale": tf.constant(stack(samples, "scale")),
-                # THE THRESHOLD WEIGHT, one number per sample (always ones unless --snr-weight is on, so a run without it
-                # is bit-identical to what it was before this existed).
-                "w_snr": tf.constant(np.asarray(snr_weights(samples), dtype=np.float32)),
-            },
-        )
+        """One batch's device tensors: the input plane, and exactly the targets the step reads.
+
+        MEASURED BEFORE DECIDING TO LEAVE IT SYNCHRONOUS. On an M4 Pro, batch 16, the c32 recipe, the seven
+        targets below cost 0.37 ms to stack and another 0.37 ms to convert -- 0.74 ms against a 199 ms step,
+        0.37% -- because the payload is 19 MB and the machine moves that in a fraction of a millisecond. A
+        background packer would therefore buy well under one percent while adding a second thread that touches
+        TensorFlow (which is where the Metal plugin has been observed to be fragile) and a queue whose failure
+        modes would have to be got exactly right. It is not worth that, so the packing stays on the caller's
+        thread and this docstring records why. Moving the numpy half of it into the loader threads was measured
+        at 0.37 ms and rejected for the same reason.
+
+        `stack` already avoids the redundant float32 copy. The conditional keys avoid a second kind of waste: a
+        host-side stack plus `tf.constant` plus a device copy for every plane whose head this graph does not have.
+        """
+        stacked = tf.constant(stack(samples, "x"))
+        targets = {
+            "llr_shape": tf.constant(stack(samples, "llr_shape")),
+            "llr_weights": tf.constant(stack(samples, "llr_weights")),
+            "scale": tf.constant(stack(samples, "scale")),
+        }
+        if read_ch:
+            targets["ch"] = tf.constant(stack(samples, "ch"))
+            targets["ch_weights"] = tf.constant(stack(samples, "ch_weights"))
+        if read_sym:
+            targets["sym"] = tf.constant(stack(samples, "sym"))
+            targets["sym_weights"] = tf.constant(stack(samples, "sym_weights"))
+        if read_noise:
+            targets["noise"] = tf.constant(stack(samples, "noise"))
+            targets["noise_weights"] = tf.constant(stack(samples, "noise_weights"))
+        if read_dmrs:
+            targets["dmrs_noise"] = tf.constant(stack(samples, "dmrs_noise"))
+        if args.snr_weight > 0.0 or args.width_weight > 0.0:
+            # THE THRESHOLD WEIGHT, one number per sample. Only the training trace reads it, and only when the
+            # weighting is on, so an unweighted run no longer builds a vector of ones per batch either. A weighted
+            # run gets exactly the vector it always got.
+            targets["w_snr"] = tf.constant(np.asarray(snr_weights(samples), dtype=np.float32))
+        return stacked, targets
 
     def perfect_llr(sample):
         """The LLRs a perfect model would emit, from the contract's label plane.
@@ -1687,16 +2410,37 @@ def main():
         return (val.modulation_of(index), snr_band(float(val.data["snr_nominal"][index])),
                 tb_band(int(val.data["nof_tb_bits"][index])))
 
+    # THE VALIDATION BATCHES COME FROM THE SAME PIPELINE, ON MACOS. `evaluate` is bound by host work once the decode
+    # is switched off (a numpy cross-entropy over every element of the batch), and building its batches serially
+    # leaves the device idle for exactly as long as the training loop's serial loop did. On Linux the loader stays
+    # serial here, as it always was: this pass is not where the reference box was measured.
+    val_workers, val_prefetch = (workers, prefetch) if IS_DARWIN else (0, 0)
+    # THE LOW-SNR BAND IS ONLY MEASURED WHEN IT CAN DECIDE SOMETHING. `val_band` exists for
+    # `--select-on band`; every other selection reads the validation loss and never looks at it, so the per-row
+    # `decode_metrics` calls that build it were pure cost -- one `np.sign` plus two boolean masks over a
+    # 612 x 112 slice, per ROW, per batch. With `--select-on val` (the default), `use_bler=False` and
+    # `--group-report 0`, `evaluate` now reads each tensor exactly once and slices nothing.
+    want_band = (args.select_on == "band")
+
     def evaluate(use_bler):
         totals, errors, magnitudes, band_ber = [], [], [], []
         groups = {}          # (modulation, snr band, tb band) -> [sum bce, sum bits, samples]
         bler = CodedBler(val) if use_bler else None
         decoded = 0
-        for samples in val.epoch(args.batch):
+        for samples in val.epoch(args.batch, val_workers, val_prefetch):
             x, targets = tensors(samples)
             total, _, llr = step(x, targets, training=False)
-            ber, mag = decode_metrics(llr.numpy(), targets["llr_shape"].numpy(),
-                                      targets["llr_weights"].numpy())
+            # ★ ONE DEVICE-TO-HOST COPY PER TENSOR PER BATCH. This loop used to call `llr.numpy()` up to four times a
+            # batch and `targets[...].numpy()` once per ROW, so a batch of eight paid some thirty synchronisations to
+            # read the same six arrays. The three below are those arrays, read once; every metric that follows
+            # consumes them, and `decode_metrics` is called with slices of them, which are views.
+            llr_host = llr.numpy()
+            labels_host = targets["llr_shape"].numpy()
+            weights_host = targets["llr_weights"].numpy()
+            ber, mag = decode_metrics(llr_host, labels_host, weights_host)
+            # The synchronisation here is not extra work: `llr_host` above already drained the device, so reading the
+            # scalar costs nothing. It is kept in float() because the epoch's validation loss is the mean of these
+            # exact float32 values, and it has to keep being that.
             totals.append(float(total))
             errors.append(ber)
             magnitudes.append(mag)
@@ -1705,15 +2449,19 @@ def main():
             # different epoch. Measuring the band during training lets the checkpoint be chosen on the acceptance metric itself.
             if args.group_report > 0:
                 scale = targets["scale"].numpy()
-                labels = targets["llr_shape"].numpy()
-                weights = targets["llr_weights"].numpy()
-                scaled = llr.numpy() * scale.reshape((-1,) + (1,) * (llr.ndim - 1))
+                # THE SCALE IS APPLIED A SECOND TIME HERE, AND THAT IS KEPT. `step` already returns the LLRs
+                # multiplied by `scale` (that is what the loss sees), so these group cross-entropies are on a
+                # squared scale while `decode_metrics` above uses the once-scaled values. It is reported verbatim
+                # because the group report is part of recorded runs' logs: correcting it here would silently make
+                # two runs' reports incomparable, which is a decision for whoever reads those logs, not for this
+                # rewrite. Flagged, not altered.
+                scaled = llr_host * scale.reshape((-1,) + (1,) * (llr_host.ndim - 1))
                 # The same stable form `depth3_loss.bce_loss` uses, kept per row so the sum and the bit count can be
                 # accumulated per group instead of collapsed into one number.
-                per_entry = (np.maximum(scaled, 0.0) - scaled * labels
+                per_entry = (np.maximum(scaled, 0.0) - scaled * labels_host
                              + np.log1p(np.exp(-np.abs(scaled))))
-                for row in range(llr.shape[0]):
-                    w = weights[row]
+                for row in range(llr_host.shape[0]):
+                    w = weights_host[row]
                     total_w = float(w.sum())
                     if total_w <= 0.0:
                         continue
@@ -1722,14 +2470,14 @@ def main():
                     slot[0] += float((per_entry[row] * w).sum())
                     slot[1] += total_w
                     slot[2] += 1
-            for row in range(llr.shape[0]):
-                row_ber, _ = decode_metrics(llr.numpy()[row:row + 1],
-                                            targets["llr_shape"].numpy()[row:row + 1],
-                                            targets["llr_weights"].numpy()[row:row + 1])
-                index = int(samples[row]["index"])
-                band_ber.append((float(val.data["snr_nominal"][index]), row_ber))
+            if want_band:
+                for row in range(llr_host.shape[0]):
+                    row_ber, _ = decode_metrics(llr_host[row:row + 1], labels_host[row:row + 1],
+                                                weights_host[row:row + 1])
+                    index = int(samples[row]["index"])
+                    band_ber.append((float(val.data["snr_nominal"][index]), row_ber))
             if bler is not None and decoded < args.bler_samples:
-                for row in range(llr.shape[0]):
+                for row in range(llr_host.shape[0]):
                     if decoded >= args.bler_samples:
                         break
                     index = int(samples[row]["index"])
@@ -1739,12 +2487,14 @@ def main():
                     # crashed a sixty-epoch run at its first decode. The training path has always passed
                     # `uci` here; this evaluation path did not, so it gathered the control elements as if
                     # they carried data and then compared the result against a count that excluded them.
-                    gathered = GATHER(llr.numpy()[row], val.allocation_of(index),
+                    gathered = GATHER(llr_host[row], val.allocation_of(index),
                                              val.dmrs_symbols_of(index), val.modulation_of(index),
                                              val.uci_of(index))
                     bler.add(index, gathered)
                     decoded += 1
         low = [b for snr, b in band_ber if np.isfinite(snr) and snr <= 10.0]
+        # `band_ber` is empty when the band was not asked for, which yields the same nan the old code produced
+        # when the validation set had no row at or below 10 dB. `chosen` only reads it under `--select-on band`.
         band = float(np.mean(low)) if low else float("nan")
         return (float(np.mean(totals)), float(np.mean(errors)), float(np.mean(magnitudes)),
                 bler.rate() if bler is not None else float("nan"),
@@ -1753,6 +2503,11 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     history = []
     best = np.inf
+    # WHETHER A BEST CHECKPOINT EVER REACHED DISK. `--select-on none` (and a `--select-on band` whose band is nan)
+    # leaves `best` at inf and never saves one, so the closing line has to know the difference between "nothing was
+    # written" and "wrote it" -- measured 2026-11-24 on a `--select-on none` run whose directory held no
+    # `depth3_best.keras` while the log claimed it did.
+    best_written = False
     epochs_without_improvement = 0
     start_epoch = 1
     # RESUME, BECAUSE A MULTI-DAY RUN MUST NOT RESTART FROM ZERO. The whole model is saved every epoch, in the format that
@@ -1763,13 +2518,12 @@ def main():
         last_path = os.path.join(args.out, "depth3_last.keras")
         state_path = os.path.join(args.out, "resume.json")
         if os.path.exists(last_path) and os.path.exists(state_path):
-            # A RESUME MUST BE ABLE TO LOAD ITS OWN CHECKPOINT. `FoldedScaleConv` is not registered with the
-            # serialization registry, so the bare load_model below failed with "Could not locate class
-            # 'FoldedScaleConv'" on any run that used --scale-init (i.e. every dense arm), and the resume died before
-            # epoch 8 rather than continuing. Naming the custom classes here fixes it for every existing file.
-            model = tf.keras.models.load_model(
-                last_path, custom_objects={"FoldedScaleConv": FoldedScaleConv, "MaskedSmooth": MaskedSmooth,
-                                    "ChannelGate": ChannelGate})
+            # A RESUME MUST BE ABLE TO LOAD ITS OWN CHECKPOINT. A bare `load_model` failed with "Could not locate
+            # class 'MaskedSmooth'"/'FoldedScaleConv' on the runs that use them, and the resume died before the
+            # epoch that would have continued it. The three classes are named once, in `CUSTOM_OBJECTS`, which the
+            # `--export-only` path uses too, so the two loaders cannot disagree about what a checkpoint contains.
+            model = tf.keras.models.load_model(last_path, compile=False,
+                                               custom_objects=CUSTOM_OBJECTS)
             state = json.load(open(state_path))
             start_epoch = int(state.get("epoch", 1)) + 1
             best = float(state.get("best", best))
@@ -1831,11 +2585,25 @@ def main():
             # constant one without reproducing the schedule by hand.
             if epoch == start_epoch or epoch % max(1, args.epochs // 20) == 0 or epoch == args.epochs:
                 print(f"  lr {float(optimizer.learning_rate):.6g} (cosine, from epoch {args.lr_decay_from})", flush=True)
-        losses = []
-        for samples in train.epoch(args.batch, args.workers, args.prefetch or (2 * args.workers)):
+        # ★ NO HOST SYNCHRONISATION PER BATCH. `float(total)` is a device-to-host copy AND a full synchronisation:
+        # it waits until every op the device has queued -- the whole step -- has finished, so the host cannot run
+        # ahead into the next batch. On the CUDA box this loop left the card at 47% utilisation, and a Metal queue
+        # stalls the same way. The per-batch means are collected as device scalars and read back once every
+        # `LOSS_ACCUMULATION` batches (one `tf.stack` plus one copy), which bounds both the synchronisations and
+        # the tensors held alive; the list below is then exactly what the synchronous form appended, element for
+        # element, so `np.mean(losses)` -- and the history, the snapshots and every number derived from them -- is
+        # unchanged. A float32 running SUM would not be: eight thousand additions at magnitude 2 lose the fifth
+        # decimal, which is the precision the epoch line prints.
+        losses, pending = [], []
+        for samples in train.epoch(args.batch, workers, prefetch):
             x, targets = tensors(samples)
             total, _, _ = step(x, targets, training=True)
-            losses.append(float(total))
+            pending.append(total)
+            if len(pending) == LOSS_ACCUMULATION:
+                losses.extend(float(value) for value in tf.stack(pending).numpy())
+                pending = []
+        if pending:
+            losses.extend(float(value) for value in tf.stack(pending).numpy())
         # ★ VAL IS OPTIONAL. It has failed as a selector ten times over (>=10 recorded inversions between val and
         # delivered bits), and the deployment decision is now made by averaging the tail weights, which needs no
         # metric at all. `--no-val` therefore skips the pass; the run keeps only the train loss and, if asked, a
@@ -1905,6 +2673,7 @@ def main():
             best = chosen
             epochs_without_improvement = 0
             model.save(os.path.join(args.out, "depth3_best.keras"))
+            best_written = True
         else:
             epochs_without_improvement += 1
 
@@ -1961,7 +2730,15 @@ def main():
                   indent=1)
     np.save(os.path.join(args.out, "val_llr_stats.npy"),
             np.array([[h["val_ber"], h["val_llr_mean"], h["val_bler"]] for h in history]))
-    print(f"best val loss {best:.5f}; wrote {args.out}/depth3_best.keras and history.json")
+    # THE CLOSING LINE MAY NOT CLAIM A FILE THAT WAS NOT WRITTEN, BUT ITS PREFIX STAYS VERBATIM. The only downstream
+    # reader of this line is `work_tmp/tmp/finalize_conditioned.sh`, which waits for a last line matching
+    # `*"best val loss"*` and then checks `[ -f .../depth3_best.keras ]` itself; keeping the prefix means a watcher
+    # cannot hang, and dropping the false "wrote" clause means a human (or a log grep) cannot be misled either.
+    if best_written:
+        print(f"best val loss {best:.5f}; wrote {args.out}/depth3_best.keras and history.json")
+    else:
+        print(f"best val loss {best:.5f}; no best checkpoint kept (select-on {args.select_on}); "
+              f"wrote {args.out}/history.json")
 
     # THE DECLARED RANGE. From the knob when given, otherwise from the training set itself: the 1st to 99th
     # percentile of `snr_nominal`, which is the range the reporting heads actually saw. The extremes are left out
