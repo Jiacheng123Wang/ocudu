@@ -71,9 +71,17 @@ def main():
     ap.add_argument("directory")
     ap.add_argument("--dump-root", default=os.path.expanduser("~/ai_depth3/dump_s2_mcs"))
     ap.add_argument("--tarball-dir", default="/Volumes/CORPUS/s2_mcs_tb_tarballs")
+    ap.add_argument("--exclude-leg", action="append", default=None, metavar="LEG",
+                    help="never read an index from this leg (repeatable). Defaults to the AMC evaluation leg "
+                         "`s2_amc_ping_1102a`: it is the ruler's corpus, and an index read from it would be one more "
+                         "path from the test set into a training artefact")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+    # THE EVALUATION LEG IS NEVER A SOURCE. `s2_amc_ping_1102a` is the corpus every ruler and HARQ measurement replays,
+    # so reading an index from it -- even just to look up an iteration count -- would be one more path from the test set
+    # into a training artefact. It is excluded by default and the exclusion is announced, not silent.
+    excluded = set(args.exclude_leg or ["s2_amc_ping_1102a"])
 
     files = sorted(f for f in os.listdir(args.directory) if f.endswith(".npz"))
     if args.limit:
@@ -86,6 +94,9 @@ def main():
         if leg is None:
             print(f"skip (unparsable name): {name}")
             stats["bad-name"] += 1
+            continue
+        if leg in excluded:
+            stats["excluded-leg"] += 1
             continue
         key = (leg, pop)
         if key not in cache:
@@ -115,6 +126,7 @@ def main():
         stats[f"written-{source}"] += 1
         if i % 50 == 0 or i == len(files):
             print(f"  {i}/{len(files)}: {dict(stats)}", flush=True)
+    print(f"excluded legs: {sorted(excluded)}")
     print(f"done: {dict(stats)}")
 
 
