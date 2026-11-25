@@ -1532,3 +1532,38 @@ ls /tmp | wc -l
 ★ 全库已可按 `iterations ≥ 4` 抽"难题训练集"；★ **amc 母集的 critical 密度是 mcs 的 1.9 倍**（30.2% vs 15.8%，旧腿口径），
 ★ 抽集时**必须排除 1102a**（已由 `backfill_iterations.py --exclude-leg` 与母集内容双重保证）。
 
+---
+
+## 26. ★★★★★★ 2026-11-25 20:15 **为什么历史归档里没有 `tb_live/`：它的内容已经进了 **dump 的 `tb/`**（不是被丢弃）**
+
+**(a) ★★ 问题**
+
+★ 新采集的 67 条腿都有 `tb_live/`（`1124l` 一条就 44 GB），但历史归档（mcs 与老 amc，共 102 个）**只留 `logs/`、`tb_live/` 三个空目录条目**（手册 §16.2 的核对式 `members − manifest_files − AppleDouble == 3` 就是证据）。
+
+**(b) ★★ 答案：`tb_live` 的比特已经被 `harq_backfill.py --live-tb` **复制进 dump 的 `tb/`**，而 dump 是被归档的**
+
+| 证据 | 数值 |
+|---|---|
+| ★ dump 目录里有 `index_harq_only.csv` | ★ **3 884 行**（回填确实跑过）|
+| ★ dump 的 `tb/*.bits` | ★ **44 584 个** |
+| ★ `index.csv` 里自己解出的单元 | ★ **38 158 个** |
+| ★ **差** | ★ **6 426 个** ＝ ★ **从 `tb_live` 恢复出来的 HARQ 样本地** |
+| ★ tb 归档内容 | ★ `tb/`（82 743 项）＋ `index.csv`、`index_self.csv`、`index_harq.csv`、`index_harq_only.csv`、`units.txt` ✓ |
+
+**⇒ 所以：★ `tb_live` 的信息**没有丢**——它在 `<dump>/tb/` 里，而 `<dump>` 被完整归档到 `s2_amc_tb_tarballs/tb_<腿>.tar.gz`。**
+
+**(c) ★ 历史做法的逻辑（现在说得通）**
+
+1. ★ 采集时 gNB 写 `tb_live/`（活链合并解码的产物，离线不可重建）；
+2. ★ 建库时 `harq_backfill --live-tb` 把其中**每个可用 TB 的比特复制**到 `<dump>/tb/`，并写 `index_harq_only.csv`；
+3. ★ 归档时**只归档 dump**（含复制过来的比特）与**原始捕获**，`tb_live/` 原始目录**不需要再存一份**；
+4. ★ ⇒ 手册 §16.2 的 "3 个目录条目" 正是这个意思：留空壳、不存内容。
+
+**(d) ★ 因此归档规则（与历史一致，且有据）**
+
+| 目录 | 是否入档 | 理由 |
+|---|---|---|
+| ★ `cap_*` ＋ `._*` | ✓ | 原始捕获，不可重建 |
+| ★ `<dump>/tb/` ＋ 索引 | ✓ | ★ **含 `tb_live` 恢复出的 HARQ 比特** ⇒ `tb_live` 的内容在此 |
+| `tb_live/`、`logs/` | ✗（只留空目录条目）| 前者已复制进 dump，后者是运行日志 |
+
