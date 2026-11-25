@@ -31,7 +31,12 @@ written = 0
 nonzero = 0
 combined = 0
 first_error = None
-with open(out_csv, "w", newline="") as fh:
+# THE OUTPUT IS WRITTEN BESIDE ITS DESTINATION AND ONLY MOVED INTO PLACE IF THE RUN IS TRUSTWORTHY, because a retry
+# that fails EVERY unit used to overwrite a good CSV with all-KO rows. That happened more than once: the measurement
+# survived only in a document, and the file that "held" it said 348 KO. A stale-but-good file plus a loud failure is
+# strictly better than a fresh file that quietly means nothing.
+tmp_csv = out_csv + ".partial"
+with open(tmp_csv, "w", newline="") as fh:
     w = csv.writer(fh)
     w.writerow(["unit", "status", "bits"])
     for r in rows:
@@ -67,6 +72,22 @@ with open(out_csv, "w", newline="") as fh:
         if written % 100 == 0:
             print(f"{written}/{len(rows)}", flush=True)
 
+with open(tmp_csv) as fh:
+    ok_units = sum(1 for row in csv.DictReader(fh) if row["status"] == "OK")
+previous_ok = 0
+if os.path.exists(out_csv):
+    with open(out_csv) as fh:
+        previous_ok = sum(1 for row in csv.DictReader(fh) if row["status"] == "OK")
+trustworthy = ok_units > 0 or previous_ok == 0
+if trustworthy:
+    os.replace(tmp_csv, out_csv)
+else:
+    kept = out_csv + ".allko"
+    os.replace(tmp_csv, kept)
+    print(f"!! every unit came back KO ({len(rows)}) and the existing {out_csv} has {previous_ok} OK rows: "
+          f"NOT overwriting it; this run's rows are in {kept}", flush=True)
+    print(f"{out_csv}: n={len(rows)}, combined {combined} (kept the previous file)", flush=True)
+    sys.exit(2)
 print(f"{out_csv}: n={len(rows)}, combined {combined}")
 if rows and combined < len(rows):
     print(f"!! {len(rows) - combined}/{len(rows)} runs replayed only ONE reception: the donor was not found or not "
