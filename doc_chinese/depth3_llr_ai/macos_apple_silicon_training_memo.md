@@ -43,7 +43,7 @@
 | 设备 | `tf.config.list_physical_devices()` = `CPU:0` + `GPU:0`；插件自报 `systemMemory: 64.00 GB`、`maxCacheSize: 25.92 GB` | GPU 报"0 MB 显存"是正常（走统一内存） |
 | ★ 为什么锁 2.18 | Apple 的对照表把 `tensorflow-metal` 1.1/1.2 配在 **TF 2.14–2.18**；**2.19+ 没有配对** | `pip install tensorflow` 现在装 2.21 ⇒ **永远看不到 GPU** |
 | ★ 唯一可信的"用上 GPU 了吗"判据 | 训练器横幅 `platform: compute placement: a 64x64 matmul lands on GPU:0` | `list_physical_devices()` **不能**当判据：`--no-gpu` 后插件仍列出 `GPU:0`，但算子落 CPU |
-| 对照机 106 | Ubuntu，N 卡/CUDA，配方同 §2，实测 **28 min/轮**（快照间隔 09:50→13:05，8 轮） | ⚠ **106 的 GPU 型号未知**：旧记录称 106 无 GPU、107 是 RTX 3060 Laptop 6 GB（见机器 memo）。若能 `ssh 106 nvidia-smi`，本 memo §4 的峰值占比可换成硬数字 |
+| 对照机 106 | Ubuntu，**RTX 3060 Ti 8 GB**（雷电 3 外置盒，链路 PCIe 3.0 **x4**），配方同 §2，实测 **28 min/轮**（快照间隔 09:50→13:05，8 轮）| ★ 2026-11-24 的 `nvidia-smi` 确认：16.2 TFLOPS fp32 / 448 GB/s / 8 GB，batch 16 占 5.7 GB，util 86%、172/200 W。峰值占比、链路与换卡建议见 **`gpu_upgrade_memo.md`**（§4.2 的 20% 应按 16.2 TFLOPS 读，即 ≈17%）|
 | 训练集 | `~/ai_depth3/datasets_train_w2v3c`：**183 624 样本**，PRB 1–51（均值 14.2），qm 2/4/6/8 = 32 002/32 000/32 012/87 610，`X` 以 **float16** 存（612×64），目录 **22 GB**（mmap） | |
 | 验证集 | `~/ai_depth3/datasets_monitor_1102a`（108 样本，`--max-val 1000` 取小值） | |
 | 模型（配方） | `--c-hid 32 --blocks 36 --dense-blocks --dense-skip-entry --se --scale-init 0.03`，2 个输出头 ⇒ **496 345 参数** | 与 `training_recipes/ceb36_const_80.sh` 一致 |
@@ -316,7 +316,7 @@
 
 | # | 问题 | 怎么解 |
 |---|---|---|
-| 1 | **106 的 GPU 到底是什么型号/显存** | `ssh 106 nvidia-smi`；有了它，§4.2 的"20% 峰值"才能写成硬结论 |
+| 1 | ~~106 的 GPU 到底是什么型号/显存~~ | **已确认（2026-11-24）**：RTX 3060 Ti 8 GB，雷电 3 x4；峰值占比 ≈17%（fp32）、链路暴露 ≈20.5 ms/步 —— 详见 `gpu_upgrade_memo.md` |
 | 2 | 106 每轮 28 min 是否含验证/快照（该配方 `--no-val --monitor-every 10`，第 10 轮才校验）| 看 106 的日志；若含校验，纯训练略快 |
 | 3 | 更新版 `tensorflow-metal` 是否修好半精度 | 跟踪 PyPI；一旦修好，fp16/bf16 可能直接给 1.5–2×（这是唯一可能显著改变 Mac 结论的外部变量）|
 | 4 | 是否值得在 Mac 上换后端（PyTorch-MPS）| 需要重写训练代码与导出链，**当前性价比不划算**；只有当"必须在 Mac 上跑长跑"成为硬需求时再评估 |
