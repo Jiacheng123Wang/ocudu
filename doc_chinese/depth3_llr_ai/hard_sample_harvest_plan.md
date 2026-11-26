@@ -349,3 +349,46 @@ RV0 判定：
 | ★ ② 链式（`--also` 供体）cap20 | ★ **待实现**（复用 `measure_harq.py` 的调用形状）|
 | ★ RV0↔供体配对 | ★ **复用 `harq_backfill.py`**（rv=0 开链、按 (rnti,harq) 与短间隔归属）|
 
+---
+
+## 15. ★★★★★★★ 2026-11-26 19:00 **对齐建库流程：self/harq 的判定交给 `harq_backfill.py`，捞取只负责"把 cap 提高到 20 后多解出哪些"**
+
+**(a) ★ 建库流程（手册 §7，原样引用）**
+
+| 步 | 做什么 |
+|---|---|
+| 1 | ★ **`harq_backfill.py`** 给每单元打 **self / harq** 标 ⇒ 写 `index_self.csv`、`index_harq_only.csv` |
+| 2 | 扫捕获头统计实际调制（不从腿名推）|
+| 3 | 每个 (调制, 群体) 直接调 **`build_depth3_dataset.py`**（全量，不走抽样）|
+| 4 | **`check_depth3_dataset.py`** 审计 ⇒ `findings: none` |
+
+**(b) ★★ 所以捞取与建库"本质相同、只差 cap"**
+
+| 环节 | 建库（cap 6）| ★ 捞困难样本（cap 20）|
+|---|---|---|
+| 单元分类 | `harq_backfill.py` | ★ **同一脚本**（输入换成 cap 20 的判决）|
+| self 定义 | rv0 **单独** `crc=OK` | ★ 同 |
+| harq 定义 | rv0 **＋供体软合并**后 `crc=OK` | ★ 同 |
+| 重传 | **只是供体，不成样本** | ★ 同 |
+| builder | `build_depth3_dataset.py` | ★ 同 |
+| 审计 | `check_depth3_dataset.py` | ★ 同 |
+
+**(c) ★★ 因此捞取脚本只做一件事**
+
+> ★ **把每个 rv0 候选在 cap 20 下重放（单独 → 失败再链式），产出一份"cap 20 判决索引"**，
+> ★ 之后**完整走建库流程**（`harq_backfill.py` → builder → 审计），产物即 `_self_hard` / `_harq_hard`。
+
+**(d) ★ 工具落位（已移出 `/tmp`）**
+
+`doc_chinese/depth3_llr_ai/work_tmp/harvest/`：
+`extract_units.py`、`harvest_leg.sh`、`harvest_worker.sh`、`harvest_hard.py`、`pilot_harvest.py`、`README.md`
+（`/tmp` 重启会被清空，这些是**要复用的**，已入库）
+
+**(e) ★ 三条腿已跑出的结果（cap 20，仅"单独重放"阶段）**
+
+| 机器 | 腿 | KO 数 | 解出 | 命中率 | 回传 |
+|---|---|---|---|---|---|
+| 107 | `s2_amc_ping_1123z` | 16 224 | 1 251 | 7.7% | ✓ |
+| 211 | `s2_amc_ping_1121a` | 11 842 | 512 | 4.3% | 待回传 |
+| 126 | `w2_harq_1027` | 1 070 | 264 | 24.7% | ✓ |
+
