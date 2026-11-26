@@ -471,3 +471,39 @@ RV0 判定：
 
 ★ 试点 12.5%、实测 7.7%（107 全腿）、24.7%（w2）⇒ **远超计划门槛 1%**，全量值得做。
 
+---
+
+## 18. ★★★★★★★ 2026-11-26 20:30 **产物命名必须带原始采集腿名（与母集同构）**
+
+**(a) ★ 规则（照 `datasets_full_s2_amc` 的既有命名）**
+
+| 群体 | ★ 文件名 |
+|---|---|
+| self | ★ **`<腿>_<MOD>_self_hard.npz`** |
+| harq | ★ **`<腿>_<MOD>_harq_hard.npz`** |
+
+例：★ `s2_amc_ping_1123z_256QAM_self_hard.npz`、`s2_amc_ping_1123z_256QAM_harq_hard.npz`
+
+**⇒ 严禁 `self_hard_256.npz` 这类"看不出是哪条腿"的名字。**
+
+**(b) ★ 实现方式（builder 的两个参数）**
+
+```bash
+python3 build_depth3_dataset.py \
+  --units  <out>/index_<pop>_hard.csv \
+  --tb     <out>/tb \
+  --corpus <work>/<腿> \
+  --out    <目标目录> \
+  --name   <腿>_<MOD>_<pop>_hard \      # ★ 文件名由 --name 决定，默认是 depth3
+  --modulation <MOD> \
+  --min-prb 1
+```
+★ `--out` 是**目录**，`--name` 是**文件名主干**（默认 `depth3` ⇒ 默认产出 `depth3.npz`，这就是上一次命名混乱的原因）。
+
+**(c) ★ 审计**
+
+```bash
+python3 check_depth3_dataset.py --dir <目标目录>/<腿>_<MOD>_<pop>_hard.npz --full
+```
+★ 期望输出 **`findings none`**（`s2_amc_ping_1123z_256QAM_self_hard` 已验证通过）。
+
