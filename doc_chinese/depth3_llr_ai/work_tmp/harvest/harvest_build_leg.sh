@@ -62,7 +62,10 @@ one() {
     # attempt is skipped -- which is exactly how the harq half stayed empty while the chain file was correct.
     local d; d=$(awk -F, -v u="$u" '$1 == u { print $2 }' "$WORK/out/chains.txt" 2>/dev/null | head -1)
     if [ -n "$d" ] && [ -f "$WORK/$LEG/$d.bin" ]; then
-      local w2="$w/chain"
+      # THE DUMP DIRECTORY HAS TO EXIST BEFORE THE RUN. The standalone branch creates its own, this one did not, and the
+      # harness writes the recovered transport block into it -- so every chained decode that succeeded threw its bits
+      # away and the harq half came out with a population but no label data.
+      local w2="$w/chain"; mkdir -p "$w2"
       # THE COMBINED VERDICT IS THE LAST LINE, NOT THE FIRST. A chained run replays the first transmission and then the
       # donor through the same soft buffer, so it prints one result line per reception: the first is the candidate still
       # failing on its own (that is why it is a candidate), and the last is the block decoded with the donor's LLRs
