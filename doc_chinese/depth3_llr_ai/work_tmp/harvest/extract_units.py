@@ -5,8 +5,10 @@ fills the worker's disk with data the harvest will not touch. The harvest only r
 crc=KO, so this reads the tar once, sequentially, and writes the four files of each wanted unit (.txt, .bin, _h.bin,
 _ce.txt). Everything else is skipped without being written.
 
-Usage: extract_units.py <leg.tar.gz> <wanted_units.txt> <dest dir> [<leg name>]
-  wanted_units.txt: one unit name per line ("cap_...")
+Usage: extract_units.py <leg.tar.gz> <full_units.txt> <dest dir> [<leg name>] [--sidecar <sidecar_units.txt>]
+  full_units.txt:    units whose captures are needed (4 files each) -- the candidates and their donors
+  --sidecar:         units whose PDU sidecar is needed but whose captures are not -- the units the previous dump
+                     already decoded, which the chain bookkeeping still has to see but never has to replay
   dest dir receives <leg name>/<unit>.<ext> (leg name defaults to the tar's basename minus ".tar.gz")
 """
 import os
@@ -20,9 +22,14 @@ SUFFIXES = ("_ce.txt", "_h.bin", ".txt", ".bin")
 
 
 def main():
-    tar_path, want_path, dest = sys.argv[1], sys.argv[2], sys.argv[3]
-    leg = sys.argv[4] if len(sys.argv) > 4 else os.path.basename(tar_path).replace(".tar.gz", "")
-    want = {line.strip() for line in open(want_path) if line.strip()}
+    argv = [a for a in sys.argv[1:] if not a.startswith("--sidecar")]
+    sidecar_arg = next((a for a in sys.argv[1:] if a.startswith("--sidecar")), None)
+    tar_path, want_path, dest = argv[0], argv[1], argv[2]
+    leg = argv[3] if len(argv) > 3 and not argv[3].startswith("--") else os.path.basename(tar_path).replace(".tar.gz", "")
+    full = {line.strip() for line in open(want_path) if line.strip()}
+    sidecar = {line.strip() for line in open(sidecar_arg.split("=", 1)[1]) if line.strip()} \
+        if sidecar_arg and "=" in sidecar_arg else set()
+    want = full | sidecar
     outdir = os.path.join(dest, leg)
     os.makedirs(outdir, exist_ok=True)
 
@@ -38,6 +45,11 @@ def main():
                     stem = base[: -len(suf)]
                     break
             if stem is None or stem not in want:
+                continue
+            # SIDECARS ONLY FOR THE UNITS THE DUMP ALREADY DECODED: their .txt carries the rnti/harq/rv that the chain
+            # bookkeeping needs, and their samples already carry labels, so their captures would be dead weight on the
+            # worker's disk.
+            if stem in sidecar and stem not in full and not base.endswith(".txt"):
                 continue
             fh = tar.extractfile(member)
             if fh is None:
