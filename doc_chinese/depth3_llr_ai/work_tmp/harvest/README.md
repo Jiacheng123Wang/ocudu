@@ -3,18 +3,39 @@
 > 设计文档：`../../hard_sample_harvest_plan.md`
 > 与建库流程（`../../corpus_to_training_to_measurement_db_manual.md` §7）**同构**，唯一区别是 **LDPC 迭代上限 6 → 20**。
 
+## 现行工具（只用这三个）
+
 | 文件 | 作用 |
 |---|---|
-| `extract_units.py` | 从语料 tar 里**只解出需要的单元**（4 个文件），避免解整腿 |
-| `harvest_leg.sh` | 单机跑一腿：读 dump 索引 → 只对 KO 单元重放（cap 20）→ 写 `index_hard.csv` |
-| `harvest_worker.sh` | 工作机端到端：拉 tar → 捞 → 回传 211 → **校验字节数** → 删本地临时 |
-| `harvest_hard.py` | 实验版：**rv0 单独 → 失败再用供体链式**，直接产出 `self` / `harq` 两群 |
-| `pilot_harvest.py` | 试点用：同一单元在多个 cap 下重放，算翻转率 |
+| `extract_units.py` | 从语料 tar 里只解出需要的单元；`--sidecar=<list>` 只解 `.txt`（原 OK 单元，永不重放）|
+| `harvest_build_leg.sh` | ★ **单腿端到端**：整腿 sidecar → 候选(rv0∧未解出) → 供体映射 → 解采样 → cap20 单独/链式重放 → `out/index_cap20.csv` + `out/tb/` |
+| `harvest_worker.sh` | 工作机调度：拉 tar → 调 `harvest_build_leg.sh` → 回传 211 → **字节校验** → 删本地 |
 
-## 关键事实（实测）
+## 已退役（2026-11-26，避免误用）
 
-- ★ **只跑 KO 单元**：索引里 `crc=OK` 的一律不碰；
-- ★ **`crc=no` 的两类**：`new_data=0` 的重传**无法单独重放**（HARQ 软缓冲预留失败 `cannot reserve a receive buffer`），
-  `new_data=1` 的首传才是真候选；
-- ★ **harq 样本的定义**（与全库母集一致）：**rv0 采集 ＋ 供体软合并** 后 `crc=OK`，重传本身**永远不是样本**；
-- ★ 产物按 `self` / `harq` 分群，与 `<腿>_<MOD>_self.npz` / `_harq.npz` 同构。
+| 文件 | 为什么退役 |
+|---|---|
+| `harvest_leg.sh` | 只做"单独重放"，没有链式 ⇒ **harq 半场永远为空**；已被 `harvest_build_leg.sh` 取代 |
+| `harvest_hard.py` | 实验版链式实现，链映射与目录约定不一致，已被上面的脚本取代 |
+
+## 关键事实（实测，2026-11-26）
+
+| 事实 | 数值/说明 |
+|---|---|
+| ★ **只跑 KO 单元** | 索引 `crc=OK` 一律跳过（名单来自归档 tb dump 的 `index.csv`）|
+| ★ `crc=no` 分两类 | `new_data=0`＝重传，**单独重放必然失败**（HARQ 软缓冲预留失败）；`new_data=1`＝真候选 |
+| ★ **harq 样本定义** | rv0 采集 ＋ 供体软合并后 `crc=OK`；**重传永远不是样本** |
+| ★ 链式判决取**最后一行** | 链式一次跑两次接收，前一行是候选自己（仍 KO），最后一行才是合并结果 |
+| ★ **1102a 一律排除** | 测试腿，不得进入任何训练侧路径 |
+
+## 校验（cap6 复现，2026-11-26）
+
+对 `s2_amc_ping_1121a` 抽 5 000 单元（2 500 OK ＋ 2 500 非 OK）用 cap 6 重放，与归档索引对照：
+
+| 归档 | 本次 | 数量 |
+|---|---|---|
+| OK | OK | 2 500 |
+| no | no | 2 498 |
+| ★ **no** | ★ **OK** | ★ **2** |
+
+★ **一致率 99.96%**；仅 2 个"归档无判决、本次能解"的差异（旧二进制更保守）。
