@@ -221,3 +221,52 @@ unsigned replay_dec_nof_iterations() {
 4. ★ 判据：**新解出比例 ≥ 1%**（试点已 12.5% ⇒ 通过）；
 5. ★ 产物与现有母集**只增不改**。
 
+---
+
+## 12. ★★★★★★★ 2026-11-26 17:35 **更正：`iterations` 是**各 codeblock 的均值**，不是"这个 TB 需要多少次"——所以"cap=6 KO 却显示 4 次"不是 bug**
+
+**(a) ★★ 用户提出的逻辑质疑（成立）**
+
+> 若一个单元在 cap=6 下 KO、却在 cap=20 下报 `iterations=3..6`，那原 dump 就有问题——它没把 ≤6 次能解出的样本找出来。
+
+**(b) ★★★ 实测澄清：那个 TB 有 **5 个 codeblock**
+
+| cap | `on_sch` | 输出行 |
+|---|---|---|
+| **6** | ★ `crc=0`（TB 失败）| ★ `crc=KO iterations=4` |
+| **7** | ★ `crc=1`（TB 成功）| ★ `crc=OK iterations=5` |
+
+```
+geometry: tbs=4612 B (36896 bits), bg=1, 5 codeblock(s) reserved
+```
+
+**⇒ 5 个 CB 里**最差的那个需要 7 次**；cap=6 时它失败 ⇒ TB 判 KO（**原 dump 正确**）。**
+
+**(c) ★★★ `iterations` 是**均值**（源码位置）**
+
+```cpp
+// ul_chain_replay.cpp
+nof_iters = sch.data.ldpc_decoder_stats.get_nof_observations() != 0
+                ? sch.data.ldpc_decoder_stats.get_mean() : 0.0F;
+```
+
+且 `pusch_decoder_result.h` 明写：*"the **average** number of iterations for correctly decoded codeblocks"*。
+
+**⇒ 所以"4"完全可以是"4 个 CB 各 3 次 ＋ 1 个 CB 需 7 次"的均值 ⇒ **均值不能用来判断"是否在 6 次内能解出"**。**
+
+**(d) ★★ 因此计划的两点修订**
+
+| 项 | 修订 |
+|---|---|
+| ★ 1 | ★ **难度标签用 `hard=1`**（cap6 KO → cap20 OK），**不**用 `iterations` 判难度 |
+| ★ 2 | ★ **新增 `iterations_max` 字段**：replay 的统计对象本身就有 `get_max()` ⇒ 把"最差 codeblock 的迭代数"也输出，母集可存两列（均值 ＋ 最大值）|
+
+**(e) ★ `iterations_max` 的实现范围**
+
+| 层 | 改动 |
+|---|---|
+| `ul_chain_replay.cpp` | 输出行加 `iterations_max=%u`；`OCUDU_REPLAY_CSV` 加一列 |
+| `dump_tb.sh` | 解析并写入 `index.csv` 的新列 |
+| `build_depth3_dataset.py` | 母集里新增 `iterations_max.npy`（与 `iterations.npy` 并列）|
+| 兼容性 | ★ 旧索引没有该列 ⇒ 取 `-1`（未知），与 `iterations` 的口径一致 |
+
