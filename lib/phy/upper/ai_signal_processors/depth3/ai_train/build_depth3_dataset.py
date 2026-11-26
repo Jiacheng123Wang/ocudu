@@ -297,7 +297,13 @@ def candidate_units(index_path, tb_dir, corpus_dir, modulation, min_prb, min_slo
             # (1-2 iterations is a block any receiver gets; 4+ is where the AI's losses live). It costs one integer
             # per sample and is the only difficulty signal the dump records, so it travels with the sample.
             iterations = int(fields[4]) if len(fields) > 4 and fields[4].isdigit() else -1
-            units.append((name, prefix, cfg, alloc, tb_path, iterations))
+            # THE WORST CODEBLOCK'S ITERATION COUNT, when the index carries it (column 5, 2026-11-26 onward). The
+            # `iterations` above is the mean over the transport block's codeblocks and therefore hides a hard member
+            # behind easy ones: a five-codeblock block whose hardest member needed seven iterations reports a mean of
+            # four. `-1` means the index predates the column, the same convention `iterations` uses for an index that
+            # predates its own.
+            iterations_max = int(fields[5]) if len(fields) > 5 and fields[5].isdigit() else -1
+            units.append((name, prefix, cfg, alloc, tb_path, iterations, iterations_max))
     return units
 
 
@@ -844,7 +850,7 @@ def main():
 
     snrs = [float(x) for x in args.snrs.split(",") if x] if args.snrs else []
     samples, names, skipped = [], [], []
-    for index, (name, prefix, cfg, alloc, tb_path, iterations) in enumerate(units):
+    for index, (name, prefix, cfg, alloc, tb_path, iterations, iterations_max) in enumerate(units):
         points = list(snrs) if snrs else [None]
         if args.include_natural and snrs:
             points = [None] + points
@@ -871,6 +877,7 @@ def main():
                 continue
             sample["source"] = 0 if args.source == "real" else 1
             sample["iterations"] = iterations
+            sample["iterations_max"] = iterations_max
             if args.source == "real":
                 # Record what the chain measured; nothing is added to the grid.
                 sample["snr_nominal"] = np.float32(measured_snr_db(prefix))

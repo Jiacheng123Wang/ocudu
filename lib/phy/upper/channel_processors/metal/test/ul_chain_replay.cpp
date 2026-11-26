@@ -136,7 +136,7 @@ FILE* replay_csv()
       }
       csv = std::fopen(path, "a");
       if ((csv != nullptr) && empty) {
-        std::fprintf(csv, "capture,slot,rnti,modulation,nof_prb,sinr_db,crc,iterations,tbs_bytes\n");
+        std::fprintf(csv, "capture,slot,rnti,modulation,nof_prb,sinr_db,crc,iterations,iterations_max,tbs_bytes\n");
       }
     }
   }
@@ -373,6 +373,7 @@ public:
     nof_iters   = static_cast<unsigned>(sch.data.ldpc_decoder_stats.get_nof_observations() != 0
                                             ? sch.data.ldpc_decoder_stats.get_mean()
                                             : 0.0F);
+    nof_iters_max = sch.data.ldpc_decoder_stats.get_max();
     nof_cbs     = sch.data.nof_codeblocks_total;
     sinr_db     = sch.csi.get_sinr_dB().has_value() ? *sch.csi.get_sinr_dB() : 0.0F;
     epre_db     = sch.csi.get_epre_dB().has_value() ? *sch.csi.get_epre_dB() : 0.0F;
@@ -385,6 +386,11 @@ public:
   bool  uci_ok    = false;
   unsigned nof_bits = 0;
   unsigned nof_iters = 0;
+  /// Worst codeblock's LDPC iteration count. `nof_iters` above is the MEAN over the transport block's codeblocks, and
+  /// a mean hides exactly the case that decides a verdict: a five-codeblock TB whose four blocks converge in three
+  /// iterations and whose fifth needs seven reports a mean of four and fails at a cap of six. The max is the number that
+  /// says how close the hardest block was, which is what a difficulty label wants.
+  unsigned nof_iters_max = 0;
   unsigned nof_cbs = 0;
   float sinr_db = 0.0F;
   float epre_db = 0.0F;
@@ -1752,7 +1758,7 @@ int main(int argc, char** argv)
       // be cut by (modulation, width, snr) is enough; the bit error rate still needs a receiver-side probe, which is why
       // it is not a column yet rather than a column filled with a guess.
       if (FILE* csv = replay_csv()) {
-        std::fprintf(csv, "%s,%u,%u,%s,%u,%.2f,%s,%u,%u\n",
+        std::fprintf(csv, "%s,%u,%u,%s,%u,%.2f,%s,%u,%u,%u\n",
                      // THE CAPTURE'S OWN NAME, not the first prefix: with `--also` one process replays several
                      // captures, and naming every row after the first one made the round-robin runs unusable.
                      std::strrchr(capture_prefix.c_str(), '/') != nullptr
@@ -1767,10 +1773,11 @@ int main(int argc, char** argv)
                      spy.sinr_db,
                      spy.crc_ok ? "OK" : "KO",
                      spy.nof_iters,
+                     spy.nof_iters_max,
                      tbs);
         std::fflush(csv);
       }
-      std::printf("  [%u] tbs=%u slot=%u rnti=%u %s: crc=%s iterations=%u sinr=%.2f dB epre=%.2f dB rsrp=%.2f dB\n",
+      std::printf("  [%u] tbs=%u slot=%u rnti=%u %s: crc=%s iterations=%u iterations_max=%u sinr=%.2f dB epre=%.2f dB rsrp=%.2f dB\n",
                   i,
                   tbs,
                   hop_pdu[k].slot.count(),
@@ -1780,6 +1787,7 @@ int main(int argc, char** argv)
                   capture.get_string("modulation", "?").c_str(),
                   spy.crc_ok ? "OK" : "KO",
                   spy.nof_iters,
+                  spy.nof_iters_max,
                   spy.sinr_db,
                   spy.epre_db,
                   spy.rsrp_db);

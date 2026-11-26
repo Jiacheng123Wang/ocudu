@@ -11,7 +11,7 @@
 # the CLASSICAL receiver's verdict, so the pipeline and the backend are pinned to cpu/classic rather than left to a
 # default that could quietly measure the AI arm instead.
 #
-# Output (all under --out):  tb/<unit>.bits, index.csv  (unit,tb_bits,crc,sinr_db,iterations,slot)
+# Output (all under --out):  tb/<unit>.bits, index.csv  (unit,tb_bits,crc,sinr_db,iterations,iterations_max,slot)
 # Usage: dump_tb.sh [--corpus DIR] [--out DIR] [--limit N] [--binary PATH] [--jobs N] [unit-dir ...]
 #
 # --jobs N runs N units at a time. Each unit is one replay process, so this is where the machine's cores are spent: the
@@ -46,7 +46,7 @@ done
 
 mkdir -p "$OUT/tb" "$OUT/stage" "$OUT/raw"
 : > "$OUT/index.csv"
-echo "unit,tb_bits,crc,sinr_db,iterations,slot,tbs_bytes" >> "$OUT/index.csv"
+echo "unit,tb_bits,crc,sinr_db,iterations,iterations_max,slot,tbs_bytes" >> "$OUT/index.csv"
 
 n_attempt=0
 n_ok=0
@@ -67,7 +67,7 @@ one_unit() {
            --phy_pipeline cpu --pusch_receiver_backend classic --out "$out/stage/$name" 2>/dev/null \
          | grep -E '^\s*\[0\]' | head -1)
 
-  local slot crc=no sinr="" iters="" tbbits=0 tbs=""
+  local slot crc=no sinr="" iters="" itersmax="" tbbits=0 tbs=""
   slot=$(grep -m1 '^slot=' "$meta" | cut -d= -f2)
   local tb
   tb=$(ls "$work"/tb_*.bits 2>/dev/null | head -1)
@@ -79,10 +79,14 @@ one_unit() {
     case "$line" in *"crc=OK"*) crc=OK ;; esac
     sinr=$(printf '%s' "$line"  | sed -n 's/.*sinr=\([-0-9.]*\) dB.*/\1/p')
     iters=$(printf '%s' "$line" | sed -n 's/.*iterations=\([0-9]*\).*/\1/p')
+    # THE WORST CODEBLOCK'S ITERATION COUNT. `iterations` above is the mean over the transport block's codeblocks, so a
+    # five-codeblock block whose hardest member needed seven reports a mean of four -- which is why the harvest cannot
+    # use the mean as a difficulty label. This column keeps that number.
+    itersmax=$(printf '%s' "$line" | sed -n 's/.*iterations_max=\([0-9]*\).*/\1/p')
     tbs=$(printf '%s' "$line" | sed -n 's/.*tbs=\([0-9]*\).*/\1/p')
   fi
   rm -rf "$work"
-  printf '%s,%s,%s,%s,%s,%s,%s\n' "$name" "$tbbits" "$crc" "$sinr" "$iters" "$slot" "$tbs" > "$out/rows/$name.row"
+  printf '%s,%s,%s,%s,%s,%s,%s,%s\n' "$name" "$tbbits" "$crc" "$sinr" "$iters" "$itersmax" "$slot" "$tbs" > "$out/rows/$name.row"
 }
 export -f one_unit
 
