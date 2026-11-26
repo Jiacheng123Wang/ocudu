@@ -270,3 +270,33 @@ nof_iters = sch.data.ldpc_decoder_stats.get_nof_observations() != 0
 | `build_depth3_dataset.py` | 母集里新增 `iterations_max.npy`（与 `iterations.npy` 并列）|
 | 兼容性 | ★ 旧索引没有该列 ⇒ 取 `-1`（未知），与 `iterations` 的口径一致 |
 
+---
+
+## 13. ★★★★★★★ 2026-11-26 18:00 **产物必须按 self / harq 分类（与全库母集同构）**
+
+**(a) ★ 要求**
+
+捞回来的困难样本**不能只汇成一个池**：母集是按 `<腿>_<MOD>_self.npz` 与 `<腿>_<MOD>_harq.npz` 分开的，
+困难样本也必须同样分成 **`_self_hard`** 与 **`_harq_hard`**。
+
+**(b) ★ 判定依据（每个单元的三个字段）**
+
+| 字段 | 来源 | 用途 |
+|---|---|---|
+| `harq_id` | 采集 `.txt` | HARQ 进程号 |
+| `rv` | 采集 `.txt` | 冗余版本；**`rv > 0` 即重传** |
+| ★ **`new_data`** | ★ 采集 `.txt` | ★ **首传标志** ⇒ ★ **`new_data=1` → self；`new_data=0` → harq** |
+
+**⇒ `harvest_leg.sh` 已把这三列写进 `index_hard.csv`（列序：`unit,crc,iterations,iterations_max,tb_bits,harq_id,rv,new_data`）。**
+
+**(c) ★ 母集产物（每腿最多 8 个文件）**
+
+| 群体 | 文件名 |
+|---|---|
+| ★ self（首传）| ★ `<腿>_<MOD>_self_hard.npz` |
+| ★ harq（重传）| ★ `<腿>_<MOD>_harq_hard.npz` |
+
+**(d) ★ 与现有母集的关系**
+
+★ 只增不改：现有 `<腿>_<MOD>_self.npz` / `_harq.npz` 不动；`_hard` 作为**独立群体**并入抽集。
+
