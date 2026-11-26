@@ -612,7 +612,7 @@ def assemble(samples, keys_arrays):
     out["tb_bits"] = transport
     for name in ("nof_bits", "nof_tb_bits", "alloc_first_prb", "alloc_nof_prb", "dmrs_bitmap",
                  "qm", "snr_nominal", "rnti", "n_id", "rv", "uci_nof_harq_ack", "uci_ack_re",
-                 "uci_ack_rvd_re", "uci_csi1_re", "iterations"):
+                 "uci_ack_rvd_re", "uci_csi1_re", "iterations", "iterations_max"):
         out[name] = np.array([s[name] for s in samples])
     out["source"] = np.array([s["source"] for s in samples], dtype=np.uint8)
     out["unit"] = np.array(keys_arrays, dtype=object)
