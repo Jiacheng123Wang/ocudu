@@ -439,3 +439,32 @@ runbook 现在与代码（`dump_tb.sh` 两段、`dump_harq_chains.py --tb-out`�
 
 另：新 `index_harq_only.csv` 有 **24 行**合并迭代数为空 —— 那些链的链回放没解出来、而旧语料的 `dd_meta` 又没有迭代列，
 所以数值未知（留空，不填 6）。
+
+---
+
+## 9. 2026-11-27 10:20 **修正 §8**：`~/ai_depth3/corpus` 是符号链接，不是副本
+
+§8 写的「新 `~/ai_depth3/corpus/tb_s2_amc_iperf_1103i`（= T7 的逐字节副本）」**说法错了**：
+
+```
+$ ls -ld ~/ai_depth3/corpus
+lrwxr-xr-x  ... /Users/jiachengwang/ai_depth3/corpus -> /Volumes/T7_Corpus/corpus
+
+$ stat -f "%i %N" ~/ai_depth3/corpus/tb_s2_amc_iperf_1103i /Volumes/T7_Corpus/corpus/tb_s2_amc_iperf_1103i
+107949500 .../ai_depth3/corpus/tb_s2_amc_iperf_1103i
+107949500 /Volumes/T7_Corpus/corpus/tb_s2_amc_iperf_1103i
+```
+
+同一个 inode ⇒ **同一个物理目录，两条路径**，磁盘上只有一份 dump（185 MiB），没有"两份副本"可言（§8 里那句
+"要不要删掉重复副本"的提议也随之作废）。
+
+对 §8 的对照结论**没有影响**：对照的另一侧 `~/ai_depth3/dump_s2_amc/tb_s2_amc_iperf_1103i` 是
+**本机磁盘上的真实目录**（inode 不同、2026-11-04 生成、7 列、42 718 块），与 T7 这份（2026-11-27、8 列、42 722 块）
+确实是两棵不同的树。
+
+顺带两条实用事实：
+
+- **旧 dump 的 `units.txt` 仍然可用**：它写的是 `~/ai_depth3/corpus/...` 路径，经符号链接解析到
+  `/Volumes/T7_Corpus/corpus/...`，同一份采集（抽第一个单元验证：文件存在）。
+- **新的 dump 用 `/Volumes/T7_Corpus/corpus` 作为 `--corpus`**，所以它的 `units.txt` 与旧的只是路径拼写不同；
+  两条路径都指向同一批文件，下游按哪个都能取到，但**同一批产物里不要混用两种拼写**（会白算"两个语料根"）。
