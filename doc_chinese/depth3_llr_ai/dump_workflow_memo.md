@@ -276,3 +276,5 @@ chain_iters.csv                                      # 链回放审计（0.44 Mi
 - `lib/phy/upper/ai_signal_processors/depth3/ai_train/dump_harq_chains.py`（`--tb-out`）
 - `lib/phy/upper/ai_signal_processors/depth3/ai_train/harq_backfill.py`（链比特当标签来源、自动读 chain_iters）
 - `doc_chinese/depth3_llr_ai/single_leg_dump_runbook.md`（§1.2 / §5.2 / §5.5 新节 / §6.2 / §7.2 / §7.3）
+
+> 本节与 §1/§2 的代码改动已提交并推送：`15c36de374`（2026-11-27，`origin/apple-silicon`）。
