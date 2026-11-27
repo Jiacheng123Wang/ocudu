@@ -49,6 +49,8 @@ mark() { echo "$1,$2,$3,$4,$5,$(date '+%Y-%m-%dT%H:%M:%S')" >> "$PROGRESS"; }
 done_leg() { awk -F, -v l="$1" '$1==l && $2=="ok"{f=1} END{exit !f}' "$PROGRESS"; }
 failed_twice() { [ "$(awk -F, -v l="$1" '$1==l && $2=="failed"{n++} END{print n+0}' "$PROGRESS")" -ge 2 ]; }
 findings_ok() { awk '/--- findings ---/{getline; if ($0 ~ /none/) ok=1} END{exit !ok}' "$1"; }
+# EXCLUDE is a list; comparing one leg against the whole string would match nothing.
+is_excluded() { local x; for x in $EXCLUDE; do [ "$1" = "$x" ] && return 0; done; return 1; }
 
 # A dump is finished when the marker is there AND the products agree with the counts next to it.
 dump_finished() {
@@ -125,7 +127,7 @@ while :; do
     [ -d "$d" ] || continue
     leg=${d##*/tb_}
     case "$leg" in "$PREFIX"*) ;; *) continue ;; esac
-    [ "$leg" = "$EXCLUDE" ] && continue
+    is_excluded "$leg" && continue
     dump_finished "$d" || continue
     if done_leg "$leg"; then continue; fi
     if failed_twice "$leg"; then

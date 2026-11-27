@@ -450,9 +450,9 @@ manifest（一条腿一份，便于全库汇总）：**§5.2 的对账脚本已�
 | 项 | 值 |
 |---|---|
 | 211 上的 s2_amc 归档 | **102 条腿**（`s2_amc_iperf_1103*` 7 ＋ `s2_amc_ping_1102*` 20 ＋ `ping_1103*` 8 ＋ `ping_1121*` 17 ＋ `ping_1123*` 35 ＋ `ping_1124*` 15）|
-| ★ **必须排除** | **`s2_amc_ping_1102a`** —— 评测保留腿（ruler 5 000／probe 500／full leg 的唯一来源）；进了母集，任何 `glob` 抽取都会把它混进训练 |
-| 可建库腿数 | **101** |
-| 预计体积 | 101 × 2.3 GB ≈ **235 GB**（Eaget_HD 剩 953 GiB）|
+| ★ **必须排除（4 条）** | **`s2_amc_ping_1102a`**（ruler 5 000／probe 500／full leg 的唯一来源）＋ **`1121a`／`1121b`／`1121c`**（评估腿，手册 §8.1b(e)：*评估腿绝不能被抽进训练集*）。它们的采集与 cap-6 dump 都在 `~/ai_depth3/full_leg_measurement/`，`dumps/` 里是**只有索引、没有 `tb/`** 的测量 dump，本来就建不出母集 |
+| 可建库腿数 | **98**（102 − 4） |
+| 预计体积 | 98 × 2.3 GB ≈ **225 GB**（Eaget_HD 剩 953 GiB）|
 
 ### 6.2 顺序：**dump 完成 → 建库 → 回收**（raw 必须留到建库之后）
 
@@ -544,7 +544,7 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/watch_dumps_build.sh --d
 | 行为 | 说明 |
 |---|---|
 | 扫描 | 每 `POLL`（默认 120 s）扫一次 `$CORPUS/tb_s2_amc_*`（前缀过滤，不会碰 mcs/w2 的 dump）|
-| 跳过 | `s2_amc_ping_1102a`（评测保留）、进度表里 `ok` 的腿、**失败两次**的腿 |
+| 跳过 | `EXCLUDE` 里的四条评估腿（`1102a`、`1121a/b/c`）、进度表里 `ok` 的腿、**失败两次**的腿 |
 | 并发 | **一次只建一条**（§6.3 的结论）；建库期间不扫盘，建完立刻扫下一轮 |
 | 回收 | 建库成功后删该腿的采集（`RECLAIM=1`）——dump 批处理在 20 GiB 守卫处等空间，这是唯一能放行它的动作 |
 | 失败 | 半成品 npz 移到 `_trash_<leg>_<ts>/`，记 `failed`；连败两次停下等人 |
@@ -552,6 +552,9 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/watch_dumps_build.sh --d
 
 ★ **手工建过的腿要补一行 `ok`**：监控只认进度表，不认磁盘上的 npz。1103i 是手工建的，补一行
 `s2_amc_iperf_1103i,ok,…,8,41987,…` 才不会重跑（重跑会覆盖 2.3 GB、白费 40 分钟）。
+
+★ `EXCLUDE` 是**空格分隔的列表**，判据必须逐个比：`[ "$leg" = "$EXCLUDE" ]` 拿单条腿和整串比，**永远不会命中**
+（这个 bug 真的写出来过，坑 #21）。
 
 ---
 
@@ -612,6 +615,7 @@ find /Volumes/Eaget_HD/datasets_full_s2_amc -name '*_part*.npz' -print    # 应�
 | 18 | 旧 7 列 dump 建出来的 `iterations_max` 等于 slot | 以前按**列位置**读第 5 列，而旧索引的第 5 列是 `slot`（`REQUIRE_ITERATIONS` 也拦不住：slot 是正数）| **已改为按列名解析**；旧 dump 现在得到 `-1` 并被拒绝。遇到 7 列索引就换 dump，不要绕过 |
 | 19 | 监控**永远不启动**建库 | 完成判据写成 `tb == self + harq`，漏了 harq 中间成员（1103i 差 714 个）| 用 `tb_blocks=`；四条判据见 §6.7 |
 | 20 | 手工建过的腿被监控重跑 | 进度表里没有它（监控只认进度表）| 补一行 `ok`（§6.7 末）|
+| 21 | 监控把评估腿也建了 | `EXCLUDE` 是列表，却用 `[ "$leg" = "$EXCLUDE" ]` 整串比较 | 逐个比较（`is_excluded`）；评估腿清单见 §6.1 |
 
 ---
 
@@ -699,8 +703,8 @@ PROGRESS=$OUT/_progress.csv
 CONC=${CONC:-3}
 MIN_FREE_GIB=${MIN_FREE_GIB:-60}
 RECLAIM=${RECLAIM:-1}      # 建库成功后删掉该腿的 raw（重建时从 211 再解包即可）
-# 评测保留腿：永不入库（手册 §17/§24）
-EXCLUDE="s2_amc_ping_1102a"
+# 评估腿：永不入库（手册 §17 / §8.1b(e)）
+EXCLUDE="s2_amc_ping_1102a s2_amc_ping_1121a s2_amc_ping_1121b s2_amc_ping_1121c"
 
 mkdir -p "$LOGD" "$OUT"
 [ -f "$PROGRESS" ] || echo "leg,status,seconds,files,samples,finished_at" > "$PROGRESS"
@@ -708,6 +712,7 @@ done_leg() { awk -F, -v l="$1" '$1==l && $2=="ok"{f=1} END{exit !f}' "$PROGRESS"
 mark()     { echo "$1,$2,$3,$4,$5,$(date '+%Y-%m-%dT%H:%M:%S')" >> "$PROGRESS"; }
 # "findings: none" 是这一行（5 个空格 + none），紧跟在 "--- findings ---" 之后
 findings_ok() { awk '/--- findings ---/{getline; if ($0 ~ /none/) ok=1} END{exit !ok}' "$1"; }
+is_excluded() { local x; for x in $EXCLUDE; do [ "$1" = "$x" ] && return 0; done; return 1; }
 
 one_leg() {
   local leg=$1 start=$SECONDS rc n
@@ -749,7 +754,7 @@ legs=$(ssh "$REMOTE" "ls $TARDIR" | sed 's/\.tar\.gz$//' | sort)
 
 group=()
 for leg in $legs; do
-  [ "$leg" = "$EXCLUDE" ] && { echo "[skip] $leg (eval-reserved)"; continue; }
+  is_excluded "$leg" && { echo "[skip] $leg (eval-reserved)"; continue; }
   done_leg "$leg" && { echo "[skip] $leg (done)"; continue; }
   free=$(df -g "$CORPUS" | awk 'NR==2{print $4}')
   [ "${free:-0}" -lt "$MIN_FREE_GIB" ] && { echo "ABORT: ${free} GiB free on $CORPUS"; exit 3; }
