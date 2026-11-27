@@ -85,7 +85,16 @@ mkdir -p "$OUT/tb" "$OUT/stage" "$OUT/raw"
   echo "corpus=${CORPUS}"
   echo "out=${OUT}"
   echo "binary=${BINARY}"
-  echo "binary_mtime=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$BINARY" 2>/dev/null || echo unknown)"
+  # GNU stat (the Linux replay host) and BSD stat (the Mac) disagree about the flag: `-c '%y'` is GNU's,
+  # `-f '%Sm'` is BSD's, and GNU reads `-f` as "filesystem", succeeds, and fills the field with garbage --
+  # which defeats the `|| unknown` fallback and leaves the dump without a usable provenance stamp. Ask
+  # GNU first and cut its fractional seconds, so both branches print the same second-resolution form.
+  if binary_mtime=$(stat -c '%y' "$BINARY" 2>/dev/null); then
+    binary_mtime=$(printf '%s' "$binary_mtime" | cut -c1-19)
+  else
+    binary_mtime=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$BINARY" 2>/dev/null || echo unknown)
+  fi
+  echo "binary_mtime=${binary_mtime}"
   echo "jobs=${JOBS}"
   echo "with_harq=${WITH_HARQ}"
   echo "legs=${DIRS[*]:-}"
