@@ -628,3 +628,48 @@ LDPC 有 early termination，是否可以把 cap 提到 40、用很小的代价�
 ### 文档
 
 runbook：§0 ④、§5.1、**§5.7 重写**（默认 20 / 参考 6、两腿对照表、新样本分布、cap40 无收益）、§8 耗时行。
+
+---
+
+## 14. 2026-11-27 11:30 批量：211 上其余 100 条 s2_amc 腿（解包 → dump → 对照 cap6）
+
+### 做法（一条腿一条腿，后台低优先级）
+
+两个脚本（都在 `~/ai_depth3/`，与 `dump_1103.sh` 等运行脚本同处；**未入仓**，批跑结束后再决定是否移入 repository）：
+
+| 脚本 | 作用 |
+|---|---|
+| `run_s2_amc_batch.sh` | 对 211 上每条腿：从 tar.gz 流式解包 → `nice -n 19 dump_tb.sh`（默认 cap 20）→ 与 `~/ai_depth3/dump_s2_amc` 的 cap-6 dump 对照 → 删原始采集保 dump。可续跑（`dump_meta.txt` 有 `finished=` 即跳过；半成品 `mv` 到一边重做）|
+| `compare_cap6.py` | 对照并出一行 CSV：units / crc_ok / self / harq / ko / tb、KO→OK（flips）、OK→KO（regressions，必须 0）、`sinr_db/slot/tbs_bytes` 差异（必须 0）、共有比特数与 **md5 不一致数**（必须 0）、只在新/只在旧的比特数。判定 PASS / CHECK / noref |
+
+- 启动方式：`nohup nice -n 19 bash run_s2_amc_batch.sh >> logs_s2_amc_batch/batch.out 2>&1 &`（整棵树继承 nice 19；
+  按手册 §21 只用 `nice`，不用 `taskpolicy -b`）；
+- `--jobs 12`：与实测天花板一致（每进程内部还会开 2 个线程，14 核上 12 进程已饱和）；
+- 每条腿的日志：`~/ai_depth3/logs_s2_amc_batch/<leg>.log`（dump）与 `<leg>.compare.txt`；
+- 汇总表：`~/ai_depth3/s2_amc_batch_report.csv`；进程日志：`~/ai_depth3/logs_s2_amc_batch/batch.out`。
+
+### 磁盘策略
+
+一条腿解包 9.6–13 GB，dump 只有 ~185 MB，T7 剩 660 GiB ⇒ **dump 全留（100 × 0.19 ≈ 19 GB），原始采集做完即删**。
+代价：以后建库要重新解包该腿（211 上 2–4 分钟）。已存在的 `s2_amc_iperf_1103i/j` 是操作者放在盘上的，不删。
+
+### 首条腿（1103k）实测 —— 流程验证通过
+
+| 项 | 值 |
+|---|---|
+| 耗时 | 721 s（12 min，含链回放）|
+| 群体 | self 38 268 / harq 3 428 / ko 7 270 / tb 42 730 |
+| 对照 | cap6 crc_ok 37 616 → **38 268（+652）**；**OK→KO = 0**；`sinr/slot/tbs` 差异 **0**；共有比特 42 650 个 **md5 全同（0 不一致）**；只在新 80、只在旧 6 |
+| 判定 | **PASS** |
+
+### 监控
+
+```bash
+tail -f ~/ai_depth3/logs_s2_amc_batch/batch.out          # 每条腿的起止与对照结论
+awk -F, '{print $1,$2,$5,$10,$11,$14}' ~/ai_depth3/s2_amc_batch_report.csv   # 汇总
+```
+
+### 待办
+
+- [ ] 100 条腿跑完（约 24–25 h）；`status=CHECK` 的腿逐条看 `*.compare.txt`
+- [ ] 全部完成后：把两个运行脚本移入 repo 或写入 runbook §附录；按 `index_ko` 汇总全局可捞样本
