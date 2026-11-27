@@ -441,6 +441,37 @@ manifest（一条腿一份，便于全库汇总）：**§5.2 的对账脚本已�
 > ★ 分箱盘点看**母集侧**（只含可解码样本）；捕获侧（`census_bins.py`）用来判断"下一腿该补哪个格子"。
 > 抽取时**按箱均匀、不按尺子加权**（手册 §7.1.4 的口径不变）。
 
+### 5.7 与 cap 6 版本的对照（**有截止日期，不要拖**）
+
+211 上留着两份 cap-6 参考，用途不同：
+
+| 参考 | 路径 | 对照的层级 |
+|---|---|---|
+| cap-6 **dump** 归档 | `/mnt/corpus/s2_amc_tb_tarballs/tb_<leg>.tar.gz` | dump 层（`index.csv` 的 crc / sinr / iterations）|
+| cap-6 **母集** | `/mnt/corpus/datasets_full_s2_amc_Cap6Save/`（740 个 npz）| 母集层（成员的 unit／TB 标签／X／H）|
+
+★★ **它们只保留到 cap-20 全库建完为止，之后整体删除**（2026-11-27 定）。⇒ **对照必须在那之前做完**，
+删掉之后既不能重建 cap-6 母集，也不能再做 dump 层对照。
+
+**已做的对照（2026-11-27，母集层）**：1103i–o 七条腿，结论是
+
+- cap6 ⊂ cap20，**唯一缺口**是"无迭代数被 `REQUIRE_ITERATIONS=1` 丢弃"的那批（逐腿 8/8/64/122/12/1/1，
+  另有 cap6 外的 32 个同上丢弃）；
+- 共有样本 **TB 标签 0 处不同**（按 `ceil(nof_tb_bits/8)` 有效字节比 md5，258 142 个共有单元）；
+- 群体迁移：harq→self 共 5 336 个。
+
+**做法**（不必搬 2 GB）：只取 cap-6 npz 的 `unit` 与 `tb_bits` 两个**小成员**，与本库逐样本比 md5；
+membership 的差集必须**全部**落在 `index_harq_only.csv` 里 `iterations` 为空的那批上，否则就是真缺失。
+
+```bash
+# 在 211 上流式取两个小成员（不落整包、不读 X/H）
+ssh jwang@192.168.31.211 'python3 - --dir /mnt/corpus/datasets_full_s2_amc_Cap6Save --leg <leg> --out /tmp/cap6_units.csv' < npz_units.py
+ssh jwang@192.168.31.211 'python3 - --dir /mnt/corpus/datasets_full_s2_amc_Cap6Save --leg <leg> --out /tmp/cap6_labels.csv' < npz_labels.py
+```
+
+> ★ 比 `tb_bits` 时**必须**按 `ceil(nof_tb_bits/8)` 切有效字节：每个文件把行补齐到本文件最宽的块，
+> 按 bit 数切会把补零算进哈希，**误报成千上万个"标签不同"**（这个错真的发生过）。
+
 ---
 
 ## 6. 全库：100+ 条腿怎么跑
