@@ -245,7 +245,7 @@ def synthetic_channel(prefix, cfg, alloc, sub, grid):
 
 
 def candidate_units(index_path, tb_dir, corpus_dir, modulation, min_prb, min_slot,
-                    require_off_prb0, max_prb=0, need_tb=True):
+                    require_off_prb0, max_prb=0, need_tb=True, require_iterations=False):
     """Select units that can be re-encoded.
 
     `build_synth_dataset` also rejected allocations starting at PRB 0 and early slots, because
@@ -259,7 +259,14 @@ def candidate_units(index_path, tb_dir, corpus_dir, modulation, min_prb, min_slo
     """
     units = []
     with open(index_path) as handle:
-        next(handle)
+        header = next(handle).strip().split(",")
+        # THE TWO DIFFICULTY COLUMNS ARE RESOLVED BY NAME, not by position. The index written before
+        # 2026-11-26 has no `iterations_max`; its column 5 is `slot`, so a positional read records the
+        # slot number as the iteration count -- a wrong difficulty that `--require-iterations` cannot
+        # catch, because a slot is a positive number. By name, an index without the column yields -1
+        # ("unknown"), which is the same convention an index without `iterations` already uses.
+        i_iterations = header.index("iterations") if "iterations" in header else -1
+        i_iterations_max = header.index("iterations_max") if "iterations_max" in header else -1
         for line in handle:
             fields = line.strip().split(",")
             if len(fields) < 6:
@@ -296,13 +303,22 @@ def candidate_units(index_path, tb_dir, corpus_dir, modulation, min_prb, min_slo
             # The chain's own LDPC iteration count is the one field that says how close to the cliff the block was
             # (1-2 iterations is a block any receiver gets; 4+ is where the AI's losses live). It costs one integer
             # per sample and is the only difficulty signal the dump records, so it travels with the sample.
-            iterations = int(fields[4]) if len(fields) > 4 and fields[4].isdigit() else -1
+            iterations = int(fields[i_iterations]) if 0 <= i_iterations < len(fields) \
+                and fields[i_iterations].isdigit() else -1
             # THE WORST CODEBLOCK'S ITERATION COUNT, when the index carries it (column 5, 2026-11-26 onward). The
             # `iterations` above is the mean over the transport block's codeblocks and therefore hides a hard member
             # behind easy ones: a five-codeblock block whose hardest member needed seven iterations reports a mean of
             # four. `-1` means the index predates the column, the same convention `iterations` uses for an index that
             # predates its own.
-            iterations_max = int(fields[5]) if len(fields) > 5 and fields[5].isdigit() else -1
+            iterations_max = int(fields[i_iterations_max]) if 0 <= i_iterations_max < len(fields) \
+                and fields[i_iterations_max].isdigit() else -1
+            # A sample whose difficulty the chain never recorded is not a usable training sample for the
+            # difficulty dimension: the drawer weights on this number, and -1 would silently look "easy".
+            # This happens when the label came from the air chain's live dump and the offline chain replay
+            # did not decode at the current cap, while the capture predates the dd_meta iteration columns.
+            # The grid and the label are complete in that case; only this measurement is missing.
+            if require_iterations and (iterations < 0 or iterations_max < 0):
+                continue
             units.append((name, prefix, cfg, alloc, tb_path, iterations, iterations_max))
     return units
 
@@ -787,6 +803,12 @@ def main():
                              "pilots; what changes is where the sample transmits its DM-RS. Used to "
                              "manufacture a modulation x pattern cell the corpus has no transmission of")
     parser.add_argument("--max-units", type=int, default=0)
+    parser.add_argument("--require-iterations", action="store_true",
+                        help="drop the units whose LDPC iteration count the chain never recorded "
+                             "(`iterations`/`iterations_max` would be -1). The grid and the label of "
+                             "such a unit are complete -- what is missing is the difficulty "
+                             "measurement, which a mother set built for difficulty-weighted draws "
+                             "must not carry as an unknown")
     # CHUNKING, for the legs whose single (modulation, source) population is too large to build in
     # one process: the candidate list is cut into contiguous slices and each slice is built on its
     # own, then the parts are merged in order. Contiguous is deliberate -- concatenating part 0..k-1
@@ -823,7 +845,8 @@ def main():
                             1 if retarget else args.min_prb,
                             args.min_slot, args.require_off_prb0,
                             0 if retarget else args.max_prb,
-                            need_tb=not retarget)
+                            need_tb=not retarget,
+                            require_iterations=args.require_iterations)
     if retarget:
         # Keep only the captures whose own allocation can host the window: outside it there are no
         # pilots to fit the channel from, so a sample built there would carry a channel nobody

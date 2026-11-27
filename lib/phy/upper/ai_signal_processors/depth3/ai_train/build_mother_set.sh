@@ -43,6 +43,16 @@ MODS=${MODS:-"QPSK 16QAM 64QAM 256QAM"}
 # pair that dies in the background cannot make the leg look successful.
 JOBS=${JOBS:-1}
 case "$JOBS" in ''|*[!0-9]*|0) JOBS=1 ;; esac
+# REQUIRE_ITERATIONS (default 0) drops the samples whose LDPC iteration count the chain never recorded,
+# so every sample in the mother set carries a real difficulty value instead of -1 ("unknown"). A harq
+# sample hits this when its label came from the air chain's live dump, the offline chain replay did not
+# decode at the current cap, and the capture predates the dd_meta iteration columns: the grid and the
+# label are complete, only the measurement is missing. The drawer weights on the number, so leaving -1
+# in would make an unmeasured sample look easy. Set to 1 when the mother set feeds difficulty-weighted
+# draws (the normal case for the training library).
+REQUIRE_ITERATIONS=${REQUIRE_ITERATIONS:-0}
+ITER_FLAG=""
+[ "$REQUIRE_ITERATIONS" = "1" ] && ITER_FLAG="--require-iterations"
 # CHUNK (default 0 = off) caps how many samples one build process assembles. A pair with more
 # candidates than this is built as contiguous slices and then stream-merged, because a 100k-sample
 # leg peaks at ~25 GB in one process. Contiguous slices concatenated in order reproduce the
@@ -126,7 +136,7 @@ for LEG in "$@"; do
       if [ "$CHUNK" -gt 0 ]; then
         count=$("$PY" "$TOOLS/build_depth3_dataset.py" --units "$UNITS" --tb "$DUMP/tb" \
                 --corpus "$CAP" --out "$OUT" --name "$NAME" --source real --modulation "$M" \
-                --min-prb 1 --max-units 0 --count-only 2>/dev/null | tail -1)
+                --min-prb 1 --max-units 0 ${ITER_FLAG} --count-only 2>/dev/null | tail -1)
         case "$count" in
           ''|*[!0-9]*)
             echo "  FAILED: could not count candidates for $NAME" >&2
@@ -152,7 +162,7 @@ for LEG in "$@"; do
           set -o pipefail
           "$PY" "$TOOLS/build_depth3_dataset.py" --units "$UNITS" --tb "$DUMP/tb" --corpus "$CAP" \
               --out "$OUT" --name "$PARTNAME" --source real --modulation "$M" --min-prb 1 --max-units 0 \
-              --chunk-index "$ci" --chunk-count "$k" 2>&1 \
+              ${ITER_FLAG} --chunk-index "$ci" --chunk-count "$k" 2>&1 \
               | tee "$job_dir/$job_n.log" | sed 's/^/    /'
           echo $? > "$job_dir/$job_n.rc"
         ) &
