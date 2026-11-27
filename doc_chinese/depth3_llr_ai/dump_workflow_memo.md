@@ -762,3 +762,47 @@ awk -F, '{print $1,$2,$5,$10,$11,$14}' ~/ai_depth3/s2_amc_batch_report.csv   # �
 ssh jwang@192.168.31.211 'tail -f /tmp/w2_batch.out'                     # 每条腿的起止、units、对照结论
 ssh jwang@192.168.31.211 'column -s, -t ~/w2_batch_report.csv'          # 汇总（与 s2 同一套列）
 ```
+
+---
+
+## 17. 2026-11-27 21:00 `iterations=0` 的根因与三层修复（dump 侧截断，母集侧夹紧）
+
+### 背景
+
+母集审计发现少量样本 `iterations=0` 而 `iterations_max≥1`。0 在 dump 里的约定是"没解出来"（KO），
+而这两个字段来自同一次解码 —— 同一列里出现了两种含义，必须收敛。
+
+### 做了什么 / 实测
+
+| 项 | 值 | 怎么测的 |
+|---|---|---|
+| 根因 | `ul_chain_replay.cpp` 的 `nof_iters = static_cast<unsigned>(stats.get_mean())`：**float 均值被截断**，真实均值落在 [0,1) 就记成 0 | 读代码；6 个样本在 `chain_iters.csv` 里就是 `iterations=0, iterations_max=2` |
+| 出现位置 | **只在 harq 链解码**；`index.csv` 的逐单元解码（首传）没有 0 | 扫全部 dump 的 `index.csv`（0 个）与 `index_harq_only.csv`（有）|
+| 规模 | 已建成的 13 条腿共 **3 481** 个：1103l 714、1103m 812、1103n 652、1103o 600、1103i 168、1103j 224、1103k 252；1102b–f 每条 4–28 | 扫母集 npz 的 `iterations` |
+| A/B（1102g，4 679 条链）| 旧二进制 `iterations=0` **25 个 → 新二进制 0 个**；变化：0→1 ×25、1→2 ×23、**2→3 ×859**、3→4 ×30、4→5 ×16、5→6 ×4；`iterations_max` **不变** | 旧二进制副本与新二进制各跑一遍 `dump_harq_chains.py` |
+| 修复①（dump 源码）| `lround` 取代截断，且 CRC-OK 时两字段下限为 1；**20:57:54 重链接** | 1102s 的 `dump_meta.txt`：`binary_mtime=2026-11-27 20:57:54` |
+| 修复②（建库）| CRC-OK 行的 0 夹到 1（`-1` 不动）| 覆盖修源码之前已 dump 的腿 |
+| 修复③（历史 npz）| `clamp_iterations.py` 用 `zip` 就地替换两个成员 | 32 个文件 / 3 481 个值 / **19 秒**；`X` 的 md5 前后一致 |
+
+### 结论（可直接引用）
+
+1. ★ **2026-11-27 20:57:54 之前产的 dump**，其 harq 行的 `iterations=0` 表示"均值不足 1 轮"，**不是** KO。
+   判据是 `dump_meta.txt` 的 `binary_mtime`；1102s 起的 dump 没有这个问题。
+2. ★ **受影响的 dump 不重跑**（1102b–r 中已 dump 的 17 条）：母集侧已夹紧，重新 dump 约 2 小时只换回
+   0.01–1% 的数值语义，不划算。
+3. ★ **四舍五入是有意改变口径**：932/4 679 条链的 `iterations` +1（2→3 占 859），其中 46 条跨进"临界"
+   （3→4 30 条、4→5 16 条）。以后与更早的 dump 比 `iterations` 分布时，要知道这个台阶。
+4. ★ 建库监控不需要为 replay 的改动重启（它不调用 replay 二进制）；但为了用上第②层夹紧，
+   21:00:02 重启过一次，1102g 用新规则从头重建。
+
+### 遗留 / 待办
+
+- [ ] 任何"跨 dump 版本"的分析，先看 `dump_meta.txt` 的 `binary_mtime`
+- [ ] 1102g 重建完成后确认 `iterations=0` 为 0（它的 `chain_iters.csv` 里仍有 0，由第②层兜住）
+
+### 涉及文件
+
+- `lib/phy/upper/channel_processors/metal/test/ul_chain_replay.cpp`（`lround` ＋ CRC-OK 下限）
+- `lib/phy/upper/ai_signal_processors/depth3/ai_train/build_depth3_dataset.py`（建库夹紧）
+- `lib/phy/upper/ai_signal_processors/depth3/ai_train/clamp_iterations.py`（历史 npz 修复，新增）
+- `doc_chinese/depth3_llr_ai/mother_set_build_runbook.md` §3.1 / §5.3 / §9 坑 #22

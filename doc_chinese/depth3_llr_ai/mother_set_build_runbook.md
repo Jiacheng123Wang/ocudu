@@ -215,6 +215,10 @@ head -1 "$DUMP/index.csv"
 # 7 列（没有 iterations_max）的是 2026-11-26 之前的 dump：建库会被 REQUIRE_ITERATIONS=1 全部拒绝（§2.4）
 ```
 
+★ **再看一眼 `dump_meta.txt` 的 `binary_mtime`**：早于 **2026-11-27 20:57:54** 的 dump，其 harq 行可能带
+`iterations=0` —— 真实含义是"均值不足 1 轮"（旧 replay 把 float 均值截断了），不是"没解出来"。建库会把
+CRC-OK 的 0 夹到 1，不需要额外处理；但**直接拿这种 dump 做分析**时要知道这个口径（§9 坑 #22）。
+
 ### 3.2 采集目录必须**同一条腿、且含 `tb_live/`**
 
 `build_mother_set.sh` 需要 `<cap>` 做三件事：读 `.txt` 侧车决定**调制/带宽/邻道**（census）、
@@ -673,7 +677,7 @@ find /Volumes/Eaget_HD/datasets_full_s2_amc -name '*_part*.npz' -print    # 应�
 | 19 | 监控**永远不启动**建库 | 完成判据写成 `tb == self + harq`，漏了 harq 中间成员（1103i 差 714 个）| 用 `tb_blocks=`；四条判据见 §6.7 |
 | 20 | 手工建过的腿被监控重跑 | 进度表里没有它（监控只认进度表）| 补一行 `ok`（§6.7 末）|
 | 21 | 监控把评估腿也建了 | `EXCLUDE` 是列表，却用 `[ "$leg" = "$EXCLUDE" ]` 整串比较 | 逐个比较（`is_excluded`）；评估腿清单见 §6.1 |
-| 22 | 少量样本 `iterations=0` 却 `iterations_max≥1` | replay 把 float 均值**截断**成整数：真实均值落在 [0,1) 就记成 0，而 0 在 dump 里表示"没解出来" | **三层**：① replay 改为四舍五入且 CRC-OK 时 ≥1（2026-11-27，影响之后的 dump）；② 建库把 OK 行的 0 夹到 1（覆盖修源码之前已 dump 的腿）；③ `clamp_iterations.py` 修已建成的 npz。全库 3 481 个零值已修复 |
+| 22 | 少量样本 `iterations=0` 却 `iterations_max≥1` | replay 把 float 均值**截断**成整数：真实均值落在 [0,1) 就记成 0，而 0 在 dump 里表示"没解出来" | **三层**：① replay 改为四舍五入且 CRC-OK 时 ≥1（2026-11-27 20:57:54 重链接，影响之后的 dump）；② 建库把 OK 行的 0 夹到 1（覆盖修源码之前已 dump 的腿 1102b–r、1103i–o）；③ `clamp_iterations.py` 修已建成的 npz（32 个文件 / 3 481 个值，`X` 不变）。★ 受影响 dump 的判据：`dump_meta.txt` 的 `binary_mtime` 早于 2026-11-27 20:57:54；那些 dump **不重跑**，口径记在 §3.1 |
 
 ---
 
