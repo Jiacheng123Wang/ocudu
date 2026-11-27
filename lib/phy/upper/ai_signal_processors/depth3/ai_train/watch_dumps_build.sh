@@ -14,7 +14,8 @@
 # progress is never mistaken for a finished one.
 #
 # WHAT IT BUILDS. Every `s2_amc_*` leg with a finished dump that is not already built, skipping the evaluation-
-# reserved 1102a. Legs already `ok` in the progress table are skipped; a leg that failed twice is left for a human.
+# reserved legs (1102a and 1121a-c, manual sections 17 and 8.1b(e)); their captures and cap-6 dumps live in
+# ~/ai_depth3/full_leg_measurement/. Legs already `ok` in the progress table are skipped; a leg that failed twice is left for a human.
 # After a successful build the leg's captures are freed (RECLAIM=1): the dump batch waits when the drive is low,
 # and a built leg's captures are the only thing that can be freed without losing anything.
 #
@@ -36,7 +37,7 @@ PROGRESS=$OUT/_progress.csv
 WATCHLOG=$LOGD/watch.log
 POLL=${POLL:-120}
 RECLAIM=${RECLAIM:-1}
-EXCLUDE="s2_amc_ping_1102a"
+EXCLUDE="s2_amc_ping_1102a s2_amc_ping_1121a s2_amc_ping_1121b s2_amc_ping_1121c"
 PREFIX="s2_amc_"
 DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
