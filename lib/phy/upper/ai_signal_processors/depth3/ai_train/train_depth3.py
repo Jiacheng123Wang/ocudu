@@ -89,6 +89,7 @@ import depth3_loss as L            # noqa: E402
 import ldpc_decode as LD           # noqa: E402
 import synth as SN                 # noqa: E402
 from coded_bler import CodedBler # noqa: E402  (decoder side, no TensorFlow)
+import code_loss as CL             # noqa: E402  (the decoder-in-the-loop loss)
 # The canonical LayerScale for this workstream lives next to the refiner that needed it first.
 from train_refiner import Scale    # noqa: E402
 
@@ -1892,6 +1893,20 @@ def main():
     parser.add_argument("--w-llr", type=float, default=L.DEFAULT_WEIGHTS["llr"])
     parser.add_argument("--w-ch", type=float, default=L.DEFAULT_WEIGHTS["ch_est"])
     parser.add_argument("--w-noise", type=float, default=L.DEFAULT_WEIGHTS["post_eq_noise"])
+    # THE CODE CONSTRAINT (architecture_levers section 93, item 1). The BCE above only says how well the
+    # network predicts the genie LLRs; this term runs the real LDPC code's min-sum decoder on the network's
+    # LLRs and charges it for the bits the decoder still gets wrong, so the gradient sees "did it decode"
+    # instead of "was the LLR close". It costs `iterations` passes over a dense (46, 68, 384) view per
+    # sample; the default is one sample per batch out of sixteen, which keeps the overhead near a few
+    # percent. Off by default: an unmodified command line trains exactly what it trained before.
+    parser.add_argument("--code-loss-weight", type=float, default=0.0, metavar="W",
+                        help="weight of the decoder-in-the-loop BCE (0 disables the term entirely)")
+    parser.add_argument("--code-loss-iterations", type=int, default=2, metavar="K",
+                        help="min-sum iterations inside the code loss (default 2)")
+    parser.add_argument("--code-loss-samples", type=int, default=1, metavar="S",
+                        help="how many samples per batch carry the code loss (default 1)")
+    parser.add_argument("--code-loss-from", type=int, default=1, metavar="EP",
+                        help="first epoch the code loss is applied (default 1; later lets the LLR fit settle)")
     parser.add_argument("--no-aux", action="store_true", help="LLR head only, for the R2.4 ablation")
     parser.add_argument("--no-val", action="store_true",
                         help="skip the per-epoch validation pass. Selection is then meaningless and the run relies on "
@@ -2194,7 +2209,8 @@ def main():
     head_channels = NOF_SYMBOLS * (D3.COND_STRIDE if args.modcond else qm)
     optimizer = tf.keras.optimizers.Adam(args.lr)
     weights = {"llr": args.w_llr, "ch_est": args.w_ch, "post_eq_noise": args.w_noise,
-               "dmrs_noise": args.w_noise, "sym_est": args.w_sym}
+               "dmrs_noise": args.w_noise, "sym_est": args.w_sym,
+               "code": args.code_loss_weight}
 
     # XLA is a TRAINING choice and cannot reach the deployed graph: the bundle is exported from the Keras
     # layer structure and the trained weights, so compiling the step changes nothing about what the ANE
@@ -2230,6 +2246,10 @@ def main():
                     # comparable with every earlier one and the number in the log still means the same thing.
                     llr_mask = llr_mask * targets["w_snr"][:, None, None]
                 terms = {"llr": L.tf_bce_loss(llr, targets["llr_shape"], llr_mask, norm=args.loss_norm)}
+                if "code" in targets:
+                    # The decoder's own verdict, differentiated: the a-posteriori LLRs of the real LDPC
+                    # code, compared with the bits that were transmitted.
+                    terms["code"] = CL.tf_code_bce(llr, targets["code"], args.code_loss_iterations)
                 if not args.no_aux:
                     # THE NOISE HEAD IS ALWAYS IN WHEN aux_heads IS (design section 22.2): it is what scales the logits
                     # into the LLRs the chain quantises, so it is trained even in the bundle that dropped the reporting
@@ -2312,6 +2332,10 @@ def main():
     read_dmrs = (head_keys is None) or ("dmrs_noise" in head_keys)
     read_noise = not args.no_aux
 
+    # WHICH BATCHES CARRY THE CODE LOSS. The term is applied from `--code-loss-from` onwards and only
+    # during training; validation must stay comparable with every earlier run, so `evaluate` turns it off.
+    code_state = {"on": False, "next_row": 0}
+
     def tensors(samples):
         """One batch's device tensors: the input plane, and exactly the targets the step reads.
 
@@ -2349,6 +2373,22 @@ def main():
             # weighting is on, so an unweighted run no longer builds a vector of ones per batch either. A weighted
             # run gets exactly the vector it always got.
             targets["w_snr"] = tf.constant(np.asarray(snr_weights(samples), dtype=np.float32))
+        if code_state["on"]:
+            # A FEW SAMPLES PER BATCH CARRY THE DECODER. The term is expensive per sample (a dense
+            # (46, 68, 384) min-sum over k iterations) and it is a regulariser on top of the LLR fit, not a
+            # replacement for it, so `--code-loss-samples` of the sixteen is what the gradient needs. The
+            # cursor rotates so every position of every batch eventually contributes.
+            chosen = []
+            for offset in range(len(samples)):
+                row = (code_state["next_row"] + offset) % len(samples)
+                prepared = CL.prepare(train, int(samples[row]["index"]), row=row)
+                if prepared is not None:
+                    chosen.append(prepared)
+                if len(chosen) >= max(1, args.code_loss_samples):
+                    break
+            code_state["next_row"] = (code_state["next_row"] + len(chosen) + 1) % max(1, len(samples))
+            if chosen:
+                targets["code"] = CL.stack_prepared(chosen)
         return stacked, targets
 
     def perfect_llr(sample):
@@ -2423,6 +2463,10 @@ def main():
     want_band = (args.select_on == "band")
 
     def evaluate(use_bler):
+        # THE CODE LOSS IS A TRAINING TERM ONLY. Validation keeps the plain LLR objective so the epoch line stays
+        # comparable with every earlier run, and the decoder is measured there by `--bler-samples` instead.
+        code_before = code_state["on"]
+        code_state["on"] = False
         totals, errors, magnitudes, band_ber = [], [], [], []
         groups = {}          # (modulation, snr band, tb band) -> [sum bce, sum bits, samples]
         bler = CodedBler(val) if use_bler else None
@@ -2496,6 +2540,7 @@ def main():
         # `band_ber` is empty when the band was not asked for, which yields the same nan the old code produced
         # when the validation set had no row at or below 10 dB. `chosen` only reads it under `--select-on band`.
         band = float(np.mean(low)) if low else float("nan")
+        code_state["on"] = code_before
         return (float(np.mean(totals)), float(np.mean(errors)), float(np.mean(magnitudes)),
                 bler.rate() if bler is not None else float("nan"),
                 bler.skipped if bler is not None else 0, band, groups)
@@ -2595,9 +2640,13 @@ def main():
         # unchanged. A float32 running SUM would not be: eight thousand additions at magnitude 2 lose the fifth
         # decimal, which is the precision the epoch line prints.
         losses, pending = [], []
+        code_state["on"] = bool(args.code_loss_weight > 0.0 and epoch >= args.code_loss_from)
+        code_last = None
         for samples in train.epoch(args.batch, workers, prefetch):
             x, targets = tensors(samples)
-            total, _, _ = step(x, targets, training=True)
+            total, step_terms, _ = step(x, targets, training=True)
+            if "code" in step_terms:
+                code_last = step_terms["code"]
             pending.append(total)
             if len(pending) == LOSS_ACCUMULATION:
                 losses.extend(float(value) for value in tf.stack(pending).numpy())
@@ -2623,7 +2672,8 @@ def main():
         if epoch == 1 or epoch % max(1, args.epochs // 20) == 0 or epoch == args.epochs:
             print(f"epoch {epoch:4d}  train {np.mean(losses):.5f}  val {val_loss:.5f}  "
                   f"uncoded BER {val_ber:.4f}  coded BLER {val_bler:.4f}  "
-                  f"mean|LLR| {val_mag:6.1f}  ({time.time() - started:.0f}s)")
+                  f"mean|LLR| {val_mag:6.1f}  ({time.time() - started:.0f}s)"
+                  + (f"  code {float(code_last):.5f}" if code_last is not None else ""))
             # THE GROUPS THE AVERAGE HIDES. Printed on the same schedule as the epoch line, worst first, with the share of the
             # validation bits each group carries: a group at twice the global loss that holds two percent of the bits is noise
             # to fix, and one that holds twenty percent is the model. That distinction is what the global number cannot make.

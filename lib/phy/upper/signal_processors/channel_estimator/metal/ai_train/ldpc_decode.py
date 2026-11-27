@@ -56,6 +56,51 @@ def deinterleave(bits, mod):
     return bits.reshape(eqm, qm).T.reshape(-1)
 
 
+def deinterleave_perm(E, mod):
+    """The permutation `deinterleave` applies, as an index array: `out[i] == inp[perm[i]]`.
+
+    The code-loss module needs the mapping rather than the permuted values, because it gathers the
+    LLRs out of the network's own plane and has to carry the labels through the same reordering.
+    """
+    qm = int(mod)
+    if E % qm:
+        raise ValueError(f"rate-matched length {E} is not a multiple of {qm}")
+    eqm = E // qm
+    index = np.arange(E)
+    return (index % eqm) * qm + (index // eqm)
+
+
+def dematch_indices(K_transmitted, K_b, Zc, E, rv, bg=None):
+    """Where each rate-matched LLR lands in the codeword, and which positions are known filler.
+
+    Split out of `rate_dematch` so the differentiable code loss (`code_loss.py`) deposits into the
+    same buffer positions. Two copies of this arithmetic would let training and the acceptance metric
+    drift apart, and the drift would look like a training result.
+
+    Returns `(codeword_index, filler)`: for each of the `E` rate-matched positions the codeword
+    position it is deposited into, and the `(start, stop)` range of filler positions (empty when
+    `K_b == K_transmitted`), which every receiver knows are zero.
+    """
+    if bg is None:
+        bg = 1 if (int(K_b) // int(Zc)) == 22 else 2
+    mb, nb, _ = NL._BG_PARAMS[bg]
+    K_transmitted = int(K_transmitted)
+    K_b = int(K_b)
+    Zc = int(Zc)
+    E = int(E)
+    nof_systematic = K_transmitted - 2 * Zc
+    buffer_length = nof_systematic + (nb * Zc - K_b)
+    shift_factor = {1: (0, 17, 33, 56), 2: (0, 13, 25, 43)}[bg]
+    k0 = shift_factor[rv] * Zc
+    filler_start = K_transmitted - 2 * Zc
+    k0 -= (K_b - K_transmitted) if k0 >= filler_start else 0
+    buffer_index = (np.arange(E) + k0) % buffer_length
+    codeword_index = np.where(buffer_index < nof_systematic,
+                              2 * Zc + buffer_index,
+                              K_b + (buffer_index - nof_systematic))
+    return codeword_index.astype(np.int64), (K_transmitted, K_b)
+
+
 def rate_dematch(llr, K_transmitted, K_b, Zc, E, rv, bg=None):
     """Deposit rate-matched LLRs into the codeblock's circular buffer.
 
@@ -77,18 +122,10 @@ def rate_dematch(llr, K_transmitted, K_b, Zc, E, rv, bg=None):
     if llr.size != E:
         raise ValueError(f"{llr.size} LLRs for a rate-matched length of {E}")
 
-    nof_systematic = int(K_transmitted) - 2 * int(Zc)
-    buffer_length = nof_systematic + (int(nb) * int(Zc) - int(K_b))
-    shift_factor = {1: (0, 17, 33, 56), 2: (0, 13, 25, 43)}[bg]
-    k0 = shift_factor[rv] * int(Zc)
-    filler_start = int(K_transmitted) - 2 * int(Zc)
-    k0 -= (int(K_b) - int(K_transmitted)) if k0 >= filler_start else 0
-
+    codeword_index, _ = dematch_indices(K_transmitted, K_b, Zc, E, rv, bg)
+    K_transmitted = int(K_transmitted)
+    K_b = int(K_b)
     codeword = np.zeros(int(nb) * int(Zc), dtype=np.float64)
-    buffer_index = (np.arange(E) + k0) % buffer_length
-    codeword_index = np.where(buffer_index < nof_systematic,
-                              2 * int(Zc) + buffer_index,
-                              int(K_b) + (buffer_index - nof_systematic))
     np.add.at(codeword, codeword_index, llr)
 
     # The filler bits are zeros by construction and every receiver knows it, so they enter as
