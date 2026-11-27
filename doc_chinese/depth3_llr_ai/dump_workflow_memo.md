@@ -673,3 +673,50 @@ awk -F, '{print $1,$2,$5,$10,$11,$14}' ~/ai_depth3/s2_amc_batch_report.csv   # �
 
 - [ ] 100 条腿跑完（约 24–25 h）；`status=CHECK` 的腿逐条看 `*.compare.txt`
 - [ ] 全部完成后：把两个运行脚本移入 repo 或写入 runbook §附录；按 `index_ko` 汇总全局可捞样本
+
+---
+
+## 15. 2026-11-27 12:50 **修正 §14 的磁盘策略**：raw 不再自动删，改为 20 GiB 等待守卫
+
+### 背景
+
+§14 的批处理在每条腿 dump＋对照后**自动删除**解包的原始采集（为在 660 GiB 里跑完 102 条腿）。用户指出：
+**建库（母集）需要 raw** —— 每个样本的 X/H/r/sigma2/… 都是在建库那一刻从 raw 提取的，删了就没法建。
+
+### 新策略（`run_s2_amc_batch.sh` 已改）
+
+| 项 | 旧 | 新 |
+|---|---|---|
+| dump＋对照完成后 | `rm -rf <corpus>/<leg>` | **保留**；由操作者在"该腿建库完成后"手动删 |
+| 空间不足 | 直接 `exit 3` 中止 | **等待**：`FREE_FLOOR_GIB=20`，每 300 s 打印一次 `WAITING: N GiB free … floor 20 GiB`，直到腾出空间 |
+| 每腿开始前 | 检查 ≥12 GiB，不足即中止 | 同上去等待 |
+
+这样批处理与并行的建库工作流**可以同时跑**：建库吃一条腿的 raw，操作者删掉已建完的腿，批处理自动被放行。
+
+### 已执行的补救
+
+- 已删 raw 的 3 条腿 **1103k / 1103l / 1103m 正在重新解包**（`/tmp/reextract.sh`，nice 19）；
+- 批处理已按新脚本重启，当前在解包 `1103o`；已完成的 1103i/j/k/l/m/n 会被跳过；
+- 已完成记录补进报告：1103n 的对照行（+813，PASS）。
+
+### 守卫验证
+
+把 `FREE_FLOOR_GIB` 临时设成 100000 跑一条腿，脚本只打印：
+`[12:44:48] WAITING: 659 GiB free on /Volumes/T7_Corpus/corpus, floor 100000 GiB (delete the captures of a leg that has been built)`
+然后 sleep，不启动 dump、不中止 —— 符合预期。
+
+### ★ 本次踩到的两个操作坑（都真实发生）
+
+1. **`pkill -f <pattern>` 会杀掉自己的 ssh 会话**：远端命令里若含同样的路径字符串，pkill 会匹配到自身（`bash -c` 的 cmdline）。
+   两次把正在排查的 ssh 会话直接杀掉。正确写法：把 pkill 放进一个**不含 pattern 的脚本文件**再执行，或 kill 具体 PID。
+2. **`timeout` 在 macOS 不存在**：守卫测试用 `timeout 8 …` 直接失败；改为后台跑 + 睡 + `kill <pid>`。
+   另外后台测试脚本如果只 `kill` 了外层 wrapper，**子进程会残留**（guard 测试的 driver 就留了一条，后来按 PID 杀掉）。
+
+### 状态（截至 12:50）
+
+| 项 | 状态 |
+|---|---|
+| T7 | 659 GiB free；已保留 raw：1103i/j/k（k 正在重解包）/n/o（o 正在解包）|
+| 已 dump 完 | 1103i/j（cap20）、1103k +652、1103l +855、1103m +1349、1103n +813（均 PASS）|
+| 批处理 | 运行中（nice 19，jobs 12），下一条 1103o |
+| 211 w2 | `w2_harq_1027` dump 进行中（14 331 / 23 975），cap-6 参考已解包待对照 |
