@@ -529,9 +529,20 @@ void pusch_decoder_impl::join_and_notify()
         // THE FRAME COLUMN IS THE MONOTONIC ONE (see ul_capture_frame.h): the slot alone repeats every 10.24 s, so a
         // retransmission's block could not be told apart from one decoded ten seconds earlier -- which is exactly the
         // ambiguity that made the first recovery attempt match nothing (2026-10-27).
-        std::fprintf(f, "%u,%lld,%u,%u,%u,%llu\n", idx, static_cast<long long>(t_us), tb_bits,
+        //
+        // THE ITERATION COLUMNS BELONG TO THE DECODE THAT PASSED THE CRC. On a retransmission the soft buffer holds the
+        // earlier transmissions, so these counts describe the block after soft combining, and no other record of them
+        // exists: a replay of the first transmission alone never combines and reports only its own attempt. A zero pair
+        // means the decode produced no observation (it was skipped because the codeblock CRC was already OK from an
+        // earlier transmission); the mean truncates, so a decode that converged immediately also reports zero there,
+        // which leaves the max as the column that tells the two apart.
+        const unsigned nof_iterations = stats.ldpc_decoder_stats.get_nof_observations();
+        const unsigned iterations_mean =
+            (nof_iterations != 0) ? static_cast<unsigned>(stats.ldpc_decoder_stats.get_mean()) : 0;
+        const unsigned iterations_max = (nof_iterations != 0) ? stats.ldpc_decoder_stats.get_max() : 0;
+        std::fprintf(f, "%u,%lld,%u,%u,%u,%llu,%u,%u\n", idx, static_cast<long long>(t_us), tb_bits,
                      stats.nof_codeblocks_total, extended_frame(current_config.slot),
-                     static_cast<unsigned long long>(current_config.slot.count()));
+                     static_cast<unsigned long long>(current_config.slot.count()), iterations_mean, iterations_max);
         std::fclose(f);
       }
     }

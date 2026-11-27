@@ -11,8 +11,16 @@
 # the CLASSICAL receiver's verdict, so the pipeline and the backend are pinned to cpu/classic rather than left to a
 # default that could quietly measure the AI arm instead.
 #
-# Output (all under --out):  tb/<unit>.bits, index.csv  (unit,tb_bits,crc,sinr_db,iterations,iterations_max,slot)
-# Usage: dump_tb.sh [--corpus DIR] [--out DIR] [--limit N] [--binary PATH] [--jobs N] [unit-dir ...]
+# Output (all under --out):  tb/<unit>.bits, index.csv  (unit,tb_bits,crc,sinr_db,iterations,iterations_max,slot,tbs)
+#
+# THE DUMP HOLDS BOTH POPULATIONS. A first transmission the classical chain fails has no label of its own, but the same
+# block's later retransmission decodes with soft combining and supplies it. That decode only exists in one process
+# walking the whole HARQ chain, so the standard dump runs a second pass over the chains that failed (`--no-harq` skips
+# it) and writes the recovered blocks into the same tb/ directory, then the two populations apart in index_self.csv and
+# index_harq_only.csv. The live chain cannot work this way -- it must decode every first transmission to know whether to
+# ask for a retransmission -- but replay can, because the chain is already on disk.
+#
+# Usage: dump_tb.sh [--corpus DIR] [--out DIR] [--limit N] [--binary PATH] [--jobs N] [--no-harq] [unit-dir ...]
 #
 # --jobs N runs N units at a time. Each unit is one replay process, so this is where the machine's cores are spent: the
 #   dump was single-threaded and left fifteen of them idle on the sixteen-core host (measured 2026-10-27). Results do not
@@ -28,6 +36,7 @@ CORPUS=$ROOT/doc_chinese/llr_ai_detection/work_tmp/corpus
 OUT=/tmp/tb_corpus
 LIMIT=0
 JOBS=1
+WITH_HARQ=1
 DIRS=()
 
 while [ $# -gt 0 ]; do
@@ -37,6 +46,7 @@ while [ $# -gt 0 ]; do
     --limit)  LIMIT="$2"; shift 2 ;;
     --binary) BINARY="$2"; shift 2 ;;
     --jobs)   JOBS="$2"; shift 2 ;;
+    --no-harq) WITH_HARQ=0; shift ;;
     *) DIRS+=("$1"); shift ;;
   esac
 done
@@ -119,3 +129,29 @@ n_attempt=$(wc -l < "$OUT/units.txt" | tr -d ' ')
 n_ok=$(grep -c ',OK,' "$OUT/index.csv" 2>/dev/null || true)
 echo "attempted $n_attempt units, ${n_ok:-0} decoded CRC-OK"
 echo "TB files in $OUT/tb ($(ls "$OUT/tb" | wc -l | tr -d ' '))"
+
+# THE RECOVERED HALF. Chains whose first transmission failed are replayed whole, so the soft buffer carries the earlier
+# receptions and the block decodes; the bits land in the same tb/ and the combined decode's iteration counts replace the
+# failed attempt's (which saturate at the cap and say nothing about the block). One directory per run: the chain pass and
+# the labelling both need the capture directory they belong to.
+if [ "$WITH_HARQ" -eq 1 ] && [ ${#DIRS[@]} -eq 1 ]; then
+  LEG_DIR="${DIRS[0]}"
+  CHAIN_CSV="$OUT/chain_iters.csv"
+  PYTHON=${PY:-python3}
+  # An empty array expansion is an unbound variable under `set -u` in the bash 3.2 this Mac ships, so the flag list is
+  # expanded with the guarded form.
+  LIVE_ARGS=()
+  [ -d "$LEG_DIR/tb_live" ] && LIVE_ARGS=(--live-tb "$LEG_DIR/tb_live")
+  echo "  recovered half: replaying HARQ chains under $LEG_DIR" >&2
+  "$PYTHON" "$SELF_DIR/dump_harq_chains.py" --leg "$LEG_DIR" --index "$OUT/index.csv" \
+      --out "$CHAIN_CSV" --jobs "$JOBS" --tb-out "$OUT/tb" \
+      "${LIVE_ARGS[@]+"${LIVE_ARGS[@]}"}" || echo "  WARN: chain pass failed" >&2
+  if [ -f "$CHAIN_CSV" ]; then
+    "$PYTHON" "$SELF_DIR/harq_backfill.py" --leg "$LEG_DIR" --index "$OUT/index.csv" --out "$OUT" \
+        --chain-iters "$CHAIN_CSV" "${LIVE_ARGS[@]+"${LIVE_ARGS[@]}"}" --max-gap-slots 200 \
+      || echo "  WARN: labelling failed" >&2
+    n_self=$(wc -l < "$OUT/index_self.csv" 2>/dev/null | tr -d ' ')
+    n_harq=$(wc -l < "$OUT/index_harq_only.csv" 2>/dev/null | tr -d ' ')
+    echo "  populations: self=$(( ${n_self:-1} - 1 )) harq=$(( ${n_harq:-1} - 1 )); tb now holds $(ls "$OUT/tb" | wc -l | tr -d ' ') blocks"
+  fi
+fi

@@ -7,8 +7,9 @@ process carries the SAME block across its retransmissions, so when a later attem
 combining, which the offline replay does not reproduce -- that decode supplies the bits for the earlier attempt. The
 sample stays a single-reception sample; the retransmission is only where the label came from.
 
-INPUT is what dump_tb.sh already writes: an index with unit, tb_bits, crc, sinr_db, iterations, slot, tbs_bytes, plus
-the .bits of every unit that decoded. The PDU sidecars in the capture directory supply rnti, harq_id and rv.
+INPUT is what dump_tb.sh already writes: an index with unit, tb_bits, crc, sinr_db, iterations, iterations_max, slot,
+tbs_bytes, plus the .bits of every unit that decoded. The PDU sidecars in the capture directory supply rnti, harq_id and
+rv.
 
 SAFEGUARDS, because a wrong label is worse than a missing one:
   * chains are split on a slot gap (a HARQ id is reused once the block is acknowledged, and merging two different
@@ -19,11 +20,18 @@ SAFEGUARDS, because a wrong label is worse than a missing one:
 OUTPUT: <out>/index_harq.csv with an extra column label_from in {self, harq, none}, and copies of the recovered .bits
 under <out>/tb/.
 
+THE RECOVERED ROW CARRIES THE DECODE THAT LABELLED IT. For label_from=harq, `iterations` and `iterations_max` describe
+the donor's decode, i.e. the combined decode when the donor is a live dump; `own_iterations` and `own_iterations_max`
+keep the failed first attempt's counts, which saturate at the decoder's iteration cap and therefore say nothing about
+how hard the block was to recover. When the donor's counts are unknown both fields are empty, never the failed count.
+
 A SECOND, BETTER DONOR SOURCE. `--live-tb <dir>` reads the transport blocks the gNB dumped DURING the flight
-(OCUDU_HELENA_DUMP_DIR): one `tb_<idx>_tbs<bits>.bits` per successful decode, plus `dd_meta.csv` whose last column is
-the system slot. Those decodes used the live chain's HARQ soft combining, which an offline replay of the same
-retransmission cannot reproduce -- so for a retransmission that only decodes after combining, this is the only place the
-bits exist. When the flag is given it is preferred; the offline replay is the fallback.
+(OCUDU_HELENA_DUMP_DIR): one `tb_<idx>_tbs<bits>.bits` per successful decode, plus `dd_meta.csv` with columns
+idx,ts_us,tb_bits,nof_cb,frame,slot[,iter_mean,iter_max]. The frame and the slot are the monotonic pair, and the last
+two columns, when present, are the LDPC iteration counts of the decode that passed the CRC. Those decodes used the live
+chain's HARQ soft combining, which an offline replay of the same retransmission cannot reproduce -- so for a
+retransmission that only decodes after combining, this is the only place the bits, and the iteration counts, exist.
+When the flag is given it is preferred; the offline replay is the fallback.
 
 Usage: harq_backfill.py --leg <capture dir> --index <dump index.csv> --out <dir> [--max-gap-slots 40] [--live-tb DIR]
 """
@@ -49,43 +57,16 @@ def read_pdu(path):
     return fields
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--leg", required=True, help="capture directory holding the PDU sidecars")
-    ap.add_argument("--index", required=True, help="index.csv written by dump_tb.sh")
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--live-tb", default="",
-                    help="directory holding the live dd_meta.csv and tb_*.bits (OCUDU_HELENA_DUMP_DIR during the leg)")
-    ap.add_argument("--max-gap-slots", type=int, default=40,
-                    help="a gap this large starts a new chain: the HARQ id has been reused for another block")
-    args = ap.parse_args()
+def load_units(rows, leg):
+    """Join every index row with the PDU fields a HARQ chain needs.
 
-    live_by_slot = {}
-    if args.live_tb:
-        meta = os.path.join(args.live_tb, "dd_meta.csv")
-        if os.path.exists(meta):
-            for line in open(meta, errors="ignore"):
-                parts = line.strip().split(",")
-                # SIX COLUMNS SINCE 2026-10-27: idx,ts_us,tb_bits,nof_cb,frame,slot. The frame is the monotonic one,
-                # because the slot alone repeats every 10.24 s and matching on it picked the wrong block (or none).
-                if len(parts) < 6:
-                    continue
-                idx, bits, frame, slot = parts[0], parts[2], int(parts[4]), int(parts[5])
-                path = os.path.join(args.live_tb, f"tb_{int(idx):08d}_tbs{bits}.bits")
-                if os.path.exists(path):
-                    live_by_slot[(frame, slot)] = path
-        print(f"live dumps: {len(live_by_slot)} reception(s) from {meta}", file=sys.stderr)
-
-    rows = list(csv.DictReader(open(args.index)))
-    if not rows:
-        print("empty index", file=sys.stderr)
-        return 2
-
-    # Join each unit with its PDU fields, and keep only units whose sidecar names a HARQ process.
+    Returns the units that name an rnti, a HARQ id and a slot, keyed by capture name. Shared with dump_harq_chains.py so
+    that both tools order receptions by the same coordinate.
+    """
     units = {}
     for row in rows:
         name = row["unit"]
-        pdu = read_pdu(os.path.join(args.leg, name + ".txt"))
+        pdu = read_pdu(os.path.join(leg, name + ".txt"))
         if pdu is None or "harq_id" not in pdu or "rnti" not in pdu or "slot" not in pdu:
             continue
         # THE KEY COMES FROM THE NAME, BOTH FIELDS. `cap_<frame>_<slot>_<rnti>` is how the capture identifies the
@@ -115,17 +96,17 @@ def main():
             "slot": int(pdu["slot"]),
             "tbs": row.get("tbs_bytes", ""),
         }
+    return units
 
-    # CHAINS START AT A FIRST TRANSMISSION, NOT AT AN RNTI AND A HARQ ID.
-    #
-    # The first version grouped by (rnti, harq) and split only on a large slot gap, which is wrong on real data: a HARQ
-    # id is reused for a NEW block as soon as the previous one is acknowledged, so on one leg with one RNTI the whole
-    # capture collapsed into three enormous chains and nothing could be recovered -- every failure had a "donor" far
-    # earlier in the same chain, which is not a retransmission of it.
-    #
-    # What actually identifies a chain is the redundancy-version sequence: rv=0 opens a block, and any following
-    # transmissions with rv != 0 at a short interval belong to it. A retransmission whose first transmission was not
-    # captured opens a chain of its own and can supply no label.
+
+def build_chains(units):
+    """Group the units into HARQ chains, each opened by a first transmission.
+
+    A chain is cut where the scheduler starts a new block (`new_data=1`), not on a slot gap: a HARQ id is reused as soon
+    as the previous block is acknowledged, so a gap guard either merges two blocks or cuts a real retransmission (see the
+    note in `main`). Shared with dump_harq_chains.py: the chains that supply labels and the chains that are replayed must
+    be the same ones.
+    """
     by_process = collections.defaultdict(list)
     for name, info in units.items():
         by_process[(info["rnti"], info["harq"])].append((info["ord"], name))
@@ -134,16 +115,7 @@ def main():
         members.sort()
         current = []
         for slot, name in members:
-            # CHAINS START WHERE THE SCHEDULER SAYS A NEW BLOCK STARTS, not where the redundancy version happens to
-            # be zero. rv=0 usually opens a block and stops doing so inside a full progression: the fifth
-            # transmission of a 0,2,3,1,0 chain carries rv 0 again and is still the same block. This capture has 534
-            # receptions in exactly that position, and opening a chain at each of them cut the original chain before
-            # its donor arrived -- six recoveries lost.
             starts = (units[name]["new_data"] == "1")
-            # NO GAP GUARD. It exists because a process identifier is reused once a block is acknowledged, so without
-            # a cut two blocks merge into one chain. But new_data already marks that boundary, which makes the guard
-            # redundant -- and harmful: its coordinate was not slots (see above), and the genuine intra-chain gaps in
-            # this traffic run 18 to 162 slots, so even a correct forty would cut real retransmissions.
             too_far = False
             if starts or too_far or not current:
                 if current:
@@ -153,12 +125,93 @@ def main():
                 current.append((slot, name))
         if current:
             chains.append(current)
+    return chains
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--leg", required=True, help="capture directory holding the PDU sidecars")
+    ap.add_argument("--index", required=True, help="index.csv written by dump_tb.sh")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--live-tb", default="",
+                    help="directory holding the live dd_meta.csv and tb_*.bits (OCUDU_HELENA_DUMP_DIR during the leg)")
+    ap.add_argument("--max-gap-slots", type=int, default=40,
+                    help="a gap this large starts a new chain: the HARQ id has been reused for another block")
+    ap.add_argument("--chain-iters", default="",
+                    help="CSV from dump_harq_chains.py: the combined decode's iteration counts, for legs whose live "
+                         "dump predates the iteration columns")
+    args = ap.parse_args()
+
+    live_by_slot = {}
+    live_iters = {}
+    if args.live_tb:
+        meta = os.path.join(args.live_tb, "dd_meta.csv")
+        if os.path.exists(meta):
+            for line in open(meta, errors="ignore"):
+                parts = line.strip().split(",")
+                # SIX COLUMNS: idx,ts_us,tb_bits,nof_cb,frame,slot. The frame is the monotonically increasing one,
+                # because the slot alone repeats every 10.24 s and matching on it picks the wrong block (or none).
+                # TWO MORE WHEN THE LEG WAS CAPTURED WITH THE ITERATION HOOK: iter_mean,iter_max, the LDPC counts of
+                # the decode that passed the CRC. Zeros there mean the decode produced no observation (it was skipped
+                # because the codeblock CRC was already OK), so they are treated as unknown rather than as one.
+                if len(parts) < 6:
+                    continue
+                idx, bits, frame, slot = parts[0], parts[2], int(parts[4]), int(parts[5])
+                path = os.path.join(args.live_tb, f"tb_{int(idx):08d}_tbs{bits}.bits")
+                if os.path.exists(path):
+                    live_by_slot[(frame, slot)] = path
+                    if len(parts) >= 8:
+                        try:
+                            it_mean, it_max = int(parts[6]), int(parts[7])
+                        except ValueError:
+                            it_mean, it_max = 0, 0
+                        if it_max > 0:
+                            live_iters[(frame, slot)] = (it_mean, it_max)
+        print(f"live dumps: {len(live_by_slot)} reception(s) from {meta}"
+              f" (iteration counts on {len(live_iters)})", file=sys.stderr)
+
+    # THE CHAIN REPLAY'S COUNTS, when the leg was captured before the live dump recorded them. They describe the same
+    # decode: one process walking the whole chain with the soft buffer shared, CRC-checked, which is the combined decode
+    # the live chain performed. The live record still wins when it exists, because it is the one that decided the label.
+    # A STANDARD DUMP LEAVES ITS CHAIN REPLAY IN THE DUMP DIRECTORY. Picking it up here keeps the combined counts on
+    # every re-run of the labelling, including the one build_mother_set.sh makes: without it, a rebuild would quietly
+    # replace the recovered samples' difficulty with the failed attempt's cap.
+    chain_iters_path = args.chain_iters
+    if not chain_iters_path:
+        candidate = os.path.join(args.out, "chain_iters.csv")
+        if os.path.exists(candidate):
+            chain_iters_path = candidate
+    chain_iters = {}
+    chain_units = {}
+    if chain_iters_path:
+        for row in csv.DictReader(open(chain_iters_path)):
+            if not row.get("hop") or not row.get("iterations_max", "").isdigit():
+                continue
+            if int(row["iterations_max"]) <= 0:
+                continue
+            chain_iters[row["unit"]] = (int(row["iterations"]) if row["iterations"].isdigit() else 0,
+                                        int(row["iterations_max"]))
+            chain_units[row["unit"]] = row.get("decoded_unit", "")
+        print(f"chain replays: {len(chain_iters)} chain(s) with iteration counts from {chain_iters_path}",
+              file=sys.stderr)
+
+    rows = list(csv.DictReader(open(args.index)))
+    if not rows:
+        print("empty index", file=sys.stderr)
+        return 2
+
+    units = load_units(rows, args.leg)
+    chains = build_chains(units)
 
     recovered = []
     for chain in chains:
         if len(chain) < 2:
             continue
-        # the first decoded member AFTER a failure is the donor; an earlier decode means there was nothing to recover
+        chain_first = chain[0][1]
+        # THREE PLACES A DECODE CAN COME FROM, in decreasing authority: the live chain's dump, the chain replay the
+        # standard dump ran (its bits are already in tb/ under the chain's first transmission), and a member that
+        # happened to decode on its own in the offline per-unit pass. The first two are the same combined decode; the
+        # third needs no combining at all.
         donor = None
         for slot, name in chain:
             decoded_offline = units[name]["row"]["crc"] == "OK"
@@ -166,6 +219,12 @@ def main():
             if decoded_offline or decoded_live:
                 donor = (slot, name)
                 break
+        chain_dump = chain_iters.get(chain_first)
+        if donor is None and chain_dump is not None:
+            for slot, name in chain:
+                if name == chain_units.get(chain_first, ""):
+                    donor = (slot, name)
+                    break
         if donor is None:
             continue
         for slot, name in chain:
@@ -176,23 +235,46 @@ def main():
             failed, ok = units[name], units[donor[1]]
             if failed["tbs"] and ok["tbs"] and failed["tbs"] != ok["tbs"]:
                 continue                     # different block sizes: not the same transport block, do not guess
+            target = os.path.join(args.out, "tb", name + ".bits")
             src = os.path.join(os.path.dirname(args.index), "tb", donor[1] + ".bits")
-            if units[donor[1]]["key"] in live_by_slot and (not failed["tbs"] or
+            from_live = units[donor[1]]["key"] in live_by_slot and (not failed["tbs"] or
                                              int(units[donor[1]]["tbs"] or 0) == 0 or
-                                             units[donor[1]]["row"]["crc"] != "OK"):
+                                             units[donor[1]]["row"]["crc"] != "OK")
+            if from_live:
                 src = live_by_slot[units[donor[1]]["key"]]  # the live decode is the only place these bits exist
-            recovered.append((name, donor[1], src))
+            elif chain_dump is not None and os.path.exists(os.path.join(args.out, "tb", chain_first + ".bits")):
+                # the chain pass wrote one block per chain, named after the transmission the label belongs to
+                src = os.path.join(args.out, "tb", chain_first + ".bits")
+            elif os.path.exists(target):
+                src = target
+            # THE ITERATION COUNTS THAT BELONG TO THE LABEL. A recovered sample's difficulty is how hard the decode
+            # that supplied its bits was, which is the combined decode, not this reception's failed attempt (always the
+            # cap). Live record first, then the chain replay, then a donor that decoded on its own.
+            combined = None
+            if from_live and units[donor[1]]["key"] in live_iters:
+                combined = live_iters[units[donor[1]]["key"]]
+            elif chain_dump is not None:
+                combined = chain_dump
+            else:
+                donor_row = units[donor[1]]["row"]
+                if donor_row["crc"] == "OK" and donor_row.get("iterations", "").isdigit() \
+                        and donor_row.get("iterations_max", "").isdigit():
+                    combined = (int(donor_row["iterations"]), int(donor_row["iterations_max"]))
+            recovered.append((name, donor[1], src, combined))
 
     os.makedirs(os.path.join(args.out, "tb"), exist_ok=True)
-    donor_of = {name: donor for name, donor, _ in recovered}
+    donor_of = {name: donor for name, donor, _, _ in recovered}
+    iters_of = {name: iters for name, _, _, iters in recovered}
     label_from = {}
     for name in units:
         label_from[name] = "self" if units[name]["row"]["crc"] == "OK" else ("harq" if name in donor_of else "none")
-    for name, donor, src in recovered:
+    for name, donor, src, _ in recovered:
         if not os.path.exists(src):
             label_from[name] = "none"
             continue
-        shutil.copy(src, os.path.join(args.out, "tb", name + ".bits"))
+        target = os.path.join(args.out, "tb", name + ".bits")
+        if os.path.abspath(src) != os.path.abspath(target):
+            shutil.copy(src, target)
 
     # TWO INDEXES, NOT ONE. A sample whose label came from its own decode and a sample whose label came from a
     # retransmission are different populations: the second is a reception the reference chain failed on, so it can train
@@ -213,6 +295,9 @@ def main():
     # BOTH FILES CARRY THE AUDIT COLUMNS. Without them a recovered row cannot be checked against the transmission it
     # came from -- the first version wrote only the plain columns and made the population unverifiable after the fact.
     cols_plain = list(rows[0].keys()) + ["label_from", "donor"]
+    # THE RECOVERED FILES CARRY BOTH COUNTS: the labelling decode's in the ordinary columns, this reception's failed
+    # attempt beside them. Two numbers, two meanings; one column pair would have to pick one of them and lose the other.
+    cols_harq = cols_plain + ["own_iterations", "own_iterations_max"]
     with open(os.path.join(args.out, "index_self.csv"), "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=cols_plain, extrasaction="ignore")
         writer.writeheader()
@@ -222,7 +307,7 @@ def main():
             out["donor"] = ""
             writer.writerow(out)
     with open(os.path.join(args.out, "index_harq_only.csv"), "w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=cols_plain)
+        writer = csv.DictWriter(handle, fieldnames=cols_harq)
         writer.writeheader()
         for row in harq_rows:
             out = dict(row)
@@ -230,11 +315,15 @@ def main():
             out["tb_bits"] = str(os.path.getsize(os.path.join(args.out, "tb", row["unit"] + ".bits")) * 8)
             out["label_from"] = "harq"
             out["donor"] = donor_of.get(row["unit"], "")
+            out["own_iterations"] = row.get("iterations", "")
+            out["own_iterations_max"] = row.get("iterations_max", "")
+            combined = iters_of.get(row["unit"])
+            out["iterations"] = str(combined[0]) if combined else ""
+            out["iterations_max"] = str(combined[1]) if combined else ""
             writer.writerow(out)
 
     with open(os.path.join(args.out, "index_harq.csv"), "w", newline="") as handle:
-        cols = list(rows[0].keys()) + ["label_from", "donor"]
-        writer = csv.DictWriter(handle, fieldnames=cols)
+        writer = csv.DictWriter(handle, fieldnames=cols_harq, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
             name = row["unit"]
@@ -245,6 +334,11 @@ def main():
             if out["label_from"] == "harq":
                 out["crc"] = "OK"
                 out["tb_bits"] = str(os.path.getsize(os.path.join(args.out, "tb", name + ".bits")) * 8)
+                out["own_iterations"] = row.get("iterations", "")
+                out["own_iterations_max"] = row.get("iterations_max", "")
+                combined = iters_of.get(name)
+                out["iterations"] = str(combined[0]) if combined else ""
+                out["iterations_max"] = str(combined[1]) if combined else ""
             writer.writerow(out)
 
     n_self = sum(1 for v in label_from.values() if v == "self")

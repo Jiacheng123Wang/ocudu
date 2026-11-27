@@ -66,10 +66,15 @@ if dry:
 
 # 2. The live index, so that reception files travel with their capture.
 meta_rows = {}
+meta_header = ["idx", "ts_us", "tb_bits", "nof_cb", "frame", "slot"]
 meta_path = os.path.join(leg_dir, "tb_live", "dd_meta.csv")
 if os.path.isfile(meta_path):
     with open(meta_path, newline="") as handle:
         rows = list(csv.reader(handle))
+    # THE SOURCE HEADER TRAVELS WITH THE ROWS. The live dump gains columns (the iteration counts, 2026-11-27), so a
+    # hardcoded header here would describe a split file's rows wrongly while the rows themselves keep every column.
+    if rows:
+        meta_header = rows[0]
     for r in rows[1:]:
         if len(r) >= 6:
             meta_rows[int(r[0])] = r
@@ -119,7 +124,7 @@ for mod, files in by_mod.items():
     for idx, r in meta_rows.items():
         (take if idx in takes else keep).append(r)
     with open(os.path.join(dest, "tb_live", "dd_meta.csv"), "w", newline="") as h:
-        w = csv.writer(h); w.writerow(["idx", "ts_us", "tb_bits", "nof_cb", "frame", "slot"]); w.writerows(sorted(take))
+        w = csv.writer(h); w.writerow(meta_header); w.writerows(sorted(take))
     src_tb = os.path.join(leg_dir, "tb_live")
     moved = 0
     for name in os.listdir(src_tb):
