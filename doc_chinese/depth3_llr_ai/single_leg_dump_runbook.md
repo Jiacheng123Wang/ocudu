@@ -594,15 +594,19 @@ rm -f /tmp/tb_<leg>.tar.gz
 > `index_harq_only.csv`、`index_ko.csv`、`chain_iters.csv`、`dump_meta.txt`（1103i cap-20 实测 184 MiB → gzip 后
 > **19.6 MiB / 20 590 860 B**）。解包后 `tar -t` 成员数 = 42 749（`tb/`）＋ 8 个文件 ＋ 2 个目录 = **42 759**。
 
-### 7.3 交给建库（手册 §7）
+### 7.3 交给建库（**按 `mother_set_build_runbook.md` 执行**）
+
+> ★★ **2026-11-27 起，建库的完整步骤以 `mother_set_build_runbook.md` 为准**（含六项验收、全库批处理、
+> `REQUIRE_ITERATIONS=1` 的语义）。下面这段是**旧写法**，保留只因为它说明了输入是怎么被找到的：
+> `OUT` 已经改到 `/Volumes/Eaget_HD/datasets_full_s2_amc`，并且**必须**加 `REQUIRE_ITERATIONS=1`。
 
 ```bash
 export TRAIN=/Users/jiachengwang/dev/ocudu
 export DUMP_ROOT=/Volumes/T7_Corpus/corpus     # ⇒ dump 在 $DUMP_ROOT/tb_<leg>
 export CORPUS_ROOT=/Volumes/T7_Corpus/corpus   # ⇒ 捕获在 $CORPUS_ROOT/<leg>
-export OUT=~/ai_depth3/datasets_full_s2        # 母集输出
+export OUT=/Volumes/Eaget_HD/datasets_full_s2_amc   # 母集输出（旧写法是 ~/ai_depth3/datasets_full_s2）
 export PY=~/ai_ce_work/venv/bin/python
-export JOBS=1 CHUNK=8000
+export JOBS=1 CHUNK=8000 REQUIRE_ITERATIONS=1
 bash lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh <leg>
 ```
 
