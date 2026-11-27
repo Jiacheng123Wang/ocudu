@@ -415,3 +415,27 @@ runbook 现在与代码（`dump_tb.sh` 两段、`dump_harq_chains.py --tb-out`�
 - 代码里 `label_from = self iff crc==OK`，**没有** `new_data` 条件；因为目前没有任何重传被单跑解出，
   `index_self.csv` 事实上只含首传 —— 但这是"事实"，不是契约。加 harvest 时必须靠新列/新文件把这条语义钉住。
 - runbook §5.6 已按上表改写（含 457 / 6 821 两类各自的出路）。
+
+---
+
+## 8. 2026-11-27 10:15 新旧 dump 对照（1103i）：数据一致，差异只有三处且都可解释
+
+对照对象：新 `~/ai_depth3/corpus/tb_s2_amc_iperf_1103i`（= `/Volumes/T7_Corpus/corpus/tb_s2_amc_iperf_1103i` 的逐字节副本，
+七个文件 sha256 全同）vs 旧 `~/ai_depth3/dump_s2_amc/tb_s2_amc_iperf_1103i`。
+
+| 项 | 结果 |
+|---|---|
+| `index.csv` | 50 000 行、unit 集合相同；**7 个共有列逐单元 0 差异**；新多一列 `iterations_max` |
+| `index_self.csv` | 36 747 行，共有列 0 差异（新多 `iterations_max`）|
+| `index_harq_only.csv` | 旧 5 259 / 新 5 260；`tb_bits/crc/sinr_db/slot/tbs_bytes` 0 差异；`iterations` 有 5 234 行不同 = **预期改进**（旧＝首传失败值，新＝合并解码值）|
+| `index_ko.csv` | 新 7 278 ＝ 新 `none`；旧 `none` 7 282；差的 4 个正是新捞回的链 |
+| `tb/` | 旧 42 718、新 42 722；**共同 42 718 个逐文件 md5 全同**（self 36 747 ＋ harq 5 971）；只多 4 个文件 |
+| `units.txt` | 50 000 个同名单元；仅路径前缀不同（旧指向 `~/ai_depth3/corpus`）|
+
+**差异三处**：① 新增 `iterations_max` 列；② 新增 `index_ko.csv`；③ harq 从 5 971 增到 5 975 —— 多出来的 4 个是**同一条链**
+（rnti 17929 / harq_id 7，首传 `cap_41736_15527_17929`，donor `cap_41791_16637_17929`，第 5 跳解码 iter 3/3），
+它的 4 个成员（1 首传 ＋ 3 重传）比特完全相同（md5 `7ca4e416d3`，1 857 B）。这条链**在 live dump 里没有解码记录**
+（`bits_check=no-live-row`），所以旧流程只能留成 `none`；链回放解出了它。CRC 通过 ⇒ 标签可信，但没有空中链的字节级旁证。
+
+另：新 `index_harq_only.csv` 有 **24 行**合并迭代数为空 —— 那些链的链回放没解出来、而旧语料的 `dd_meta` 又没有迭代列，
+所以数值未知（留空，不填 6）。
