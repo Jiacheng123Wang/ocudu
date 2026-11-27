@@ -570,7 +570,19 @@ POLL=120 RECLAIM=1 nohup bash lib/phy/upper/ai_signal_processors/depth3/ai_train
 
 # 试跑：只列出"现在会建哪些腿"，不建
 bash lib/phy/upper/ai_signal_processors/depth3/ai_train/watch_dumps_build.sh --dry-run
+
+# 停止：按锁里的 pid 杀（不要用 pkill -f，见下）
+kill "$(cat /Volumes/Eaget_HD/datasets_full_s2_amc/_watcher.lock/pid)"
 ```
+
+★ **单实例锁**：启动时在 `<out>/_watcher.lock/` 写自己的 pid；已有活着的实例就拒绝启动，锁里的 pid 已死则接管。
+原因是一次真实的操作失误：重启时用 `pgrep -f watch_dumps_build.sh` 取"第一个匹配"，命中的是
+`bash -c … nohup bash watch_dumps_build.sh` 那个**包装 shell**，真正的 watcher 没被杀掉，结果**同时跑了两个**。
+两个实例会挑同一条腿、写同一批文件名。⇒ 停止一律用锁里的 pid。
+
+★ **循环里先做便宜检查**：`done_leg`／`failed_twice`（各一次 awk）先判，`dump_finished`（要 `ls tb | wc -l`，
+42 000 个文件、约 6 秒/腿）最后判。反过来写的话，每个周期都会把**所有已建完的腿**重新验一遍，
+两条腿之间的间隔会随库增长从几秒涨到几分钟（98 条腿时约 10 分钟/周期）。
 
 | 行为 | 说明 |
 |---|---|

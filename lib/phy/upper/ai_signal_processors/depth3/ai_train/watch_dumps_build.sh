@@ -43,6 +43,25 @@ DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
 
 mkdir -p "$LOGD" "$OUT"
+
+# ONE WATCHER PER LIBRARY. Two instances would both pick the same next leg and build it into the
+# same filenames. Restarting by hand is exactly when that happens: `pgrep -f watch_dumps_build.sh`
+# also matches the `bash -c ... nohup bash watch_dumps_build.sh` wrapper, so killing "the first
+# match" can leave the real watcher running while a second one starts. A directory holding the pid
+# is the guard; a stale one (its pid gone) is taken over.
+LOCK=$OUT/_watcher.lock
+if ! mkdir "$LOCK" 2>/dev/null; then
+  other=$(cat "$LOCK/pid" 2>/dev/null)
+  if [ -n "${other:-}" ] && kill -0 "$other" 2>/dev/null; then
+    echo "another watcher already runs (pid $other, lock $LOCK); exiting" >&2
+    exit 0
+  fi
+  echo "taking over a stale lock ($LOCK, pid ${other:-unknown} is gone)" >&2
+  rm -rf "$LOCK"
+  mkdir "$LOCK" 2>/dev/null || { echo "cannot take $LOCK; exiting" >&2; exit 1; }
+fi
+echo $$ > "$LOCK/pid"
+trap 'rm -rf "$LOCK"' EXIT
 [ -f "$PROGRESS" ] || echo "leg,status,seconds,files,samples,finished_at" > "$PROGRESS"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$WATCHLOG"; }
@@ -129,12 +148,17 @@ while :; do
     leg=${d##*/tb_}
     case "$leg" in "$PREFIX"*) ;; *) continue ;; esac
     is_excluded "$leg" && continue
-    dump_finished "$d" || continue
+    # THE CHEAP CHECKS COME FIRST. `dump_finished` stats every block of a 42k-file tb/ directory
+    # (~6 s a leg), and the library only grows: with the expensive check first, each cycle would
+    # re-verify every leg already built before reaching the next candidate, and the gap between
+    # builds would grow from seconds to minutes. The progress table and the two-failure rule are
+    # one awk each, so they decide almost every directory without touching the drive.
     if done_leg "$leg"; then continue; fi
     if failed_twice "$leg"; then
       [ "$DRY" = "1" ] && log "[dry] $leg: would skip (failed twice)"
       continue
     fi
+    dump_finished "$d" || continue
     if [ "$DRY" = "1" ]; then
       log "[dry] $leg: would build now"
       built_this_round=1
