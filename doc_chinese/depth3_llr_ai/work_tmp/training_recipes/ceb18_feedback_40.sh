@@ -21,6 +21,9 @@
 # (first pass -> numpy min-sum -> fill the channels -> second pass); until then this is a training-side result.
 #
 # COST. Two forward passes and the min-sum, i.e. roughly 2.2-2.5x the step of the code-loss arm.
+#
+# BATCH 8, NOT 16. A 32-sample smoke at batch 16 passed and the real run then died asking for a single
+# 4.04 GiB buffer on the 6 GB card. Batch 8 is the size that fits; the recipe is otherwise unchanged.
 set -u
 ROOT=${ROOT:-$HOME/work/ai_phy_train}
 PY=${PY:-$ROOT/.venv/bin/python}
@@ -36,7 +39,7 @@ exec "$PY" -u "$ROOT/lib/phy/upper/ai_signal_processors/depth3/ai_train/train_de
   --modulation QPSK --modcond --no-reporting-heads --c-hid 32 --blocks 18 --layout spatial \
   --dense-blocks --dense-skip-entry --se \
   --scale-init 0.03 --snr-weight 2 --snr-sigma 3 --loss-norm bits --smooth-k 0 \
-  --epochs 40 --snapshot-every 1 --batch 16 --workers 6 --max-val 1000 \
+  --epochs 40 --snapshot-every 1 --batch 8 --workers 6 --max-val 1000 \
   --no-val --monitor-every 10 --bler-samples 0 --select-on none \
   --seed 20261105 --lr 1e-3 \
   --code-loss-weight 0.1 --code-loss-iterations 2 --code-loss-samples 2 --code-loss-from 5 \

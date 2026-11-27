@@ -2704,12 +2704,19 @@ def main():
         # step would see a different target dict); `active` says the code BCE itself is in the objective.
         code_state["on"] = bool(args.code_loss_weight > 0.0 or args.decode_feedback_planes > 0)
         code_state["active"] = bool(epoch >= args.code_loss_from)
-        code_last = None
+        # THE CODE TERM IS AVERAGED OVER THE EPOCH, ON THE DEVICE. Printing the last batch's value was a
+        # single noisy sample: the same run reported 0.13, 0.22, 0.003, 0.17 and 0.00000 on consecutive
+        # epoch lines, because each batch draws different receptions. The accumulation is tensors all the way,
+        # so the one host synchronisation per epoch is unchanged.
+        code_total = None
+        code_batches = 0
         for samples in train.epoch(args.batch, workers, prefetch):
             x, targets = tensors(samples)
             total, step_terms, _ = step(x, targets, training=True)
             if "code" in step_terms:
-                code_last = step_terms["code"]
+                code_total = (step_terms["code"] if code_total is None
+                              else code_total + step_terms["code"])
+                code_batches += 1
             pending.append(total)
             if len(pending) == LOSS_ACCUMULATION:
                 losses.extend(float(value) for value in tf.stack(pending).numpy())
@@ -2732,6 +2739,7 @@ def main():
         history.append({"epoch": epoch, "train": float(np.mean(losses)), "val": val_loss,
                         "val_ber": val_ber, "val_llr_mean": val_mag, "val_bler": val_bler,
                         "val_bler_skipped": val_skipped})
+        code_last = None if code_total is None else code_total / max(code_batches, 1)
         if epoch == 1 or epoch % max(1, args.epochs // 20) == 0 or epoch == args.epochs:
             print(f"epoch {epoch:4d}  train {np.mean(losses):.5f}  val {val_loss:.5f}  "
                   f"uncoded BER {val_ber:.4f}  coded BLER {val_bler:.4f}  "
