@@ -470,16 +470,21 @@ manifest（一条腿一份，便于全库汇总）：**§5.2 的对账脚本已�
 | **"建完即删"不是优化，是必需** | 102 腿 × 9.6 GB ≈ 980 GB > T7 的 660 GiB ⇒ 不回收，dump 批处理会停在 `WAITING` |
 | 删除命令 | `rm -rf /Volumes/T7_Corpus/corpus/<leg>`（只删采集，**dump 保留**）|
 
-时间账不变：解包 2–4 分钟＋建库 38 分钟 ⇒ 单线程约 42 分钟/腿，**101 腿约 70 小时**；4 路并行约 **18–20 小时**。
+时间账：解包 2–4 分钟＋建库 38 分钟 ⇒ 单腿约 42 分钟（机器独占）。**与 dump 批处理并行时实测 78–103 分钟/腿**（见 §6.3），
+所以全库的墙钟时间由两条流水线共享同一块盘这件事决定，不是由并行度决定。
 
 ### 6.3 并发与资源（实测数）
 
 | 资源 | 实测 | 建议 |
 |---|---|---|
-| 单进程峰值内存（`CHUNK=8000`）| **2.17 GiB** | 4 路 ＝ ≈ 9 GB，64 GB 机器无压力 |
-| 单进程 CPU | ≈ 1 核（BLAS 单线程；`/usr/bin/time`：204.9 s user / 229.6 s real）| 4 路 ≈ 4 核 |
+| 单进程峰值内存（`CHUNK=8000`）| **2.17 GiB** | 单路 ≈ 2.2 GiB，内存不是约束 |
+| 单进程 CPU | ≈ 1 核（BLAS 单线程；`/usr/bin/time`：204.9 s user / 229.6 s real）| 并行时它也只会拿到 11–16% CPU（盘被 dump 占着）|
 | 磁盘 | 每条在飞腿 9.6 GB 采集 ＋ 0.19 GB dump ＋ 2.3 GB 产物 ＋ 1.4 GB 临时；**采集会一直留到该腿建完** | T7 至少留 `12 GiB × 并行数` 且**建完即删**（否则 dump 批处理停在 20 GiB 守卫）；母集盘留 5 GiB/腿 |
-| 与 dump 批处理共存 | dump 用 12 个 replay 进程（14 核）| 建库**再开 2–3 路**为宜；再多两边都慢 |
+| 与 dump 批处理共存 | 3 路并行实测：单腿从 38 min 拉到 **78–103 min**，建库进程 CPU 只有 11–16%，dump 也变慢 | ★★ **一次只建一条腿**（2026-11-27 定）。多开不提高总吞吐，只会让两边都变慢 |
+
+★ **为什么串行反而是对的**：瓶颈是 T7 这一块盘，不是 14 个核。三条腿并行时每条都在等 I/O，
+总吞吐与一条腿相近，而 dump 批处理（12 个 replay 进程）被拖慢。串行让 dump 拿到绝大部分机器，
+建库以"排队消费"的方式跟上，两条流水线都稳定前进。
 
 ★ **降优先级只 `nice`，不要 `taskpolicy -b`**（手册 §21：后台 QoS 会把线程压到能效核）。
 
@@ -510,6 +515,43 @@ grep -c WAITING ~/ai_depth3/logs_s2_amc_batch/batch.out         # dump 批处理
 3. 汇总 `_manifest_*.csv` → `_manifest_all.csv`；
 4. 抽样复核：随机抽 20 个 npz，各抽 5 个样本，`iterations`/`unit` 与 dump 的 `index.csv` join 对得上；
 5. 记录**代码版本**（`git log -1`）与每腿 dump 的 `ldpc_iterations`（要混用 cap 6/20 时尤其重要）。
+
+### 6.7 自动监控：dump 一完成就建库（**串行**）
+
+**判据**（`watch_dumps_build.sh` 实现的就是这四条）：
+
+| # | 检查 | 为什么它能证明"完成" |
+|---|---|---|
+| 1 | `dump_meta.txt` 里有 `finished=` | 该文件在**开跑时被截断重写**，`finished=` 只在两段回放、`index.csv` 拼装、群体划分**全部做完之后**才追加（`dump_tb.sh:228-237`）|
+| 2 | `index.csv` 行数 == `units.txt` 行数 | 每个单元都跑出了判决行 |
+| 3 | `tb/` 文件数 == `dump_meta.txt` 的 **`tb_blocks=`** | 每个可训练样本恰好一个比特文件 |
+| 4 | `index_ko.csv` 存在 | 它是打标签那一步的产物，只有 harq 段跑完才有 |
+
+★ 第 3 条**不能**写成 `tb == self + harq`：`dump_meta` 的 `self=`/`harq=` 只数**首传**，而 `tb/` 里还有 harq 的
+**中间成员**（1103i：42 749 − (37 599 + 4 436) = **714**）。按 `self+harq` 判会**永远判不完成**。
+
+**用法**
+
+```bash
+# 常驻（串行；一条建完自动建下一条）
+POLL=120 RECLAIM=1 nohup bash lib/phy/upper/ai_signal_processors/depth3/ai_train/watch_dumps_build.sh \
+    >> ~/ai_depth3/logs_build_full_s2_amc/watch.out 2>&1 &
+
+# 试跑：只列出"现在会建哪些腿"，不建
+bash lib/phy/upper/ai_signal_processors/depth3/ai_train/watch_dumps_build.sh --dry-run
+```
+
+| 行为 | 说明 |
+|---|---|
+| 扫描 | 每 `POLL`（默认 120 s）扫一次 `$CORPUS/tb_s2_amc_*`（前缀过滤，不会碰 mcs/w2 的 dump）|
+| 跳过 | `s2_amc_ping_1102a`（评测保留）、进度表里 `ok` 的腿、**失败两次**的腿 |
+| 并发 | **一次只建一条**（§6.3 的结论）；建库期间不扫盘，建完立刻扫下一轮 |
+| 回收 | 建库成功后删该腿的采集（`RECLAIM=1`）——dump 批处理在 20 GiB 守卫处等空间，这是唯一能放行它的动作 |
+| 失败 | 半成品 npz 移到 `_trash_<leg>_<ts>/`，记 `failed`；连败两次停下等人 |
+| 状态 | `<out>/_progress.csv`（`leg,status,seconds,files,samples,finished_at`）＋ `watch.log` |
+
+★ **手工建过的腿要补一行 `ok`**：监控只认进度表，不认磁盘上的 npz。1103i 是手工建的，补一行
+`s2_amc_iperf_1103i,ok,…,8,41987,…` 才不会重跑（重跑会覆盖 2.3 GB、白费 40 分钟）。
 
 ---
 
@@ -542,7 +584,7 @@ find /Volumes/Eaget_HD/datasets_full_s2_amc -name '*_part*.npz' -print    # 应�
 | 建 8 个 npz | 第 3 步（`CHUNK=8000`）| **≈ 37 min** | 2.3 GB（＋临时 1.4 GB）|
 | 审计 ＋ 合并 | 第 4 步 | < 1 min | — |
 | **合计** | — | **38 min 12 s** | 峰值 ≈ 12.5 GB |
-| 全库（101 腿，4 路）| — | **≈ 18–20 h** | ≈ 235 GB |
+| 全库（101 腿，**串行**，与 dump 并行）| — | 每腿 78–103 min ⇒ **≈ 130–175 h**；dump 批处理结束后回落到 ≈ 38 min/腿 | ≈ 235 GB |
 
 ---
 
@@ -568,6 +610,8 @@ find /Volumes/Eaget_HD/datasets_full_s2_amc -name '*_part*.npz' -print    # 应�
 | 16 | `_part0.npz` 留在目录里 | 合并失败（某片 rc≠0）| 看日志 `FAILED: … has a failed chunk; not merging`，重跑该腿 |
 | 17 | 用了 cap 20 的母集做尺子对比 | **852** 个样本空中链（cap 6）解不出 | 测量另建 cap 6 的母集；`dump_meta.txt` 的 `ldpc_iterations` 是标记 |
 | 18 | 旧 7 列 dump 建出来的 `iterations_max` 等于 slot | 以前按**列位置**读第 5 列，而旧索引的第 5 列是 `slot`（`REQUIRE_ITERATIONS` 也拦不住：slot 是正数）| **已改为按列名解析**；旧 dump 现在得到 `-1` 并被拒绝。遇到 7 列索引就换 dump，不要绕过 |
+| 19 | 监控**永远不启动**建库 | 完成判据写成 `tb == self + harq`，漏了 harq 中间成员（1103i 差 714 个）| 用 `tb_blocks=`；四条判据见 §6.7 |
+| 20 | 手工建过的腿被监控重跑 | 进度表里没有它（监控只认进度表）| 补一行 `ok`（§6.7 末）|
 
 ---
 
@@ -587,7 +631,7 @@ find /Volumes/Eaget_HD/datasets_full_s2_amc -name '*_part*.npz' -print    # 应�
 | dump 完整性 | 建库前后 7 个索引 md5 **逐字节相同** |
 | 分箱 | 113/224 非空；投影 28 469（2 500/250）、39 834（8 000/800）|
 | 单片基准 | 8 000 样本：**229.6 s**、**2.17 GiB**、产物 498.4 MB |
-| 并发基准 | 4 路时预计 ≈ 9 GB 内存、≈ 4 核；与 dump 批处理共存时建议 2–3 路 |
+| 并发基准 | 3 路并行实测 **78–103 min/腿**（单腿独占 38 min）⇒ 定为**串行**；内存 2.17 GiB/腿不是约束 |
 
 ---
 
