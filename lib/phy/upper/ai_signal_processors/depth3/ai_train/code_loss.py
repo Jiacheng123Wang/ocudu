@@ -252,6 +252,86 @@ def tf_code_bce(llr, targets, iterations=2, alpha=0.8):
     return total / max(count, 1)
 
 
+def null_prepared(row=0):
+    """A code target with nothing in it, so a batch without a decodable sample keeps the same graph.
+
+    The feedback pass reads `targets["code"]` unconditionally; if some batch happened to carry no valid sample the
+    key would disappear and the compiled step would retrace with a different signature. Length zero means every
+    mask is empty and the extrinsic it produces is all zeros -- the second pass then sees exactly what the first
+    one did, which is the correct behaviour for a batch with nothing to say.
+    """
+    return {
+        "row": int(row),
+        "flat_index": np.zeros(1, dtype=np.int32),
+        "sign": np.zeros(1, dtype=np.float32),
+        "bit": np.zeros(1, dtype=np.float32),
+        "mother": np.zeros(1, dtype=np.int32),
+        "filler": np.zeros(1, dtype=np.int32),
+        "length": 0,
+        "nof_filler": 0,
+        "zc": 2,
+        "nb": 68,
+        "shift": structure(1, 2),
+    }
+
+
+def tf_decode_feedback(llr, targets, planes=8, scale=20.0, detach=False, iterations=2, alpha=0.8):
+    """The decoder's EXTRINSIC LLRs, scattered back onto the network's own `[612, 14, 8]` layout.
+
+    This is the training side of the second-pass lever (architecture_levers section 93, item 2). For every
+    transmitted bit the decoder produced an a-posteriori LLR; the part that came from the OTHER bits -- the
+    extrinsic -- is `posterior - intrinsic`, and it is exactly the information the demapper could not have
+    (the code's own constraint). It is descrambled back into the plane's own sign convention, placed at the
+    positions the gather took it from, and returned as `planes` channels for the second forward pass.
+
+    `planes=8` is one channel per modulation bit within a symbol, the faithful layout (the head's stride is 8).
+    `planes=1` collapses the eight bits of a symbol to their mean, which is what the memo's "17 channels"
+    shorthand describes; it is kept because it is the cheaper of the two and the comparison is part of the point.
+
+    `detach=True` stops the gradient at the decoder: the second pass is then trained on feedback whose statistics
+    are fixed, which is what an inference chain that runs a real (non-differentiable) decoder would do.
+    """
+    import tensorflow as tf
+
+    batch = tf.shape(llr)[0]
+    stride = D3.COND_STRIDE
+    plane = D3.NOF_SUBCARRIERS * D3.NOF_SYMBOLS * stride
+    flat_batch = tf.reshape(tf.cast(llr, tf.float32), (batch, -1))
+    total = tf.zeros((batch, plane), dtype=tf.float32)
+    for position in range(targets["zc"].shape[0]):
+        row = targets["row"][position]
+        length = targets["length"][position]
+        valid = tf.reshape(tf.range(targets["flat_index"].shape[1]) < length, (-1,))
+        intrinsic = (tf.gather(flat_batch[row], targets["flat_index"][position])
+                     * tf.where(valid, targets["sign"][position], 0.0))
+        if detach:
+            intrinsic = tf.stop_gradient(intrinsic)
+        deposited = tf.math.unsorted_segment_sum(intrinsic, targets["mother"][position], NOF_VAR)
+        filler_valid = tf.reshape(tf.range(targets["filler"].shape[1]) < targets["nof_filler"][position],
+                                  (-1,))
+        deposited = deposited + tf.math.unsorted_segment_sum(
+            tf.where(filler_valid, KNOWN_LLR, 0.0), targets["filler"][position], NOF_VAR)
+        posterior = _min_sum(deposited, targets["shift"][position],
+                             tf.cast(targets["zc"][position], tf.int32),
+                             tf.cast(targets["nb"][position], tf.int32), iterations, alpha)
+        if detach:
+            posterior = tf.stop_gradient(posterior)
+        extrinsic = tf.gather(posterior, targets["mother"][position]) - intrinsic
+        values = extrinsic * tf.where(valid, targets["sign"][position], 0.0)
+        row_plane = tf.math.unsorted_segment_sum(values, targets["flat_index"][position], plane)
+        total = tf.tensor_scatter_nd_add(total, [[row]], [row_plane])
+    shaped = tf.reshape(total, (batch, D3.NOF_SUBCARRIERS, D3.NOF_SYMBOLS, stride))
+    if int(planes) != stride:
+        shaped = tf.reduce_mean(shaped, axis=-1, keepdims=True)
+    # BOUNDED, LIKE EVERY OTHER INPUT THE TRUNK SEES. An extrinsic LLR is in the same units as the network's own
+    # output (tens), while the twelve feature planes are O(1). `tanh` was the first choice and it saturated: with a
+    # perfect demapper the decoder's confirmation is 20-30, so almost every bit landed on +-1 and the gradient
+    # through the feedback path -- the only reason to make it differentiable -- went to zero. A linear map with a
+    # generous clip keeps the magnitude ordering and a usable slope, and `scale` defaults to the calibration's own
+    # S_llr (20) rather than to a number invented here.
+    return tf.clip_by_value(shaped / float(scale), -3.0, 3.0)
+
+
 def selfcheck():
     """Prove the TF min-sum decodes like the numpy one, and that perfect LLRs give ~zero loss."""
     import tensorflow as tf

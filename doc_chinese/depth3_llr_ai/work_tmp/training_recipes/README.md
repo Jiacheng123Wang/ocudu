@@ -78,3 +78,16 @@ nohup bash ceb36_const_80.sh > logs/ceb36_e80.log 2>&1 < /dev/null &
 | 自检 | `python code_loss.py --selfcheck`：完美信道精确解码；5 条含噪信道与 `ldpc_decode.MinSum` **逐位一致**；坏信道两边都判失败 |
 | 读数 | 每轮日志行尾多一个 `code <值>`（起点 ≈ ln2 = 0.693）；**判据仍是尺子**（e37–e40 末端 SWA）|
 | 机器 | 211（3060 Ti）；211 的 e120 衰减 run 跑完后由 watcher 自动起（先跑完 GPU 冒烟，XLA 不过就退到 `--no-jit`）|
+
+## 8. ★★★★ 2026-11-28 **解码反馈第二遍**（§93 #2 训练侧原型；未排机器）
+
+| 项 | 值 |
+|---|---|
+| 脚本 | `ceb18_feedback_40.sh` |
+| 实现 | `code_loss.tf_decode_feedback()`（外信息 ＝ 后验 − 内禀，scatter 回 `(612,14,8)`）＋ `train_depth3.py` 的 `--decode-feedback-*`；**默认关** |
+| 通道 | `--decode-feedback-planes 8`＝逐调制比特（faithful，24 通道）｜`1`＝每符号均值（17 通道，memo 的字面版）|
+| 两遍 | **共享权重**：第一遍反馈通道填 0（＝现模型），第二遍填 `clip(ext/S,−3,3)` |
+| 验证 | `work_tmp/analysis/check_decode_feedback.py`：完美 LLR → 符号一致 **100%**；随机 → 幅度 1.6、按 qm 逐平面；梯度 `1.18`（detach 后为 None）|
+| 限制 | ★ **目前只有训练侧**：链路每接收只跑一次模型，量交付比特需要回放侧的两遍原型 |
+| 代价 | 两遍前向 ＋ min-sum ⇒ 约 **2.2–2.5×** 码字约束那条的 step |
+

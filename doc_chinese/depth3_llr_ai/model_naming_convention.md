@@ -292,11 +292,12 @@ d3_w2v1_c32b18dw_e2e-cond-norep-sw2s3_e20
 | ★ `g<n>` | `--groups n` | 主干卷积**分组**数（g=4；省略＝dense）| 少 | `…-g4_e40`（107）|
 | ★ `symaux` | `--sym-aux --w-sym 0.1` | **训练期**符号回归辅助头（导出丢弃）| 0（导出）| `…-llrp-symaux_e40`（107）|
 
-**(b)bis ★★★ 损失项 token（2026-11-27 起）：`code<λ>`**
+**(b)bis ★★★ 损失项与迭代 token（2026-11-27/28 起）：`code<λ>` 与 `fb<planes>`**
 
 | token | 对应 flag | 含义 | 例 |
 |---|---|---|---|
 | ★ `code<λ>` | `--code-loss-weight λ`（＋可选的 `--code-loss-iterations k`、`--code-loss-from e`）| ★ **码字约束损失**（§93 #1）：训练时在真 LDPC 码上跑 k 次 min-sum，按解码后仍错的比特计 BCE。λ 按 `lr3e-4` 的写法（0.1 → `code1e-1`）| `…-se-code1e-1_e40` |
+| ★ `fb<planes>` | `--decode-feedback-planes <n>`（＋`--decode-feedback-detach`／`-scale`）| ★ **解码反馈第二遍**（§93 #2）：把 LDPC 外信息回灌成 `n` 个输入通道再前向一次；`fb8` = 逐比特（faithful），`fb1` = 每符号均值（"17 通道"的字面版）| `…-se-code1e-1-fb8_e40` |
 
 **⇒ 位置**：`<recipe>` 段**最末尾**（它是损失项，不是结构）。**迭代数不进名字**（默认 2），进 sidecar/argv ✓
 

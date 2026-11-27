@@ -1907,6 +1907,21 @@ def main():
                         help="how many samples per batch carry the code loss (default 1)")
     parser.add_argument("--code-loss-from", type=int, default=1, metavar="EP",
                         help="first epoch the code loss is applied (default 1; later lets the LLR fit settle)")
+    # THE SECOND PASS (architecture_levers section 93, item 2). The decoder's EXTRINSIC information is fed back
+    # into the network as extra input channels and the trunk runs a second time, so the demapper can see what the
+    # code's own constraint said about each bit -- the one thing it cannot compute itself. Training-side only for
+    # now: a deployed chain would have to run a decoder between the two passes, which the C++ arm does not do yet.
+    parser.add_argument("--decode-feedback-planes", type=int, default=0, metavar="N",
+                        help="extrinsic channels fed to the second pass (0 disables; 8 = one per modulation bit, "
+                             "1 = the per-symbol mean, i.e. the memo's 17-channel shorthand)")
+    parser.add_argument("--decode-feedback-scale", type=float, default=20.0, metavar="S",
+                        help="the feedback enters as clip(extrinsic / S, -3, 3) (default 20 = the calibrated "
+                             "S_llr; tanh saturated and killed the gradient through the decoder)")
+    parser.add_argument("--decode-feedback-detach", action="store_true",
+                        help="stop the gradient at the decoder, like an inference chain with a real decoder")
+    parser.add_argument("--decode-feedback-first-weight", type=float, default=0.5, metavar="W",
+                        help="weight of the first pass's own BCE (deep supervision; 0 trains the first pass "
+                             "only through the decoder path)")
     parser.add_argument("--no-aux", action="store_true", help="LLR head only, for the R2.4 ablation")
     parser.add_argument("--no-val", action="store_true",
                         help="skip the per-epoch validation pass. Selection is then meaningless and the run relies on "
@@ -2171,9 +2186,12 @@ def main():
         # The sample appends the four conditioning channels itself, so the model's input width is the data's plus
         # those four. Kept here rather than inside `plane_channels` so the two widths stay visibly different.
         from_data += len(D3.COND_QM_ORDER)
-    if from_data != in_channels:
+    # THE FEEDBACK CHANNELS ARE FILLED BY THE STEP, NOT BY THE DATA: the dataset still carries `from_data`,
+    # and the graph is wider by exactly the planes the second pass appends.
+    in_channels += args.decode_feedback_planes
+    if from_data + args.decode_feedback_planes != in_channels:
         parser.error(f"--layout {args.layout} builds {in_channels} input channels but the data "
-                     f"carries {from_data}")
+                     f"carries {from_data} (+{args.decode_feedback_planes} feedback)")
     print(f"layout {args.layout}, {in_channels} input channels")
     model = build(blocks=args.blocks, c_hid=args.c_hid, qm=qm, aux_heads=not args.no_aux, low_rank=args.low_rank,
                   reporting_heads=not args.no_reporting_heads,
@@ -2210,7 +2228,7 @@ def main():
     optimizer = tf.keras.optimizers.Adam(args.lr)
     weights = {"llr": args.w_llr, "ch_est": args.w_ch, "post_eq_noise": args.w_noise,
                "dmrs_noise": args.w_noise, "sym_est": args.w_sym,
-               "code": args.code_loss_weight}
+               "code": args.code_loss_weight, "llr_first": args.decode_feedback_first_weight}
 
     # XLA is a TRAINING choice and cannot reach the deployed graph: the bundle is exported from the Keras
     # layer structure and the trained weights, so compiling the step changes nothing about what the ANE
@@ -2227,7 +2245,6 @@ def main():
         @tf.function(jit_compile=bool(jit))
         def compiled(x, targets, training):
             with tf.GradientTape() as tape:
-                outputs = model(x, training=training)
                 # Every head leaves the model with the contract's `[width, channels]` tail, so one
                 # reshape reads each of them and the loss cannot drift with the trunk's layout: the
                 # spatial axes are an implementation detail that stops at the head.
@@ -2235,17 +2252,44 @@ def main():
                 # computed, so `--dtype float16` narrows the graph and not the objective; on macOS, where the
                 # Metal plugin's fp16 path is the one with the most caveats, this keeps the number in the log
                 # comparable with the Ubuntu run of the same command line.
-                llr = tf.reshape(tf.cast(outputs["llr"], tf.float32),
-                                 (-1, D3.NOF_SUBCARRIERS, head_channels)) * targets["scale"][:, None, None]
-                if args.llr_linear:
-                    # The bound the contract asks for, applied where it is differentiable, per sample.
-                    llr = tf.clip_by_value(llr, -targets["scale"][:, None, None], targets["scale"][:, None, None])
+                def head_llr(heads):
+                    """The LLR head with this run's own scaling and bound, shared by both passes."""
+                    value = tf.reshape(tf.cast(heads["llr"], tf.float32),
+                                       (-1, D3.NOF_SUBCARRIERS, head_channels)) * targets["scale"][:, None, None]
+                    if args.llr_linear:
+                        # The bound the contract asks for, applied where it is differentiable, per sample.
+                        value = tf.clip_by_value(value, -targets["scale"][:, None, None],
+                                                 targets["scale"][:, None, None])
+                    return value
+
+                llr_first = None
+                if args.decode_feedback_planes > 0:
+                    # PASS ONE WITH THE FEEDBACK CHANNELS BLANK: the shared weights see the same input the
+                    # contract feeds today, so the first pass is exactly the model that already exists.
+                    blank = tf.zeros_like(x[..., :args.decode_feedback_planes])
+                    llr_first = head_llr(model(tf.concat([x, blank], axis=-1), training=training))
+                    # THE DECODER'S EXTRINSIC, PLACED BACK WHERE THE GATHER TOOK THE LLR FROM.
+                    feedback = CL.tf_decode_feedback(
+                        llr_first, targets["code"], planes=args.decode_feedback_planes,
+                        scale=args.decode_feedback_scale, detach=args.decode_feedback_detach,
+                        iterations=args.code_loss_iterations)
+                    # PASS TWO, SAME WEIGHTS, WITH THE CODE'S OWN CONSTRAINT IN THE INPUT.
+                    outputs = model(tf.concat([x, feedback], axis=-1), training=training)
+                else:
+                    outputs = model(x, training=training)
+                llr = head_llr(outputs)
                 llr_mask = targets["llr_weights"]
                 if training and (args.snr_weight > 0.0 or args.width_weight > 0.0):
                     # THE WEIGHTING APPLIES TO TRAINING ONLY. Validation reports the unweighted loss, so a weighted run stays
                     # comparable with every earlier one and the number in the log still means the same thing.
                     llr_mask = llr_mask * targets["w_snr"][:, None, None]
                 terms = {"llr": L.tf_bce_loss(llr, targets["llr_shape"], llr_mask, norm=args.loss_norm)}
+                if llr_first is not None:
+                    # DEEP SUPERVISION ON THE FIRST PASS. Without it the first pass only learns through the
+                    # decoder's extrinsic path, which is a weak and indirect signal at the start; with it, both
+                    # passes are fitted to the genie LLRs and the second one learns what to ADD from the code.
+                    terms["llr_first"] = L.tf_bce_loss(llr_first, targets["llr_shape"], llr_mask,
+                                                       norm=args.loss_norm)
                 if "code" in targets:
                     # The decoder's own verdict, differentiated: the a-posteriori LLRs of the real LDPC
                     # code, compared with the bits that were transmitted.
@@ -2387,6 +2431,11 @@ def main():
                 if len(chosen) >= max(1, args.code_loss_samples):
                     break
             code_state["next_row"] = (code_state["next_row"] + len(chosen) + 1) % max(1, len(samples))
+            if not chosen and args.decode_feedback_planes > 0:
+                # A FIXED SIGNATURE FOR THE COMPILED STEP. When the feedback is on, `targets["code"]` must exist on
+                # every batch or the tf.function retraces with a different signature; an empty target says
+                # "nothing to feed back" and the second pass then sees exactly what the first one did.
+                chosen = [CL.null_prepared(0)]
             if chosen:
                 targets["code"] = CL.stack_prepared(chosen)
         return stacked, targets
@@ -2640,7 +2689,8 @@ def main():
         # unchanged. A float32 running SUM would not be: eight thousand additions at magnitude 2 lose the fifth
         # decimal, which is the precision the epoch line prints.
         losses, pending = [], []
-        code_state["on"] = bool(args.code_loss_weight > 0.0 and epoch >= args.code_loss_from)
+        code_state["on"] = bool((args.code_loss_weight > 0.0 or args.decode_feedback_planes > 0)
+                                and epoch >= args.code_loss_from)
         code_last = None
         for samples in train.epoch(args.batch, workers, prefetch):
             x, targets = tensors(samples)
