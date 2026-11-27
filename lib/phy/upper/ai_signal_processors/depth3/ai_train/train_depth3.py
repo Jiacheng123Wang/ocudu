@@ -2267,14 +2267,20 @@ def main():
                     # PASS ONE WITH THE FEEDBACK CHANNELS BLANK: the shared weights see the same input the
                     # contract feeds today, so the first pass is exactly the model that already exists.
                     blank = tf.zeros_like(x[..., :args.decode_feedback_planes])
-                    llr_first = head_llr(model(tf.concat([x, blank], axis=-1), training=training))
-                    # THE DECODER'S EXTRINSIC, PLACED BACK WHERE THE GATHER TOOK THE LLR FROM.
-                    feedback = CL.tf_decode_feedback(
-                        llr_first, targets["code"], planes=args.decode_feedback_planes,
-                        scale=args.decode_feedback_scale, detach=args.decode_feedback_detach,
-                        iterations=args.code_loss_iterations)
-                    # PASS TWO, SAME WEIGHTS, WITH THE CODE'S OWN CONSTRAINT IN THE INPUT.
-                    outputs = model(tf.concat([x, feedback], axis=-1), training=training)
+                    first = model(tf.concat([x, blank], axis=-1), training=training)
+                    llr_first = head_llr(first)
+                    if "code" in targets:
+                        # THE DECODER'S EXTRINSIC, PLACED BACK WHERE THE GATHER TOOK THE LLR FROM.
+                        feedback = CL.tf_decode_feedback(
+                            llr_first, targets["code"], planes=args.decode_feedback_planes,
+                            scale=args.decode_feedback_scale, detach=args.decode_feedback_detach,
+                            iterations=args.code_loss_iterations)
+                        # PASS TWO, SAME WEIGHTS, WITH THE CODE'S OWN CONSTRAINT IN THE INPUT.
+                        outputs = model(tf.concat([x, feedback], axis=-1), training=training)
+                    else:
+                        # No decodable sample in this batch: the second pass would see zeros, so reuse the first
+                        # one's heads instead of paying for an identical forward.
+                        outputs = first
                 else:
                     outputs = model(x, training=training)
                 llr = head_llr(outputs)
@@ -2292,8 +2298,10 @@ def main():
                                                        norm=args.loss_norm)
                 if "code" in targets:
                     # The decoder's own verdict, differentiated: the a-posteriori LLRs of the real LDPC
-                    # code, compared with the bits that were transmitted.
-                    terms["code"] = CL.tf_code_bce(llr, targets["code"], args.code_loss_iterations)
+                    # code, compared with the bits that were transmitted. The gate is zero until
+                    # --code-loss-from, so the term's SHAPE never changes across epochs.
+                    terms["code"] = (CL.tf_code_bce(llr, targets["code"], args.code_loss_iterations)
+                                     * targets.get("code_gate", 1.0))
                 if not args.no_aux:
                     # THE NOISE HEAD IS ALWAYS IN WHEN aux_heads IS (design section 22.2): it is what scales the logits
                     # into the LLRs the chain quantises, so it is trained even in the bundle that dropped the reporting
@@ -2378,7 +2386,7 @@ def main():
 
     # WHICH BATCHES CARRY THE CODE LOSS. The term is applied from `--code-loss-from` onwards and only
     # during training; validation must stay comparable with every earlier run, so `evaluate` turns it off.
-    code_state = {"on": False, "next_row": 0}
+    code_state = {"on": False, "active": False, "next_row": 0}
 
     def tensors(samples):
         """One batch's device tensors: the input plane, and exactly the targets the step reads.
@@ -2438,6 +2446,8 @@ def main():
                 chosen = [CL.null_prepared(0)]
             if chosen:
                 targets["code"] = CL.stack_prepared(chosen)
+                # THE GATE, NOT A DIFFERENT GRAPH: --code-loss-from must not change the compiled signature.
+                targets["code_gate"] = tf.constant(1.0 if code_state["active"] else 0.0)
         return stacked, targets
 
     def perfect_llr(sample):
@@ -2689,8 +2699,11 @@ def main():
         # unchanged. A float32 running SUM would not be: eight thousand additions at magnitude 2 lose the fifth
         # decimal, which is the precision the epoch line prints.
         losses, pending = [], []
-        code_state["on"] = bool((args.code_loss_weight > 0.0 or args.decode_feedback_planes > 0)
-                                and epoch >= args.code_loss_from)
+        # TWO STATES, BECAUSE THE FEEDBACK NEEDS THE TARGETS BEFORE THE TERM IS SWITCHED ON. `on` says the
+        # batch must carry the decoder targets (the feedback needs them from its first epoch, or the compiled
+        # step would see a different target dict); `active` says the code BCE itself is in the objective.
+        code_state["on"] = bool(args.code_loss_weight > 0.0 or args.decode_feedback_planes > 0)
+        code_state["active"] = bool(epoch >= args.code_loss_from)
         code_last = None
         for samples in train.epoch(args.batch, workers, prefetch):
             x, targets = tensors(samples)
