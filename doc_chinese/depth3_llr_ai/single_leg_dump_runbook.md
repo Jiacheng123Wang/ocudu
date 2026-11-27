@@ -32,7 +32,7 @@ mkdir -p $CORPUS
 ssh $REMOTE "cat $TARBALL" | tar -xzf - -C $CORPUS --exclude '._*'
 # ③ 解包校验（完整四条见 §4；本腿文件数应为 293 510）
 find $CORPUS/$LEG -type f | wc -l
-# ④ dump（12 路并行；50 000 单元约 10 分钟；自动含 self ＋ harq 两个群体，见 §5.5）
+# ④ dump（12 路并行；50 000 单元约 11 分钟，含 self 与 harq 两段；见 §5.5）
 cd $REPO && bash $TOOL --corpus $CORPUS --out $OUT --jobs 12 --binary $BIN $CORPUS/$LEG
 # ⑤ 三条判据（见 §6）
 python3 - "$OUT" <<'PY'
@@ -43,8 +43,12 @@ with_bin = sum(1 for u in us if os.path.exists(u[:-4] + ".bin"))
 rows = sum(1 for _ in open(os.path.join(out, "index.csv"))) - 1
 ok = sum(1 for l in open(os.path.join(out, "index.csv")) if ",OK," in l)
 print(f"units={len(us)} with_bin={with_bin} index_rows={rows} crc_ok={ok}")
+import csv
+lab = [r["label_from"] for r in csv.DictReader(open(os.path.join(out, "index_harq.csv")))]
+print("self+harq:", sum(1 for x in lab if x in ("self", "harq")),
+      "tb:", len(os.listdir(os.path.join(out, "tb"))))
 PY
-# ⑥ 收尾：删草稿（6 GB），只留三个契约产物
+# ⑥ 收尾：删草稿（6 GB），只留七个契约产物（见 §5.2）
 rm -rf $OUT/{stage,rows,raw}; find $OUT -name .DS_Store -delete
 ```
 
@@ -57,7 +61,7 @@ rm -rf $OUT/{stage,rows,raw}; find $OUT -name .DS_Store -delete
 | 角色 | 位置 | 内容 |
 |---|---|---|
 | **归档机 211** | `jwang@192.168.31.211:/mnt/corpus/s2_amc_corpus_tarballs/<leg>.tar.gz` | ★ 原始采集归档，**一条腿一个包**（该目录 102 个包：95 条 ping ＋ 7 条 iperf，合计 340 GB）|
-| 归档机 211（旁路） | `/mnt/corpus/s2_amc_tb_tarballs/tb_<leg>.tar.gz` | ★ **dump 的归档**（本腿 22 MB，2026-11-06）；怎么生成见 §7.2 |
+| 归档机 211（旁路） | `/mnt/corpus/s2_amc_tb_tarballs/tb_<leg>.tar.gz` | ★ **dump 的归档**（本腿现有的是 2026-11-06 的 22 MB 旧版；新流程产出 19.4 MiB，见 §7.2）|
 | **本机代码仓** | `/Users/jiachengwang/dev/ocudu` | dump 工具与 replay 二进制源码 |
 | **本机语料盘** | `/Volumes/T7_Corpus/corpus` | 解包目标 ＋ dump 输出（T7 为 APFS，2026-11-27 实测余量 676 GiB）|
 
@@ -65,7 +69,7 @@ rm -rf $OUT/{stage,rows,raw}; find $OUT -name .DS_Store -delete
 `DUMP=$DUMP_ROOT/tb_$LEG` 找 dump（`build_mother_set.sh:65`），
 `CAP=$CORPUS_ROOT/$LEG` 找捕获（`:66`）。
 位置可以换：手册 §6 的示例放在训练机的 `~/ai_depth3/dump_s2/tb_<leg>`；
-**本文按本次实际执行放在语料盘** `/Volumes/T7_Corpus/corpus/tb_<leg>`（那里有 600 GiB 余量，
+**本文按本次实际执行放在语料盘** `/Volumes/T7_Corpus/corpus/tb_<leg>`（那里有 ≥ 600 GiB 余量，
 且与捕获同盘，`build_mother_set.sh` 只要把 `DUMP_ROOT` 指过去即可，见 §7.3）。
 
 ### 1.2 一条腿的容量预算（实测）
@@ -76,7 +80,7 @@ rm -rf $OUT/{stage,rows,raw}; find $OUT -name .DS_Store -delete
 | 解包后原始语料 | **9.6 GB / 293 510 文件** | 9 576 543 376 B，见 §4 |
 | dump 草稿 `stage/` | **5.8 GB** | 逐单元 staged 捕获，**可删** |
 | dump 草稿 `rows/` | **195 MB** | 逐单元一行，`index.csv` 就是它排序拼起来的，**可删** |
-| dump 契约产物 | **≈ 180 MiB** | `index.csv` 2.2 MiB ＋ `units.txt` 3.4 MiB ＋ `tb/` 172 MiB（self ＋ harq）＋ 三个群体索引 ＋ `chain_iters.csv` |
+| dump 契约产物 | **≈ 185 MiB** | `tb/` 172 MiB（self ＋ harq）＋ `index.csv` 2.2 ＋ `units.txt` 3.4 ＋ 三个群体索引 5.2 ＋ `chain_iters.csv` 0.44 |
 | **峰值合计** | **≈ 16 GB/腿** | 所以开跑前 **T7 至少留 20 GiB**（历史驱动 `dump_1103.sh` 用的就是 20 GiB 门槛）|
 
 ---
@@ -264,7 +268,8 @@ bash $LIB/dump_tb.sh \
 | `--out DIR` | 输出目录 | ★ **一条腿一个 `tb_<leg>`**；给根目录会把多条腿混在一起 |
 | `--jobs N` | **N 个单元同时在飞**，每单元一个进程 | 每进程单线程（脚本内导出 `OMP_NUM_THREADS=1`）；★ 14 核上 **12** 是实测上限（手册 §6：12 个并发进程已到负载天花板）|
 | `--binary PATH` | replay 二进制 | 优先 `ul_chain_replay_cpu`（纯 CPU 经典链）；脚本另钉死 `--phy_pipeline cpu --pusch_receiver_backend classic` |
-| `--limit N` | 只跑排序后的前 N 个单元 | 冒烟用，见 §5.4 |
+| `--limit N` | 只跑排序后的前 N 个单元 | 冒烟用，见 §5.4；★ 链回放也只用这 N 个单元，链条被切断，数字不代表本腿 |
+| `--no-harq` | 关掉第二段（harq 半程）| 只要逐单元结果时用；此时 `tb/` 只装 self，`index_*` 三个文件不生成 |
 | 位置参数 | **腿目录**（可多条） | 脚本用 `find -maxdepth 1 -name '*.txt' ! -name '*_ce.txt' ! -name '._*'` 建单元清单 |
 
 产物结构（全部在 `--out` 下）：
@@ -282,10 +287,12 @@ bash $LIB/dump_tb.sh \
 
 ### 5.3 实测耗时与节奏
 
-| 项 | 实测 |
+| 项 | 实测（2026-11-27 干净重跑）|
 |---|---|
-| 全量 50 000 单元、`--jobs 12` | **9 分 55 秒**（`units.txt` 05:42:23 → `index.csv` 05:52:18）|
-| 吞吐 | **≈ 83 单元/秒**（12 路 ⇒ 每单元有效占用约 0.145 s）|
+| **整条流程**（50 000 单元 ＋ 链回放 ＋ 打标）| **11 分 8 秒** |
+| 其中：逐单元回放 | ≈ 10 分钟（**≈ 83 单元/秒**，12 路 ⇒ 每单元约 0.145 s）|
+| 其中：链回放（5 655 条链）| **≈ 40 秒**（一条链一个进程）|
+| 其中：打标（三个索引 ＋ 拷比特）| ≈ 20 秒 |
 | 负载 | 1 分钟负载均值峰值 33（含 T7 的 I/O 等待）；吞吐已饱和，**不要再加 jobs** |
 
 > ★ **同时跑多条腿时，限制的是「总进程数」不是「每条腿的 jobs」**：手册 §6 的实测上限是
@@ -307,9 +314,12 @@ bash $LIB/dump_tb.sh --corpus /Volumes/T7_Corpus/corpus --out /tmp/tb_smoke \
   /Volumes/T7_Corpus/corpus/s2_amc_iperf_1103i
 ```
 
-**本次实测**：2 000 单元 **23.2 秒**，1 433 个 CRC-OK；其 `index.csv` 的 2 000 行与全量 dump 的同名行
+**实测**：2 000 单元逐单元段 **23.2 秒**；带 harq 段时整条 **27.7 秒**（1 694 条链里挑出 260 条候选、
+解出 258 条、写出 258 个 harq 比特，`tb/` 1 739 个块）。其 `index.csv` 的 2 000 行与全量 dump 的同名行
 **逐字段完全相同 0 处不符**（`--limit` 取的是排序后的前 N 个，正好是全量结果的前缀 ⇒ 可用于 A/B 对照）。
-`--limit` 只截断 `units.txt`，不改任何判读逻辑。
+
+> ★ 冒烟阶段链是**被截断的**（只拿到前 2 000 个单元），所以候选数/解出数不能拿来判断本腿的 harq 规模；
+> 冒烟只用于验证「流程能跑通、`index.csv` 是全量的前缀」。
 
 ### 5.5 dump 的两个群体：self 与 harq（`--no-harq` 可关）
 
@@ -329,11 +339,11 @@ bash $LIB/dump_tb.sh --corpus /Volumes/T7_Corpus/corpus --out /tmp/tb_smoke \
   在第 2 段里只作为合并的输入出现。
 - 有 `<leg>/tb_live/`（空中链的 live dump）时，链回放的比特会与之**逐字节比对**；一致才落盘。
   没有 `tb_live` 也能出 harq（比特来自链回放本身，CRC 保证同块），只是少了那层验证。
-- 本腿实测：候选链 5 655 → 解码 5 236（92.6%）→ `tb/` 从 36 747 增到 **42 722**；
-  1103j：4 947 → 4 894（98.9%）→ 38 740 增到 **44 805**。
+- 本腿实测（2026-11-27 干净重跑）：候选链 **5 655** → 解码 **5 236（92.6%）** → `tb/` 从 36 747 增到
+  **42 722**；比特与 `tb_live` 比对 `match=5 225 / no-live-row=11`。
 
 > ★ **重跑要先删旧目录**：`dump_tb.sh` 每次会截断 `index.csv`/`units.txt`，但**不会**清 `tb/`。
-> 旧目录里残留的 `.bits` 会让「tb 文件数 = crc_ok」这条判据假性失败。
+> 旧目录里残留的 `.bits` 会让「`tb/` = self＋harq」这条判据假性失败（数出来比群体多）。
 > 正确做法：`rm -rf <out>` 再跑（历史驱动 `dump_1103.sh` 也是把半成品 `mv` 到一边，不在原地续跑）。
 
 ---
@@ -395,8 +405,8 @@ PY
 # 本腿：crc_ok=36747 tb_bits_mismatch=0 empty_iterations_max=0
 ```
 
-> `iterations_max` 为空 ⇒ 二进制过期（§2）。`tb/` 文件数 **大于** `crc_ok` ⇒ 这个目录里后来跑过
-> `harq_backfill.py`（建库第一步，见 §7.3），**不是** dump 缺陷。
+> `iterations_max` 为空 ⇒ 二进制过期（§2）。`tb/` 文件数 **大于** `crc_ok` 是**标准 dump 的正常结果**
+> （多出来的是合并解码解出的 harq 样本，判据见上面的 (a)）；只有比 `self+harq` **还多**才是旧残留。
 
 ### 6.3 本腿的参考解出率（只用于「像不像」，不是判据）
 
@@ -408,8 +418,8 @@ PY
 | 256QAM | 8 276 | 1 635 | 19.8% |
 | **合计** | **50 000** | **36 747** | **73.5%** |
 
-其他量纲（本腿）：单 TB 4–4 867 B，均值 **709 B**；`tb/` **144 MiB**；`index.csv` **2 329 532 B / 50 001 行**；
-`units.txt` **3 520 749 B / 50 000 行**。
+其他量纲（本腿）：单 TB 4–4 867 B，均值 **709 B**（self 部分）；`tb/` 合计 **172 MiB**（self 144 ＋ harq 28）；
+`index.csv` **2 329 532 B / 50 001 行**；`units.txt` **3 520 749 B / 50 000 行**。
 若某腿解出率明显低于同调制族的常见值，先查**二进制是否过期**、**解包是否完整**，再怀疑数据。
 
 ### 6.4 与历史 dump 对照（可选，但强烈建议做过一次的腿都留个底）
@@ -428,7 +438,8 @@ PY
 # 本腿实测：{'tb_bits': 0, 'crc': 0, 'sinr_db': 0, 'iterations': 0, 'slot': 0, 'tbs_bytes': 0}
 ```
 
-本次还做了比特级复核：新旧 `tb/`（36 747 个）**文件名集合完全相同**，抽 300 个比 md5 **0 处不同**。
+本次还做了两组比特级复核：① 与历史 dump 的 36 747 个 self 文件**文件名集合完全相同**，抽 300 个比 md5 **0 处不同**；
+② 链回放解出的 5 236 个 harq 块与 `<leg>/tb_live/` 的对应比特**逐字节相同**（5 225 match，检查见 `chain_iters.csv` 的 `bits_check`）。
 
 ---
 
@@ -438,26 +449,34 @@ PY
 
 ```bash
 OUT=/Volumes/T7_Corpus/corpus/tb_s2_amc_iperf_1103i
-rm -rf $OUT/{stage,rows,raw}                 # 草稿 6 GB，删掉后目录只剩三个契约产物
+rm -rf $OUT/{stage,rows,raw}                 # 草稿 6 GB，删掉后目录只剩七个契约产物
 find $OUT -name .DS_Store -delete             # Finder 浏览产生的，不是语料
 find $OUT -name '._*' -delete                 # 万一有
-du -sh $OUT                                   # 本腿实测：≈150 MiB
+du -sh $OUT                                   # 本腿实测：≈185 MiB
 ```
 
-保留：`index.csv`、`units.txt`、`tb/`。**只有这三样是消费者需要的**（`run_dump_remaining.sh` 的注释也这么写）。
+保留七样：`index.csv`、`units.txt`、`tb/`、`index_self.csv`、`index_harq.csv`、`index_harq_only.csv`、`chain_iters.csv`。
+前三个是 dump 本身，后四个是群体划分与链回放的审计（建库和复核都要用）。本腿实测体积：
+
+| 产物 | 体积 |
+|---|---|
+| `tb/`（42 722 个块）| 172 MiB |
+| `index.csv` / `index_self.csv` / `index_harq.csv` / `index_harq_only.csv` | 2.2 / 1.95 / 2.8 / 0.41 MiB |
+| `units.txt` / `chain_iters.csv` | 3.4 / 0.43 MiB |
 
 ### 7.2 归档 dump（可选，但 211 上已有约定）
 
 ```bash
 cd /Volumes/T7_Corpus/corpus
-tar -czf /tmp/tb_<leg>.tar.gz tb_<leg>        # 本腿实测 22 MB（纯契约产物）
+tar -czf /tmp/tb_<leg>.tar.gz tb_<leg>        # 本腿实测 19.4 MiB / 20 333 635 B（42 730 个成员，11.6 s）
 scp /tmp/tb_<leg>.tar.gz jwang@192.168.31.211:/mnt/corpus/s2_amc_tb_tarballs/
 rm -f /tmp/tb_<leg>.tar.gz
 ```
 
 > ★ **归档前必须删 `stage/`**（手册 §22：不删，tar.gz 会大两个数量级）。
 > ★ 标准 dump 的归档现在就是七样：`index.csv`、`units.txt`、`tb/`、`index_self.csv`、`index_harq.csv`、
-> `index_harq_only.csv`、`chain_iters.csv`（1103i 实测 `tb/` 172 MiB，三个索引 5.6 MiB，`chain_iters` 0.44 MiB）。
+> `index_harq_only.csv`、`chain_iters.csv`（1103i 实测 185 MiB → gzip 后 **19.4 MiB**）。
+> 解包后 `tar -t` 的成员数 = 42 722（`tb/`）＋ 6 个文件 ＋ 1 个目录 = **42 730**。
 
 ### 7.3 交给建库（手册 §7）
 
@@ -471,21 +490,21 @@ export JOBS=1 CHUNK=8000
 bash lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh <leg>
 ```
 
-> ★ **建库会往 dump 目录里写东西**：`build_mother_set.sh` 第 1 步调用
-> `harq_backfill.py --index $DUMP/index.csv --out $DUMP`，于是 `<out>/` 会多出
-> `index_self.csv`、`index_harq.csv`、`index_harq_only.csv`，并向 `tb/` **拷回捞回的 `.bits`**
-> （本腿历史：+5 971 个，使 `tb/` 从 36 747 变 42 718）。这不是 dump 的缺陷，但要知道：
-> - 真正等价于「dump」的索引是 `index.csv`（crc 是链路判决）；
-> - `index_harq.csv` 把捞回的行改写成 `crc=OK`（借 donor 标签），**不能**当 dump 判决用；
-> - `build_mother_set.sh` 会重跑 `harq_backfill.py`；它现在**自动读** `<out>/chain_iters.csv`，
->   所以重建母集不会把 harq 的合并迭代数抹掉（除非该文件被删）；
-> - harq 行的 `iterations`/`iterations_max` 是 **donor 那次解码**（即带软合并的解码）的迭代数，
->   不是它自己首传的失败值；首传值保留在 `own_iterations`/`own_iterations_max`。这个能力 2026-11-27
->   才进 `dd_meta.csv`（列 `iter_mean,iter_max`），**之前采集的腿没有这份记录**，两列留空（不是 6）；
-> - 旧语料（`dd_meta` 还没有 `iter_mean,iter_max` 的腿）可以用链式回放补：
->   `python3 dump_harq_chains.py --leg <leg> --index <out>/index.csv --out <csv> --live-tb <leg>/tb_live --jobs 12`
->   （一条链一个进程，1103i 实测 35 s、覆盖率 92.6%），再给 `harq_backfill.py` 加 `--chain-iters <csv>`；
-> - 想保持 dump 纯净，就别在这个目录上跑建库（目前 `--out "$DUMP"` 是脚本写死的）。
+> ★ **建库会在 dump 目录上重跑一次打标**：`build_mother_set.sh` 第 1 步调用
+> `harq_backfill.py --index $DUMP/index.csv --out $DUMP`。dump 已经生成过这三个索引和 harq 比特，重跑得到
+> 一致的产物；关键是它会**自动读** `<out>/chain_iters.csv`，因此不会把合并迭代数抹掉（删了才会）。三点要记住：
+> - 真正等价于「dump 判决」的索引是 `index.csv`；`index_harq.csv` 把捞回的行改写成 `crc=OK`（借 donor 标签），
+>   **不能**当链路判决用；
+> - harq 行的 `iterations`/`iterations_max` 是**标签那次解码**（带软合并）的迭代数；自己首传的失败值在
+>   `own_iterations`/`own_iterations_max`（2026-11-27 起由 `dd_meta.csv` 的 `iter_mean,iter_max` 记录）；
+> - **本 runbook 之前 dump 的腿**（例如 `~/ai_depth3/dump_s2_amc/*`）没有 harq 比特和 `chain_iters.csv`，
+>   用第二段补齐即可（约 40 s/腿）：
+>   ```bash
+>   dump_harq_chains.py --leg <leg> --index <dump>/index.csv --out <dump>/chain_iters.csv \
+>       --tb-out <dump>/tb --live-tb <leg>/tb_live --jobs 12
+>   harq_backfill.py --leg <leg> --index <dump>/index.csv --out <dump> --live-tb <leg>/tb_live
+>   ```
+>   补齐前，这些腿的 harq 行 `iterations` 为空（不是 6）。
 
 ---
 
@@ -495,10 +514,10 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh <leg
 |---|---|---|---|
 | 二进制检查＋重编 | `make -C build -j14 ul_chain_replay_cpu` | 12.7 s（仅 exe 源过期时）| — |
 | 解包 | `ssh … cat` 管道喂给 `tar -xzf - --exclude '._*'` | **2 min 13 s** | 9.6 GB |
-| 冒烟（可选）| `--limit 2000` | 23.2 s | 0.3 GB |
-| **dump 全量** | `--jobs 12` | **9 min 55 s** | 5.8 GB 草稿 ＋ 0.15 GB 契约 |
+| 冒烟（可选）| `--limit 2000`（含 harq 段）| 27.7 s | 0.3 GB |
+| **dump 全量**（self＋harq）| `--jobs 12` | **11 min 8 s** | 5.8 GB 草稿 ＋ 0.19 GB 契约 |
 | 收尾 | `rm -rf stage rows raw` | 秒级 | −6 GB |
-| **合计（一条腿）** | — | **≈ 13 分钟**（含解包）| 峰值 ≈ 16 GB |
+| **合计（一条腿）** | — | **≈ 14 分钟**（含解包）| 峰值 ≈ 16 GB |
 
 ---
 
@@ -509,15 +528,20 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh <leg
 | 1 | `index.csv` 只有 7 列 / `iterations_max` 整列为空 | 二进制过期，没重编 | §2 重编，跑 §2.3 探针确认 |
 | 2 | `ls /path/*.txt` 返回 0 或报 `Argument list too long` | 一条腿 20 万文件，glob 撑爆 ARG_MAX | 一律用 `find … -maxdepth 1`（`dump_tb.sh` 内部就是 `find`）|
 | 3 | 清点数字是期望的 2 倍 | 解包时带出了 `._*`（AppleDouble，本腿 293 508 个）| 解包加 `--exclude '._*'`；`dump_tb.sh` 的单元清单已排除 `._*`，但目录体积会被撑大 |
-| 4 | `tb/` 文件数 ≠ `crc_ok` | ① 旧目录重跑残留 ② 后来跑过 `harq_backfill` | ① `rm -rf <out>` 重跑 ② 属建库产物，`crc_ok` 以 `index.csv` 为准 |
+| 4 | `tb/` 文件数 ≠ `crc_ok` | **正常**：`tb/` 里还有合并解码解出的 harq 样本 | 判据改成 `tb/` = `index_harq.csv` 里 `label_from ∈ {self,harq}` 的行数（§6.2）；只有 `tb/` 比群体**多**才是旧残留 |
+| 4b | `tb/` 比群体多出若干 | 旧目录重跑残留（`dump_tb.sh` 不清 `tb/`）| `rm -rf <out>` 重跑 |
 | 5 | `crc_ok` 远低于参考 | 解包不全 / 二进制不对 / 跑错后端 | 先按 §4 对四条硬指标，再跑 `--limit 2000` 与全量前缀对照 |
 | 6 | dump 很慢（< 20 单元/秒）| `--jobs` 太小，或 T7 同时在跑别的重活 | 提到 12；确认没有第二个 dump 在抢盘 |
 | 7 | 负载飙到 40 还想加 jobs | 12 已是 14 核的实测上限 | 保持 12；瓶颈常在 I/O 不在 CPU |
-| 8 | 归档 tar.gz 从 22 MB 变几 GB | 忘了删 `stage/`（5.8 GB）| 归档前 §7.1 |
-| 9 | 目录里冒出 3 个 `index_*.csv`、`tb/` 变多 | 在该目录跑过 `build_mother_set.sh` | 见 §7.3；`index.csv` 才是 dump 判决 |
+| 8 | 归档 tar.gz 从 19.4 MiB 变几 GB | 忘了删 `stage/`（5.8 GB）| 归档前 §7.1 |
+| 9 | 目录里多了 3 个 `index_*.csv`、`chain_iters.csv` | **正常**：标准 dump 的产物 | 见 §5.2；`index.csv` 才是链路判决，其余是群体划分与审计 |
 | 10 | 目录里出现 `.DS_Store` | Finder 浏览 | 归档前删（§7.1）|
 | 11 | 解包被网络中断 | ssh 断了 | 文件数不够就**换新目录重解**，不要在半个目录上续解 |
 | 12 | 把旧批次路径当成本批 | 手册 §16.4 写的是 `s2_corpus_tarballs/<leg>.tar` | 本批是 `s2_amc_corpus_tarballs/<leg>.tar.gz` |
+| 13 | `chain_iters.csv` 里 `bits_check=no-live` 或 `no-live-row` | `no-live` ＝ 没给 `--live-tb`（未请求比对）；`no-live-row` ＝ live dump 里没有这次接收 | **都不是错误**：前者补 `--live-tb` 重跑即可比对，后者这几次接收本来就没进 live dump；解码本身仍由 CRC 保证 |
+| 14 | 拿 replay 的 `dd_meta.csv` 的 frame 去对飞行 dump 对不上 | `extended_frame()` 的进位基数是**进程级**：新起的 replay 报的是原始 SFN（如 807），飞行 dump 报的是含所有回绕的计数（如 10 023） | 按 slot（同一条链内唯一）或按 capture 名匹配；工具已这么做，别自己再按 frame 对 |
+| 15 | 链回放中途 Ctrl-C，`chain_iters.csv` 不完整、harq 群体变小 | 第二段没跑完就退出 | 删 `<out>/chain_iters.csv` 与 `index_*` 后重跑第二段（不必重跑逐单元段）|
+| 16 | 一次给多个腿目录时 harq 段没跑 | `--with-harq` 只在**一个**腿目录时运行（链和打标都必须属于同一条腿）| 一条腿一个 `--out`，分开跑 |
 
 ---
 
@@ -532,9 +556,15 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh <leg
 | 单元数 | 50 000 |
 | `index.csv` | 2 329 532 B，50 001 行，sha256 `5c060c019d859b4ffd6f6e943a6cb4c2547a44ad41a421170794734422ba5bbd` |
 | `units.txt` | 3 520 749 B，sha256 `d65cd410b705e7033f6deb0a77cc48127e0460b620548fad05ebc84bf46e8a82` |
-| `tb/` | 36 747 个 `.bits`，144 MiB，md5 抽检 300 个与历史 dump 全同 |
-| 判据行 | `units=50000 with_bin=50000 index_rows=50000 crc_ok=36747` |
-| 耗时 | 解包 2 min 13 s ＋ dump 9 min 55 s |
+| `tb/` | **42 722 个** `.bits`，**172 MiB**（self 36 747 ＋ harq 全标 5 975）|
+| `index_self.csv` / `index_harq_only.csv` / `index_harq.csv` | 36 747 / **5 260** / 50 000 行（1.95 / 0.41 / 2.8 MiB）|
+| `chain_iters.csv` | 5 655 行，449 044 B，sha256 `cab2ab0854591fd62d1a6e65facb2863f2b4e9e38e2ecebe2bf7c54f75f26566` |
+| 链回放 | 5 655 候选 → **5 236 解码（92.6%）**；`bits_check`：match 5 225 / no-live-row 11 |
+| 合并 `iterations_max` 直方（harq）| 1:108 2:1 687 3:1 806 4:1 023 5:415 **6:197** |
+| 两个群体的均值 | self 1.75 轮 / harq（合并后）3.10 轮 |
+| 判据行 | `units=50000 with_bin=50000 index_rows=50000 crc_ok=36747`；`self+harq=42722 tb=42722` |
+| 耗时 | 解包 2 min 13 s ＋ **dump 全流程 11 min 8 s** |
+| 归档 | 185 MiB → `tar.gz` **20 333 635 B / 42 730 个成员**（11.6 s）|
 
 > 注：换腿时归档 sha256 必须现取现记，不要套用上表：
 > `ssh jwang@192.168.31.211 'sha256sum /mnt/corpus/s2_amc_corpus_tarballs/<leg>.tar.gz'`。
