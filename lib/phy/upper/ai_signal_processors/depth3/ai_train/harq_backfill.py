@@ -20,6 +20,14 @@ SAFEGUARDS, because a wrong label is worse than a missing one:
 OUTPUT: <out>/index_harq.csv with an extra column label_from in {self, harq, none}, and copies of the recovered .bits
 under <out>/tb/.
 
+THE THIRD FILE IS THE ONE WITH NO LABEL. index_ko.csv holds every unit whose label_from is none, i.e. the receptions the
+classical chain did not decode and no retransmission recovered. It is the complement of index_self.csv and
+index_harq_only.csv, so the three partition the dump. Its use is the other direction: with the capture directory beside it
+it names exactly what another decode back end may still crack, and every row that back end turns into a CRC pass becomes
+a sample. The rows carry the PDU fields that decide how to retry (new_data, rv, harq_id, rnti) and a reason column:
+"no-buffer" when the per-unit pass never reached the LDPC decoder (a retransmission without its soft buffer), and
+"decode-failed" when it ran and the CRC still failed.
+
 THE RECOVERED ROW CARRIES THE DECODE THAT LABELLED IT. For label_from=harq, `iterations` and `iterations_max` describe
 the donor's decode, i.e. the combined decode when the donor is a live dump; `own_iterations` and `own_iterations_max`
 keep the failed first attempt's counts, which saturate at the decoder's iteration cap and therefore say nothing about
@@ -341,11 +349,35 @@ def main():
                 out["iterations_max"] = str(combined[1]) if combined else ""
             writer.writerow(out)
 
+    # THE COMPLEMENT, FOR A SECOND DECODE BACK END. Every unit here has no label from the classical chain: the per-unit
+    # pass failed it and no retransmission recovered it. With the capture directory beside this file it is the work list
+    # for any other decoder, and its rows decide how to retry: a first transmission (new_data=1) can be replayed on its
+    # own by another back end, while a retransmission (new_data=0) needs the chain, because a standalone replay never has
+    # its soft buffer. The reason column says whether the classical chain even reached the LDPC decoder.
+    ko_rows = [r for r in rows if label_from.get(r["unit"]) == "none"]
+    cols_ko = list(rows[0].keys()) + ["new_data", "rv", "harq_id", "rnti", "reason"]
+    with open(os.path.join(args.out, "index_ko.csv"), "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=cols_ko, extrasaction="ignore")
+        writer.writeheader()
+        for row in ko_rows:
+            name = row["unit"]
+            info = units[name]
+            out = dict(row)
+            out["new_data"] = info["new_data"]
+            out["rv"] = info["rv"]
+            out["harq_id"] = info["harq"]
+            out["rnti"] = info["rnti"]
+            # An empty iteration count means the decoder was never reached: the harness reserves the soft buffer with
+            # the capture's own new_data flag and a retransmission has none to reserve.
+            out["reason"] = "no-buffer" if not row.get("iterations", "") else "decode-failed"
+            writer.writerow(out)
+
     n_self = sum(1 for v in label_from.values() if v == "self")
     n_harq = sum(1 for v in label_from.values() if v == "harq")
     print(f"units with a HARQ process: {len(units)}  chains: {len(chains)}")
     print(f"decoded on their own: {n_self}   recovered from a retransmission: {n_harq}")
     print(f"wrote index_self.csv ({len(self_rows)}) and index_harq_only.csv ({len(harq_rows)}) in {args.out}")
+    print(f"wrote index_ko.csv ({len(ko_rows)}): the units no decode labelled")
     return 0
 
 

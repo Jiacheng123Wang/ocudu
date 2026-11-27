@@ -46,9 +46,10 @@ print(f"units={len(us)} with_bin={with_bin} index_rows={rows} crc_ok={ok}")
 import csv
 lab = [r["label_from"] for r in csv.DictReader(open(os.path.join(out, "index_harq.csv")))]
 print("self+harq:", sum(1 for x in lab if x in ("self", "harq")),
-      "tb:", len(os.listdir(os.path.join(out, "tb"))))
+      "tb:", len(os.listdir(os.path.join(out, "tb"))),
+      "ko:", sum(1 for _ in open(os.path.join(out, "index_ko.csv"))) - 1)
 PY
-# ⑥ 收尾：删草稿（6 GB），只留七个契约产物（见 §5.2）
+# ⑥ 收尾：删草稿（6 GB），只留八个契约产物（见 §5.2）
 rm -rf $OUT/{stage,rows,raw}; find $OUT -name .DS_Store -delete
 ```
 
@@ -280,6 +281,7 @@ bash $LIB/dump_tb.sh \
 | `units.txt` | ★ 契约：单元清单（50 000 行绝对路径，`LC_ALL=C` 排序）|
 | `tb/<unit>.bits` | ★ 契约：**每个可训练样本一个 TB 比特文件**：self ＝ 自己解出的；harq ＝ 合并解码解出的（同一目录、同一命名）|
 | `index_self.csv` / `index_harq_only.csv` / `index_harq.csv` | ★ 契约：按群体拆开的索引（self / harq 首传 / 全量 + `label_from`）|
+| `index_ko.csv` | ★ 契约：**没有 label 的样本清单**（`label_from=none`，与 self / harq 互斥）；字段见 §5.6，是换后段解码器捞样本的工作清单 |
 | `chain_iters.csv` | ★ 契约（审计用）：每条候选链的恢复结果 —— `hop`、`decoded_unit`、`iterations/iterations_max`、`bits_check` |
 | `rows/<unit>.row` | 草稿：`index.csv` 的一行，拼装后即冗余 |
 | `stage/<unit>/` | 草稿：逐单元 staged 捕获，约 3.4 个文件/单元 |
@@ -346,6 +348,31 @@ bash $LIB/dump_tb.sh --corpus /Volumes/T7_Corpus/corpus --out /tmp/tb_smoke \
 > 旧目录里残留的 `.bits` 会让「`tb/` = self＋harq」这条判据假性失败（数出来比群体多）。
 > 正确做法：`rm -rf <out>` 再跑（历史驱动 `dump_1103.sh` 也是把半成品 `mv` 到一边，不在原地续跑）。
 
+### 5.6 `index_ko.csv`：CPU 链拿不到 label 的样本清单（给别的后段用）
+
+`index_ko.csv` 是 `index_self.csv` / `index_harq_only.csv` 的**补集**：所有 `label_from=none` 的单元 —— 经典 CPU
+链没有解出来、也没有任何重传把它捞回来的接收。三个群体加 harq 的中间成员恰好把 50 000 个单元分完。
+
+| 项 | 本腿实测 |
+|---|---|
+| 行数 | **7 278**（self 36 747 ＋ harq 首传 5 260 ＋ harq 中间成员 715 ＋ ko 7 278 = 50 000）|
+| `decode-failed`（首传，进了 LDPC、6 轮撞墙没过 CRC）| **457**（`new_data=1`）|
+| `no-buffer`（重传，harness 按 `new_data` 预留软缓冲失败，**没进 LDPC**）| **6 821**（`new_data=0`）|
+| 列 | `index.csv` 的 8 列 ＋ `new_data, rv, harq_id, rnti, reason` |
+| 大小 | 435 560 B |
+
+**怎么用**：`index_ko.csv` ＋ `<leg>/`（`.bin`、`.txt`、`_ce.txt`）就是一份工作清单。换一套后段解码器逐个重试 ——
+replay 的接口是 `--phy_pipeline cpu|cpu_gpu|gpu|npu`、`--pusch_receiver_backend auto|classic|ai`、
+`--pusch_ldpc_decoder_type auto|generic|metal…`（GPU/NPU 用 `metal/ul_chain_replay` 那个二进制），
+或换成任何 GPU/NPU 的 LDPC 实现。**每个解出 CRC 的单元都是一条新样本**：把它的 TB 写成 `tb/<unit>.bits`，
+再产出一行 `crc=OK` 的 index，之后按 self 的方式进建库（它不是 harq —— 没有任何合并发生）。
+
+两条注意：
+
+- `reason=decode-failed` 的 457 条**最值得先试**：它们确实跑过 LDPC（6 轮撞墙），更多轮次或更强的解码器有机会翻过来。
+- `reason=no-buffer` 的 6 821 条是**重传**，当前 harness 按 `new_data` 预留软缓冲会直接拒绝，**单跑解不了**；
+  要用它们只能走链回放（本流程已做）或给 harness 加"强制新缓冲"模式，属于另一项工作。
+
 ---
 
 ## 6. 步骤 4：三条判据（＋两条加固检查）
@@ -405,6 +432,19 @@ PY
 # 本腿：crc_ok=36747 tb_bits_mismatch=0 empty_iterations_max=0
 ```
 
+```bash
+# c) 三个群体互斥且把 50 000 个单元分完；index_ko 的行数等于 label_from=none 的行数
+python3 - "$OUT" <<'PY'
+import csv, os, sys
+o = sys.argv[1]
+lab = {r["unit"]: r["label_from"] for r in csv.DictReader(open(os.path.join(o, "index_harq.csv")))}
+counts = {k: sum(1 for v in lab.values() if v == k) for k in ("self", "harq", "none")}
+ko = sum(1 for _ in open(os.path.join(o, "index_ko.csv"))) - 1
+print("self+harq+ko:", sum(counts.values()), "of", len(lab), "| ko rows:", ko, "|", counts)
+PY
+# 本腿：self+harq+ko: 50000 of 50000 | ko rows: 7278 | {'self': 36747, 'harq': 5975, 'none': 7278}
+```
+
 > `iterations_max` 为空 ⇒ 二进制过期（§2）。`tb/` 文件数 **大于** `crc_ok` 是**标准 dump 的正常结果**
 > （多出来的是合并解码解出的 harq 样本，判据见上面的 (a)）；只有比 `self+harq` **还多**才是旧残留。
 
@@ -449,34 +489,35 @@ PY
 
 ```bash
 OUT=/Volumes/T7_Corpus/corpus/tb_s2_amc_iperf_1103i
-rm -rf $OUT/{stage,rows,raw}                 # 草稿 6 GB，删掉后目录只剩七个契约产物
+rm -rf $OUT/{stage,rows,raw}                 # 草稿 6 GB，删掉后目录只剩八个契约产物
 find $OUT -name .DS_Store -delete             # Finder 浏览产生的，不是语料
 find $OUT -name '._*' -delete                 # 万一有
 du -sh $OUT                                   # 本腿实测：≈185 MiB
 ```
 
-保留七样：`index.csv`、`units.txt`、`tb/`、`index_self.csv`、`index_harq.csv`、`index_harq_only.csv`、`chain_iters.csv`。
-前三个是 dump 本身，后四个是群体划分与链回放的审计（建库和复核都要用）。本腿实测体积：
+保留八样：`index.csv`、`units.txt`、`tb/`、`index_self.csv`、`index_harq.csv`、`index_harq_only.csv`、`index_ko.csv`、
+`chain_iters.csv`。前三个是 dump 本身，后五个是群体划分、无 label 清单与链回放审计（建库、复核、换后段捞样本都要用）。
+本腿实测体积：
 
 | 产物 | 体积 |
 |---|---|
 | `tb/`（42 722 个块）| 172 MiB |
 | `index.csv` / `index_self.csv` / `index_harq.csv` / `index_harq_only.csv` | 2.2 / 1.95 / 2.8 / 0.41 MiB |
-| `units.txt` / `chain_iters.csv` | 3.4 / 0.43 MiB |
+| `units.txt` / `chain_iters.csv` / `index_ko.csv` | 3.4 / 0.43 / 0.42 MiB |
 
 ### 7.2 归档 dump（可选，但 211 上已有约定）
 
 ```bash
 cd /Volumes/T7_Corpus/corpus
-tar -czf /tmp/tb_<leg>.tar.gz tb_<leg>        # 本腿实测 19.4 MiB / 20 333 635 B（42 730 个成员，11.6 s）
+tar -czf /tmp/tb_<leg>.tar.gz tb_<leg>        # 本腿实测 19.5 MiB / 20 400 698 B（42 732 个成员，11.8 s）
 scp /tmp/tb_<leg>.tar.gz jwang@192.168.31.211:/mnt/corpus/s2_amc_tb_tarballs/
 rm -f /tmp/tb_<leg>.tar.gz
 ```
 
 > ★ **归档前必须删 `stage/`**（手册 §22：不删，tar.gz 会大两个数量级）。
-> ★ 标准 dump 的归档现在就是七样：`index.csv`、`units.txt`、`tb/`、`index_self.csv`、`index_harq.csv`、
-> `index_harq_only.csv`、`chain_iters.csv`（1103i 实测 185 MiB → gzip 后 **19.4 MiB**）。
-> 解包后 `tar -t` 的成员数 = 42 722（`tb/`）＋ 6 个文件 ＋ 1 个目录 = **42 730**。
+> ★ 标准 dump 的归档现在就是八样：`index.csv`、`units.txt`、`tb/`、`index_self.csv`、`index_harq.csv`、
+> `index_harq_only.csv`、`index_ko.csv`、`chain_iters.csv`（1103i 实测 185 MiB → gzip 后 **19.5 MiB / 20 400 698 B**）。
+> 解包后 `tar -t` 的成员数 = 42 722（`tb/`）＋ 8 个文件 ＋ 2 个目录 = **42 732**。
 
 ### 7.3 交给建库（手册 §7）
 
@@ -533,7 +574,7 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh <leg
 | 5 | `crc_ok` 远低于参考 | 解包不全 / 二进制不对 / 跑错后端 | 先按 §4 对四条硬指标，再跑 `--limit 2000` 与全量前缀对照 |
 | 6 | dump 很慢（< 20 单元/秒）| `--jobs` 太小，或 T7 同时在跑别的重活 | 提到 12；确认没有第二个 dump 在抢盘 |
 | 7 | 负载飙到 40 还想加 jobs | 12 已是 14 核的实测上限 | 保持 12；瓶颈常在 I/O 不在 CPU |
-| 8 | 归档 tar.gz 从 19.4 MiB 变几 GB | 忘了删 `stage/`（5.8 GB）| 归档前 §7.1 |
+| 8 | 归档 tar.gz 从 19.5 MiB 变几 GB | 忘了删 `stage/`（5.8 GB）| 归档前 §7.1 |
 | 9 | 目录里多了 3 个 `index_*.csv`、`chain_iters.csv` | **正常**：标准 dump 的产物 | 见 §5.2；`index.csv` 才是链路判决，其余是群体划分与审计 |
 | 10 | 目录里出现 `.DS_Store` | Finder 浏览 | 归档前删（§7.1）|
 | 11 | 解包被网络中断 | ssh 断了 | 文件数不够就**换新目录重解**，不要在半个目录上续解 |
@@ -559,12 +600,13 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh <leg
 | `tb/` | **42 722 个** `.bits`，**172 MiB**（self 36 747 ＋ harq 全标 5 975）|
 | `index_self.csv` / `index_harq_only.csv` / `index_harq.csv` | 36 747 / **5 260** / 50 000 行（1.95 / 0.41 / 2.8 MiB）|
 | `chain_iters.csv` | 5 655 行，449 044 B，sha256 `cab2ab0854591fd62d1a6e65facb2863f2b4e9e38e2ecebe2bf7c54f75f26566` |
+| `index_ko.csv` | **7 278 行**（457 `decode-failed` ＋ 6 821 `no-buffer`），435 560 B |
 | 链回放 | 5 655 候选 → **5 236 解码（92.6%）**；`bits_check`：match 5 225 / no-live-row 11 |
 | 合并 `iterations_max` 直方（harq）| 1:108 2:1 687 3:1 806 4:1 023 5:415 **6:197** |
 | 两个群体的均值 | self 1.75 轮 / harq（合并后）3.10 轮 |
 | 判据行 | `units=50000 with_bin=50000 index_rows=50000 crc_ok=36747`；`self+harq=42722 tb=42722` |
 | 耗时 | 解包 2 min 13 s ＋ **dump 全流程 11 min 8 s** |
-| 归档 | 185 MiB → `tar.gz` **20 333 635 B / 42 730 个成员**（11.6 s）|
+| 归档 | 185 MiB → `tar.gz` **20 400 698 B / 42 732 个成员**（11.8 s）|
 
 > 注：换腿时归档 sha256 必须现取现记，不要套用上表：
 > `ssh jwang@192.168.31.211 'sha256sum /mnt/corpus/s2_amc_corpus_tarballs/<leg>.tar.gz'`。

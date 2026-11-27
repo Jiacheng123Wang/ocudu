@@ -343,3 +343,44 @@ chain_iters.csv                                      # 链回放审计（0.44 Mi
 
 runbook 现在与代码（`dump_tb.sh` 两段、`dump_harq_chains.py --tb-out`、`harq_backfill.py --chain-iters`）
 **一一对应**，照抄即可复现 1103i 的 11 min 8 s / 42 722 块 / 5 236 条合并解码。
+
+---
+
+## 6. 2026-11-27 09:55 新增 `index_ko.csv`：没有 label 的样本成为别处解码器的工作清单
+
+### 背景
+
+`index_self` / `index_harq_only` 只覆盖"CPU 经典链拿到了 label"的样本。剩下那批既没解出、也没有 donor 的接收，
+以前只以 `label_from=none` 的形式散在 `index_harq.csv` 里 —— 想换 GPU/NPU 后段捞样本时没有一份干净的清单。
+
+### 做了什么
+
+`harq_backfill.py` 多写一个 `index_ko.csv`（标准 dump 因此自动带出）：
+
+| 项 | 值 |
+|---|---|
+| 定义 | `label_from=none` 的行，与 `index_self.csv` / `index_harq_only.csv` **互斥** |
+| 列 | `index.csv` 的 8 列 ＋ `new_data, rv, harq_id, rnti, reason` |
+| `reason` | `decode-failed`（进了 LDPC、6 轮没过）／`no-buffer`（重传，harness 拒绝预留软缓冲，没进 LDPC）|
+| 1103i 实测 | **7 278 行** ＝ `decode-failed` **457**（`new_data=1`）＋ `no-buffer` 6 821（`new_data=0`）；435 560 B |
+| 分区校验 | self 36 747 ＋ harq 全标 5 975 ＋ ko 7 278 = **50 000**（harq 首传 5 260 ＋ harq 中间成员 715）|
+
+`dump_tb.sh` 的收尾行现在打印 `ko=N (ko = no label; work list for another decoder)`。
+
+### 用途与边界
+
+- **457 条 `decode-failed`**：确实撞了 LDPC 的 6 轮上限，是最值得用更强后段（更多轮次、GPU/NPU 解码器、
+  AI 接收机）重试的一批；解出 CRC 后按 self 的方式写入 `tb/<unit>.bits` ＋ `crc=OK` 行即可进建库。
+- **6 821 条 `no-buffer`**：都是重传。harness 按 `new_data` 预留软缓冲 ⇒ 单跑直接被拒；**当前单靠逐单元回放解不了**，
+  要走链回放（已有）或给 harness 加"强制新缓冲"模式（未做）。
+
+### 文档
+
+- runbook：§5.2 产物表加 `index_ko`；新增 **§5.6**（定义、字段、怎么换后段用、两条边界）；§6.2 加分区校验 (c)；
+  §7.1/§7.2 归档改八样（19.5 MiB / 20 400 698 B / 42 732 成员）；§10 指纹加 `index_ko` 行。
+
+### 待办
+
+- [ ] 若要在本机试 GPU/NPU 后段：用 `metal/ul_chain_replay` ＋ `--phy_pipeline gpu|npu`，
+      对 457 条 `decode-failed` 逐个重试（约几分钟），看能翻回来多少
+- [ ] 若需要覆盖 `no-buffer` 那 6 821 条：给 harness 加"忽略 new_data 的强制新缓冲"开关（要谨慎，会改变语义）

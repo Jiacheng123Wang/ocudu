@@ -17,8 +17,10 @@
 # block's later retransmission decodes with soft combining and supplies it. That decode only exists in one process
 # walking the whole HARQ chain, so the standard dump runs a second pass over the chains that failed (`--no-harq` skips
 # it) and writes the recovered blocks into the same tb/ directory, then the two populations apart in index_self.csv and
-# index_harq_only.csv. The live chain cannot work this way -- it must decode every first transmission to know whether to
-# ask for a retransmission -- but replay can, because the chain is already on disk.
+# index_harq_only.csv. What neither decode labelled lands in index_ko.csv, which is the work list for another decoder: with
+# the captures beside it, a GPU or NPU back end can try the receptions the classical chain could not decode. The live chain
+# cannot work this way -- it must decode every first transmission to know whether to ask for a retransmission -- but replay
+# can, because the chain is already on disk.
 #
 # Usage: dump_tb.sh [--corpus DIR] [--out DIR] [--limit N] [--binary PATH] [--jobs N] [--no-harq] [unit-dir ...]
 #
@@ -152,6 +154,8 @@ if [ "$WITH_HARQ" -eq 1 ] && [ ${#DIRS[@]} -eq 1 ]; then
       || echo "  WARN: labelling failed" >&2
     n_self=$(wc -l < "$OUT/index_self.csv" 2>/dev/null | tr -d ' ')
     n_harq=$(wc -l < "$OUT/index_harq_only.csv" 2>/dev/null | tr -d ' ')
-    echo "  populations: self=$(( ${n_self:-1} - 1 )) harq=$(( ${n_harq:-1} - 1 )); tb now holds $(ls "$OUT/tb" | wc -l | tr -d ' ') blocks"
+    n_ko=$(wc -l < "$OUT/index_ko.csv" 2>/dev/null | tr -d ' ')
+    echo "  populations: self=$(( ${n_self:-1} - 1 )) harq=$(( ${n_harq:-1} - 1 )) ko=$(( ${n_ko:-1} - 1 )) (ko = no label; work list for another decoder)"
+    echo "  tb now holds $(ls "$OUT/tb" | wc -l | tr -d ' ') blocks"
   fi
 fi
