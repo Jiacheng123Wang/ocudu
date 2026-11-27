@@ -312,6 +312,17 @@ def candidate_units(index_path, tb_dir, corpus_dir, modulation, min_prb, min_slo
             # predates its own.
             iterations_max = int(fields[i_iterations_max]) if 0 <= i_iterations_max < len(fields) \
                 and fields[i_iterations_max].isdigit() else -1
+            # ZERO IS NOT A DIFFICULTY, IT IS THE ABSENCE OF A DECODE. The replay used to cast its float
+            # mean to unsigned, so a decode whose mean was in [0,1) was recorded as 0 -- the value that
+            # otherwise means "not decoded". The cast is fixed, but every dump taken before 2026-11-27
+            # still carries the zeros, and those dumps are what the queue is building from. A CRC-OK row
+            # cannot have taken zero iterations, so floor it at one. `-1` stays untouched: it means
+            # "never recorded", a different statement that REQUIRE_ITERATIONS rejects.
+            if fields[2] == "OK":
+                if iterations == 0:
+                    iterations = 1
+                if iterations_max == 0:
+                    iterations_max = 1
             # A sample whose difficulty the chain never recorded is not a usable training sample for the
             # difficulty dimension: the drawer weights on this number, and -1 would silently look "easy".
             # This happens when the label came from the air chain's live dump and the offline chain replay

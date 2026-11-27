@@ -400,12 +400,16 @@ python3 - /Volumes/Eaget_HD/datasets_full_s2_amc <leg> <<'PY'
 import sys, os, glob, numpy as np
 for p in sorted(glob.glob(os.path.join(sys.argv[1], sys.argv[2] + "_*.npz"))):
     d = np.load(p, allow_pickle=True); n = len(d["X"])
+    it, im = d["iterations"], d["iterations_max"]
     print(f"{os.path.basename(p):40s} n={n:6d} members={len(d.files)} "
-          f"it={int((d['iterations']<0).sum())} it_max={int((d['iterations_max']<0).sum())} "
-          f"unit={'unit' in d.files}")
+          f"unknown={int((it<0).sum())}/{int((im<0).sum())} "
+          f"zero={int((it==0).sum())}/{int((im==0).sum())} unit={'unit' in d.files}")
 PY
-# 本腿：8 个文件、25 成员、两个字段缺失全 0
+# 本腿：8 个文件、25 成员、unknown 与 zero 全 0
 ```
+
+★ **`zero` 必须为 0**：CRC-OK 的样本不可能"用 0 轮解出来"。0 来自 2026-11-27 之前的 replay 把
+float 均值截断（见 §9 坑 #22）；建库现在会把 OK 行的 0 夹到 1，历史 npz 用 `clamp_iterations.py` 修。
 
 **口径**（下游 `draw_train_set_w2.py --w-critical` 依赖）：
 
@@ -669,6 +673,7 @@ find /Volumes/Eaget_HD/datasets_full_s2_amc -name '*_part*.npz' -print    # 应�
 | 19 | 监控**永远不启动**建库 | 完成判据写成 `tb == self + harq`，漏了 harq 中间成员（1103i 差 714 个）| 用 `tb_blocks=`；四条判据见 §6.7 |
 | 20 | 手工建过的腿被监控重跑 | 进度表里没有它（监控只认进度表）| 补一行 `ok`（§6.7 末）|
 | 21 | 监控把评估腿也建了 | `EXCLUDE` 是列表，却用 `[ "$leg" = "$EXCLUDE" ]` 整串比较 | 逐个比较（`is_excluded`）；评估腿清单见 §6.1 |
+| 22 | 少量样本 `iterations=0` 却 `iterations_max≥1` | replay 把 float 均值**截断**成整数：真实均值落在 [0,1) 就记成 0，而 0 在 dump 里表示"没解出来" | **三层**：① replay 改为四舍五入且 CRC-OK 时 ≥1（2026-11-27，影响之后的 dump）；② 建库把 OK 行的 0 夹到 1（覆盖修源码之前已 dump 的腿）；③ `clamp_iterations.py` 修已建成的 npz。全库 3 481 个零值已修复 |
 
 ---
 

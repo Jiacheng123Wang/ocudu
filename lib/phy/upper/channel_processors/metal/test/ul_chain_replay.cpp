@@ -80,6 +80,7 @@
 
 #include <algorithm>
 #include <thread>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -370,10 +371,19 @@ public:
     }
     crc_ok      = sch.data.tb_crc_ok;
     nof_bits    = sch.data.nof_codeblocks_total;
-    nof_iters   = static_cast<unsigned>(sch.data.ldpc_decoder_stats.get_nof_observations() != 0
-                                            ? sch.data.ldpc_decoder_stats.get_mean()
-                                            : 0.0F);
+    // ROUND, DO NOT TRUNCATE. get_mean() is a float, and casting it to unsigned truncated a mean in
+    // [0,1) to 0 -- the value the dump uses for "no decode at all". A CRC-OK transport block also
+    // cannot have taken zero iterations, so a successful decode is floored at one. Together these
+    // keep 0 meaning exactly "not decoded", which is what every downstream count assumes.
+    const float mean_iters = sch.data.ldpc_decoder_stats.get_nof_observations() != 0
+                                 ? sch.data.ldpc_decoder_stats.get_mean()
+                                 : 0.0F;
+    nof_iters     = static_cast<unsigned>(std::lround(mean_iters));
     nof_iters_max = sch.data.ldpc_decoder_stats.get_max();
+    if (crc_ok) {
+      nof_iters     = std::max(nof_iters, 1U);
+      nof_iters_max = std::max(nof_iters_max, 1U);
+    }
     nof_cbs     = sch.data.nof_codeblocks_total;
     sinr_db     = sch.csi.get_sinr_dB().has_value() ? *sch.csi.get_sinr_dB() : 0.0F;
     epre_db     = sch.csi.get_epre_dB().has_value() ? *sch.csi.get_epre_dB() : 0.0F;
