@@ -617,6 +617,40 @@ kill "$(cat /Volumes/Eaget_HD/datasets_full_s2_amc/_watcher.lock/pid)"
 ★ `EXCLUDE` 是**空格分隔的列表**，判据必须逐个比：`[ "$leg" = "$EXCLUDE" ]` 拿单条腿和整串比，**永远不会命中**
 （这个 bug 真的写出来过，坑 #21）。
 
+### 6.8 w2 全库（**在 211 上跑**，与 s2 那条线并行）
+
+w2 的目录布局与 s2 不同：**一条腿的采集和 dump 在同一个父目录下**
+
+| 角色 | 路径 |
+|---|---|
+| 采集 ＋ dump | `/mnt/corpus/w2_tb_tarballs/<leg>/`（采集）＋ `/mnt/corpus/w2_tb_tarballs/tb_<leg>/`（dump）|
+| 语料归档（durable copy）| `/mnt/corpus/w2_corpus_tarballs/<leg>.tar.gz`（60 条腿，264 GB）|
+| 母集输出 | `/mnt/corpus/datasets_full_w2/` |
+| 生产方 | `run_w2_batch.sh`：解包 → dump（cap 20）→ **保留**采集 |
+| 消费方 | `watch_dumps_build_w2.sh`（`ai_train/` 里，§6.7 的 w2 版本）|
+
+它与 §6.7 只有三处不同：腿前缀 `w2_`；`CORPUS_ROOT` 与 `DUMP_ROOT` 是同一个目录；**没有"从归档解包"分支** ——
+host 本身就是归档机，采集缺了就记一行 `no-captures` 跳过，而不是 ssh 到自己。
+
+```bash
+# 在 211 上常驻（一条建完自动建下一条）
+cd ~ && nohup nice -n 10 bash ~/w2_watch_dumps_build.sh >> ~/logs_w2_motherset/watch.out 2>&1 &
+kill "$(cat /mnt/corpus/datasets_full_w2/_watcher.lock/pid)"      # 停
+```
+
+| 项 | 值 |
+|---|---|
+| 完成判据 | 与 §6.7 **同一套四条**（`finished=` ＋ index 行数 ＋ `tb_blocks=` ＋ `index_ko.csv`）|
+| manifest | 由 `build_mother_set.sh` 第 5 步写出（§4.3）|
+| 回收 | `RECLAIM=1`：建完删解包出来的采集；**归档 tar 包不动**，重建＝再解包 2 分钟 |
+| 日志 | `~/logs_w2_motherset/{watch.log, <leg>.log}`；进度表 `/mnt/corpus/datasets_full_w2/_progress.csv` |
+| 并发 | 单实例（锁）、**一次一条腿**；与 211 上的训练任务、dump 批处理共存 |
+
+★ **211 上 2026-11-27 之前的 dump 没有可用的 `binary_mtime`**：`dump_tb.sh` 用的是 BSD `stat -f`，GNU 的
+`stat` 把它当"文件系统"，于是那批 `dump_meta.txt` 里是一串数字 ＋ 一个多余的 `unknown`。
+`ecaaeace0e` 起两边都正常（`stat -c '%y'`）。⇒ 判断"哪份 w2 dump 是哪个二进制的产物"时，
+`ecaaeace0e` 之前的只能用时间推断。
+
 ---
 
 ## 7. 收尾与交接
