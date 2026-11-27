@@ -292,6 +292,14 @@ d3_w2v1_c32b18dw_e2e-cond-norep-sw2s3_e20
 | ★ `g<n>` | `--groups n` | 主干卷积**分组**数（g=4；省略＝dense）| 少 | `…-g4_e40`（107）|
 | ★ `symaux` | `--sym-aux --w-sym 0.1` | **训练期**符号回归辅助头（导出丢弃）| 0（导出）| `…-llrp-symaux_e40`（107）|
 
+**(b)bis ★★★ 损失项 token（2026-11-27 起）：`code<λ>`**
+
+| token | 对应 flag | 含义 | 例 |
+|---|---|---|---|
+| ★ `code<λ>` | `--code-loss-weight λ`（＋可选的 `--code-loss-iterations k`、`--code-loss-from e`）| ★ **码字约束损失**（§93 #1）：训练时在真 LDPC 码上跑 k 次 min-sum，按解码后仍错的比特计 BCE。λ 按 `lr3e-4` 的写法（0.1 → `code1e-1`）| `…-se-code1e-1_e40` |
+
+**⇒ 位置**：`<recipe>` 段**最末尾**（它是损失项，不是结构）。**迭代数不进名字**（默认 2），进 sidecar/argv ✓
+
 **⇒ 保留 token（还没人用过，但一旦偏离默认就必须写）：**
 `seR<n>`（`--se-ratio` 非 8）、`dskipK<n>`（`--dense-skip-depth` >1）、`mlp<r>`（`--mlp-expand` 非 1/2）、
 `ww<v>`（`--width-weight` 非 1.0）、`wch<v>`（`--w-ch`）、`wsym<v>`（`--w-sym`）。
@@ -304,6 +312,7 @@ d3_w2v1_c32b18dw_e2e-cond-norep-sw2s3_e20
 |---|---|
 | ★ `e<EP>` | ★ **本次 run 写出的最后一个快照的轮次**（不是父 run 的轮次，也不是计划轮数）|
 | ★ `_decay` | ★ **本段续训用 cosine 衰减**：`--lr-decay cosine --lr-min <v> --lr-decay-from <本段第一轮>`；**只衰减这一段** |
+| ★ `_decay<first>` | ★ 衰减**起点不是常见的 81** 时（不是"80→120 续训"那一段）把起点写出来：`…_e120_decay41` = **e41 起**衰减到 e120 |
 | 无 `_decay` | 本段用**恒定 LR**（＝父配方原样 + `--epochs`）|
 
 **⇒ 为什么 `_decay` 放在 `_e<EP>` 之后**：它不是训练旋钮，而是**这一段的性质**（哪一段衰减、衰减到哪一轮），
@@ -349,5 +358,7 @@ d3_<ds>_c<C>b<B><arch：dense|dw|bn<N>>[sc<v>][dil<cycle>]
 d3_w2v3c_c32b36dense_e2e-cond-norep-sw2s3-dskip-entry_e80
 d3_w2v3c_c32b36dense_e2e-cond-norep-sw2s3-dskip-entry_e120_decay
 d3_w2v3c_c32b36dense_e2e-cond-norep-sw2s3-dskip-entry-se_e120_decay
+d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3-dskip-entry-se_e120_decay41
 ```
-（第三条在 107 上跑，`--se` 使参数为 **496 345**；第一条 211 上是 **485 833** —— 两者**只差 SE**。）
+（第三条在 107 上跑，`--se` 使参数为 **496 345**；第一条 211 上是 **485 833** —— 两者**只差 SE**。
+第四条是 2026-11-27 增补的**长衰减**：18 块 ＋ SE，父 run 是 126 上 CeB 的 **e40 快照**，`--lr-decay-from 41` ⇒ 衰减跨 **79 轮**。）
