@@ -49,8 +49,8 @@ print("self+harq:", sum(1 for x in lab if x in ("self", "harq")),
       "tb:", len(os.listdir(os.path.join(out, "tb"))),
       "ko:", sum(1 for _ in open(os.path.join(out, "index_ko.csv"))) - 1)
 PY
-# ⑥ 收尾：删草稿（6 GB），只留八个契约产物（见 §5.2）
-rm -rf $OUT/{stage,rows,raw}; find $OUT -name .DS_Store -delete
+# ⑥ 收尾：草稿由工具自动删（--keep-scratch 才保留）；此处只核对残留
+ls $OUT; find $OUT -name .DS_Store -delete
 ```
 
 ---
@@ -79,10 +79,10 @@ rm -rf $OUT/{stage,rows,raw}; find $OUT -name .DS_Store -delete
 |---|---|---|
 | 归档 tar.gz（网络上） | **4.05 GB** | 本腿 4 053 908 427 B（gzip 把 9.58 GB 内容压到 4.05 GB，2.37×）|
 | 解包后原始语料 | **9.6 GB / 293 510 文件** | 9 576 543 376 B，见 §4 |
-| dump 草稿 `stage/` | **5.8 GB** | 逐单元 staged 捕获，**可删** |
-| dump 草稿 `rows/` | **195 MB** | 逐单元一行，`index.csv` 就是它排序拼起来的，**可删** |
+| dump 草稿 `stage/` | 运行中**每单元即删**（常驻几 MB）| `--keep-scratch` 时才会累积到 **5.8 GB** |
+| dump 草稿 `rows/` | **195 MB**（run 期间）| 拼 `index.csv` 用；run 结束自动删 |
 | dump 契约产物 | **≈ 185 MiB** | `tb/` 172 MiB（self ＋ harq）＋ `index.csv` 2.2 ＋ `units.txt` 3.4 ＋ 三个群体索引 5.2 ＋ `chain_iters.csv` 0.44 |
-| **峰值合计** | **≈ 16 GB/腿** | 所以开跑前 **T7 至少留 20 GiB**（历史驱动 `dump_1103.sh` 用的就是 20 GiB 门槛）|
+| **峰值合计** | **≈ 10 GB/腿** | 所以开跑前 **T7 至少留 12 GiB**（草稿不再累积）|
 
 ---
 
@@ -151,7 +151,7 @@ tb_00000000_tbs1736.bits   217 字节   （= 1736 bit = tbs 217 B × 8）
 ### 3.2 推荐做法：流式解包（不落 4 GB 中间文件）
 
 ```bash
-df -h /Volumes/T7_Corpus          # ★ 至少 20 GiB 可用（本腿峰值 ≈ 16 GB）
+df -h /Volumes/T7_Corpus          # ★ 至少 12 GiB 可用（本腿峰值 ≈ 10 GB；草稿每单元即删）
 mkdir -p /Volumes/T7_Corpus/corpus
 ssh jwang@192.168.31.211 "cat /mnt/corpus/s2_amc_corpus_tarballs/s2_amc_iperf_1103i.tar.gz" \
   | tar -xzf - -C /Volumes/T7_Corpus/corpus --exclude '._*'
@@ -271,6 +271,7 @@ bash $LIB/dump_tb.sh \
 | `--binary PATH` | replay 二进制 | 优先 `ul_chain_replay_cpu`（纯 CPU 经典链）；脚本另钉死 `--phy_pipeline cpu --pusch_receiver_backend classic` |
 | `--limit N` | 只跑排序后的前 N 个单元 | 冒烟用，见 §5.4；★ 链回放也只用这 N 个单元，链条被切断，数字不代表本腿 |
 | `--no-harq` | 关掉第二段（harq 半程）| 只要逐单元结果时用；此时 `tb/` 只装 self，`index_*` 三个文件不生成 |
+| `--keep-scratch` | 保留 `stage/`、`rows/`、`raw/` | 只在需要事后排查某单元时用；正常跑不要加（会多占 ~6 GB）|
 | 位置参数 | **腿目录**（可多条） | 脚本用 `find -maxdepth 1 -name '*.txt' ! -name '*_ce.txt' ! -name '._*'` 建单元清单 |
 
 产物结构（全部在 `--out` 下）：
@@ -283,9 +284,10 @@ bash $LIB/dump_tb.sh \
 | `index_self.csv` / `index_harq_only.csv` / `index_harq.csv` | ★ 契约：按群体拆开的索引（self / harq 首传 / 全量 + `label_from`）|
 | `index_ko.csv` | ★ 契约：**没有 label 的样本清单**（`label_from=none`，与 self / harq 互斥）；字段见 §5.6，是换后段解码器捞样本的工作清单 |
 | `chain_iters.csv` | ★ 契约（审计用）：每条候选链的恢复结果 —— `hop`、`decoded_unit`、`iterations/iterations_max`、`bits_check` |
-| `rows/<unit>.row` | 草稿：`index.csv` 的一行，拼装后即冗余 |
-| `stage/<unit>/` | 草稿：逐单元 staged 捕获，约 3.4 个文件/单元 |
-| `raw/<unit>/` | 草稿：单元级 scratch，跑完自清（本次为空）|
+| `rows/<unit>.row` | 草稿：`index.csv` 的一行；**run 结束自动删** |
+| `stage/<unit>/` | 草稿：逐单元 staged 捕获；**该单元写完行与比特即删**（约 3.4 文件/单元，5.8 GB/腿）|
+| `raw/<unit>/` | 草稿：单元级 scratch，每单元跑完即删；目录本身在收尾时删 |
+| （以上三样） | ★ 默认**不留在产物里**；`--keep-scratch` 才保留，用于事后排查 |
 
 ### 5.3 实测耗时与节奏
 
@@ -305,8 +307,11 @@ bash $LIB/dump_tb.sh \
 
 ```bash
 O=/Volumes/T7_Corpus/corpus/tb_s2_amc_iperf_1103i
-while :; do echo "$(date +%H:%M:%S) rows=$(ls $O/rows | wc -l) tb=$(ls $O/tb | wc -l) stage=$(du -sh $O/stage | cut -f1)"; sleep 30; done
+while :; do echo "$(date +%H:%M:%S) rows=$(ls $O/rows | wc -l) tb=$(ls $O/tb | wc -l)"; sleep 30; done
 ```
+
+> 草稿默认**随跑随删**，所以 `stage/` 不涨（`--keep-scratch` 时才会涨到 ~5.8 GB）；
+> 能看到的进度只有 `rows/` 与 `tb/` 两个数。
 
 ### 5.4 冒烟：先用 `--limit 2000` 试一条腿的 1/25
 
@@ -501,11 +506,12 @@ PY
 
 ## 7. 步骤 5：收尾、归档、交给下一步
 
-### 7.1 收尾（必做）
+### 7.1 收尾（工具已自动做完，这里只核对）
 
 ```bash
 OUT=/Volumes/T7_Corpus/corpus/tb_s2_amc_iperf_1103i
-rm -rf $OUT/{stage,rows,raw}                 # 草稿 6 GB，删掉后目录只剩八个契约产物
+ls $OUT                                       # 应只有八个契约产物；看到 stage/rows/raw 说明用了 --keep-scratch
+rm -rf $OUT/{stage,rows,raw}                  # 仅当用了 --keep-scratch 时才需要手动清
 find $OUT -name .DS_Store -delete             # Finder 浏览产生的，不是语料
 find $OUT -name '._*' -delete                 # 万一有
 du -sh $OUT                                   # 本腿实测：≈185 MiB
@@ -572,9 +578,9 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh <leg
 | 二进制检查＋重编 | `make -C build -j14 ul_chain_replay_cpu` | 12.7 s（仅 exe 源过期时）| — |
 | 解包 | `ssh … cat` 管道喂给 `tar -xzf - --exclude '._*'` | **2 min 13 s** | 9.6 GB |
 | 冒烟（可选）| `--limit 2000`（含 harq 段）| 27.7 s | 0.3 GB |
-| **dump 全量**（self＋harq）| `--jobs 12` | **11 min 8 s** | 5.8 GB 草稿 ＋ 0.19 GB 契约 |
-| 收尾 | `rm -rf stage rows raw` | 秒级 | −6 GB |
-| **合计（一条腿）** | — | **≈ 14 分钟**（含解包）| 峰值 ≈ 16 GB |
+| **dump 全量**（self＋harq）| `--jobs 12` | **11 min 8 s** | 0.19 GB 契约（草稿随跑随删）|
+| 收尾 | 工具自动 | 秒级 | — |
+| **合计（一条腿）** | — | **≈ 14 分钟**（含解包）| 峰值 ≈ 10 GB |
 
 ---
 
@@ -599,6 +605,7 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh <leg
 | 14 | 拿 replay 的 `dd_meta.csv` 的 frame 去对飞行 dump 对不上 | `extended_frame()` 的进位基数是**进程级**：新起的 replay 报的是原始 SFN（如 807），飞行 dump 报的是含所有回绕的计数（如 10 023） | 按 slot（同一条链内唯一）或按 capture 名匹配；工具已这么做，别自己再按 frame 对 |
 | 15 | 链回放中途 Ctrl-C，`chain_iters.csv` 不完整、harq 群体变小 | 第二段没跑完就退出 | 删 `<out>/chain_iters.csv` 与 `index_*` 后重跑第二段（不必重跑逐单元段）|
 | 16 | 一次给多个腿目录时 harq 段没跑 | `--with-harq` 只在**一个**腿目录时运行（链和打标都必须属于同一条腿）| 一条腿一个 `--out`，分开跑 |
+| 17 | 想查某单元的 staged 产物/失败现场，但 `stage/` 已经不在了 | 工具默认随跑随删草稿 | 加 `--keep-scratch` 重跑该范围（可配 `--limit`）；`rows/`、`raw/` 同理 |
 
 ---
 

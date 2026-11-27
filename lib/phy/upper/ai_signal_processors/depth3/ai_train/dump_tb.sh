@@ -13,6 +13,11 @@
 #
 # Output (all under --out):  tb/<unit>.bits, index.csv  (unit,tb_bits,crc,sinr_db,iterations,iterations_max,slot,tbs)
 #
+# THE SCRATCH IS NOT A PRODUCT. stage/ holds the replay's own per-unit output and raw/ its per-unit dump directory; nothing
+# reads either after its unit finishes, so each unit's stage directory is removed as soon as its row and bits are written,
+# and rows/, stage/ and raw/ are removed when the run ends. That keeps the peak footprint at the corpus plus the contract
+# products instead of adding ~6 GB of captures a second time. --keep-scratch leaves everything in place for a post-mortem.
+#
 # THE DUMP HOLDS BOTH POPULATIONS. A first transmission the classical chain fails has no label of its own, but the same
 # block's later retransmission decodes with soft combining and supplies it. That decode only exists in one process
 # walking the whole HARQ chain, so the standard dump runs a second pass over the chains that failed (`--no-harq` skips
@@ -22,7 +27,8 @@
 # cannot work this way -- it must decode every first transmission to know whether to ask for a retransmission -- but replay
 # can, because the chain is already on disk.
 #
-# Usage: dump_tb.sh [--corpus DIR] [--out DIR] [--limit N] [--binary PATH] [--jobs N] [--no-harq] [unit-dir ...]
+# Usage: dump_tb.sh [--corpus DIR] [--out DIR] [--limit N] [--binary PATH] [--jobs N] [--no-harq] [--keep-scratch]
+#                    [unit-dir ...]
 #
 # --jobs N runs N units at a time. Each unit is one replay process, so this is where the machine's cores are spent: the
 #   dump was single-threaded and left fifteen of them idle on the sixteen-core host (measured 2026-10-27). Results do not
@@ -39,6 +45,7 @@ OUT=/tmp/tb_corpus
 LIMIT=0
 JOBS=1
 WITH_HARQ=1
+KEEP_SCRATCH=0
 DIRS=()
 
 while [ $# -gt 0 ]; do
@@ -49,6 +56,7 @@ while [ $# -gt 0 ]; do
     --binary) BINARY="$2"; shift 2 ;;
     --jobs)   JOBS="$2"; shift 2 ;;
     --no-harq) WITH_HARQ=0; shift ;;
+    --keep-scratch) KEEP_SCRATCH=1; shift ;;
     *) DIRS+=("$1"); shift ;;
   esac
 done
@@ -98,6 +106,10 @@ one_unit() {
     tbs=$(printf '%s' "$line" | sed -n 's/.*tbs=\([0-9]*\).*/\1/p')
   fi
   rm -rf "$work"
+  # THE STAGED CAPTURE IS SPENT ONCE THE ROW AND THE BITS ARE WRITTEN. Removing it here keeps a serial run from holding
+  # one leg's captures twice: the 5.8 GB that stage/ would otherwise accumulate is the largest single artifact the dump
+  # produces and nothing reads it back.
+  [ "$KEEP_SCRATCH" -eq 1 ] || rm -rf "$out/stage/$name"
   printf '%s,%s,%s,%s,%s,%s,%s,%s\n' "$name" "$tbbits" "$crc" "$sinr" "$iters" "$itersmax" "$slot" "$tbs" > "$out/rows/$name.row"
 }
 export -f one_unit
@@ -118,7 +130,7 @@ fi
 
 # The pool. xargs keeps JOBS units in flight; each writes its own row, so nothing needs a lock.
 echo "  $(wc -l < "$OUT/units.txt") unit(s), $JOBS at a time" >&2
-export OUT BINARY
+export OUT BINARY KEEP_SCRATCH
 tr '\n' '\0' < "$OUT/units.txt" | xargs -0 -n 1 -P "$JOBS" bash -c 'one_unit "$1"' _ 2>/dev/null
 
 # Index in the sorted order the unit list already has, so two runs produce the same file.
@@ -158,4 +170,12 @@ if [ "$WITH_HARQ" -eq 1 ] && [ ${#DIRS[@]} -eq 1 ]; then
     echo "  populations: self=$(( ${n_self:-1} - 1 )) harq=$(( ${n_harq:-1} - 1 )) ko=$(( ${n_ko:-1} - 1 )) (ko = no label; work list for another decoder)"
     echo "  tb now holds $(ls "$OUT/tb" | wc -l | tr -d ' ') blocks"
   fi
+fi
+
+# THE DRAFT DIRECTORIES GO LAST, after the index is assembled and the populations are split: rows/ is what index.csv was
+# built from, so it is only redundant once that file exists. A run that died earlier keeps its scratch, which is what a
+# post-mortem and a resumed index assembly need.
+if [ "$KEEP_SCRATCH" -eq 0 ]; then
+  rm -rf "$OUT/stage" "$OUT/rows" "$OUT/raw"
+  echo "  scratch removed (stage/ rows/ raw/; pass --keep-scratch to keep them)"
 fi

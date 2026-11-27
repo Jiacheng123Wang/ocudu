@@ -468,3 +468,40 @@ $ stat -f "%i %N" ~/ai_depth3/corpus/tb_s2_amc_iperf_1103i /Volumes/T7_Corpus/co
   `/Volumes/T7_Corpus/corpus/...`，同一份采集（抽第一个单元验证：文件存在）。
 - **新的 dump 用 `/Volumes/T7_Corpus/corpus` 作为 `--corpus`**，所以它的 `units.txt` 与旧的只是路径拼写不同；
   两条路径都指向同一批文件，下游按哪个都能取到，但**同一批产物里不要混用两种拼写**（会白算"两个语料根"）。
+
+---
+
+## 10. 2026-11-27 10:35 草稿改为随跑随删（`--keep-scratch` 可保留）
+
+### 背景
+
+`stage/`（5.8 GB/腿）、`rows/`（195 MB）以前留到人工收尾才删。它们对下游没有用处（§6 已核实：全仓无消费者），
+留着只是占盘，还让每条腿的峰值到 16 GB。
+
+### 改动（`dump_tb.sh`）
+
+| 时机 | 动作 |
+|---|---|
+| 每单元写完 `rows/<unit>.row` 与 `tb/<unit>.bits` 之后 | `rm -rf stage/<unit>`（原来只删 `raw/<unit>`）|
+| 整个 run 结束（含 harq 第二段）| `rm -rf stage/ rows/ raw/`，并打印 `scratch removed (…; pass --keep-scratch to keep them)` |
+| `--keep-scratch` | 两处都跳过，产物保留，供事后排查 |
+
+`rows/` 必须留到 run 末尾（`index.csv` 是它拼起来的），所以它在**最后**删。
+
+### 验证
+
+| 跑法 | 结果 |
+|---|---|
+| `--limit 200`（默认）| 产物只剩八样；`self+harq=189 = tb 189`、`ko=11`；日志出现 `scratch removed` |
+| `--limit 50 --keep-scratch` | `stage/` 保留（180 个条目、6.3 MB）、`rows/` 50 行、`raw/` 在 |
+
+### 影响
+
+- **峰值 16 GB → ≈10 GB/腿**（语料 9.6 ＋ 契约 0.19 ＋ run 期间 rows 0.2），开跑前的最低余量从 20 GiB 降到 **12 GiB**；
+- 正常 run 的 dump 目录**天生就是归档形态**（八样），不再依赖人工收尾；
+- run 中途挂掉时草稿会留下（有利于续跑与事后排查）——这是有意的。
+
+### 文档
+
+runbook：§0 ⑥、§1.2 容量、§3.2 空间检查、§5.2 参数与草稿行、§5.3 监控（stage 不再增长）、§7.1 收尾（改为核对）、
+§8 总账、§9 新增坑 17（想查现场要加 `--keep-scratch`）。
