@@ -49,7 +49,7 @@ print("self+harq:", sum(1 for x in lab if x in ("self", "harq")),
       "tb:", len(os.listdir(os.path.join(out, "tb"))),
       "ko:", sum(1 for _ in open(os.path.join(out, "index_ko.csv"))) - 1)
 PY
-# ⑥ 收尾：草稿由工具自动删（--keep-scratch 才保留）；此处只核对残留
+# ⑥ 收尾：草稿由工具自动删（--keep-scratch 才保留）；产物共九样（含 dump_meta.txt）
 ls $OUT; find $OUT -name .DS_Store -delete
 ```
 
@@ -284,6 +284,7 @@ bash $LIB/dump_tb.sh \
 | `index_self.csv` / `index_harq_only.csv` / `index_harq.csv` | ★ 契约：按群体拆开的索引（self / harq 首传 / 全量 + `label_from`）|
 | `index_ko.csv` | ★ 契约：**没有 label 的样本清单**（`label_from=none`，与 self / harq 互斥）；字段见 §5.6，是换后段解码器捞样本的工作清单 |
 | `chain_iters.csv` | ★ 契约（审计用）：每条候选链的恢复结果 —— `hop`、`decoded_unit`、`iterations/iterations_max`、`bits_check` |
+| `dump_meta.txt` | ★ 契约（**出处**）：`ldpc_iterations`、`binary`、`binary_mtime`、`jobs`、`corpus`、`legs`、起止时间与各群体计数。**判断这份 dump 是"参考配置"还是"更强的解码器"就看这一行** |
 | `rows/<unit>.row` | 草稿：`index.csv` 的一行；**run 结束自动删** |
 | `stage/<unit>/` | 草稿：逐单元 staged 捕获；**该单元写完行与比特即删**（约 3.4 文件/单元，5.8 GB/腿）|
 | `raw/<unit>/` | 草稿：单元级 scratch，每单元跑完即删；目录本身在收尾时删 |
@@ -393,6 +394,40 @@ replay 的接口是 `--phy_pipeline cpu|cpu_gpu|gpu|npu`、`--pusch_receiver_bac
   ① 走链回放（本流程已做，它们在那里是链条中间成员，按既有规则不进 harq 群体）；
   ② 给 harness 加"强制新缓冲"模式，让它们能被单跑解码 —— 那样解出的是 **`own` 标签、非首传**的新群体
   （上表第三列 `first_transmission=0`），既不是 self 也不是 harq。
+
+### 5.7 解码强度：`OCUDU_REPLAY_DEC_ITERATIONS`（默认 6）
+
+harness 的 LDPC 迭代上限来自环境变量 `OCUDU_REPLAY_DEC_ITERATIONS`（`ul_chain_replay.cpp:148-155`），默认 **6**
+（＝空中腿的 `pusch_dec_max_iterations`），运行时会打印 `… N decoder iteration(s)`，并写进 `dump_meta.txt` 的
+`ldpc_iterations`。
+
+**它决定判决，不只是时延**：某个接收在第 7 轮能过、在第 6 轮就是 `crc=KO`。所以**换 cap 就是换一份数据集**，不是换速度。
+
+本腿实测（1103i，cap 6 → cap 20，同一语料、同一二进制、同样 12 路）：
+
+| 项 | cap 6（参考）| cap 20 | 差 |
+|---|---|---|---|
+| `crc_ok`（＝self）| 36 747 | **37 599** | **+852** |
+| ├ 原本是 harq（借 donor 的标签）| — | 其中 **824** 个现在自己解出 | 借标签 → 自有标签 |
+| └ 原本是 ko（无标签）| — | 其中 **28** 个现在解出 | 新增样本 |
+| 反例：cap6 OK → cap20 KO | — | **0** | 早停 ⇒ 单调，无回归 |
+| harq 首传 | 5 260 | 4 436 | −824（转 self）|
+| ko | 7 278 | 7 251 | −27 |
+| `tb/` 块数 | 42 722 | 42 749 | +27 |
+| 运行时间 | 11 min 8 s | **12 min 39 s** | +1.5 min |
+
+新解出的 852 个样本的 `iterations_max` 分布：7:205 8:148 9:111 10:95 11:74 12:42 13:38 14:30 15:30 16:22 17:18 18:17 19:14 **20:8**。
+
+三条要点：
+
+1. **824 个"借标签 → 自有标签"的样本，比特逐字节相同**（824/824 md5 相等）：同一块，只是不再需要 donor。
+2. **harq 群体因此变"纯"**：能自己解出的那批从 harq 挪到 self，留下的 4 436 才是真正必须靠合并的。
+3. ★ **cap≠6 的 dump 不是"参考链判决"**：那 852 个样本空中链（cap 6）是解不出的。用这种 dump 建出来的数据集
+   **不能**再拿去和经典链做门控/尺子对比（否则相当于让基线少 852 个它本来就解不出的样本）。`dump_meta.txt` 的
+   `ldpc_iterations` 就是用来防止这种误用的；做测量时请用 cap 6 的 dump。
+
+**还会不会更多？** cap 20 下仍失败的 429 个首传**全部撞在 20**（`iterations_max=20`），说明再加轮次还有边际收益
+（分布上 20 轮处还有 8 个样本刚够）；但它们同时也是最低 SNR 的一批，换更强后段（GPU/NPU LDPC、AI 接收机）比单纯加轮次更值得试（§5.6）。
 
 ---
 
@@ -510,36 +545,37 @@ PY
 
 ```bash
 OUT=/Volumes/T7_Corpus/corpus/tb_s2_amc_iperf_1103i
-ls $OUT                                       # 应只有八个契约产物；看到 stage/rows/raw 说明用了 --keep-scratch
+ls $OUT                                       # 应只有九个契约产物；看到 stage/rows/raw 说明用了 --keep-scratch
 rm -rf $OUT/{stage,rows,raw}                  # 仅当用了 --keep-scratch 时才需要手动清
 find $OUT -name .DS_Store -delete             # Finder 浏览产生的，不是语料
 find $OUT -name '._*' -delete                 # 万一有
 du -sh $OUT                                   # 本腿实测：≈185 MiB
 ```
 
-保留八样：`index.csv`、`units.txt`、`tb/`、`index_self.csv`、`index_harq.csv`、`index_harq_only.csv`、`index_ko.csv`、
-`chain_iters.csv`。前三个是 dump 本身，后五个是群体划分、无 label 清单与链回放审计（建库、复核、换后段捞样本都要用）。
+保留九样：`index.csv`、`units.txt`、`tb/`、`index_self.csv`、`index_harq.csv`、`index_harq_only.csv`、`index_ko.csv`、
+`chain_iters.csv`、`dump_meta.txt`。前三个是 dump 本身，中间五个是群体划分、无 label 清单与链回放审计，
+最后一个是出处（解码强度等）。
 本腿实测体积：
 
 | 产物 | 体积 |
 |---|---|
 | `tb/`（42 722 个块）| 172 MiB |
 | `index.csv` / `index_self.csv` / `index_harq.csv` / `index_harq_only.csv` | 2.2 / 1.95 / 2.8 / 0.41 MiB |
-| `units.txt` / `chain_iters.csv` / `index_ko.csv` | 3.4 / 0.43 / 0.42 MiB |
+| `units.txt` / `chain_iters.csv` / `index_ko.csv` / `dump_meta.txt` | 3.4 / 0.43 / 0.42 / < 1 KiB |
 
 ### 7.2 归档 dump（可选，但 211 上已有约定）
 
 ```bash
 cd /Volumes/T7_Corpus/corpus
-tar -czf /tmp/tb_<leg>.tar.gz tb_<leg>        # 本腿实测 19.5 MiB / 20 400 698 B（42 732 个成员，11.8 s）
+tar -czf /tmp/tb_<leg>.tar.gz tb_<leg>        # 本腿实测(cap20) 19.6 MiB / 20 590 860 B（42 759 个成员，16.6 s）
 scp /tmp/tb_<leg>.tar.gz jwang@192.168.31.211:/mnt/corpus/s2_amc_tb_tarballs/
 rm -f /tmp/tb_<leg>.tar.gz
 ```
 
 > ★ **归档前必须删 `stage/`**（手册 §22：不删，tar.gz 会大两个数量级）。
-> ★ 标准 dump 的归档现在就是八样：`index.csv`、`units.txt`、`tb/`、`index_self.csv`、`index_harq.csv`、
-> `index_harq_only.csv`、`index_ko.csv`、`chain_iters.csv`（1103i 实测 185 MiB → gzip 后 **19.5 MiB / 20 400 698 B**）。
-> 解包后 `tar -t` 的成员数 = 42 722（`tb/`）＋ 8 个文件 ＋ 2 个目录 = **42 732**。
+> ★ 标准 dump 的归档现在就是九样：`index.csv`、`units.txt`、`tb/`、`index_self.csv`、`index_harq.csv`、
+> `index_harq_only.csv`、`index_ko.csv`、`chain_iters.csv`、`dump_meta.txt`（1103i cap-20 实测 184 MiB → gzip 后
+> **19.6 MiB / 20 590 860 B**）。解包后 `tar -t` 成员数 = 42 749（`tb/`）＋ 8 个文件 ＋ 2 个目录 = **42 759**。
 
 ### 7.3 交给建库（手册 §7）
 
@@ -578,7 +614,8 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh <leg
 | 二进制检查＋重编 | `make -C build -j14 ul_chain_replay_cpu` | 12.7 s（仅 exe 源过期时）| — |
 | 解包 | `ssh … cat` 管道喂给 `tar -xzf - --exclude '._*'` | **2 min 13 s** | 9.6 GB |
 | 冒烟（可选）| `--limit 2000`（含 harq 段）| 27.7 s | 0.3 GB |
-| **dump 全量**（self＋harq）| `--jobs 12` | **11 min 8 s** | 0.19 GB 契约（草稿随跑随删）|
+| **dump 全量**（self＋harq，cap 6）| `--jobs 12` | **11 min 8 s** | 0.19 GB 契约（草稿随跑随删）|
+| dump 全量（cap 20）| `--jobs 12` | **12 min 39 s** | 0.19 GB（多 27 个块）|
 | 收尾 | 工具自动 | 秒级 | — |
 | **合计（一条腿）** | — | **≈ 14 分钟**（含解包）| 峰值 ≈ 10 GB |
 
@@ -609,7 +646,10 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh <leg
 
 ---
 
-## 10. 本次实测指纹（2026-11-27，腿 `s2_amc_iperf_1103i`）
+## 10. 本次实测指纹（2026-11-27，腿 `s2_amc_iperf_1103i`，**cap 6** 那一版）
+
+> ★ 这张表是 **cap 6**（参考配置）的指纹；那份 dump 已于 2026-11-27 10:13 删除，其内容与历史归档
+> `~/ai_depth3/dump_s2_amc/tb_s2_amc_iperf_1103i` 的 self 半程逐字节一致。**现在磁盘上的是 cap 20 版**（见 §5.7）。
 
 | 项 | 值 |
 |---|---|

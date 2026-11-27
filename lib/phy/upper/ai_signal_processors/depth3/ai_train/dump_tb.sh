@@ -13,6 +13,11 @@
 #
 # Output (all under --out):  tb/<unit>.bits, index.csv  (unit,tb_bits,crc,sinr_db,iterations,iterations_max,slot,tbs)
 #
+# THE DECODER STRENGTH IS PART OF THE RESULT. The LDPC cap decides verdicts, not only latency: a reception that needs a
+# seventh iteration is crc=KO at six and crc=OK at twenty. The harness takes it from OCUDU_REPLAY_DEC_ITERATIONS (default
+# 6, the value every air leg runs), and this script records whatever it sees in dump_meta.txt beside the products, so a
+# dump made at a different cap cannot later be mistaken for the reference verdict. Both passes inherit the variable.
+#
 # THE SCRATCH IS NOT A PRODUCT. stage/ holds the replay's own per-unit output and raw/ its per-unit dump directory; nothing
 # reads either after its unit finishes, so each unit's stage directory is removed as soon as its row and bits are written,
 # and rows/, stage/ and raw/ are removed when the run ends. That keeps the peak footprint at the corpus plus the contract
@@ -65,6 +70,19 @@ done
 [ ${#DIRS[@]} -gt 0 ] || DIRS=("$CORPUS/col_1025_verify")
 
 mkdir -p "$OUT/tb" "$OUT/stage" "$OUT/raw"
+# PROVENANCE FIRST, BECAUSE THE CAP CHANGES THE VERDICTS. A reader of these products has to be able to tell a dump made at
+# the air configuration from one made by a stronger decoder, and nothing else in the directory says which it is.
+{
+  echo "started=$(date '+%Y-%m-%d %H:%M:%S')"
+  echo "ldpc_iterations=${OCUDU_REPLAY_DEC_ITERATIONS:-6}"
+  echo "corpus=${CORPUS}"
+  echo "out=${OUT}"
+  echo "binary=${BINARY}"
+  echo "binary_mtime=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$BINARY" 2>/dev/null || echo unknown)"
+  echo "jobs=${JOBS}"
+  echo "with_harq=${WITH_HARQ}"
+  echo "legs=${DIRS[*]:-}"
+} > "$OUT/dump_meta.txt"
 : > "$OUT/index.csv"
 echo "unit,tb_bits,crc,sinr_db,iterations,iterations_max,slot,tbs_bytes" >> "$OUT/index.csv"
 
@@ -170,6 +188,18 @@ if [ "$WITH_HARQ" -eq 1 ] && [ ${#DIRS[@]} -eq 1 ]; then
     echo "  populations: self=$(( ${n_self:-1} - 1 )) harq=$(( ${n_harq:-1} - 1 )) ko=$(( ${n_ko:-1} - 1 )) (ko = no label; work list for another decoder)"
     echo "  tb now holds $(ls "$OUT/tb" | wc -l | tr -d ' ') blocks"
   fi
+fi
+
+if [ -f "$OUT/dump_meta.txt" ]; then
+  {
+    echo "finished=$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "units=$(wc -l < "$OUT/units.txt" | tr -d ' ')"
+    echo "crc_ok=$(grep -c ',OK,' "$OUT/index.csv" 2>/dev/null || echo 0)"
+    echo "tb_blocks=$(ls "$OUT/tb" | wc -l | tr -d ' ')"
+    [ -f "$OUT/index_self.csv" ] && echo "self=$(($(wc -l < "$OUT/index_self.csv") - 1))"
+    [ -f "$OUT/index_harq_only.csv" ] && echo "harq=$(($(wc -l < "$OUT/index_harq_only.csv") - 1))"
+    [ -f "$OUT/index_ko.csv" ] && echo "ko=$(($(wc -l < "$OUT/index_ko.csv") - 1))"
+  } >> "$OUT/dump_meta.txt"
 fi
 
 # THE DRAFT DIRECTORIES GO LAST, after the index is assembled and the populations are split: rows/ is what index.csv was
