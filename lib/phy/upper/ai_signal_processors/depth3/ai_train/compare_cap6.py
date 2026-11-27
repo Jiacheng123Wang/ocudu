@@ -12,6 +12,7 @@ WHAT IT WRITES. One CSV row on stdout (the driver appends it to a report) and a 
 Usage: compare_cap6.py --leg <leg> [--corpus DIR] [--ref DIR] [--seconds N] [--status S]
 """
 import argparse
+import concurrent.futures
 import csv
 import hashlib
 import os
@@ -87,8 +88,14 @@ def main():
     old_tb = {f[:-5] for f in os.listdir(os.path.join(ref, "tb")) if f.endswith(".bits")}
     new_tb = {f[:-5] for f in os.listdir(os.path.join(new, "tb")) if f.endswith(".bits")}
     bit_common = sorted(old_tb & new_tb)
-    mismatch = sum(1 for u in bit_common
-                   if md5(os.path.join(ref, "tb", u + ".bits")) != md5(os.path.join(new, "tb", u + ".bits")))
+
+    # PARALLEL, BECAUSE THE COST IS THE OPEN, NOT THE HASH. Twenty-two thousand one-kilobyte files took eighteen minutes
+    # one at a time on the replay host, with almost no CPU time: the wall clock went to per-file latency on a busy disk.
+    def differs(unit):
+        return md5(os.path.join(ref, "tb", unit + ".bits")) != md5(os.path.join(new, "tb", unit + ".bits"))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        mismatch = sum(pool.map(differs, bit_common))
     row["bit_common"] = len(bit_common)
     row["bit_mismatch"] = mismatch
     row["bits_new"] = len(new_tb - old_tb)
