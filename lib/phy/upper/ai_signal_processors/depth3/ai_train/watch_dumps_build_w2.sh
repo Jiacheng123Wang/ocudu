@@ -75,6 +75,10 @@ mark() { echo "$1,$2,$3,$4,$5,$(date '+%Y-%m-%dT%H:%M:%S')" >> "$PROGRESS"; }
 done_leg() { awk -F, -v l="$1" '$1==l && $2=="ok"{f=1} END{exit !f}' "$PROGRESS"; }
 failed_twice() { [ "$(awk -F, -v l="$1" '$1==l && $2=="failed"{n++} END{print n+0}' "$PROGRESS")" -ge 2 ]; }
 findings_ok() { awk '/--- findings ---/{getline; if ($0 ~ /none/) ok=1} END{exit !ok}' "$1"; }
+# `df -g` is BSD syntax; GNU's df rejects it and the log line came out empty on 211.
+free_gib() {
+  df -BG --output=avail "$1" 2>/dev/null | tr -dc '0-9' || df -g "$1" 2>/dev/null | awk 'NR==2{print $4}'
+}
 # EXCLUDE is a list; comparing one leg against the whole string would match nothing.
 is_excluded() { local x; for x in $EXCLUDE; do [ "$1" = "$x" ] && return 0; done; return 1; }
 
@@ -136,7 +140,7 @@ PY
     log "$leg: OK files=$n samples=$samples ($(( (SECONDS - start) / 60 ))m)"
     if [ "$RECLAIM" = "1" ]; then
       rm -rf "$cap"
-      log "$leg: captures freed ($(df -g "$CORPUS" | awk 'NR==2{print $4}') GiB free)"
+      log "$leg: captures freed ($(free_gib "$CORPUS") GiB free)"
     fi
   else
     mark "$leg" failed $((SECONDS - start)) "$n" "$samples"
@@ -191,7 +195,7 @@ while :; do
       dump_finished "$d" && echo x
     done | wc -l | tr -d ' ')
     built=$(awk -F, '$2=="ok"{n++} END{print n+0}' "$PROGRESS")
-    log "waiting: $complete finished dump(s), $built built, $(df -g "$CORPUS" | awk 'NR==2{print $4}') GiB free on corpus"
+    log "waiting: $complete finished dump(s), $built built, $(free_gib "$CORPUS") GiB free on corpus"
     last_heartbeat=$now
   fi
   [ "$built_this_round" = "0" ] && sleep "$POLL"
