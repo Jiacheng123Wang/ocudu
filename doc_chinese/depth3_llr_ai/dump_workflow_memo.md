@@ -720,3 +720,45 @@ awk -F, '{print $1,$2,$5,$10,$11,$14}' ~/ai_depth3/s2_amc_batch_report.csv   # �
 | 已 dump 完 | 1103i/j（cap20）、1103k +652、1103l +855、1103m +1349、1103n +813（均 PASS）|
 | 批处理 | 运行中（nice 19，jobs 12），下一条 1103o |
 | 211 w2 | `w2_harq_1027` dump 进行中（14 331 / 23 975），cap-6 参考已解包待对照 |
+
+---
+
+## 16. 2026-11-27 14:30 w2 首批 10 腿开跑（保留 raw，跑完退出等建库）
+
+### 决策
+
+用户要求：**保留原始采集**（建库要读），先 dump **10 腿**，完成后退出等建库。于是：
+- 211 上新建 `~/run_w2_batch.sh`（nice 19、`--jobs 6` ≈ 12 线程、空间守卫 floor 100 GiB，**不删任何 raw**）；
+- 跑完 10 条腿自动结束，不自动接续；原始采集与 dump 都留在 `/mnt/corpus/w2_tb_tarballs/`。
+
+### 选的 10 腿（覆盖 4 调制 × ping/iperf，压缩总量 18 GB）
+
+`16QAM_ping_1029b/c/d/e`、`QPSK_ping_clip_1029g`、`64QAM_ping_1030a`、`256QAM_iperf_1030d`、
+`mcs06_ping500_1027`、`mcs12_ping500_1027`、`mcs20_ping100_1027`。
+
+### ★ 实测压缩比远高于 s2：一条腿 ≈ 26–36 GB raw
+
+| 腿 | tar.gz | 解包后 | 压缩比 | 单元数 |
+|---|---|---|---|---|
+| w2_harq_1027 | 1.12 GB | 36 GB | 32× | 23 975 |
+| 16QAM_ping_1029b | 0.46 GB | **26 GB** | **56×** | **8 960** |
+
+⇒ 10 腿 raw 预计 **≈ 1.0 TB**（17.95 GB × ~56），加 dump（5.8 GB/腿）≈ 1.06 TB；211 现余 1.6 TB，够但需盯：
+守卫在 free < 100 GiB 时**等待**（不删），到时要么腾空间、要么停批。
+
+### 每腿流程
+
+解包**完成**后才启动 dump（1027 曾因并行解包只抓到 18 214/23 975 个单元）→ dump（默认 cap 20）→
+解包该腿的 cap-6 参考 → `compare_cap6.py` 判定 → 保留 raw → 下一条。
+
+### 已修复的脚本 bug
+
+`df -g` 是 macOS 语法，Ubuntu 上直接报 `invalid option -- 'g'`，守卫读到空值会永久等待；
+改成 `df -BG --output=avail /mnt/corpus | tr -dc '0-9'`。首次启动因此空转 5 分钟，已改正并重启（14:18）。
+
+### 监控
+
+```bash
+ssh jwang@192.168.31.211 'tail -f /tmp/w2_batch.out'                     # 每条腿的起止、units、对照结论
+ssh jwang@192.168.31.211 'column -s, -t ~/w2_batch_report.csv'          # 汇总（与 s2 同一套列）
+```
