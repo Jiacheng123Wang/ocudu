@@ -158,6 +158,26 @@ echo "  $(wc -l < "$OUT/units.txt") unit(s), $JOBS at a time" >&2
 export OUT BINARY KEEP_SCRATCH
 tr '\n' '\0' < "$OUT/units.txt" | xargs -0 -n 1 -P "$JOBS" bash -c 'one_unit "$1"' _ 2>/dev/null
 
+# RETRY THE HOLES. Under load a replay occasionally dies before printing its verdict, which leaves a row with no SINR; the
+# same unit decodes when it is run again (measured on the w2 legs 2026-11-27: four of ten thousand units were lost that way
+# while a GPU training job shared the machine, and each decoded on its own on the retry). Only first transmissions are
+# retried, because a retransmission has no soft buffer to reserve and fails the same way every time.
+: > "$OUT/retry.txt"
+while read -r unit_path; do
+  name=${unit_path##*/}
+  name=${name%.txt}
+  row="$OUT/rows/$name.row"
+  [ -f "$row" ] || { echo "$unit_path" >> "$OUT/retry.txt"; continue; }
+  [ -n "$(cut -d, -f4 "$row")" ] && continue
+  [ "$(grep -m1 '^new_data=' "$unit_path" | cut -d= -f2)" = "1" ] && echo "$unit_path" >> "$OUT/retry.txt"
+done < "$OUT/units.txt"
+n_retry=$(wc -l < "$OUT/retry.txt" | tr -d ' ')
+if [ "$n_retry" -gt 0 ]; then
+  echo "  retrying $n_retry unit(s) that produced no verdict" >&2
+  tr '\n' '\0' < "$OUT/retry.txt" | xargs -0 -n 1 -P "$JOBS" bash -c 'one_unit "$1"' _ 2>/dev/null
+fi
+rm -f "$OUT/retry.txt"
+
 # Index in the sorted order the unit list already has, so two runs produce the same file.
 # A PER-ROW cat IS A PER-ROW FORK, and a fork costs about 66 ms on a loaded host: measured on the Ubuntu replay host
 # (2026-11-27), a 24 000-unit leg took 33 minutes to replay its units and then 25 more to assemble this index one `cat`
