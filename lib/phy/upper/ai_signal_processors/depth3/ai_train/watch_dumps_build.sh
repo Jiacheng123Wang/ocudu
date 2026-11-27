@@ -114,11 +114,17 @@ build_leg() {
       JOBS=1 CHUNK=8000 REQUIRE_ITERATIONS=1 bash "$TOOL" "$leg" > "$log" 2>&1
   rc=$?
   n=$(ls "$OUT/${leg}"_*.npz 2>/dev/null | wc -l | tr -d ' ')
-  samples=$("$PY" - "$OUT" "$leg" <<'PY'
+  # The build writes _manifest_<leg>.csv; prefer it: counting samples from the npz decompresses every
+  # X member (1.3 GB for QPSK self) for a number that is already on disk.
+  if [ -f "$OUT/_manifest_${leg}.csv" ]; then
+    samples=$(awk -F, 'NR > 1 { s += $4 } END { print s + 0 }' "$OUT/_manifest_${leg}.csv")
+  else
+    samples=$("$PY" - "$OUT" "$leg" <<'PY'
 import sys, glob, os, numpy as np
 print(sum(len(np.load(p, allow_pickle=True)["X"]) for p in glob.glob(os.path.join(sys.argv[1], sys.argv[2] + "_*.npz"))))
 PY
 )
+  fi
   if [ "$rc" -eq 0 ] && findings_ok "$log"; then
     mark "$leg" ok $((SECONDS - start)) "$n" "$samples"
     log "$leg: OK files=$n samples=$samples ($(( (SECONDS - start) / 60 ))m)"

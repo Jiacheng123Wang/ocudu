@@ -219,6 +219,27 @@ for LEG in "$@"; do
     fi
   done
   rm -rf -- "$job_dir"
+
+  # 5. THE PER-LEG MANIFEST: one row per (modulation, population) with samples built, index rows and
+  #    how many were rejected. It is what makes a SHORT build visible -- the audit checks the samples
+  #    that exist, not the ones that should exist -- and the binning downstream needs it. It has to run
+  #    while the captures are still on disk, because `index.csv` does not carry the modulation: it is in
+  #    each PDU sidecar. A failure here is loud but not fatal: the npz are the product, and rerunning
+  #    this script recreates the manifest.
+  if [ -d "$CAP" ]; then
+    echo "=== manifest"
+    manifest_log=$(mktemp "${TMPDIR:-/tmp}/motherset-manifest.XXXXXX")
+    if "$PY" "$TOOLS/write_manifest.py" --out "$OUT" --dump "$DUMP" --corpus "$CORPUS_ROOT" --leg "$LEG" \
+         > "$manifest_log" 2>&1; then
+      tail -12 "$manifest_log" | sed 's/^/  /'
+    else
+      echo "  FAILED: could not write the manifest for $LEG (see below)" >&2
+      tail -5 "$manifest_log" | sed 's/^/    /' >&2
+    fi
+    rm -f "$manifest_log"
+  else
+    echo "  no $CAP: skipped the manifest (the modulation comes from the capture sidecars)" >&2
+  fi
 done
 
 # 4. Audit this leg's datasets. The checker reports sample counts, shapes, bit balance and SNR, and

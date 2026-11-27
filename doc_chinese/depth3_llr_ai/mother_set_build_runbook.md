@@ -292,7 +292,7 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh <leg
 | `GAP_SLOTS` | 200 | 链间隙护栏 | 调小会切断真链 |
 | `MODS` | 默认四种 | 只建指定的调制 | 调试用；正常不要设 |
 
-### 4.3 脚本内部做四步（每步都有判据）
+### 4.3 脚本内部做五步（每步都有判据）
 
 | 步 | 做什么 | 判据／产物 |
 |---|---|---|
@@ -300,9 +300,13 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh <leg
 | 2 | 扫 `cap_*.txt` 侧车统计**实际存在的调制**（★ 不从腿名推）| `modulations present:` 列出几种 ⇒ 就建几种 × 2 个群体 |
 | 3 | 每个 (调制, 来源) 直接调 `build_depth3_dataset.py`（**不走 `select_by_bin`/配额**）| 每个 npz 写出；`--count-only` 先算片数 |
 | 4 | `check_depth3_dataset.py` 只审计**本腿**的 npz | **`findings: none`** |
+| 5 | `write_manifest.py` 写 `_manifest_<leg>.csv`（逐 (调制,群体) 的 samples／index_rows／rejected）| 12 行表格 ＋ `wrote …csv`。★ 必须在**采集还在盘上**时写：调制只存在于每单元的 PDU 侧车，`index.csv` 里没有 |
 
 > ★ **为什么不走 `select_by_bin.py`**：它是**抽样**工具（按箱配额），而且"无限配额"曾经静默沿用抽样账本、
 > 不报错地浪费过数小时。母集要**全量**，所以脚本从不碰配额机制。
+>
+> ★ **第 5 步失败只告警、不使建库失败**：npz 才是产物，重跑一次脚本就能重建 manifest。但**采集一旦被回收，
+> manifest 就补不出来了**（除非重新解包）—— 这也是 watcher 在 `rm -rf <cap>` 之前必须先跑完建库的原因。
 
 ### 4.4 进度怎么看
 
@@ -374,13 +378,16 @@ for pop, idx in (("self", "index_self.csv"), ("harq", "index_harq_only.csv")):
         print(f"{m:6s} {pop:4s} index={n:6d} built={got:6d} rejected={n - got:3d}")
         manifest.append([leg, m, pop, got, n, n - got])
 print("total built:", sum(built.values()))
-path = os.path.join(out, f"_manifest_{leg}.csv")          # 一条腿一份，便于全库汇总（§6.6）
+path = f"/tmp/{leg}_manifest_recheck.csv"     # 独立复算，写到 /tmp，再与库里的那份逐行比
 with open(path, "w", newline="") as fh:
     w = csv.writer(fh); w.writerow(["leg","modulation","population","samples","index_rows","rejected_total"])
     w.writerows(manifest)
 print("wrote", path)
 PY
-# 本腿：41987（self 37587 = 37599−12；harq 4400 = 4436−28−8），并写出 _manifest_s2_amc_iperf_1103i.csv
+# 本腿：41987（self 37587 = 37599−12；harq 4400 = 4436−28−8）
+# 与建库自己写的那份必须逐行相同：
+diff /tmp/<leg>_manifest_recheck.csv /Volumes/Eaget_HD/datasets_full_s2_amc/_manifest_<leg>.csv \
+  && echo "manifest matches"
 ```
 
 判据：**每个 `rejected` 都应是"DM-RS 拒 ＋ 无迭代数"的可解释数目**（日志里有 `N unit(s) skipped` 逐对记录）；
@@ -435,8 +442,11 @@ PY
 
 本腿：**113/224 箱非空**；均匀抽取投影 **28 469**（2 500/250）／**39 834**（8 000/800）。
 
-manifest（一条腿一份，便于全库汇总）：**§5.2 的对账脚本已经写出** `<out>/_manifest_<leg>.csv`
-（列：`leg,modulation,population,samples,index_rows,rejected_total`）。本腿 8 行，合计 41 987。
+**manifest 由建库自己写出**（§4.3 第 5 步）：`<out>/_manifest_<leg>.csv`，列
+`leg,modulation,population,samples,index_rows,rejected_total`。本腿 8 行，合计 41 987。
+它让"建少了"可见 —— 审计只检查**存在**的样本，不检查**应该存在**的样本。
+
+复核：把 §5.2 的脚本再跑一遍（它独立复算同样的表），输出写到 `/tmp` 再与库里的 manifest 比，**必须逐行相同**。
 
 > ★ 分箱盘点看**母集侧**（只含可解码样本）；捕获侧（`census_bins.py`）用来判断"下一腿该补哪个格子"。
 > 抽取时**按箱均匀、不按尺子加权**（手册 §7.1.4 的口径不变）。
