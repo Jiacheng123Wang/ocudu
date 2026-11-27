@@ -45,6 +45,7 @@ Usage: harq_backfill.py --leg <capture dir> --index <dump index.csv> --out <dir>
 """
 import argparse
 import collections
+import concurrent.futures
 import csv
 import os
 import shutil
@@ -71,10 +72,17 @@ def load_units(rows, leg):
     Returns the units that name an rnti, a HARQ id and a slot, keyed by capture name. Shared with dump_harq_chains.py so
     that both tools order receptions by the same coordinate.
     """
+    # THE SIDECARS ARE SMALL AND NUMEROUS, AND THE OPEN IS THE COST. Ten thousand of them took twenty minutes on the
+    # replay host while a dump shared the disk, almost all of it per-file latency; sixteen threads read them in seconds.
+    def sidecar(row):
+        return read_pdu(os.path.join(leg, row["unit"] + ".txt"))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        pdus = list(pool.map(sidecar, rows))
+
     units = {}
-    for row in rows:
+    for row, pdu in zip(rows, pdus):
         name = row["unit"]
-        pdu = read_pdu(os.path.join(leg, name + ".txt"))
         if pdu is None or "harq_id" not in pdu or "rnti" not in pdu or "slot" not in pdu:
             continue
         # THE KEY COMES FROM THE NAME, BOTH FIELDS. `cap_<frame>_<slot>_<rnti>` is how the capture identifies the
