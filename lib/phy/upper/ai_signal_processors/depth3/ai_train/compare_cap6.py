@@ -31,7 +31,14 @@ def md5(path):
 
 
 def load_index(path):
-    return {row["unit"]: row for row in csv.DictReader(open(path))}
+    """Index rows, minus the AppleDouble stubs.
+
+    THE OLD DUMPS CARRIED `._` JUNK UNITS. A corpus packed on a Mac has a resource-fork stub beside every file, and the
+    dump of the time selected `*.txt` without excluding them, so a w2 reference index holds twice the real unit count and
+    every one of those stubs is "missing" from a dump made after the exclusion was added. They carry no verdict, so they
+    are dropped rather than reported as a difference.
+    """
+    return {row["unit"]: row for row in csv.DictReader(open(path)) if not row["unit"].startswith("._")}
 
 
 def main():
@@ -85,7 +92,8 @@ def main():
 
     # THE TRANSPORT BLOCKS ARE THE PAYLOAD. A shared file that differs, or a decode that regressed, is the only kind of
     # difference this comparison treats as a finding; everything else is the expected label harvest.
-    old_tb = {f[:-5] for f in os.listdir(os.path.join(ref, "tb")) if f.endswith(".bits")}
+    old_tb = {f[:-5] for f in os.listdir(os.path.join(ref, "tb"))
+              if f.endswith(".bits") and not f.startswith("._")}
     new_tb = {f[:-5] for f in os.listdir(os.path.join(new, "tb")) if f.endswith(".bits")}
     bit_common = sorted(old_tb & new_tb)
 
