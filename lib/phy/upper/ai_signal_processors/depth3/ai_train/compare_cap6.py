@@ -77,6 +77,14 @@ def main():
         return 2
 
     old_rows = load_index(os.path.join(ref, "index.csv"))
+    # WHICH OLD ROWS CARRIED A BORROWED LABEL. A dump made before the chain replay labelled a recovered sample from a donor
+    # and copied the donor's block; if that donor match was wrong the file holds a different transport block, so comparing
+    # it with the sample's own decode reports a difference that is a correction, not a regression.
+    old_labels = {}
+    old_harq_csv = os.path.join(ref, "index_harq.csv")
+    if os.path.exists(old_harq_csv):
+        old_labels = {r["unit"]: r["label_from"] for r in csv.DictReader(open(old_harq_csv))
+                      if not r["unit"].startswith("._")}
     new_idx = {r["unit"]: r for r in new_rows}
     common = set(old_rows) & set(new_idx)
     missing = set(old_rows) - set(new_idx)
@@ -103,9 +111,12 @@ def main():
         return md5(os.path.join(ref, "tb", unit + ".bits")) != md5(os.path.join(new, "tb", unit + ".bits"))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
-        mismatch = sum(pool.map(differs, bit_common))
+        differs_map = dict(zip(bit_common, pool.map(differs, bit_common)))
+    mismatch = sum(1 for u in bit_common if differs_map[u] and old_labels.get(u, "self") == "self")
+    mismatch_borrowed = sum(1 for u in bit_common if differs_map[u] and old_labels.get(u) == "harq")
     row["bit_common"] = len(bit_common)
     row["bit_mismatch"] = mismatch
+    row["bit_borrowed_diff"] = mismatch_borrowed
     row["bits_new"] = len(new_tb - old_tb)
 
     bad = (row["shared_diffs"] != 0 or down != 0 or mismatch != 0 or missing or extra)
@@ -115,7 +126,8 @@ def main():
     print(f"{args.leg}: units={row['units']} crc_ok={row['crc_ok']} (cap6 {sum(1 for r in old_rows.values() if r['crc'] == 'OK')}) "
           f"self={row['self']} harq={row['harq']} ko={row['ko']} tb={row['tb']}", file=sys.stderr)
     print(f"  +{up} 个 KO→OK, -{down} 个 OK→KO | shared diffs {shared_diffs} | "
-          f"bits: common {len(bit_common)} mismatch {mismatch}, only-new {len(new_tb - old_tb)}, "
+          f"bits: common {len(bit_common)} mismatch {mismatch} (borrowed-label {mismatch_borrowed}), "
+          f"only-new {len(new_tb - old_tb)}, "
           f"only-old {len(old_tb - new_tb)} | unit 差异: 缺 {len(missing)} 多 {len(extra)}", file=sys.stderr)
     print(f"  verdict: {'PASS' if not bad else 'CHECK'}", file=sys.stderr)
     print(",".join(str(row[k]) for k in row))
