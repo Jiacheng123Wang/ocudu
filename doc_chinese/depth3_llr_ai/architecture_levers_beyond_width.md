@@ -5095,7 +5095,7 @@ CSV 与 **2026-11-25 的 PK 记录逐字节相同**（`4b7e609b…`）⇒ 今天
 
 **(a) ★★ 测的是什么**
 
-126（`jwang@192.168.31.30`）上跑到 e57 的 run
+126（`jwang@192.168.31.30`）上跑到 **e58** 后被停止的 run（★ 2026-11-27 14:37，用户要求；见 §105(f)）
 `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3-dskip-entry-se_abce_e80`，
 按用户要求测它的 **e37–e40 末端 SWA**（4 轮等权平均）——即把 **A（`--mlp-expand 2`）＋B（`--se`）＋Ce（`--dense-skip-entry`）** 四个杠杆同时打开后的 40 轮产物。
 
@@ -5177,3 +5177,7 @@ CSV 与 **2026-11-25 的 PK 记录逐字节相同**（`4b7e609b…`）⇒ 今天
 | 运行日志 | 203 `~/ai_depth3/runs/ruler_ABCe_e40swa.log`（START/END、BUNDLE_FILES、SIDECAR）|
 | bundle ＋ provenance | 203 `~/ai_depth3/gate_ai_models/bundles/ABCe_e40swa/` |
 | 模型与快照 | 126 `~/work/ai_phy_train/runs/d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3-dskip-entry-se_abce_e80/snapshots/` |
+
+**(f) ★ 2026-11-27 14:37 停止训练**：按用户要求对 PID 23758 发 **SIGINT**，进程以 `KeyboardInterrupt` **优雅退出**（未用 SIGKILL）；
+GPU 从 96% / 3 931 MiB 回到 **0% / 75 MiB**，无残留进程。★ **最后完整快照 = e58**（14:34，`depth3_last.keras` ＋ `resume.json` 同步在 14:34）⇒ **可随时 `--resume` 续训**；
+40 轮（e37–e40）的测量产物已归档，不受停止影响 ✓
