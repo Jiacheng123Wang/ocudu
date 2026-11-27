@@ -159,10 +159,18 @@ export OUT BINARY KEEP_SCRATCH
 tr '\n' '\0' < "$OUT/units.txt" | xargs -0 -n 1 -P "$JOBS" bash -c 'one_unit "$1"' _ 2>/dev/null
 
 # Index in the sorted order the unit list already has, so two runs produce the same file.
-for meta in $(cat "$OUT/units.txt"); do
-  name=$(basename "${meta%.txt}")
-  [ -f "$OUT/rows/$name.row" ] && cat "$OUT/rows/$name.row" >> "$OUT/index.csv"
-done
+# A PER-ROW cat IS A PER-ROW FORK, and a fork costs about 66 ms on a loaded host: measured on the Ubuntu replay host
+# (2026-11-27), a 24 000-unit leg took 33 minutes to replay its units and then 25 more to assemble this index one `cat`
+# at a time. The existence test stays in the shell because a unit whose replay died has no row; the concatenation is one
+# batched cat, which xargs splits under ARG_MAX on its own.
+: > "$OUT/rows.order"
+while read -r unit_path; do
+  name=${unit_path##*/}
+  name=${name%.txt}
+  [ -f "$OUT/rows/$name.row" ] && echo "$OUT/rows/$name.row" >> "$OUT/rows.order"
+done < "$OUT/units.txt"
+xargs cat < "$OUT/rows.order" >> "$OUT/index.csv"
+rm -f "$OUT/rows.order"
 
 n_attempt=$(wc -l < "$OUT/units.txt" | tr -d ' ')
 n_ok=$(grep -c ',OK,' "$OUT/index.csv" 2>/dev/null || true)
