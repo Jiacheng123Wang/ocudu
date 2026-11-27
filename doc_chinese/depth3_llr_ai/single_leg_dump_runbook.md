@@ -364,14 +364,30 @@ bash $LIB/dump_tb.sh --corpus /Volumes/T7_Corpus/corpus --out /tmp/tb_smoke \
 **怎么用**：`index_ko.csv` ＋ `<leg>/`（`.bin`、`.txt`、`_ce.txt`）就是一份工作清单。换一套后段解码器逐个重试 ——
 replay 的接口是 `--phy_pipeline cpu|cpu_gpu|gpu|npu`、`--pusch_receiver_backend auto|classic|ai`、
 `--pusch_ldpc_decoder_type auto|generic|metal…`（GPU/NPU 用 `metal/ul_chain_replay` 那个二进制），
-或换成任何 GPU/NPU 的 LDPC 实现。**每个解出 CRC 的单元都是一条新样本**：把它的 TB 写成 `tb/<unit>.bits`，
-再产出一行 `crc=OK` 的 index，之后按 self 的方式进建库（它不是 harq —— 没有任何合并发生）。
+或换成任何 GPU/NPU 的 LDPC 实现。
+
+**换后端不改变样本的分类规则**：self / harq 由「label 从哪来」决定，和 CPU 那套完全一致 ——
+
+- 这次接收**自己**解出来（单跑） ⇒ `label_source=own`，等价于 self；
+- 只能靠**同一条 HARQ 链上别的接收**（软合并）解出来 ⇒ `label_source=chain`，等价于 harq
+  （标签挂在该链首传上才是 harq 样本）。
+
+所以同一套后端跑完，既可能多出 self 样本，也可能多出 harq 样本（也可能一个都没有，全被 CPU 解掉了）。
+**落盘时必须多带三列**，否则建库和评测分不清：
+
+| 列 | 取值 | 为什么必须 |
+|---|---|---|
+| `decoder` | `cpu-classic` / `metal` / `npu-ai` / … | `label_from=self` 只说明"这次接收自己解出来了"，不说明"**参考链**也解得出来"；把 harvest 的 own 样本混进经典 self 群体，会让"参考链能解"的基线虚高（§17/§18 的泄漏规则）|
+| `label_source` | `own` / `chain` | 决定它属于 self 还是 harq 群体 |
+| `first_transmission` | `1` / `0`（`new_data=1 && rv=0`）| 重传被单跑解出时，它既不是经典 self（不是首传）也不是 harq（没有借标签），是当前流水线从未产生过的新群体；混进 `index_self.csv` 会破坏该文件"首传"的隐含语义 |
 
 两条注意：
 
 - `reason=decode-failed` 的 457 条**最值得先试**：它们确实跑过 LDPC（6 轮撞墙），更多轮次或更强的解码器有机会翻过来。
-- `reason=no-buffer` 的 6 821 条是**重传**，当前 harness 按 `new_data` 预留软缓冲会直接拒绝，**单跑解不了**；
-  要用它们只能走链回放（本流程已做）或给 harness 加"强制新缓冲"模式，属于另一项工作。
+- `reason=no-buffer` 的 6 821 条是**重传**：当前 harness 按 `new_data` 预留软缓冲会直接拒绝，单跑解不了。两条出路：
+  ① 走链回放（本流程已做，它们在那里是链条中间成员，按既有规则不进 harq 群体）；
+  ② 给 harness 加"强制新缓冲"模式，让它们能被单跑解码 —— 那样解出的是 **`own` 标签、非首传**的新群体
+  （上表第三列 `first_transmission=0`），既不是 self 也不是 harq。
 
 ---
 

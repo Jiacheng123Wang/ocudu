@@ -384,3 +384,34 @@ runbook 现在与代码（`dump_tb.sh` 两段、`dump_harq_chains.py --tb-out`�
 - [ ] 若要在本机试 GPU/NPU 后段：用 `metal/ul_chain_replay` ＋ `--phy_pipeline gpu|npu`，
       对 457 条 `decode-failed` 逐个重试（约几分钟），看能翻回来多少
 - [ ] 若需要覆盖 `no-buffer` 那 6 821 条：给 harness 加"忽略 new_data 的强制新缓冲"开关（要谨慎，会改变语义）
+
+---
+
+## 7. 2026-11-27 10:05 **修正 §6**：换后段也能产出 harq 样本，分类看 label 来源而不是后端
+
+### 修正内容
+
+§6 里写的「解出 CRC 后按 self 的方式进建库（它不是 harq —— 没有任何合并发生）」**范围说窄了**。
+正确说法：
+
+| label 怎么来的 | 归类 | 说明 |
+|---|---|---|
+| 这次接收**自己**解出（单跑）| 等价 self（`label_source=own`）| 与 CPU 规则一致 |
+| 只能靠**同一条 HARQ 链上别的接收**（软合并）解出 | 等价 harq（`label_source=chain`）| 标签挂在链首传上才是 harq 样本 |
+| 重传被**强制新缓冲**单跑解出 | **既不是 self 也不是 harq** | `own` 标签 ＋ `first_transmission=0`，是当前流水线从未产生过的新群体 |
+
+也就是说：**任何后段（metal / npu-ai / 别的 LDPC）逻辑上都和 CPU 一样，可能补出 self，也可能补出 harq，
+也可能一条都补不出来**（全被 CPU 先解了）。原来那句话只对"单跑解出首传"这一种情形成立。
+
+### 由此必须加的三列（harvest 落盘时）
+
+`decoder`（cpu-classic / metal / npu-ai …）、`label_source`（own / chain）、`first_transmission`（`new_data=1 && rv=0`）。
+
+理由：`label_from=self` 只说明"这次接收自己解出来了"，**不说明参考链解得出来**；
+把 harvest 解出的 own 样本混进经典 self 群体，会让"参考链能解"的基线虚高（与 §17/§18 的泄漏规则同一类事故）。
+
+### 现状
+
+- 代码里 `label_from = self iff crc==OK`，**没有** `new_data` 条件；因为目前没有任何重传被单跑解出，
+  `index_self.csv` 事实上只含首传 —— 但这是"事实"，不是契约。加 harvest 时必须靠新列/新文件把这条语义钉住。
+- runbook §5.6 已按上表改写（含 457 / 6 821 两类各自的出路）。
