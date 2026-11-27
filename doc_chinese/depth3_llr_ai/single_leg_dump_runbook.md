@@ -32,7 +32,8 @@ mkdir -p $CORPUS
 ssh $REMOTE "cat $TARBALL" | tar -xzf - -C $CORPUS --exclude '._*'
 # ③ 解包校验（完整四条见 §4；本腿文件数应为 293 510）
 find $CORPUS/$LEG -type f | wc -l
-# ④ dump（12 路并行；50 000 单元约 11 分钟，含 self 与 harq 两段；见 §5.5）
+# ④ dump（12 路并行；50 000 单元约 12 分钟，含 self 与 harq 两段；默认 LDPC cap 20，参考配置加
+#    OCUDU_REPLAY_DEC_ITERATIONS=6；见 §5.5 与 §5.7）
 cd $REPO && bash $TOOL --corpus $CORPUS --out $OUT --jobs 12 --binary $BIN $CORPUS/$LEG
 # ⑤ 三条判据（见 §6）
 python3 - "$OUT" <<'PY'
@@ -261,6 +262,9 @@ bash $LIB/dump_tb.sh \
 （一条链一个进程，软缓冲共享 ⇒ 合并解码），把恢复出来的 TB 写进同一个 `tb/`，并把合并解码的迭代数写进
 `index_harq*.csv`。见 §5.5。
 
+**默认 LDPC 迭代上限 20**（2026-11-27 起；脚本内 `export OCUDU_REPLAY_DEC_ITERATIONS=${…:-20}`，两段都继承）。
+它是"标签采集"强度，不是空中值：要参考判决就显式 `OCUDU_REPLAY_DEC_ITERATIONS=6`。理由、实测与误用警告见 §5.7。
+
 ### 5.2 参数说明
 
 | 参数 | 作用 | 要点 |
@@ -395,39 +399,52 @@ replay 的接口是 `--phy_pipeline cpu|cpu_gpu|gpu|npu`、`--pusch_receiver_bac
   ② 给 harness 加"强制新缓冲"模式，让它们能被单跑解码 —— 那样解出的是 **`own` 标签、非首传**的新群体
   （上表第三列 `first_transmission=0`），既不是 self 也不是 harq。
 
-### 5.7 解码强度：`OCUDU_REPLAY_DEC_ITERATIONS`（默认 6）
+### 5.7 解码强度：`OCUDU_REPLAY_DEC_ITERATIONS`（dump 默认 **20**，参考配置 6）
 
-harness 的 LDPC 迭代上限来自环境变量 `OCUDU_REPLAY_DEC_ITERATIONS`（`ul_chain_replay.cpp:148-155`），默认 **6**
-（＝空中腿的 `pusch_dec_max_iterations`），运行时会打印 `… N decoder iteration(s)`，并写进 `dump_meta.txt` 的
-`ldpc_iterations`。
+harness 的 LDPC 迭代上限来自环境变量 `OCUDU_REPLAY_DEC_ITERATIONS`（`ul_chain_replay.cpp:148-155`）。**从 2026-11-27 起
+`dump_tb.sh` 默认 20**（`export …:-20`，两段都继承），值会打印在 banner（`… N decoder iteration(s)`）并写进
+`dump_meta.txt` 的 `ldpc_iterations`。要 **参考配置**（＝空中腿的 `pusch_dec_max_iterations`）就显式 `=6`：
+
+```bash
+OCUDU_REPLAY_DEC_ITERATIONS=6 bash $LIB/dump_tb.sh …     # 参考判决（与空中链可比）
+bash $LIB/dump_tb.sh …                                   # 默认 20：标签采集
+```
 
 **它决定判决，不只是时延**：某个接收在第 7 轮能过、在第 6 轮就是 `crc=KO`。所以**换 cap 就是换一份数据集**，不是换速度。
 
-本腿实测（1103i，cap 6 → cap 20，同一语料、同一二进制、同样 12 路）：
+两条腿的实测（同语料、同二进制、`--jobs 12`，cap 6 → cap 20）：
 
-| 项 | cap 6（参考）| cap 20 | 差 |
-|---|---|---|---|
-| `crc_ok`（＝self）| 36 747 | **37 599** | **+852** |
-| ├ 原本是 harq（借 donor 的标签）| — | 其中 **824** 个现在自己解出 | 借标签 → 自有标签 |
-| └ 原本是 ko（无标签）| — | 其中 **28** 个现在解出 | 新增样本 |
-| 反例：cap6 OK → cap20 KO | — | **0** | 早停 ⇒ 单调，无回归 |
-| harq 首传 | 5 260 | 4 436 | −824（转 self）|
-| ko | 7 278 | 7 251 | −27 |
-| `tb/` 块数 | 42 722 | 42 749 | +27 |
-| 运行时间 | 11 min 8 s | **12 min 39 s** | +1.5 min |
+| 项 | 1103i cap 6 | 1103i cap 20 | 1103j cap 6 | 1103j cap 20 |
+|---|---|---|---|---|
+| `crc_ok`（＝self）| 36 747 | **37 599**（+852）| 38 740 | **39 611**（+871）|
+| ├ 原本 harq（借标签）→ self | — | 824 | — | 841 |
+| └ 原本无标签 → self | — | 28 | — | 30 |
+| ★ 原本无标签 → harq（链在 20 轮下解出）| — | 4 | — | **72** |
+| 反例：cap6 OK → cap20 KO | — | **0** | — | **0** |
+| harq 首传 | 5 260 | 4 436 | 4 909 | 4 089 |
+| ko（无标签）| 7 278 | 7 251 | 5 207 | 5 107 |
+| `tb/` 块数 | 42 722 | 42 749 | 44 805 | 44 893 |
+| 运行时间 | 11 min 8 s | **12 min 39 s** | — | **11 min 56 s** |
+| 仍在 KO 的首传（全部撞 20）| 457→**429** | — | — | **38** |
 
-新解出的 852 个样本的 `iterations_max` 分布：7:205 8:148 9:111 10:95 11:74 12:42 13:38 14:30 15:30 16:22 17:18 18:17 19:14 **20:8**。
+新解出样本的 `iterations_max` 分布（7 轮起点，逐轮递减）：
+
+- 1103i：7:205 8:148 9:111 10:95 11:74 12:42 13:38 14:30 15:30 16:22 17:18 18:17 19:14 **20:8**
+- 1103j：7:222 8:149 9:101 10:79 11:58 12:62 13:41 14:36 15:30 16:22 17:23 18:15 19:21 **20:12**
 
 三条要点：
 
-1. **824 个"借标签 → 自有标签"的样本，比特逐字节相同**（824/824 md5 相等）：同一块，只是不再需要 donor。
-2. **harq 群体因此变"纯"**：能自己解出的那批从 harq 挪到 self，留下的 4 436 才是真正必须靠合并的。
-3. ★ **cap≠6 的 dump 不是"参考链判决"**：那 852 个样本空中链（cap 6）是解不出的。用这种 dump 建出来的数据集
-   **不能**再拿去和经典链做门控/尺子对比（否则相当于让基线少 852 个它本来就解不出的样本）。`dump_meta.txt` 的
-   `ldpc_iterations` 就是用来防止这种误用的；做测量时请用 cap 6 的 dump。
+1. **"借标签 → 自有标签"的样本，比特逐字节相同**（1103i 824/824、1103j 841/841 的 md5 相等）：同一块，只是不再需要 donor。
+2. **harq 群体变"纯"**：能自己解出的那批从 harq 挪去 self，留下的（1103i 4 436 / 1103j 4 089 个首传）才是真正必须靠合并的；
+   反过来，1103j 还有 72 个单元因为链在 20 轮下解出而**第一次**拿到 harq 标签。
+3. ★ **cap≠6 的 dump 不是"参考链判决"**：多出来的样本空中链（cap 6）解不出。用这种 dump 建的数据集
+   **不能**拿去和经典链做门控/尺子/验收对比；`dump_meta.txt` 的 `ldpc_iterations` 就是防误用的标记。做测量时请用 cap 6 的 dump。
 
-**还会不会更多？** cap 20 下仍失败的 429 个首传**全部撞在 20**（`iterations_max=20`），说明再加轮次还有边际收益
-（分布上 20 轮处还有 8 个样本刚够）；但它们同时也是最低 SNR 的一批，换更强后段（GPU/NPU LDPC、AI 接收机）比单纯加轮次更值得试（§5.6）。
+**还会不会更多？** cap 20 下仍失败的（1103i 429、1103j 38 个首传）**全部撞在 20**；实测把它们单独提到 **cap 40**
+仍然 **0 个解出**，链回放也一个不多（见 memo §12）——它们的 SINR 在 −19 dB 量级，是信号不够，不是迭代不够。
+所以继续加轮次没有收益，下一步该换后段（§5.6 的 `index_ko` 工作清单）或再采集。
+
+---
 
 ---
 
@@ -615,7 +632,7 @@ bash lib/phy/upper/ai_signal_processors/depth3/ai_train/build_mother_set.sh <leg
 | 解包 | `ssh … cat` 管道喂给 `tar -xzf - --exclude '._*'` | **2 min 13 s** | 9.6 GB |
 | 冒烟（可选）| `--limit 2000`（含 harq 段）| 27.7 s | 0.3 GB |
 | **dump 全量**（self＋harq，cap 6）| `--jobs 12` | **11 min 8 s** | 0.19 GB 契约（草稿随跑随删）|
-| dump 全量（cap 20）| `--jobs 12` | **12 min 39 s** | 0.19 GB（多 27 个块）|
+| dump 全量（cap 20，默认）| `--jobs 12` | **12 min 39 s**（1103i）/ **11 min 56 s**（1103j）| 0.19 GB（块数按样本数略增）|
 | 收尾 | 工具自动 | 秒级 | — |
 | **合计（一条腿）** | — | **≈ 14 分钟**（含解包）| 峰值 ≈ 10 GB |
 

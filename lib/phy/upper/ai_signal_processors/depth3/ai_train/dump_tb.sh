@@ -14,9 +14,11 @@
 # Output (all under --out):  tb/<unit>.bits, index.csv  (unit,tb_bits,crc,sinr_db,iterations,iterations_max,slot,tbs)
 #
 # THE DECODER STRENGTH IS PART OF THE RESULT. The LDPC cap decides verdicts, not only latency: a reception that needs a
-# seventh iteration is crc=KO at six and crc=OK at twenty. The harness takes it from OCUDU_REPLAY_DEC_ITERATIONS (default
-# 6, the value every air leg runs), and this script records whatever it sees in dump_meta.txt beside the products, so a
-# dump made at a different cap cannot later be mistaken for the reference verdict. Both passes inherit the variable.
+# seventh iteration is crc=KO at six and crc=OK at twenty. A dump therefore runs TWENTY iterations by default, because the
+# extra iterations recover samples the air chain cannot decode and a dump is harvested for labels. Twenty is not the air
+# configuration (every air leg runs six), so these products are a label harvest and not the reference verdict: pass
+# OCUDU_REPLAY_DEC_ITERATIONS=6 for a reference dump, and read dump_meta.txt to see which one a directory holds. Both
+# passes inherit the variable.
 #
 # THE SCRATCH IS NOT A PRODUCT. stage/ holds the replay's own per-unit output and raw/ its per-unit dump directory; nothing
 # reads either after its unit finishes, so each unit's stage directory is removed as soon as its row and bits are written,
@@ -33,6 +35,7 @@
 # can, because the chain is already on disk.
 #
 # Usage: dump_tb.sh [--corpus DIR] [--out DIR] [--limit N] [--binary PATH] [--jobs N] [--no-harq] [--keep-scratch]
+#                    (OCUDU_REPLAY_DEC_ITERATIONS=N selects the LDPC cap; default 20, 6 is the air configuration)
 #                    [unit-dir ...]
 #
 # --jobs N runs N units at a time. Each unit is one replay process, so this is where the machine's cores are spent: the
@@ -52,6 +55,10 @@ JOBS=1
 WITH_HARQ=1
 KEEP_SCRATCH=0
 DIRS=()
+
+# TWENTY BY DEFAULT, SIX FOR THE AIR CONFIGURATION. The knob is exported so that both the per-unit pass and the chain pass
+# run the same decoder strength; a caller that sets it keeps its value.
+export OCUDU_REPLAY_DEC_ITERATIONS=${OCUDU_REPLAY_DEC_ITERATIONS:-20}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -74,7 +81,7 @@ mkdir -p "$OUT/tb" "$OUT/stage" "$OUT/raw"
 # the air configuration from one made by a stronger decoder, and nothing else in the directory says which it is.
 {
   echo "started=$(date '+%Y-%m-%d %H:%M:%S')"
-  echo "ldpc_iterations=${OCUDU_REPLAY_DEC_ITERATIONS:-6}"
+  echo "ldpc_iterations=${OCUDU_REPLAY_DEC_ITERATIONS:-20}"
   echo "corpus=${CORPUS}"
   echo "out=${OUT}"
   echo "binary=${BINARY}"
