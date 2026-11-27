@@ -17,7 +17,7 @@ d3_<ds>_c<C>b<B>_<recipe>_e<EP>[best]
 | `d3` | 家族前缀（depth3）| 固定 |
 | `<ds>` | ★ **训练语料** | `w2`（166 495）｜★ `w2v3c`（**183 624** = w2v1 全量 ＋ s2_amc 2PRB 补集，**不含 1102a**）｜`e17`（99 097）｜`e17x40k`（43 523）｜`s2x8k`（8k 抽取）｜`e4`（旧 43 902）|
 | `c<C>` | ★ **宽度**（通道数）| `c32`｜`c128`｜`c256`｜`c512` |
-| `b<B>` | ★ **块数** | `b12`｜`b18` |
+| `b<B>` | ★ **块数** | `b12`｜`b18`｜★ `b36`（2026-11-24 起的深网络，见 §10）|
 | `<recipe>` | ★ **配方标签**，`-` 连接 | 见 §2 |
 | `e<EP>` | ★ **快照所处的训练轮**（**不是**总计划轮数）| `e9`｜`e33`｜`e60` |
 | `best` | ★★ **仅当该快照是 val 选出的 best 时追加**（用户 2026-11-06 指示）| `e33best`｜`e6best` |
@@ -58,6 +58,9 @@ d3_w2_c128b18_2st-cond_e9              ← 现在的 w2_cond_c128_b18_e9（同 r
 | ★ `cst` | ★ **星座感知头**（lever A：解析 4·s/σ² ＋ 残差）| 2026-11-18 起 |
 
 **⇒ 不进名字、进 sidecar 的**：`batch`（8/16）、`workers`、`max-val`、`epochs`（总计划）、`snr-range`、`layout`、`nsc`。
+
+**⇒ ★★★ 2026-11-16 之后新增的架构 token 与续训后缀，统一补在 §10**（`dskip`／`dskip-entry`／`se`／`mlp2`／
+`w<max>`／`suminit`／`cliff`／`g<n>`／`symaux`，以及 `_e<EP>_decay`）—— 看 §2 这张表时**必须同时看 §10** ✓
 
 **⇒ 为什么 batch 不进名字**：它是**显存约束**（6 GB 上 c128 只能 batch 12），不是配方意图 ✓
 
@@ -262,3 +265,89 @@ d3_<ds>_c<C>b<B><arch>_[sc<v>_]  <mode>[-cond][-norep][-sw<w>s<s>][-lr<v>][-s<se
 d3_w2v1_c32b18dense_sc003_e2e-cond-norep_e10
 d3_w2v1_c32b18dw_e2e-cond-norep-sw2s3_e20
 ```
+
+---
+
+## 10. ★★★★ 2026-11-27 **补齐 2026-11-16 之后实际在用的 token（C/e 线）＋ 续训的 `_decay` 后缀**
+
+**(a) ★★ 背景：runs/ 里已经用了 40+ 次，文档只写了其中五个**
+
+⇒ §2 只登记了 `nzllr`／`dense`／`ceh`／`llrp`／`cst`，但 107／211 的 `runs/` 里
+`dskip`、`dskip-entry`、`se`、`mlp2`、`w8`、`suminit`、`cliff`、`g4`、`symaux` 都在用，
+且续训产生了 `_decay`／`_c80`／`e32cont` 三种后缀 ⇒ **光看名字已经无法反推 argv** ✗
+本节按 §8 的通则补齐，**每个 token 都给一条真实 argv 作依据**（可在对应机器 `logs/*.log` 的 `argv:` 行核对）。
+
+**(b) ★★★ 架构 token（★ 位置：**`<recipe>` 段的末尾**，即 `cond`／`norep`／`sw<w>s<s>` 之后；
+`dense`／`dw`／`bn<N>`／`sc<v>`／`dil` 仍留在紧跟 `b<B>` 的架构段，见 §7／§9）**
+
+| token | 对应 flag | 含义 | 参数（c32b18，实测）| 真实例（机器）|
+|---|---|---|---|---|
+| ★ `dskip` | `--dense-skip` | 每块的残差和换成**跨块 dense 连接**（拼接 state＋本块输出，1×1 投回 C）| **224 905**（dense 186 889 之上 +38 016）| `…-sw2s3-dskip_e40`（107）|
+| ★ `dskip-entry` | `--dense-skip-entry` | 在 dskip 之上再把**入口特征**（接收信号＋Qm 条件，非线性之前）喂给每块；**隐含 dskip**，每块多一个 C→C 1×1 | **243 337**（dskip 之上 +18 432）；c32**b36** ＝ **485 833** | `…-sw2s3-dskip-entry_e80`（211）|
+| ★ `se` | `--se` | 每块 **squeeze-excite** 通道注意力（lever B），不加逐元素 MAC | ★ **+292/块**（b18 +5 256 → 248 593；b36 +10 512 → 496 345）| `…-dskip-entry-se_e40`（107）|
+| ★ `mlp2` | `--mlp-expand 2` | 点卷积块内升维 2×（多一个 1×1 ＋ ReLU）| 249 745（与 se 同时；mlp2 自身 +57 600）| `…-mlp2-se_e40`（107）|
+| ★ `w<max>` | `--width-weight 1.0 --width-max <max>` | 沿**宽度（PRB）轴**的第二维损失加权（§92，负结果）| 0 | `…-dskip-entry-se_w8_e40`（107）|
+| ★ `suminit` | `--dense-skip-init sum` | dense-skip 投影初始化为**相加解**（§86b，−0.22 pp，已关闭）| 0 | `…-dskip-entry-se-suminit_e40`（§80）|
+| ★ `cliff` | `--snr-weight 6 --snr-sigma 1.5 --snr-center 25.5` | 只压 256QAM 悬崖的**窄带**加权（§50）| 0 | `…-sc003_cliff_e40`（107）|
+| ★ `g<n>` | `--groups n` | 主干卷积**分组**数（g=4；省略＝dense）| 少 | `…-g4_e40`（107）|
+| ★ `symaux` | `--sym-aux --w-sym 0.1` | **训练期**符号回归辅助头（导出丢弃）| 0（导出）| `…-llrp-symaux_e40`（107）|
+
+**⇒ 保留 token（还没人用过，但一旦偏离默认就必须写）：**
+`seR<n>`（`--se-ratio` 非 8）、`dskipK<n>`（`--dense-skip-depth` >1）、`mlp<r>`（`--mlp-expand` 非 1/2）、
+`ww<v>`（`--width-weight` 非 1.0）、`wch<v>`（`--w-ch`）、`wsym<v>`（`--w-sym`）。
+
+**(c) ★★★ 续训命名：`_e<最终轮>` ＋ 可选 `_decay`（本节为**正式规则**）**
+
+> **格式**：`<§1 的完整名字>_e<本次续训写出的最后一个轮次>[_decay]`
+
+| 段 | 含义 |
+|---|---|
+| ★ `e<EP>` | ★ **本次 run 写出的最后一个快照的轮次**（不是父 run 的轮次，也不是计划轮数）|
+| ★ `_decay` | ★ **本段续训用 cosine 衰减**：`--lr-decay cosine --lr-min <v> --lr-decay-from <本段第一轮>`；**只衰减这一段** |
+| 无 `_decay` | 本段用**恒定 LR**（＝父配方原样 + `--epochs`）|
+
+**⇒ 为什么 `_decay` 放在 `_e<EP>` 之后**：它不是训练旋钮，而是**这一段的性质**（哪一段衰减、衰减到哪一轮），
+和 `best` 一样属于"快照段"的修饰语 ✓
+
+**⇒ 真实例（本次，2026-11-27）**：
+```
+父：d3_w2v3c_c32b36dense_e2e-cond-norep-sw2s3-dskip-entry_e80            （211，恒定 LR，80 轮）
+子：d3_w2v3c_c32b36dense_e2e-cond-norep-sw2s3-dskip-entry_e120_decay     （e81–e120，cosine 1e-3→1e-4）
+```
+
+**(d) ★★ 历史后缀（**不要再用于新 run**，只在追溯旧目录时认得）**
+
+| 旧后缀 | 实际含义 | 例 |
+|---|---|---|
+| `_e<start>_c<end>` | 从父 run 的 `e<start>` 续到 `e<end>`（**不含衰减**）| `…-se_e40_c80`（107，e41→e80）|
+| `_e<start>cont` | 从 `e<start>` 续训（计划更长）| `…_s20261106_e32cont`（epochs 72）|
+| `-e<n>decay` | 在**同一条 run 内部**从第 n 轮开始衰减（不是续训）| `…-mlp2-se-e30decay_e40`（`--lr-decay-from 30`）|
+
+**(e) ★★ `<recipe>` 的完整顺序（2026-11-27 版，以此为准）**
+
+```
+d3_<ds>_c<C>b<B><arch：dense|dw|bn<N>>[sc<v>][dil<cycle>]
+   _<mode：e2e|2st|ft@<src>>[-cond][-norep][-sw<w>s<s>]
+   [-dskip[-entry]][-se][-mlp<r>][-g<n>][-w<max>][-nzllr][-ceh][-llrp][-symaux]
+   _e<EP>[best][_decay]
+```
+
+**⇒ ★ 注意两处容易写错的地方**：
+1. **`dense` 在架构段（`b36dense`），而 `dskip`／`se`／`mlp2` 等在新 lever 段（末尾）** ——
+   历史名字 `…-sw2s3-dskip-entry-se_e40` 就是这个顺序；`mlp2-se-dskip`／`mlp2-se` 之间的次序没有硬性规定，
+   但**同类 token 必须出现**（否则无法反推 argv）✓
+2. **`sc<v>`／`dil` 紧跟架构段**（§9），**不要**把它们挪到末尾 ✓
+
+**⇒ 自检三步**（写完名字后逐条对）：
+1. **架构**：块数/宽度/主干类型（dense/dskip/se/mlp）写了没有？看参数数量能否反推（c32b18dense＝186 889、＋dskip-entry＝243 337、＋se＝248 593；c32b36＋dskip-entry＝485 833、＋se＝496 345）✓
+2. **配方**：`sw`/`lr`/`s`/`pat` 里凡是**偏离默认**的写了没有？（默认表见 §8(c)）✓
+3. **轮次**：`e<EP>` 是**本次最后一个快照**的轮次；衰减续训再加 `_decay` ✓
+
+**(f) ★ 由本节新增的正式名字**
+
+```
+d3_w2v3c_c32b36dense_e2e-cond-norep-sw2s3-dskip-entry_e80
+d3_w2v3c_c32b36dense_e2e-cond-norep-sw2s3-dskip-entry_e120_decay
+d3_w2v3c_c32b36dense_e2e-cond-norep-sw2s3-dskip-entry-se_e120_decay
+```
+（第三条在 107 上跑，`--se` 使参数为 **496 345**；第一条 211 上是 **485 833** —— 两者**只差 SE**。）

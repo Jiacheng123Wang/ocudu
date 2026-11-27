@@ -39,3 +39,17 @@ nohup bash ceb36_const_80.sh > logs/ceb36_e80.log 2>&1 < /dev/null &
 2. ★ **数据目录存在**：`data/datasets_train_w2v3c`（19 个 `.npy`）；
 3. ★ **`seed` 与结构参数一字不差**（否则不是同一配方）；
 4. ★ **`--snapshot-every 1`**（末端 SWA 需要 e37–e40 / e77–e80 的逐轮快照）。
+
+## 5. ★★★★ 2026-11-27 e80 → e120 的**衰减续训**（211，正在跑）
+
+| 项 | 值 |
+|---|---|
+| 脚本 | `ceb36_decay_120.sh` |
+| 父 run | `runs/d3_w2v3c_c32b36dense_e2e-cond-norep-sw2s3-dskip-entry_e80`（211，**恒定 LR**，80 轮，485 833 参数）|
+| 本段 | e81–e120，**cosine 1e-3 → 1e-4**（`--lr-decay-from 81`），其余 argv **与父一字不差** |
+| 输出 | `runs/d3_w2v3c_c32b36dense_e2e-cond-norep-sw2s3-dskip-entry_e120_decay` |
+| 状态来源 | 把父目录的 `depth3_last.keras` ＋ `resume.json` **拷进新目录**，再 `--resume`（日志应打印 `next epoch 81`）|
+| 参照 | 107 上同日程的 `…-dskip-entry-**se**_e120_decay`（496 345 参数；本条**不加 `--se`**，与 211 父 run 一致）|
+| 目的 | 同一条轨迹上量"多 40 轮 ＋ 末端衰减"值多少 pp（§94/§99/§100/§101 的 +0.38/+0.57 pp 量级），并得到**末端平**的 e120 权重供尺子选 |
+| ETA | 40 轮 × ~27 min ≈ **18 h**（3060 Ti 实测父 run 40 037 s / 25 轮）|
+
