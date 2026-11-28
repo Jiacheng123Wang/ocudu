@@ -330,7 +330,16 @@ def candidate_units(index_path, tb_dir, corpus_dir, modulation, min_prb, min_slo
             # The grid and the label are complete in that case; only this measurement is missing.
             if require_iterations and (iterations < 0 or iterations_max < 0):
                 continue
-            units.append((name, prefix, cfg, alloc, tb_path, iterations, iterations_max))
+            # THE CHAIN'S OWN SINR, from the index. `snr_nominal` used to come from the capture's
+            # `_ce.txt`, a second estimator that agrees within a few dB on 92% of samples but goes
+            # negative -- impossible for a CRC-OK block -- on 0.01-2.4% of them and is 9+ dB off at
+            # its 5th percentile. The index carries sinr_db for every row, so that is the field to
+            # copy; the CE sidecar's value is not the same measurement.
+            try:
+                sinr_db = float(fields[3])
+            except (IndexError, ValueError):
+                sinr_db = float("nan")
+            units.append((name, prefix, cfg, alloc, tb_path, iterations, iterations_max, sinr_db))
     return units
 
 
@@ -884,7 +893,8 @@ def main():
 
     snrs = [float(x) for x in args.snrs.split(",") if x] if args.snrs else []
     samples, names, skipped = [], [], []
-    for index, (name, prefix, cfg, alloc, tb_path, iterations, iterations_max) in enumerate(units):
+    for index, (name, prefix, cfg, alloc, tb_path, iterations, iterations_max,
+                sinr_db) in enumerate(units):
         points = list(snrs) if snrs else [None]
         if args.include_natural and snrs:
             points = [None] + points
@@ -913,8 +923,9 @@ def main():
             sample["iterations"] = iterations
             sample["iterations_max"] = iterations_max
             if args.source == "real":
-                # Record what the chain measured; nothing is added to the grid.
-                sample["snr_nominal"] = np.float32(measured_snr_db(prefix))
+                # Record what the chain measured; nothing is added to the grid. This is the dump's
+                # sinr_db (see candidate_units), not the capture's `_ce.txt` estimate.
+                sample["snr_nominal"] = np.float32(sinr_db)
             samples.append(sample)
             names.append(f"{name}@{snr if snr is not None else 'natural'}")
             made += 1
