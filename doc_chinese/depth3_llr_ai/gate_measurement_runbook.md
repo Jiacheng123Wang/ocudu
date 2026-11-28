@@ -115,6 +115,11 @@ mkdir -p /tmp/rv && ln -sfn <解压出的 corpus 目录> /tmp/rv/corpus
 
 `run_arm_ext.py --guard 1` 实现了 1/3/4；`OCUDU_DEPTH3_FALLBACK=none` 由脚本设置。**2** 靠你把 scales 放对位置。
 
+> ★ **2026-11-28 补充（全腿与尺子共存）**：全腿队列默认 **`nice 19` ＋ `taskpolicy -b`**（后台 QoS）；
+> ★ **跑尺子/探针前必须执行 `~/ai_depth3/bin/fullleg_pause.sh`**（SIGSTOP 全腿 python，并等当前单元的 replay 退出），
+> 跑完再 `~/ai_depth3/bin/fullleg_resume.sh`。理由同第 3 条：**低优先级只解决"慢"，并发 replay 仍会污染信道数据**
+> ⇒ **必须显式冻结**，不是降优先级。脚本本体在 `work_tmp/measurement/fullleg_pause.sh` / `fullleg_resume.sh`。
+
 ---
 
 ## 4. 准备一台回放机
