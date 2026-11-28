@@ -894,3 +894,50 @@ QPSK 记成正的，所以回填后负值数从 662 涨到 3 595。
 - [x] 负 SINR 样本**不过滤**（2026-11-28 决定）：二维分箱里 `snr <= 0` 本来就是一格，过滤反而会
       把那一格掏空；母集口径保持"每个可解出的 TB 都要"。★ 分箱时注意 `snr <= 0` 是**一个**桶，
       不是异常值 —— `1103i` 的那 3 595 个 QPSK 负 SINR 样本就落在这一格里
+
+---
+
+## 20. 2026-11-27 22:49 `s2_amc_ping_1103b` 的 dump 被打断（改脚本改到正在跑的 bash）
+
+### 现象
+
+`s2_amc_ping_1103b` 的采集一直留在 T7 上（9.2 GB），它后面的腿都已建库并回收采集；库里没有它的 npz，
+进度表也没有它的行。
+
+### 根因
+
+批处理日志：`[22:49:59] s2_amc_ping_1103b: DUMP FAILED rc=2`，该腿日志：
+
+```
+50000 unit(s), 12 at a time
+.../dump_tb.sh: line 162: syntax error near unexpected token `done'
+```
+
+时间对得上：**当天 22:47 左右我改了 `dump_tb.sh`（`stat -c` 可移植性修复），而这个 bash 正在执行**。
+bash 是边读边执行脚本的，文件被改写后它按旧偏移读到了新内容，撞出 `done` 语法错误退出。结果
+`dump_meta.txt` 只有 `started=` 没有 `finished=`，`index.csv` 只剩表头，`index_ko.csv` 缺失，
+`tb/` 留了 41 987 个半途写的比特。
+
+★ **教训**：改 `dump_tb.sh`（或任何正在被跑的长脚本）之前，必须在**所有可能跑它的机器**上确认没有实例 ——
+当时只查了 211，漏了 Mac 上的 s2 批处理。运行中的 bash 不会因为改文件而重载，只会读到错位内容。
+
+### 影响面
+
+批处理是串行的，22:30–23:10 之间只有 1103b 一条腿在 dump，其余腿不受影响（1103c 在 22:49:59 正常开始）。
+
+### 修复
+
+1. 旧 dump 整体挪开：`tb_s2_amc_ping_1103b.FAILED_20261127`（避免半途比特混进新 dump）；
+2. 用与批处理相同的参数重跑：`dump_tb.sh --corpus /Volumes/T7_Corpus/corpus --out .../tb_s2_amc_ping_1103b
+   --jobs 12 --binary .../ul_chain_replay_cpu .../s2_amc_ping_1103b`；
+3. 完成后 watcher 会自动认领、建库、回收采集。
+
+### 遗留 / 待办
+
+- [x] 重跑完成（18:54:59 → 19:19:11 写完 `finished=`，含 harq 链回归共 52 分钟），四条判据通过：
+      `finished=` ✓、index 50 000 = units 50 000 ✓、`tb/` 45 150 ≥ `tb_blocks=` 45 150 ✓、`index_ko.csv` ✓；
+      群体 `self=41 987`、`harq=2 609`、`ko=4 851`、`crc_ok=41 987`
+- [ ] 确认建库产物（npz + manifest）与 `findings: none` —— 等 watcher 建完 `1121j` 后自动接手
+- [x] 失败残留已删：`_failed_dump_1103b_20261127`（6.5 GB / 41 987 个文件，删除耗时 10 分 27 秒 —— HDD 上
+      删小文件本身就很慢）；T7 剩余 423 GiB
+- [x] runbook 补坑 #24：**不要编辑正在运行的 dump 脚本**（见下）

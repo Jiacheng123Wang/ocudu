@@ -712,6 +712,7 @@ find /Volumes/Eaget_HD/datasets_full_s2_amc -name '*_part*.npz' -print    # 应�
 | 20 | 手工建过的腿被监控重跑 | 进度表里没有它（监控只认进度表）| 补一行 `ok`（§6.7 末）|
 | 21 | 监控把评估腿也建了 | `EXCLUDE` 是列表，却用 `[ "$leg" = "$EXCLUDE" ]` 整串比较 | 逐个比较（`is_excluded`）；评估腿清单见 §6.1 |
 | 23 | 按 `snr_nominal` 分箱时趋势是反的 | 该字段原取自采集的 `_ce.txt snr=`（**另一个估计器**）：与 dump 的 `sinr_db` 在 92% 样本上差 ≤3 dB，但 p5 差 −9.4 dB，且 **0.01–2.4%** 的样本算出**负 dB**（CRC-OK 块不可能） | 2026-11-28 起 `snr_nominal` 改取 dump 的 **`sinr_db`**；旧 npz 用 `refill_snr.py` 就地替换该成员（zip 改写，秒级、不动 X/H）。★ 分箱/分析一律以 dump 的 `sinr_db` 为准 |
+| 24 | dump 跑到一半报 `syntax error near unexpected token 'done'` | **改脚本改到了正在跑的 bash**：bash 边读边执行，文件被改写后按旧偏移读到新内容。2026-11-27 22:49 就因此毁了 `s2_amc_ping_1103b` 的 dump（`rc=2`、`index.csv` 只剩表头、采集白留 9.2 GB）| 改 `dump_tb.sh`／`build_mother_set.sh` 这类长脚本前，**在所有可能跑它的机器上** `pgrep -fa` 确认无实例（当时只查了 211，漏了 Mac 的 s2 批处理）；补救＝挪开残留 dump、用原参数重跑（本案 24 分钟出 `finished=`）|
 | 22 | 少量样本 `iterations=0` 却 `iterations_max≥1` | replay 把 float 均值**截断**成整数：真实均值落在 [0,1) 就记成 0，而 0 在 dump 里表示"没解出来" | **三层**：① replay 改为四舍五入且 CRC-OK 时 ≥1（2026-11-27 20:57:54 重链接，影响之后的 dump）；② 建库把 OK 行的 0 夹到 1（覆盖修源码之前已 dump 的腿 1102b–r、1103i–o）；③ `clamp_iterations.py` 修已建成的 npz（32 个文件 / 3 481 个值，`X` 不变）。★ 受影响 dump 的判据：`dump_meta.txt` 的 `binary_mtime` 早于 2026-11-27 20:57:54；那些 dump **不重跑**，口径记在 §3.1 |
 
 ---
