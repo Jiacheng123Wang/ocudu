@@ -84,10 +84,12 @@ int main(int argc, char** argv)
   // The main head is a function of the modulation, so the check binds the 256QAM shape.
   constexpr unsigned BITS_PER_SYMBOL = 8;
   constexpr unsigned NOF_SYMBOLS     = 14;
-  // The contract's spatial plane: one block of 12 channels per symbol.
-  constexpr unsigned IN_CHANNELS     = 12;
-
-  std::vector<__fp16> plane(nsc * NOF_SYMBOLS * IN_CHANNELS);
+  // THE CHANNEL COUNT COMES FROM THE BUNDLE, not from the contract's 12. A modulation-conditioned bundle takes
+  // `12 + 4` (the four Qm one-hots), and the first version of this tool read the contract's 12 and then handed the
+  // engine a buffer that was 25% too short -- the engine reads whatever the bound model declares, so the pass ran off
+  // the end of the vector. It still "worked" (heap garbage happened to be mapped), which is the worst kind of probe.
+  const unsigned in_channels = std::max(1U, engine.depth3_input_channels());
+  std::vector<__fp16> plane(nsc * NOF_SYMBOLS * in_channels);
   std::vector<__fp16> llr(nsc * NOF_SYMBOLS * BITS_PER_SYMBOL);
   std::vector<__fp16> noise(nsc * NOF_SYMBOLS);
   std::vector<__fp16> ch_est(nsc * 2 * NOF_SYMBOLS);
@@ -103,6 +105,12 @@ int main(int argc, char** argv)
   output.ch_est          = reinterpret_cast<uint16_t*>(ch_est.data());
   output.dmrs_noise      = reinterpret_cast<uint16_t*>(dmrs_noise.data());
   output.bits_per_symbol = BITS_PER_SYMBOL;
+
+  // A SUBSET OF THE HEADS IS A LEGITIMATE ARTIFACT (design 22.2), so the check asks the bundle which heads it carries
+  // instead of requiring all four. A two-head bundle used to FAIL here while being exactly the contract it declares.
+  bool has_ch_est = false;
+  bool has_dmrs_noise = false;
+  engine.depth3_has_reporting_heads(has_ch_est, has_dmrs_noise);
 
   std::vector<double> timings;
   timings.reserve(repeats);
@@ -138,19 +146,29 @@ int main(int argc, char** argv)
   std::printf("noise      %zu/%zu written, %zu nonzero, range [%.4f, %.4f]\n",
               noise_report.written, noise.size(), noise_report.nonzero, noise_report.min_value,
               noise_report.max_value);
-  std::printf("ch_est     %zu/%zu written, %zu nonzero, range [%.4f, %.4f]\n",
-              ch_report.written, ch_est.size(), ch_report.nonzero, ch_report.min_value,
-              ch_report.max_value);
-  std::printf("dmrs_noise %zu/%zu written, %zu nonzero, range [%.4f, %.4f]\n",
-              dmrs_report.written, dmrs_noise.size(), dmrs_report.nonzero, dmrs_report.min_value,
-              dmrs_report.max_value);
+  if (has_ch_est) {
+    std::printf("ch_est     %zu/%zu written, %zu nonzero, range [%.4f, %.4f]\n",
+                ch_report.written, ch_est.size(), ch_report.nonzero, ch_report.min_value,
+                ch_report.max_value);
+  } else {
+    std::printf("ch_est     absent (two-head bundle: --no-reporting-heads)\n");
+  }
+  if (has_dmrs_noise) {
+    std::printf("dmrs_noise %zu/%zu written, %zu nonzero, range [%.4f, %.4f]\n",
+                dmrs_report.written, dmrs_noise.size(), dmrs_report.nonzero, dmrs_report.min_value,
+                dmrs_report.max_value);
+  } else {
+    std::printf("dmrs_noise absent (two-head bundle: --no-reporting-heads)\n");
+  }
   std::printf("p50 %.1f us, p99 %.1f us over %zu predictions\n", p50, p99, timings.size());
 
   // Every head must have been written, and the two that carry a bounded shape must not be a
   // constant: a constant noise head is what drives the scheduler's SINR to an extreme.
   const bool all_written = llr_report.written == llr.size() && noise_report.written == noise.size() &&
-                           ch_report.written == ch_est.size() && dmrs_report.written == 1;
-  const bool informative = llr_report.nonzero > 0 && ch_report.nonzero > 0;
+                           (!has_ch_est || ch_report.written == ch_est.size()) &&
+                           (!has_dmrs_noise || dmrs_report.written == 1);
+  // The `llr` head carries the information in either form; a constant channel head is only a failure when it is there.
+  const bool informative = llr_report.nonzero > 0 && (!has_ch_est || ch_report.nonzero > 0);
   std::printf("%s\n", (all_written && informative) ? "PASS" : "FAIL");
   return (all_written && informative) ? 0 : 1;
 }

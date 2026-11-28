@@ -32,7 +32,10 @@ if [ -z "${PY:-}" ]; then
 fi
 "$PY" -c 'import tensorflow, coremltools' 2>/dev/null || {
   echo "FATAL: $PY cannot import tensorflow and coremltools; pass PY=<venv python>" >&2; exit 2; }
-REPO=$(cd "$HERE/../../../../.." && pwd)
+# SIX LEVELS, NOT FIVE. Five leaves the script in `lib/`, so the latency probe below was looked for at
+# `lib/build/...`, never found, and `--measure` silently did nothing -- a flag that reports nothing is the failure
+# mode this workflow keeps writing down.
+REPO=$(cd "$HERE/../../../../../.." && pwd)
 PROBE=${PROBE:-$REPO/build/lib/phy/upper/signal_processors/channel_estimator/metal/coreml_latency_probe}
 
 KERAS=""
@@ -85,6 +88,10 @@ OUT=${OUT:-$HOME/ai_depth3/gate_ai_models/bundles/$NAME}
 mkdir -p "$OUT/buckets"
 
 echo "=== $NAME from $KERAS  (c_hid $C_HID, $BLOCKS blocks, widths $WIDTHS)"
+# THE ARCHITECTURE COMES FROM THE KERAS FILE, NOT FROM THESE FLAGS (2026-11-28). `--c-hid`/`--blocks`/`--dense-*` are now
+# advisory: train_depth3.py reads every structural lever back from the source model (trunk_flags_from_source) and FAILS if
+# the graph it rebuilds is not the source's. That is the repair of a silent failure: an SE + entry-skip model was
+# exported with 108 of its weights dropped and exit code 0, because those flags were never passed here.
 if ! "$PY" -u "$HERE/train_depth3.py" --export-only "$KERAS" \
       --export-probe "$OUT/$NAME.mlpackage" --export-buckets "$WIDTHS" \
       --modcond --layout spatial --modulation QPSK --c-hid "$C_HID" --blocks "$BLOCKS" \
@@ -95,6 +102,10 @@ if ! "$PY" -u "$HERE/train_depth3.py" --export-only "$KERAS" \
   tail -12 /tmp/make_bucket_export.log >&2
   exit 1
 fi
+# THE DERIVED ARCHITECTURE IS PART OF THE RECORD: the bundle's own statement of what it is, and the only place a reader
+# can see that the bucket was built from the source rather than from the command line.
+grep -aE "bucket arch from source" /tmp/make_bucket_export.log || {
+  echo "FATAL: the export did not report a source-derived architecture; this is not a bucket of THIS model" >&2; exit 1; }
 grep -aE "wrote the fp16|bucket width" /tmp/make_bucket_export.log | tail -"$(echo "$WIDTHS" | tr ',' '\n' | wc -l | tr -d ' ')"
 
 echo "=== compiling"
@@ -112,11 +123,20 @@ if [ -n "$CALIB" ]; then
   "$PY" "$HERE/calibrate_depth3.py" --model "$KERAS" --data "$CALIB" \
     --modulation QPSK --cond --layout spatial --samples 60 --write-scales "$OUT" \
     2>&1 | grep -a "chosen" | tail -1
+fi
+# THE SIDECAR IS READ FROM THE MODEL'S OWN DIRECTORY (read_scales() takes <dir>/depth3_scales.txt), and a bucket's
+# directory is <bundle>/buckets -- so a bundle whose sidecar never made it into buckets/ flies with the DEFAULT scales
+# while the full-band model uses the calibrated ones. That is a silent quality difference between two arms, so it is
+# copied whenever a sidecar exists, not only on the --calib path.
+if [ -f "$OUT/depth3_scales.txt" ]; then
   cp "$OUT/depth3_scales.txt" "$OUT/buckets/depth3_scales.txt"
+  echo "=== sidecar copied into buckets/"
 fi
 
 echo "=== layout"
-ls -d "$OUT/$NAME.mlmodelc" "$OUT"/buckets/base_w*.mlmodelc 2>/dev/null | sed "s|$OUT/|  |"
+# `|| true`: with `set -e`, a glob that matches nothing (a single-width export has no buckets/) made `ls` exit
+# non-zero and killed the script before the latency block -- the same class of silent stop as the REPO depth above.
+ls -d "$OUT/$NAME.mlmodelc" "$OUT"/buckets/base_w*.mlmodelc 2>/dev/null | sed "s|$OUT/|  |" || true
 
 if [ "$MEASURE" = "1" ] && [ -x "$PROBE" ]; then
   echo "=== ANE latency (cpu_ne)"

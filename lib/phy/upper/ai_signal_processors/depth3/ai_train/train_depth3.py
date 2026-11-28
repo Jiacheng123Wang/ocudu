@@ -69,6 +69,7 @@ import math
 import operator
 import os
 import platform
+import re
 import sys
 import threading
 import time
@@ -1623,87 +1624,253 @@ def cli_snr_range(args):
     return (low, high)
 
 
+# ── THE TRUNK'S STRUCTURE, READ BACK FROM THE MODEL ──────────────────────────────────────────────────────────
+# Every pattern below is the inverse of a construction site in `build()`. The flags are NOT stored in the `.keras`
+# archive, and `--export-only` routinely loads an archive produced by another machine's run, so a bucket rebuilt from
+# the command line is correct only by coincidence. That coincidence held while the bucket feature existed and the trunk
+# was plain dense/depthwise; it stopped holding when SE (B), the dense cross-block projection (C) and its entry plane
+# (Ce) were added, because those levers were never taught to this function. Measured 2026-11-28: `--export-buckets 108`
+# over the 36-block SE+entry model exited 0, wrote a bundle, and had silently dropped 36 `dproj*_1x1` and 72 `se*_fc*`
+# weights -- a second, different network that loads, passes the contract and runs fast. Reading the structure from the
+# source is the only form of this fix that cannot drift again, because the signature check below turns any unread lever
+# into a hard error instead of a plausible number.
+_BLOCK_LAYER_RE = re.compile(r"^(cv|dw)(\d+)_(\d+)x(\d+)_d(\d+)$")
+
+# The ONLY layers a bucket may hold fewer of than its source: heads that shape the trunk during training, and the
+# reporting heads a `--no-reporting-heads` run never built. Anything else missing means the bucket is not the source,
+# and that must stop the export rather than be printed and forgotten.
+_DROPPABLE_LAYER_RE = re.compile(r"^(ce_res_1x1|sym_aux_1x1|ch_est_1x1|dmrs_noise_1x1)$")
+
+
+def _layer_producer(tensor):
+    """The layer that produced `tensor` (Keras 3 keeps it in `_keras_history`)."""
+    try:
+        return tensor._keras_history[0].name          # noqa: SLF001 - Keras exposes no public route
+    except Exception:                                  # noqa: BLE001 - "unknown" is a valid answer here
+        return ""
+
+
+def _concat_producers(layer):
+    """The producers of a Concatenate's inputs, in the order `build()` handed them over."""
+    inputs = layer.input
+    if not isinstance(inputs, (list, tuple)):
+        inputs = [inputs]
+    return [_layer_producer(t) for t in inputs]
+
+
+def trunk_flags_from_source(source, layout):
+    """`build()` flags recovered from the trained model itself.
+
+    Returns `{"build": {...}, "qm": int, "summary": str}`; the caller adds `width` and `dtype`. Raises rather than
+    guessing: a flag this function cannot read is a flag that would silently change the graph, and the point of the
+    exercise is that such a change must be loud.
+    """
+    names = [layer.name for layer in source.layers]
+    name_set = set(names)
+
+    by_index = {}
+    for name in names:
+        match = _BLOCK_LAYER_RE.match(name)
+        if match is not None:
+            by_index[int(match.group(2))] = (match.group(1), int(match.group(3)), int(match.group(5)))
+    if not by_index:
+        raise ValueError("the source has no block layer (cv{i}_KxK_dD or dw{i}_KxK_dD): it is not a depth-3 trunk")
+    indices = sorted(by_index)
+    if indices != list(range(len(indices))):
+        raise ValueError(f"block layers are numbered {indices}; build() makes 0..N-1, so this is not its graph")
+    blocks = len(indices)
+    kinds = {by_index[i][0] for i in indices}
+    k_sizes = {by_index[i][1] for i in indices}
+    if (len(kinds) != 1) or (len(k_sizes) != 1):
+        raise ValueError(f"the blocks disagree on kind/kernel: {sorted(kinds)} {sorted(k_sizes)}")
+    kind = kinds.pop()
+    ksize = k_sizes.pop()
+    rates = [by_index[i][2] for i in indices]
+    period = next((p for p in range(1, blocks + 1) if all(rates[i] == rates[i % p] for i in range(blocks))), blocks)
+    dilations = tuple(rates[:period])
+
+    entry = source.get_layer("entry_1x1")
+    in_total = int(entry.kernel.shape[2])
+    c_hid = int(entry.kernel.shape[3])
+    smooth_k = 0
+    if "smooth_ms" in name_set:
+        smooth_k = int(source.get_layer("smooth_ms").taps)
+        if (in_total % 2) != 0:
+            raise ValueError(f"--smooth-k doubles the entry width, but entry_1x1 reads {in_total} channel(s)")
+        in_total //= 2
+    base_channels = {"folded": D3.NOF_CHANNELS, "probe8": 8}.get(layout, D3.NOF_CHANNELS_SPATIAL)
+    cond = (in_total == base_channels + len(D3.COND_QM_ORDER))
+    in_channels = in_total - (len(D3.COND_QM_ORDER) if cond else 0)
+    if in_channels != base_channels:
+        raise ValueError(f"layout {layout} expects {base_channels} input channel(s), the source carries {in_channels} "
+                         f"(with cond={'yes' if cond else 'no'}); the layout passed does not describe this graph")
+
+    # BOTTLENECK is a divisor, not a flag: its 3x3 layers are `cv` like the plain dense block, so the only evidence is
+    # the squeeze layer, whose output width is c_hid over the divisor.
+    dense_bottleneck = 0
+    if "sq0_1x1" in name_set:
+        narrow = int(source.get_layer("sq0_1x1").kernel.shape[3])
+        if narrow <= 0 or (c_hid % narrow) != 0:
+            raise ValueError(f"sq0_1x1 carries {narrow} channel(s), which does not divide c_hid {c_hid}")
+        dense_bottleneck = max(2, c_hid // narrow)
+
+    # GROUPS is the dense block's dial: a grouped Conv2D stores C/g input channels, so g is recoverable. The bottleneck
+    # path does not take it (its 3x3 runs at the reduced width, groups=1).
+    groups = 1
+    if (kind == "cv") and (dense_bottleneck == 0):
+        block0 = f"cv0_{ksize}x{ksize}_d{dilations[0]}"
+        stored = int(source.get_layer(block0).kernel.shape[2])
+        groups = max(1, c_hid // stored) if stored else 1
+        if groups * stored != c_hid:
+            raise ValueError(f"{block0} stores {stored} input channel(s); {c_hid} is not a multiple of it")
+
+    fuse_relu = not any(f"relu{i}" in name_set for i in indices)
+
+    se = "se0_gap" in name_set
+    se_ratio = 8
+    if se:
+        units = int(source.get_layer("se0_fc1").kernel.shape[1])
+        se_ratio = max(1, c_hid // units) if units else 8
+
+    mlp_expand = 1.0
+    if "pw0a_1x1" in name_set:
+        wide = int(source.get_layer("pw0a_1x1").kernel.shape[3])
+        mlp_expand = wide / float(c_hid)
+        if abs(mlp_expand * c_hid - wide) > 1e-6:
+            raise ValueError(f"pw0a_1x1 carries {wide} channel(s), not a multiple of c_hid {c_hid}")
+
+    # LEVER C, INCLUDING ITS ENTRY PLANE. The projection's input width is c_hid per visible tensor, and the ORDER of the
+    # concatenation is what tells the entry plane apart from a second recent block (`--dense-skip-depth 2` has the same
+    # width, so the width alone is ambiguous). The producers of `dcat{i}` are read instead of guessed.
+    dense_skip = "dproj0_1x1" in name_set
+    dense_skip_entry = False
+    dense_skip_depth = 1
+    if dense_skip:
+        dcats = [i for i in indices if f"dcat{i}" in name_set]
+        if not dcats:
+            raise ValueError("the source carries dproj* but no dcat*: the cross-block projection has no visible set")
+        block_output = {}
+        for i in indices:
+            block_output[f"relu{i}"] = i
+            if fuse_relu:
+                block_output[f"{kind}{i}_{ksize}x{ksize}_d{rates[i]}"] = i
+        recent = 0
+        for i in dcats:
+            producers = _concat_producers(source.get_layer(f"dcat{i}"))
+            if (i >= 1) and ("entry_relu" in producers):
+                dense_skip_entry = True
+            recent = max(recent, sum(1 for name in producers
+                                     if (name in block_output) and (block_output[name] != i)))
+        dense_skip_depth = 1 + recent
+
+    aux = "noise_flat" in name_set
+    reporting = ("ch_est" in name_set) or ("dmrs_noise" in name_set)
+    noise_to_llr = "llr_with_noise" in name_set
+    llr_post = "llrp_dw" in name_set
+    cst_head = "cst_res" in name_set
+
+    # THE HEAD STRIDE IS THE MODULATION THE GRAPH DECLARES, not the one on the command line: a conditioned bundle always
+    # carries COND_STRIDE per symbol, and a per-modulation bundle carries its own Qm.
+    head_layer = "cst_res" if cst_head else "llr_1x1"
+    head_channels = int(source.get_layer(head_layer).kernel.shape[3])
+    if (head_channels % D3.NOF_SYMBOLS) != 0:
+        raise ValueError(f"{head_layer} carries {head_channels} channel(s), not a multiple of {D3.NOF_SYMBOLS} symbols")
+    qm = head_channels // D3.NOF_SYMBOLS
+
+    build_flags = dict(
+        blocks=blocks, c_hid=c_hid, qm=qm, aux_heads=aux, smooth_k=smooth_k, layout=layout, in_channels=in_channels,
+        cond=cond, reporting_heads=reporting, dense=(kind == "cv"), dense_bottleneck=dense_bottleneck,
+        fuse_relu=fuse_relu, dilations=dilations, ksize=ksize, groups=groups, noise_to_llr=noise_to_llr,
+        ce_aux=False, llr_post=llr_post, cst_head=cst_head, sym_aux=False, mlp_expand=mlp_expand, se=se,
+        se_ratio=se_ratio, dense_skip=dense_skip or dense_skip_entry or (dense_skip_depth > 1),
+        dense_skip_entry=dense_skip_entry, dense_skip_depth=dense_skip_depth)
+    summary = (f"{blocks} blocks, {kind} k={ksize}, c_hid {c_hid}, dilations {dilations}, groups {groups}, "
+               f"mlp x{mlp_expand:g}, se {'x' + str(se_ratio) if se else 'no'}, "
+               f"dense-skip {'entry/' if dense_skip_entry else ''}{dense_skip_depth if dense_skip else 'no'}, "
+               f"cond {cond}, in {in_channels + (len(D3.COND_QM_ORDER) if cond else 0)}, qm {qm}, "
+               f"heads aux={aux} reporting={reporting}")
+    return {"build": build_flags, "qm": qm, "summary": summary}
+
+
 def export_buckets(args, parser, source=None):
     """Exports the same weights as several narrow-band artefacts (model_network_design section 49).
 
-    Cropping the plane to the allocation plus a four-PRB margin reproduces the full-band outputs bit for bit -- measured,
-    not assumed -- and the trunk is fully convolutional, so one weight set builds at any input width. The buckets exist
-    only because the ANE needs a static shape; the runtime picks the smallest one that covers `12 * prb + 96`
-    subcarriers. Nothing here retrains anything.
+    WHY BUCKETS EXIST: the ANE needs a static input shape, so a reception whose allocation is narrow is served by a
+    graph compiled at that width; the runtime picks the smallest bucket that covers `12 * prb + 96` subcarriers. The
+    weights do not depend on the width, so one weight set builds every artefact -- but the GRAPH does, which is why the
+    structure is now read back from the source (see `trunk_flags_from_source`) instead of from the command line.
+
+    WHAT THE CROP IS WORTH: for a fully-local trunk (conv/depthwise, ReLU, Add) cropping the plane to the allocation
+    plus four PRB of margin reproduces the full-band outputs (measured 2026-11-06, w2/w2v1 family). THAT NO LONGER
+    HOLDS FOR A MODEL WITH SE: the squeeze is a global average over the whole input window, so a narrower window gives
+    a different gate -- everywhere, not just at the boundary, and no margin can fix a global reduction. Such a bucket
+    is an APPROXIMATION of the full-band graph, and the field difference must be measured (tools/bucket_equivalence.py)
+    before it is flown. Nothing here retrains anything.
     """
     if not args.export_buckets:
         return
     if not args.export_probe:
         parser.error("--export-buckets derives its file names from --export-probe")
     weights = args.export_only or os.path.join(args.out, "depth3_best.keras")
-    # TWO INDEPENDENT FLAGS, NOT ONE. `aux_heads` also builds the per-RE noise head, which a two-head bundle keeps --
-    # only the two REPORTING heads go away. Mirroring the single flag gave the bucket graph 94 weights against the
-    # source's 96 and the export refused, which is the check doing its job.
-    aux = not args.no_aux
-    reporting = not args.no_reporting_heads
-    # THE SHAPE COMES FROM THE GRAPH, NOT FROM THE COMMAND LINE. `--in-channels` defaults to 0 because the layouts
-    # disagree about it, and `--c-hid` defaults to 64, so a bucket built from the flags alone produced a 64-channel
-    # graph with a zero-channel entry conv and refused to load. The source model knows both.
+
+    head_qm = D3.BITS_PER_SYMBOL[args.modulation]
     if source is not None:
-        entry = source.get_layer("entry_1x1").kernel.shape
-        c_hid, in_channels = int(entry[3]), int(entry[2])
-        # THE BLOCK TYPE COMES FROM THE SOURCE TOO, AND THE DEPTH COUNT HAS TO FOLLOW IT. A dense trunk names its 3x3
-        # layers `cv{i}_3x3` rather than `dw{i}_3x3`, so counting only `dw` gave zero blocks and the bucket graph then
-        # had six weights against the source's ninety-six -- which is how this was found (2026-11-07). `sq{i}_1x1`
-        # marks the bottleneck variant, whose 3x3 layers are also `cv`.
-        dense = any(layer.name.endswith("_3x3_d1") and layer.name.startswith("cv") for layer in source.layers)
-        # THE FACTOR, NOT A FLAG. `dense_bottleneck` is an integer divisor, so reading the presence of the squeeze
-        # layer as a boolean rebuilt the bucket at c/1 -- the full width -- and the copy then refused on shape. The
-        # divisor is recoverable from the squeeze itself: its output channels are c_hid over the factor.
-        bottleneck = 0
-        if any(layer.name.startswith("sq") for layer in source.layers):
-            bottleneck = max(2, c_hid // int(source.get_layer("sq0_1x1").kernel.shape[3]))
-        blocks = sum(1 for layer in source.layers
-                     if layer.name.startswith(("dw", "cv")) and "_3x3_" in layer.name)
-        # THE HEADS COME FROM THE SOURCE TOO, for the same reason the width and the depth do: a source trained with
-        # `--no-reporting-heads` has two heads fewer than the default graph, and building the bucket with the default
-        # gives it four extra weights that the copy then refuses (observed as "the bucket graph has 100 weights, the
-        # source 96"). Reading the source makes the export follow the model instead of the command line.
-        names = {layer.name for layer in source.layers}
-        reporting = any("ch_est" in name or "dmrs_noise" in name for name in names)
-        aux = any("post_eq_noise" in name for name in names)
+        arch = trunk_flags_from_source(source, args.layout)
+        build_flags, head_qm = arch["build"], arch["qm"]
+        print(f"bucket arch from source: {arch['summary']}")
+        if args.modcond != build_flags["cond"]:
+            print(f"bucket arch: --modcond {args.modcond} disagrees with the source (cond={build_flags['cond']}); "
+                  f"the source wins")
+        declared = D3.BITS_PER_SYMBOL[args.modulation] if not build_flags["cond"] else D3.COND_STRIDE
+        if head_qm != declared:
+            print(f"bucket arch: --modulation {args.modulation} declares stride {declared}, the head carries {head_qm}; "
+                  f"the source wins")
     else:
-        c_hid, in_channels, blocks = args.c_hid, 8, args.blocks
-        dense, bottleneck = args.dense_blocks, args.dense_bottleneck
+        # NO SOURCE: the caller asked for a graph rather than a copy. The flags are then whatever the command line says,
+        # which is exactly the case this function must not pretend is a bucket of an existing model.
+        build_flags = dict(blocks=args.blocks, c_hid=args.c_hid, qm=head_qm, aux_heads=not args.no_aux,
+                           smooth_k=args.smooth_k, layout=args.layout, in_channels=args.in_channels or 8,
+                           cond=args.modcond, reporting_heads=not args.no_reporting_heads,
+                           dense=args.dense_blocks, dense_bottleneck=args.dense_bottleneck, dilations=args.dilations,
+                           ksize=args.kernel_size, groups=args.groups, noise_to_llr=args.noise_to_llr, ce_aux=False,
+                           llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=False,
+                           mlp_expand=args.mlp_expand, se=args.se, se_ratio=args.se_ratio,
+                           dense_skip=args.dense_skip or args.dense_skip_entry or (args.dense_skip_depth > 1),
+                           dense_skip_entry=args.dense_skip_entry, dense_skip_depth=args.dense_skip_depth)
+
     for width in [int(w) for w in args.export_buckets.split(",") if w.strip()]:
-        narrow = build(width=width, blocks=blocks, qm=D3.BITS_PER_SYMBOL[args.modulation], smooth_k=args.smooth_k,
-                       aux_heads=aux, c_hid=c_hid, dtype=args.dtype,
-                       layout=args.layout, in_channels=in_channels, cond=args.modcond,
-                       reporting_heads=reporting, dense=dense, dense_bottleneck=bottleneck,
-                       dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
-                       noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand, se=args.se,
-                    se_ratio=args.se_ratio, dense_skip=args.dense_skip)
+        narrow = build(width=width, dtype=args.dtype, **build_flags)
         # WEIGHTS ARE COPIED, NOT RELOADED. A `.keras` archive carries the width the graph was built with, and loading
         # it into a graph built for another width fails on every layer past the divergence (41 objects in the first
         # attempt). The tensor shapes do not depend on the width -- they are 1x1 and depthwise convolutions -- so
         # assigning them in order is both correct and explicit about why.
         if source is not None:
-            # TRAINING-ONLY HEADS ARE DROPPED HERE. A head that exists to shape the trunk (the CE refinement head)
-            # has no place in the deployed graph, so the source carries a few weights the bucket does not. They are
-            # filtered out by layer name and reported, rather than failing the whole export on a count mismatch.
             dst_layers = {w.path.rsplit("/", 1)[0] for w in narrow.weights}
             kept = [w for w in source.weights if w.path.rsplit("/", 1)[0] in dst_layers]
             dropped = sorted({w.path.rsplit("/", 1)[0] for w in source.weights
                               if w.path.rsplit("/", 1)[0] not in dst_layers})
+            # A MISSING LAYER IS A DIFFERENT NETWORK, NOT A TIDY-UP. The old filter dropped whatever the bucket graph
+            # did not have and printed it; that is how 108 lever weights left the 2026-11-28 export with exit code 0.
+            illegal = [name for name in dropped if not _DROPPABLE_LAYER_RE.match(name)]
+            if illegal:
+                raise ValueError(
+                    f"the bucket graph is missing {len(illegal)} layer(s) the source carries: {illegal}. A bucket "
+                    f"must be the SAME network at a narrower width; a missing lever means build() was called without "
+                    f"it, and train_depth3.py must read that lever from the source instead (trunk_flags_from_source)")
             if dropped:
                 print(f"export drops training-only layer(s): {', '.join(dropped)}")
-            if len(kept) != len(narrow.weights):
-                raise ValueError(f"the bucket graph has {len(narrow.weights)} weights, the source {len(kept)} "
-                                 f"after dropping {dropped}")
+            src_sig = [(w.path, tuple(w.shape)) for w in kept]
+            dst_sig = [(w.path, tuple(w.shape)) for w in narrow.weights]
+            if src_sig != dst_sig:
+                only_bucket = [path for path, _shape in dst_sig if path not in {p for p, _s in src_sig}]
+                raise ValueError(f"the bucket graph and its source hold different weights ({len(dst_sig)} against "
+                                 f"{len(src_sig)}); in the bucket only: {only_bucket[:8]}")
             for w_src, w_dst in zip(kept, narrow.weights):
-                if tuple(w_src.shape) != tuple(w_dst.shape):
-                    raise ValueError(f"weight shape mismatch: {w_src.path} {tuple(w_src.shape)} against "
-                                     f"{w_dst.path} {tuple(w_dst.shape)}")
                 w_dst.assign(w_src)
         else:
             narrow.load_weights(weights)
         path = f"{args.export_probe.rsplit('.', 1)[0]}_w{width}.mlpackage"
-        export_deployment(narrow, D3.BITS_PER_SYMBOL[args.modulation], path, cond=args.modcond,
+        export_deployment(narrow, head_qm, path, cond=build_flags["cond"],
                           snr_range=cli_snr_range(args), sinr_cal=cli_sinr_cal(args))
         print(f"bucket width {width}: {path}")
 
