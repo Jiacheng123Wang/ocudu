@@ -219,8 +219,11 @@ if [ "$WITH_HARQ" -eq 1 ] && [ ${#DIRS[@]} -eq 1 ]; then
   LIVE_ARGS=()
   [ -d "$LEG_DIR/tb_live" ] && LIVE_ARGS=(--live-tb "$LEG_DIR/tb_live")
   echo "  recovered half: replaying HARQ chains under $LEG_DIR" >&2
+  # THE BINARY IS PASSED ON, NOT REDISCOVERED. The chain tool's default path is relative to its own location, which is a
+  # repository checkout on one machine and a copied tools directory on another; naming the binary here keeps the two
+  # passes on the same decoder, which is the whole point of recording one cap.
   "$PYTHON" "$SELF_DIR/dump_harq_chains.py" --leg "$LEG_DIR" --index "$OUT/index.csv" \
-      --out "$CHAIN_CSV" --jobs "$JOBS" --tb-out "$OUT/tb" \
+      --out "$CHAIN_CSV" --jobs "$JOBS" --tb-out "$OUT/tb" --binary "$BINARY" \
       "${LIVE_ARGS[@]+"${LIVE_ARGS[@]}"}" || echo "  WARN: chain pass failed" >&2
   if [ -f "$CHAIN_CSV" ]; then
     "$PYTHON" "$SELF_DIR/harq_backfill.py" --leg "$LEG_DIR" --index "$OUT/index.csv" --out "$OUT" \
