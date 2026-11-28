@@ -96,20 +96,38 @@ dump_finished() {
   recorded=$(awk -F= '/^tb_blocks=/{print $2}' "$d/dump_meta.txt")
   [ -n "$recorded" ] || return 1
   tb=$(ls "$d/tb" 2>/dev/null | wc -l | tr -d ' ')
-  [ "$tb" -eq "$recorded" ] || return 1
+  # AT LEAST the recorded count, not exactly. A dump re-run into the same directory truncates the
+  # indexes but not tb/, so stale blocks from the earlier run stay behind: 1029c carries 230 of them
+  # (and four more than its own meta recorded, written after the snapshot). The build reads only the
+  # units the indexes name, so extra blocks are harmless -- while FEWER than recorded means the dump
+  # really is short and must not be built.
+  [ "$tb" -ge "$recorded" ] || return 1
+  if [ "$tb" -gt "$recorded" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] NOTE: $leg has $tb block(s) in tb/, meta recorded $recorded" >> "$WATCHLOG"
+  fi
   return 0
+}
+
+# A FINISHED DUMP IS NOT ENOUGH: the captures must be there too, and whole. The other workflow
+# copies both halves into the same directory, so a dump can appear while its captures are still
+# arriving, and building then would read missing .bin files. The unit count is the same check the
+# producer used to decide the leg was complete (and a re-extraction can leave MORE than the dump's
+# list, which is fine).
+captures_complete() {
+  local d=$1 leg=$2 cap="$CORPUS/$2" want have
+  [ -d "$cap" ] || return 1
+  want=$(wc -l < "$d/units.txt" | tr -d ' ')
+  have=$(find "$cap" -maxdepth 1 -name '*.txt' ! -name '*_ce.txt' ! -name '._*' 2>/dev/null | wc -l | tr -d ' ')
+  [ "${have:-0}" -ge "${want:-1}" ]
 }
 
 build_leg() {
   local leg=$1 start=$SECONDS rc n samples cap="$CORPUS/$1" dump="$CORPUS/tb_$1" log="$LOGD/$1.log"
 
   if [ ! -d "$cap" ]; then
-    # The w2 workflow unpacks the captures before it dumps, so a finished dump without them means the tree
-    # was moved or stripped. There is nothing to build from; record it once and move on.
-    if ! grep -q "^$leg,no-captures," "$PROGRESS"; then
-      mark "$leg" no-captures 0 0 0
-      log "$leg: no capture directory $cap -- skipped (nothing to build from)"
-    fi
+    # Defensive: the loop only calls this once captures_complete said yes, so a disappear in between
+    # means someone moved the tree. Nothing to build from.
+    log "$leg: capture directory $cap vanished before the build; skipped"
     return 0
   fi
 
@@ -175,6 +193,7 @@ while :; do
       continue
     fi
     dump_finished "$d" || continue
+    captures_complete "$d" "$leg" || continue
     if [ "$DRY" = "1" ]; then
       log "[dry] $leg: would build now"
       built_this_round=1

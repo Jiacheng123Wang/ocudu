@@ -617,65 +617,41 @@ kill "$(cat /Volumes/Eaget_HD/datasets_full_s2_amc/_watcher.lock/pid)"
 ★ `EXCLUDE` 是**空格分隔的列表**，判据必须逐个比：`[ "$leg" = "$EXCLUDE" ]` 拿单条腿和整串比，**永远不会命中**
 （这个 bug 真的写出来过，坑 #21）。
 
-### 6.8 w2 全库（**在 211 上跑**，与 s2 那条线并行）
+### 6.8 w2 全库（**在 126 上跑**）
 
-w2 的目录布局与 s2 不同：**一条腿的采集和 dump 在同一个父目录下**
+w2 的目录布局与 s2 不同：**一条腿的采集和 dump 在同一个父目录下**。2026-11-28 起这条线在 **126** 上跑
+（211 的 USB 盘是 exFAT＋5400 转 SMR，见 memo §18，已不适合）。
 
-| 角色 | 路径 |
+| 角色 | 路径（126）|
 |---|---|
-| 采集 ＋ dump | `/mnt/corpus/w2_tb_tarballs/<leg>/`（采集）＋ `/mnt/corpus/w2_tb_tarballs/tb_<leg>/`（dump）|
-| 语料归档（durable copy）| `/mnt/corpus/w2_corpus_tarballs/<leg>.tar.gz`（60 条腿，264 GB）|
-| 母集输出 | `/mnt/corpus/datasets_full_w2/` |
-| 生产方 | `run_w2_batch.sh`：解包 → dump（cap 20）→ **保留**采集 |
-| 消费方 | `watch_dumps_build_w2.sh`（`ai_train/` 里，§6.7 的 w2 版本）|
+| 采集 ＋ dump | `~/w2/w2_tb_tarballs/<leg>/`（采集）＋ `~/w2/w2_tb_tarballs/tb_<leg>/`（dump）|
+| 母集输出 | `~/w2/datasets_full_w2/` |
+| 日志 | `~/w2/logs/{watch.log, <leg>.log}`；进度表 `~/w2/datasets_full_w2/_progress.csv` |
+| 生产方 | 另一个工作流负责把采集＋dump 放进 `~/w2/w2_tb_tarballs/` |
+| 消费方 | `~/w2/watch_dumps_build.sh`（即 `ai_train/watch_dumps_build_w2.sh`，5 处路径覆盖）|
 
-它与 §6.7 只有三处不同：腿前缀 `w2_`；`CORPUS_ROOT` 与 `DUMP_ROOT` 是同一个目录；**没有"从归档解包"分支** ——
-host 本身就是归档机，采集缺了就记一行 `no-captures` 跳过，而不是 ssh 到自己。
+**126 的部署**（一次性）：Ubuntu 24.04、8 核／31 GB／NVMe；`~/w2/venv`（python3.12 ＋ numpy 2.5.5，
+系统 python 没有 numpy）；工具两棵树都要在，缺一不可 ——
+`~/w2/lib/phy/upper/ai_signal_processors/depth3/ai_train/` **和**
+`~/w2/lib/phy/upper/signal_processors/channel_estimator/metal/ai_train/`（后者提供 `dmrs`／`synth`／
+`dd_label`／`ldpc_decode`／`nr_ldpc`／`build_labels`／`pusch_uci`，`depth3_paths.add_ce_shared()` 会检查）；
+另建空目录 `~/w2/build/`（`build_mother_set.sh` 的仓库根判据）。
 
 ```bash
-# 在 211 上常驻（一条建完自动建下一条）
-cd ~ && nohup nice -n 10 bash ~/w2_watch_dumps_build.sh >> ~/logs_w2_motherset/watch.out 2>&1 &
-kill "$(cat /mnt/corpus/datasets_full_w2/_watcher.lock/pid)"      # 停
+# 启动（单实例锁、一次一条腿）
+cd ~ && setsid nohup nice -n 10 bash ~/w2/watch_dumps_build.sh >> ~/w2/logs/watch.out 2>&1 < /dev/null &
+kill "$(cat ~/w2/datasets_full_w2/_watcher.lock/pid)"     # 停
 ```
 
-| 项 | 值 |
+| 判据 | 说明 |
 |---|---|
-| 完成判据 | 与 §6.7 **同一套四条**（`finished=` ＋ index 行数 ＋ `tb_blocks=` ＋ `index_ko.csv`）|
-| manifest | 由 `build_mother_set.sh` 第 5 步写出（§4.3）|
-| 回收 | `RECLAIM=1`：建完删解包出来的采集；**归档 tar 包不动**，重建＝再解包 2 分钟 |
-| 日志 | `~/logs_w2_motherset/{watch.log, <leg>.log}`；进度表 `/mnt/corpus/datasets_full_w2/_progress.csv` |
-| 并发 | 单实例（锁）、**一次一条腿**；与 211 上的训练任务、dump 批处理共存 |
+| **dump 完成** | `finished=` ＋ `index.csv` 行数 ＝ `units.txt` ＋ `tb/` **≥** `tb_blocks=` ＋ `index_ko.csv` 存在（§6.7 的四条，`tb ≥` 是 1029c 教的：重跑会在 `tb/` 里留下旧块）|
+| **采集齐全** | `~/w2/w2_tb_tarballs/<leg>/` 里 `cap_*.txt`（去掉 `_ce.txt`）的数量 **≥** dump 的 `units.txt` 行数。★ 只看 dump 不看采集会让 watcher 在采集还没到时开建（真的发生过：0 样本 manifest ＋ 一批 `failed` 行）|
+| 建完清理 | 成功后 `rm -rf <leg>/`（采集）；**dump 不删**（还没归档）。归档在 211 的 `w2_corpus_tarballs/`，要重建就再解包 |
+| 解码强度 | w2 的 dump 是 **cap 20**（`ldpc_iterations=20`）⇒ 训练可用、不能拿去做与经典链可比的测量 |
 
-★★ **2026-11-28 08:15 起 w2 的建库已暂停**（生产方同时停掉了 w2 的解包与 dump）。原因不是流程问题，
-而是 `/mnt/corpus` 这块盘：**exFAT、256 KB 簇、TOSHIBA MQ04ABB400（5400 转 SMR USB 机械盘）**。
-实测代价：
-
-| 项 | 实测 |
-|---|---|
-| 解包 `w2_harq_64QAM_ping_1030a`（4.87 GB 归档 → 17.2 GB 内容、60 万个小文件）| 13 小时 23 分只到 64%，最终被 SIGKILL |
-| 建库 `w2_harq_1027` | 23 415 样本 / **210 min**（0.54 s/样本）|
-| 建库 `w2_harq_16QAM_ping_1029b` | 7 323 样本 / **258 min**（2.1 s/样本）|
-
-⇒ 60 条 w2 腿按这个速率是周级。**恢复前先把解包/建库搬到快盘**（211 的 NVMe `/home` 只剩 111 GB，
-一次一条腿够用；或搬到 Mac 的 APFS），详见 §6.8 的方案对比。
-
-**暂停时的状态**：`w2_harq_1027`（23 415 样本）、`w2_harq_16QAM_ping_1029b`（7 323 样本）已建成并验收
-（`findings: none`、manifest 齐全、零值 0）；`1029c`／`1029d`／`1029e`／`1029g` 四条 dump 已完成但**未建**，
-它们的 dump 都在 `w2_tb_tarballs/tb_*` 里（每条约 200 MB），随时可以建。
-
-**恢复命令**（会从进度表继续，已 `ok` 的腿跳过）：
-
-```bash
-cd ~ && setsid nohup nice -n 10 bash ~/w2_watch_dumps_build.sh \
-    >> ~/logs_w2_motherset/watch.out 2>&1 < /dev/null &
-```
-
-★ **211 上 2026-11-27 之前的 dump 没有可用的 `binary_mtime`**：`dump_tb.sh` 用的是 BSD `stat -f`，GNU 的
-`stat` 把它当"文件系统"，于是那批 `dump_meta.txt` 里是一串数字 ＋ 一个多余的 `unknown`。
-`ecaaeace0e` 起两边都正常（`stat -c '%y'`）。⇒ 判断"哪份 w2 dump 是哪个二进制的产物"时，
-`ecaaeace0e` 之前的只能用时间推断。
-
----
+★ **126 上的实测**：`w2_harq_16QAM_ping_1029c`（7 602 样本）**13 分钟**（≈4 单元/秒，吃满一个核），
+对比 211 的 exFAT 盘是 0.5–2 秒/样本。
 
 ## 7. 收尾与交接
 
