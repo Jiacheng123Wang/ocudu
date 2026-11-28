@@ -154,6 +154,19 @@ def receptive_field(blocks, dilations, ksize=3):
     return 1 + (ksize - 1) * sum(dilations[i % len(dilations)] for i in range(blocks))
 
 
+def recurrent_dilations(recurrent_blocks, recurrent_loops, dilations):
+    """The effective dilation sequence of the statically unrolled recurrent trunk.
+
+    The shared stage's cycle repeats every `recurrent_blocks`, so the effective depth is
+    `recurrent_blocks * recurrent_loops` and the same six-rate pattern is walked once per loop. The receptive field is
+    the product of that sequence -- NOT `receptive_field(recurrent_blocks*recurrent_loops, ...)` if the two happened to
+    disagree, and not the super-block's field either, because depth accumulates across iterations.
+    """
+    if recurrent_loops <= 0:
+        return [dilations[i % len(dilations)] for i in range(recurrent_blocks)]
+    return [dilations[i % len(dilations)] for i in range(recurrent_blocks)] * recurrent_loops
+
+
 def _flag_was_given(argv, *flags):
     """Whether one of `flags` was written on the command line, in the `--flag` or the `--flag=v` form.
 
@@ -371,6 +384,37 @@ class ChannelGate(tf.keras.layers.Layer):
         return super().get_config()
 
 
+@tf.keras.utils.register_keras_serializable(package="ocudu")
+class StepBias(tf.keras.layers.Layer):
+    """The per-iteration channel bias of a STATICALLY UNROLLED recurrent trunk.
+
+    WHY A LAYER AND NOT A CONSTANT. The recurrent stage is called K times with one shared set of weights, so the only
+    thing that distinguishes iteration k from iteration k+1 is this bias. It starts at zero, which makes iteration zero
+    compute exactly the plain stage; the trainer then decides how much of a per-depth offset each iteration needs. The
+    layer holds one C-vector, so the whole modulation costs K*C parameters (192 at c32, K=6) and one add per iteration.
+
+    It is a Layer subclass rather than an Add of a trainable weight because Keras has no functional form of "add this
+    variable", and a Lambda cannot be deserialised -- the checkpoints of this project must load in the exporter, the
+    probe scripts and the resume path alike (see CUSTOM_OBJECTS).
+    """
+
+    def __init__(self, channels, **kwargs):
+        super().__init__(**kwargs)
+        self.channels = int(channels)
+
+    def get_config(self):
+        return {**super().get_config(), "channels": self.channels}
+
+    def build(self, input_shape):
+        self.bias = self.add_weight(name="bias", shape=(1, 1, 1, self.channels),
+                                    initializer="zeros", trainable=True)
+
+    def call(self, x, **kwargs):
+        # The cast is a no-op in fp32 and keeps the add well-typed in the fp16 graph the exporter builds (the same
+        # lesson as ChannelGate: a constant operand can otherwise come out in the other precision).
+        return x + tf.cast(self.bias, x.dtype)
+
+
 class MaskedSmooth(tf.keras.layers.Layer):
     """A dense local average over one coherence bandwidth, taken only where the allocation actually is.
 
@@ -475,7 +519,7 @@ class FoldedScaleConv(tf.keras.layers.Layer):
 # a fourth custom layer cannot be added to one site and forgotten at the other. The names are unchanged, which is
 # what keeps `depth3_best.keras`, `depth3_last.keras` and `snapshots/*.keras` loadable exactly as before.
 CUSTOM_OBJECTS = {"FoldedScaleConv": FoldedScaleConv, "MaskedSmooth": MaskedSmooth,
-                  "ChannelGate": ChannelGate}
+                  "ChannelGate": ChannelGate, "StepBias": StepBias}
 
 
 def init_dense_skip_as_sum(model):
@@ -525,7 +569,8 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
           dense_bottleneck=0, fuse_relu=False,
           layout="folded", in_channels=D3.NOF_CHANNELS_SPATIAL, cond=False,
           dilations=DILATIONS, ksize=3, groups=1, noise_to_llr=False, ce_aux=False, llr_post=False,
-          cst_head=False, sym_aux=False, mlp_expand=1, se=False, se_ratio=8, dense_skip=False, dense_skip_entry=False, dense_skip_depth=1):
+          cst_head=False, sym_aux=False, mlp_expand=1, se=False, se_ratio=8, dense_skip=False, dense_skip_entry=False,
+          dense_skip_depth=1, recurrent_blocks=6, recurrent_loops=0):
     """The contract's graph: the plane in, the reporting heads out.
 
     `residual` and `dtype` are the two lessons the refiner paid for (`model_network_design`
@@ -541,6 +586,13 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
       chooses that, so the graph dtype here is a training decision only.
     """
     keras_dtype = tf.float32 if dtype == "float32" else tf.float16
+    # ★ LAYER 2 IS A SPATIAL-LAYOUT CONSTRUCTION. The folded layout has its own trunk loop (a different builder with
+    # its own head shapes), and teaching only one of the two would make `--recurrent-loops` silently inert on the
+    # other -- the failure mode this project has paid for twice (the `--dense-blocks` and `--dense-skip-entry` guards).
+    if recurrent_loops < 0:
+        raise ValueError("--recurrent-loops must be >= 0")
+    if recurrent_loops > 0 and layout == "folded":
+        raise ValueError("--recurrent-loops is implemented for --layout spatial only")
 
     def finish(graph):
         """Marks the CONTRACT the graph follows, for the export's metadata declaration (design section 19.102).
@@ -592,7 +644,76 @@ def build(width=D3.NOF_SUBCARRIERS, blocks=18, qm=8, aux_heads=True, c_hid=64, r
         # blocks. `--dense-skip-depth 1` is the plain C (state + own output), 2 adds the previous block's output, and
         # so on. The list is bounded by the depth, so memory does not grow with the block count.
         recent = []
-        for i in range(blocks):
+        if recurrent_loops > 0:
+            # ★ LAYER 2: PERIODIC UNROLLED RECURRENT TRUNK. One shared super-block of `recurrent_blocks` residual
+            # blocks is called `recurrent_loops` times, so the effective depth is their product while the parameter
+            # count is that of the super-block alone. The stage layers are created ONCE and called K times; Keras keeps
+            # one weight tensor per layer, which is what makes the deployment graph carry one copy of the stage rather
+            # than K. The only per-iteration parameters are the K StepBias vectors below.
+            #
+            # WHY THIS IS NOT AN RNN LAYER: an RNN would make the loop a single op whose input shape the ANE cannot see
+            # through. This loop is a PYTHON loop over the same layer objects, so the exported graph is a plain
+            # feed-forward chain of B*K convolutions -- static shapes all the way down, which is the ANE's requirement.
+            #
+            # THE ENTRY PLANE IS IN EVERY BLOCK'S VISIBLE SET. The baseline's `--dense-skip-entry` made the raw entry
+            # features reachable from every block; a recurrent stage would otherwise lose them after the first
+            # iteration, because each loop overwrites the state. Requiring the flag is what keeps the contract of this
+            # layer honest instead of approximating it.
+            if not dense or dense_bottleneck > 0:
+                raise ValueError("--recurrent-loops needs --dense-blocks and no --dense-bottleneck")
+            if (mlp_expand != 1) or (not residual) or (not fold_scale):
+                raise ValueError("--recurrent-loops needs the plain FoldedScaleConv block "
+                                 "(mlp-expand 1, residual and fold-scale on)")
+            if not dense_skip_entry:
+                raise ValueError("--recurrent-loops needs --dense-skip-entry: the entry plane is part of every "
+                                 "block's visible set (Layer 2's contract)")
+            stage = []
+            for i in range(recurrent_blocks):
+                dilation = dilations[i % len(dilations)]
+                cv = tf.keras.layers.Conv2D(c_hid, ksize, padding="same", groups=groups,
+                                            dilation_rate=(dilation, 1), dtype=keras_dtype,
+                                            activation="relu" if fuse_relu else None,
+                                            name=f"cv{i}_{ksize}x{ksize}_d{dilation}")
+                relu_a = None if fuse_relu else tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}")
+                pw = FoldedScaleConv(c_hid, initial_gain=scale_init, rank=low_rank,
+                                     dtype=keras_dtype, name=f"pw{i}_1x1")
+                relu_b = tf.keras.layers.ReLU(dtype=keras_dtype, name=f"relu{i}b")
+                se_layers = None
+                if se:
+                    se_layers = (
+                        tf.keras.layers.GlobalAveragePooling2D(dtype=keras_dtype, name=f"se{i}_gap"),
+                        tf.keras.layers.Dense(max(4, c_hid // se_ratio), activation="relu",
+                                              dtype=keras_dtype, name=f"se{i}_fc1"),
+                        tf.keras.layers.Dense(c_hid, activation="sigmoid", dtype=keras_dtype,
+                                              name=f"se{i}_fc2"),
+                        tf.keras.layers.Reshape((1, 1, c_hid), dtype=keras_dtype, name=f"se{i}_gate"),
+                        ChannelGate(dtype=keras_dtype, name=f"se{i}_scale"))
+                dcat = tf.keras.layers.Concatenate(dtype=keras_dtype, name=f"dcat{i}")
+                dproj = FoldedScaleConv(c_hid, initial_gain=1.0, rank=low_rank,
+                                        dtype=keras_dtype, name=f"dproj{i}_1x1")
+                stage.append((cv, relu_a, pw, relu_b, se_layers, dcat, dproj))
+            steps = [StepBias(c_hid, dtype=keras_dtype, name=f"stepbias{k}")
+                     for k in range(recurrent_loops)]
+            for k in range(recurrent_loops):
+                for (cv, relu_a, pw, relu_b, se_layers, dcat, dproj) in stage:
+                    block = cv(y)
+                    if relu_a is not None:
+                        block = relu_a(block)
+                    block = pw(block)
+                    block = relu_b(block)
+                    if se_layers is not None:
+                        gap, fc1, fc2, gate, scale = se_layers
+                        z = gap(block)
+                        z = fc1(z)
+                        z = fc2(z)
+                        z = gate(z)
+                        block = scale([block, z])
+                    pair = dcat([y, block, y_entry])
+                    y = dproj(pair)
+                # ★ STEP-BIAS: the only per-iteration parameter. Zero-initialised, so iteration k=0 is exactly the
+                # shared stage and training decides how much depth-specific offset each later pass needs.
+                y = steps[k](y)
+        for i in range(0 if recurrent_loops > 0 else blocks):
             dilation = dilations[i % len(dilations)]
             # THE BLOCK TYPE HAS TO BE HONOURED ON THIS PATH TOO. The spatial layout has its own trunk
             # builder, and it used to hard-code a depthwise 3x3: `--dense-blocks` and
@@ -967,7 +1088,7 @@ class Batches:
                      "allocated")
 
     def __init__(self, path, modulation, max_samples=0, seed=0, snr_min=None, snr_max=None, cond=False,
-                 target="coded", layout="folded"):
+                 target="coded", layout="folded", prb_min=None, prb_max=None):
         # TWO FORMS, ONE MEANING. A path that is a directory holds one `.npy` per array and is opened
         # memory-mapped, so the dataset is limited by disk rather than by RAM; `convert_npz_to_mmap.py`
         # writes that form. A path that is a file is the original compressed archive.
@@ -1019,6 +1140,14 @@ class Batches:
             keep &= nominal >= snr_min
         if snr_max is not None:
             keep &= nominal <= snr_max
+        # ★ THE WIDTH AXIS OF THE MACRO-MoE. A deterministic expert is trained on a slice of the allocation-width
+        # distribution, so the slice has to be expressible on the dataset side; doing it here (rather than by
+        # materialising seven copies of the 22 GB corpus) keeps one source of truth for what "narrow" means. The
+        # bounds are inclusive PRB counts and are the SAME numbers the C++ scheduler routes on (`alloc_nof_prb`).
+        if prb_min is not None:
+            keep &= self.data["alloc_nof_prb"] >= prb_min
+        if prb_max is not None:
+            keep &= self.data["alloc_nof_prb"] <= prb_max
         self.order = self.order[keep]
         self.n = int(self.order.size)
         if max_samples:
@@ -1689,6 +1818,15 @@ def trunk_flags_from_source(source, layout):
     period = next((p for p in range(1, blocks + 1) if all(rates[i] == rates[i % p] for i in range(blocks))), blocks)
     dilations = tuple(rates[:period])
 
+    # ★ RECURRENCE IS VISIBLE IN THE LAYER LIST. A statically unrolled trunk creates ONE stage layer per block and one
+    # StepBias per iteration, so the number of distinct block layers is `recurrent_blocks` and the number of step
+    # biases is `recurrent_loops`. Counting biases is exact: every loop gets its own (zero-initialised) vector, and
+    # nothing else in the graph is named `stepbias*`. A source with no step bias is the plain feed-forward trunk, and
+    # then `recurrent_loops` is zero and `blocks` is the depth, exactly as before.
+    step_biases = [name for name in names if name.startswith("stepbias")]
+    recurrent_loops = len(step_biases)
+    recurrent_blocks = blocks if recurrent_loops else 0
+
     entry = source.get_layer("entry_1x1")
     in_total = int(entry.kernel.shape[2])
     c_hid = int(entry.kernel.shape[3])
@@ -1699,11 +1837,15 @@ def trunk_flags_from_source(source, layout):
             raise ValueError(f"--smooth-k doubles the entry width, but entry_1x1 reads {in_total} channel(s)")
         in_total //= 2
     base_channels = {"folded": D3.NOF_CHANNELS, "probe8": 8}.get(layout, D3.NOF_CHANNELS_SPATIAL)
+    # `build()` takes the WIDENED channel count: the four conditioning planes are appended by the dataset, and the
+    # builder's `cond` flag only decides the head's stride and layout. Passing the pre-conditioning 12 built a graph
+    # whose entry projection read 12 channels against the source's 16 -- caught by the weight-signature check, which is
+    # the point of having one.
     cond = (in_total == base_channels + len(D3.COND_QM_ORDER))
-    in_channels = in_total - (len(D3.COND_QM_ORDER) if cond else 0)
-    if in_channels != base_channels:
-        raise ValueError(f"layout {layout} expects {base_channels} input channel(s), the source carries {in_channels} "
-                         f"(with cond={'yes' if cond else 'no'}); the layout passed does not describe this graph")
+    if (in_total != base_channels) and not cond:
+        raise ValueError(f"layout {layout} expects {base_channels} input channel(s) (+{len(D3.COND_QM_ORDER)} when "
+                         f"conditioned); the source carries {in_total}. The layout passed does not describe this graph")
+    in_channels = in_total
 
     # BOTTLENECK is a divisor, not a flag: its 3x3 layers are `cv` like the plain dense block, so the only evidence is
     # the squeeze layer, whose output width is c_hid over the divisor.
@@ -1746,22 +1888,30 @@ def trunk_flags_from_source(source, layout):
     dense_skip_entry = False
     dense_skip_depth = 1
     if dense_skip:
-        dcats = [i for i in indices if f"dcat{i}" in name_set]
-        if not dcats:
-            raise ValueError("the source carries dproj* but no dcat*: the cross-block projection has no visible set")
-        block_output = {}
-        for i in indices:
-            block_output[f"relu{i}"] = i
-            if fuse_relu:
-                block_output[f"{kind}{i}_{ksize}x{ksize}_d{rates[i]}"] = i
-        recent = 0
-        for i in dcats:
-            producers = _concat_producers(source.get_layer(f"dcat{i}"))
-            if (i >= 1) and ("entry_relu" in producers):
-                dense_skip_entry = True
-            recent = max(recent, sum(1 for name in producers
-                                     if (name in block_output) and (block_output[name] != i)))
-        dense_skip_depth = 1 + recent
+        if recurrent_loops:
+            # Layer 2's contract REQUIRES the entry plane in every block's visible set (build() refuses the recurrent
+            # trunk without it), and a shared Concatenate has one node per iteration, so `layer.input` is not a
+            # reliable description of the visible set here. The flags are therefore read from the construction rule
+            # rather than from one node of a reused layer.
+            dense_skip_entry = True
+            dense_skip_depth = 1
+        else:
+            dcats = [i for i in indices if f"dcat{i}" in name_set]
+            if not dcats:
+                raise ValueError("the source carries dproj* but no dcat*: the cross-block projection has no visible set")
+            block_output = {}
+            for i in indices:
+                block_output[f"relu{i}"] = i
+                if fuse_relu:
+                    block_output[f"{kind}{i}_{ksize}x{ksize}_d{rates[i]}"] = i
+            recent = 0
+            for i in dcats:
+                producers = _concat_producers(source.get_layer(f"dcat{i}"))
+                if (i >= 1) and ("entry_relu" in producers):
+                    dense_skip_entry = True
+                recent = max(recent, sum(1 for name in producers
+                                         if (name in block_output) and (block_output[name] != i)))
+            dense_skip_depth = 1 + recent
 
     aux = "noise_flat" in name_set
     reporting = ("ch_est" in name_set) or ("dmrs_noise" in name_set)
@@ -1770,11 +1920,15 @@ def trunk_flags_from_source(source, layout):
     cst_head = "cst_res" in name_set
 
     # THE HEAD STRIDE IS THE MODULATION THE GRAPH DECLARES, not the one on the command line: a conditioned bundle always
-    # carries COND_STRIDE per symbol, and a per-modulation bundle carries its own Qm.
-    head_layer = "cst_res" if cst_head else "llr_1x1"
-    head_channels = int(source.get_layer(head_layer).kernel.shape[3])
+    # carries COND_STRIDE per symbol, and a per-modulation bundle carries its own Qm. Read from the MODEL'S OUTPUT, not
+    # from the head convolution: the spatial layout's `llr_1x1` emits `head_qm` channels and a Reshape turns them into
+    # `14 * head_qm`, so the convolution's width is the stride only in the folded layout (measured here: llr_1x1 carried
+    # 8 channels where the output carried 112 -- the first version of this check read the convolution and refused a
+    # perfectly good model).
+    llr_tensor = source.output["llr"] if isinstance(source.output, dict) else source.output[0]
+    head_channels = int(llr_tensor.shape[-1])
     if (head_channels % D3.NOF_SYMBOLS) != 0:
-        raise ValueError(f"{head_layer} carries {head_channels} channel(s), not a multiple of {D3.NOF_SYMBOLS} symbols")
+        raise ValueError(f"the llr head carries {head_channels} channel(s), not a multiple of {D3.NOF_SYMBOLS} symbols")
     qm = head_channels // D3.NOF_SYMBOLS
 
     build_flags = dict(
@@ -1783,13 +1937,59 @@ def trunk_flags_from_source(source, layout):
         fuse_relu=fuse_relu, dilations=dilations, ksize=ksize, groups=groups, noise_to_llr=noise_to_llr,
         ce_aux=False, llr_post=llr_post, cst_head=cst_head, sym_aux=False, mlp_expand=mlp_expand, se=se,
         se_ratio=se_ratio, dense_skip=dense_skip or dense_skip_entry or (dense_skip_depth > 1),
-        dense_skip_entry=dense_skip_entry, dense_skip_depth=dense_skip_depth)
+        dense_skip_entry=dense_skip_entry, dense_skip_depth=dense_skip_depth,
+        recurrent_blocks=recurrent_blocks, recurrent_loops=recurrent_loops)
     summary = (f"{blocks} blocks, {kind} k={ksize}, c_hid {c_hid}, dilations {dilations}, groups {groups}, "
                f"mlp x{mlp_expand:g}, se {'x' + str(se_ratio) if se else 'no'}, "
                f"dense-skip {'entry/' if dense_skip_entry else ''}{dense_skip_depth if dense_skip else 'no'}, "
-               f"cond {cond}, in {in_channels + (len(D3.COND_QM_ORDER) if cond else 0)}, qm {qm}, "
+               f"recurrent {recurrent_blocks}x{recurrent_loops} ({recurrent_blocks * recurrent_loops} effective), "
+               f"cond {cond}, in {in_channels}, qm {qm}, "
                f"heads aux={aux} reporting={reporting}")
     return {"build": build_flags, "qm": qm, "summary": summary}
+
+
+def rebuild_recurrent(source, loops, layout):
+    """The SAME trained recurrent trunk unrolled a different number of times (Layer 3's dual graph).
+
+    WHY REBUILD INSTEAD OF PRUNING A GRAPH. The unroll count is a Python loop in `build()`, so a `.keras` archive is
+    tied to the K it was trained with; there is no "remove the last four iterations" operation on the saved graph. The
+    stage weights, the entry projection and the heads are named identically for every K, however, so a fresh graph with
+    the new K can be built and the weights copied BY NAME. That is exactly the property the parameter sharing buys:
+    the Fast path and the Deep path differ in the number of calls, not in the weights. The first `min(K_src, K_new)`
+    StepBias vectors are copied; a larger K starts its extra iterations at zero by construction.
+    """
+    arch = trunk_flags_from_source(source, layout)
+    build_flags = dict(arch["build"])
+    if build_flags.get("recurrent_loops", 0) <= 0:
+        raise ValueError("rebuild_recurrent: the source is not a recurrent trunk (no stepbias layer)")
+    if loops <= 0:
+        raise ValueError("rebuild_recurrent: loops must be positive")
+    build_flags["recurrent_loops"] = int(loops)
+    width = int(source.inputs[0].shape[1])
+    rebuilt = build(width=width, dtype="float32", **build_flags)
+    src_layers = {layer.name: layer for layer in source.layers}
+    copied, reset = 0, []
+    for layer in rebuilt.layers:
+        dst = layer.get_weights()
+        if not dst:
+            continue
+        origin = src_layers.get(layer.name)
+        if origin is None:
+            # The only legal "new" tensors of a shorter/longer unroll are the step biases. Everything else is the
+            # shared stage and must be present; a missing one would mean the rebuild changed the architecture.
+            if not layer.name.startswith("stepbias"):
+                raise ValueError(f"rebuild_recurrent: the source has no {layer.name}; the rebuild is not the same trunk")
+            reset.append(layer.name)
+            continue
+        src = origin.get_weights()
+        if (len(src) != len(dst)) or any(a.shape != b.shape for a, b in zip(src, dst)):
+            raise ValueError(f"rebuild_recurrent: {layer.name} changed shape; the rebuild is not the same trunk")
+        layer.set_weights(src)
+        copied += 1
+    effective = build_flags["recurrent_blocks"] * int(loops)
+    print(f"rebuilt recurrent trunk: {build_flags['recurrent_blocks']} blocks x {loops} loops = {effective} effective, "
+          f"{copied} weight tensor(s) copied, {len(reset)} step bias(es) fresh", flush=True)
+    return rebuilt
 
 
 def export_buckets(args, parser, source=None):
@@ -1836,7 +2036,8 @@ def export_buckets(args, parser, source=None):
                            llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=False,
                            mlp_expand=args.mlp_expand, se=args.se, se_ratio=args.se_ratio,
                            dense_skip=args.dense_skip or args.dense_skip_entry or (args.dense_skip_depth > 1),
-                           dense_skip_entry=args.dense_skip_entry, dense_skip_depth=args.dense_skip_depth)
+                           dense_skip_entry=args.dense_skip_entry, dense_skip_depth=args.dense_skip_depth,
+                           recurrent_blocks=args.recurrent_blocks, recurrent_loops=args.recurrent_loops)
 
     for width in [int(w) for w in args.export_buckets.split(",") if w.strip()]:
         narrow = build(width=width, dtype=args.dtype, **build_flags)
@@ -1859,14 +2060,23 @@ def export_buckets(args, parser, source=None):
                     f"it, and train_depth3.py must read that lever from the source instead (trunk_flags_from_source)")
             if dropped:
                 print(f"export drops training-only layer(s): {', '.join(dropped)}")
-            src_sig = [(w.path, tuple(w.shape)) for w in kept]
-            dst_sig = [(w.path, tuple(w.shape)) for w in narrow.weights]
+            # COMPARED BY NAME, NOT BY POSITION. Keras lists a functional model's weights in the order the layers were
+            # BUILT, and the bucket's builder visits the same layers in a different order (the SE branch is created
+            # inside the block loop, the projection after it). Zipping the two lists would therefore align mismatched
+            # tensors whenever their shapes happen to agree -- the exact silent failure this check exists to prevent
+            # -- so the comparison is a name->shape map and the copy is by name.
+            src_sig = {w.path: tuple(w.shape) for w in kept}
+            dst_sig = {w.path: tuple(w.shape) for w in narrow.weights}
             if src_sig != dst_sig:
-                only_bucket = [path for path, _shape in dst_sig if path not in {p for p, _s in src_sig}]
-                raise ValueError(f"the bucket graph and its source hold different weights ({len(dst_sig)} against "
-                                 f"{len(src_sig)}); in the bucket only: {only_bucket[:8]}")
-            for w_src, w_dst in zip(kept, narrow.weights):
-                w_dst.assign(w_src)
+                only_bucket = sorted(set(dst_sig) - set(src_sig))
+                only_source = sorted(set(src_sig) - set(dst_sig))
+                shape_diff = sorted(path for path in set(src_sig) & set(dst_sig) if src_sig[path] != dst_sig[path])
+                raise ValueError(f"the bucket graph and its source do not hold the same weights: "
+                                 f"bucket-only {only_bucket[:6]}, source-only {only_source[:6]}, "
+                                 f"shape-differs {shape_diff[:6]}")
+            src_by_path = {w.path: w for w in kept}
+            for path, weight in {w.path: w for w in narrow.weights}.items():
+                weight.assign(src_by_path[path])
         else:
             narrow.load_weights(weights)
         path = f"{args.export_probe.rsplit('.', 1)[0]}_w{width}.mlpackage"
@@ -1913,6 +2123,17 @@ def main():
                              "'2:slope,offset;4:...;6:...;8:...'. Measured against the classical chain's own "
                              "publication (design section 19.172); it corrects the reporting path only.")
     parser.add_argument("--blocks", type=int, default=18)
+    # ★ LAYER 2: PERIODIC UNROLLED RECURRENT TRUNK. `--recurrent-loops 0` keeps every existing command line on the
+    # graph it was trained with (the project rule: a default must not change a reproducible run). `--recurrent` is the
+    # one-flag form of the recipe this layer was designed for: six shared dense blocks, unrolled six times.
+    parser.add_argument("--recurrent", action="store_true",
+                        help="enable the Layer-2 recurrent trunk with its defaults (6 shared blocks x 6 loops = 36 "
+                             "effective blocks); equivalent to --recurrent-blocks 6 --recurrent-loops 6")
+    parser.add_argument("--recurrent-blocks", type=int, default=6, metavar="B",
+                        help="independent blocks inside the shared recurrent stage (default 6)")
+    parser.add_argument("--recurrent-loops", type=int, default=0, metavar="K",
+                        help="static unroll count of the shared stage; 0 disables the recurrent trunk (default), "
+                             "the Layer-2 recipe uses 6 (36 effective blocks at B=6)")
     # THE FREE ARCHITECTURE KNOB. Dilation changes neither the parameters nor the multiply-adds, only
     # how far each block looks, and the default cycle reaches 127 subcarriers against a measured
     # coherence length of 150-300. Empty means the default cycle, so old command lines reproduce.
@@ -2049,6 +2270,14 @@ def main():
                              "decided by the noise, so training on it cannot converge to a low "
                              "error rate; the high-SNR slice is the one with a reachable answer")
     parser.add_argument("--snr-max", type=float, default=None)
+    # ★ LAYER 1: THE WIDTH SLICE OF A DETERMINISTIC MACRO-EXPERT. Inclusive PRB bounds, applied to
+    # `alloc_nof_prb` on both the training and the validation loader. The narrow/wide split of the architecture
+    # is `--prb-max 8` for the narrow expert and `--prb-min 9` for the wide one; the boundaries are PRB counts
+    # because that is what the scheduler routes on, not bucket indices (a bucket is a static input SHAPE).
+    parser.add_argument("--prb-min", type=int, default=None, metavar="PRB",
+                        help="keep only allocations with at least this many PRBs (inclusive)")
+    parser.add_argument("--prb-max", type=int, default=None, metavar="PRB",
+                        help="keep only allocations with at most this many PRBs (inclusive)")
     # HOW THE LLR TERM IS AVERAGED. "bits" is the historical objective: a sample's pull on the gradient is
     # proportional to its coded-bit count, which leaves narrow allocations with 2.4% of the weight although they are
     # 20% of the samples (improvement plan section 100). "sample" gives every reception one vote; "sqrt" is between.
@@ -2160,6 +2389,10 @@ def main():
                              "the plane to the allocation plus four PRB is bit-exact and needs no retraining; the "
                              "buckets exist only because the ANE wants a static shape. Ignored without --export-probe, "
                              "which names the base artefact the bucket names are derived from.")
+    parser.add_argument("--export-fast-loops", type=int, default=0, metavar="K",
+                        help="with --export-only, ALSO export the same trained recurrent trunk unrolled K times "
+                             "(Layer 3's Fast path; e.g. 2). The stage weights are copied by name, so the two "
+                             "artefacts share one weight set and differ only in unroll depth. 0 disables.")
     parser.add_argument("--probe-graph", default="",
                         help="build the graph from the architecture flags, export it and EXIT "
                              "without training, so ANE placement and latency can be measured "
@@ -2215,6 +2448,10 @@ def main():
     parser.add_argument("--seed", type=int, default=20261013)
     args = parser.parse_args()
     args.dilations = parse_dilations(args.dilations)
+    # `--recurrent` is the named recipe; `--recurrent-loops` stays the single knob so an experiment can unroll a
+    # different number without a second switch (the early-exit export needs exactly that).
+    if args.recurrent and args.recurrent_loops == 0:
+        args.recurrent_loops = 6
     # WHAT THE PROCESS WAS LAUNCHED WITH. The log is the only lasting record of a multi-hour run, and a
     # restart is where flags drift: on 2026-11-03 a restart dropped `--bler-samples 0`, the default 24
     # took over, and the first decode killed a run that had been healthy for fourteen epochs. The old
@@ -2273,6 +2510,14 @@ def main():
         # there are no `snr_nominal` percentiles to derive it from (see the note where training derives it).
         export_deployment(exported, D3.BITS_PER_SYMBOL[args.modulation], args.export_probe,
                           cond=args.modcond, snr_range=cli_snr_range(args), sinr_cal=cli_sinr_cal(args))
+        if args.export_fast_loops:
+            # ★ LAYER 3: THE FAST GRAPH IS THE SAME TRUNK, FEWER UNROLLS. `rebuild_recurrent` copies every stage
+            # tensor by name, so the two bundles are one trained model deployed at two depths -- the whole premise of
+            # the early-exit cascade. The naming is derived from --export-probe so a downstream script can find it.
+            fast = rebuild_recurrent(exported, args.export_fast_loops, args.layout)
+            fast_path = f"{args.export_probe.rsplit('.', 1)[0]}_k{args.export_fast_loops}.mlpackage"
+            export_deployment(fast, D3.BITS_PER_SYMBOL[args.modulation], fast_path,
+                              cond=args.modcond, snr_range=cli_snr_range(args), sinr_cal=cli_sinr_cal(args))
         export_buckets(args, parser, source=exported)
         return 0
 
@@ -2304,8 +2549,10 @@ def main():
                             layout=args.layout, in_channels=in_channels, cond=args.modcond,
                             dilations=args.dilations, ksize=args.kernel_size, groups=args.groups,
                             noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand, se=args.se, se_ratio=args.se_ratio, dense_skip=args.dense_skip or args.dense_skip_entry or args.dense_skip_depth > 1,
-                    dense_skip_entry=args.dense_skip_entry,
-                    dense_skip_depth=args.dense_skip_depth,
+                            dense_skip_entry=args.dense_skip_entry,
+                            dense_skip_depth=args.dense_skip_depth,
+                            recurrent_blocks=args.recurrent_blocks,
+                            recurrent_loops=args.recurrent_loops,
                             smooth_k=args.smooth_k)
         export_deployment(probe_model, qm, args.probe_graph, cond=args.modcond)
         return 0
@@ -2330,10 +2577,12 @@ def main():
                      "is given")
     train = Batches(args.train, args.modulation, args.max_train, seed=args.seed,
                     snr_min=args.snr_min, snr_max=args.snr_max, target=args.target,
-                    layout=args.layout, cond=args.modcond)
+                    layout=args.layout, cond=args.modcond,
+                    prb_min=args.prb_min, prb_max=args.prb_max)
     val = Batches(args.val, args.modulation, args.max_val, seed=args.seed + 1,
                   snr_min=args.snr_min, snr_max=args.snr_max, target=args.target,
-                  layout=args.layout, cond=args.modcond)
+                  layout=args.layout, cond=args.modcond,
+                  prb_min=args.prb_min, prb_max=args.prb_max)
     qm = train.qm
     if args.modcond:
         # The head serves every modulation, so its stride is the widest one; the per-sample Qm travels as the
@@ -2343,6 +2592,16 @@ def main():
               f"modulations from the dataset)")
     else:
         print(f"train {train.n} samples, val {val.n} samples, {args.modulation} (Qm={qm})")
+    if args.prb_min is not None or args.prb_max is not None:
+        # THE SLICE HAS TO BE IN THE LOG, not just in the argv: an expert's identity is its width range, and a
+        # mistyped bound would otherwise be visible only by a sample count nobody has a reference for.
+        retained = np.asarray(train.data["alloc_nof_prb"])[train.order]
+        retained_bits = int(np.asarray(train.data["nof_tb_bits"])[train.order].sum())
+        retained_qm = np.asarray(train.data["qm"])[train.order]
+        census = " ".join(f"Qm{int(q)}:{(retained_qm == q).sum()}" for q in np.unique(retained_qm))
+        print(f"width slice PRB [{args.prb_min if args.prb_min is not None else 0}, "
+              f"{args.prb_max if args.prb_max is not None else 'max'}]: {retained.size} samples, "
+              f"{retained_bits} TB bits, {census}", flush=True)
 
     # ★ THE DATA'S CHANNEL COUNT, WITHOUT BUILDING A SAMPLE. The old form called `train.sample(0)` for this one
     # integer and threw the rest away -- the bit unpack, the label plane, the masks and the noise target, which is
@@ -2370,6 +2629,7 @@ def main():
                   noise_to_llr=args.noise_to_llr, ce_aux=args.ce_head, llr_post=args.llr_post, cst_head=args.cst_head, sym_aux=args.sym_aux, mlp_expand=args.mlp_expand, se=args.se, se_ratio=args.se_ratio, dense_skip=args.dense_skip or args.dense_skip_entry or args.dense_skip_depth > 1,
                     dense_skip_entry=args.dense_skip_entry,
                     dense_skip_depth=args.dense_skip_depth,
+                  recurrent_blocks=args.recurrent_blocks, recurrent_loops=args.recurrent_loops,
                   smooth_k=args.smooth_k)
     if args.dense_skip_init == "sum":
         model = init_dense_skip_as_sum(model)
@@ -2379,9 +2639,20 @@ def main():
     # one architecture number that costs nothing (dilation adds no weights and no multiply-adds), and
     # it was the only one that had no record in the run logs: the cycle lived in a module constant, so
     # two runs could differ in it and look identical in the log.
-    print(f"receptive field {receptive_field(args.blocks, args.dilations, args.kernel_size)} subcarriers "
-          f"(cycle {','.join(str(d) for d in args.dilations)} x {args.blocks} blocks, kernel "
-          f"{args.kernel_size}x{args.kernel_size})")
+    effective_blocks = (args.recurrent_blocks * args.recurrent_loops if args.recurrent_loops > 0
+                        else args.blocks)
+    effective_dilations = (recurrent_dilations(args.recurrent_blocks, args.recurrent_loops, args.dilations)
+                           if args.recurrent_loops > 0 else None)
+    if effective_dilations is not None:
+        print(f"recurrent trunk {args.recurrent_blocks} shared blocks x {args.recurrent_loops} loops "
+              f"= {effective_blocks} effective blocks", flush=True)
+        print(f"receptive field {receptive_field(effective_blocks, effective_dilations, args.kernel_size)} "
+              f"subcarriers (cycle {','.join(str(d) for d in args.dilations)} x {args.recurrent_blocks} "
+              f"blocks x {args.recurrent_loops} loops, kernel {args.kernel_size}x{args.kernel_size})")
+    else:
+        print(f"receptive field {receptive_field(args.blocks, args.dilations, args.kernel_size)} subcarriers "
+              f"(cycle {','.join(str(d) for d in args.dilations)} x {args.blocks} blocks, kernel "
+              f"{args.kernel_size}x{args.kernel_size})")
     if args.init:
         model.load_weights(args.init)
         print(f"started from {args.init}")

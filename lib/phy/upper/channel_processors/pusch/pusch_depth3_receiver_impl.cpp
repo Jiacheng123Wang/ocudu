@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <map>
 #include <tuple>
 #include <chrono>
@@ -374,6 +375,37 @@ public:
                prepare_full_plane ? "WHOLE" : "DM-RS-only",
                prepare_full_plane ? "OCUDU_DEPTH3_PREPARE_FULL_PLANE=1" : "OCUDU_DEPTH3_PREPARE_FULL_PLANE=0");
   }
+  // ★ LAYER 3: THE FAST GRAPH OF THE DUAL-DEPTH EARLY EXIT. The primary bundle is the Deep graph (K=6); this optional
+  // second artifact is the SAME trained recurrent trunk unrolled fewer times (train_depth3.py --export-fast-loops).
+  // It is an ENVIRONMENT knob rather than a command-line one because the arm already binds its model through
+  // OCUDU_REPLAY_MODEL / the config path, and a prototype must not change the configuration schema before the
+  // measurement says the cascade is worth deploying. The geometry and contract checks at bind time are what keep a
+  // wrong file from silently becoming "the model is broken".
+  if (const char* env = std::getenv("OCUDU_DEPTH3_FAST_MODEL")) {
+    fast_model_path = env;
+    fmt::print(stderr, "[pusch_receiver] AI depth-3: early-exit Fast graph requested: {}\n", fast_model_path);
+  }
+  if (const char* env = std::getenv("OCUDU_DEPTH3_FAST_LLR_THRESHOLD")) {
+    fast_llr_threshold = std::strtof(env, nullptr);
+    fmt::print(stderr,
+               "[pusch_receiver] AI depth-3: early-exit confidence threshold mean|LLR| < %.2f triggers the Deep pass "
+               "(OCUDU_DEPTH3_FAST_LLR_THRESHOLD)\n",
+               fast_llr_threshold);
+  }
+  // ★ LAYER 1: THE NARROW-BAND EXPERT. A second modulation-conditioned bundle trained on allocations of at most eight
+  // PRBs (`train_depth3.py --prb-max 8`). The scheduler already knows the width, so the choice is a static branch on
+  // `alloc_nof_prb` -- no network-internal routing and no second shape. The wide expert remains the primary bundle.
+  // One geometry is shared (checked at bind), so a narrow reception is served by the narrow weights on the same plane;
+  // a per-expert bucket set is the deployment version, exactly as for the Fast/Deep pair.
+  if (const char* env = std::getenv("OCUDU_DEPTH3_NARROW_MODEL")) {
+    narrow_model_path = env;
+    fmt::print(stderr, "[pusch_receiver] AI depth-3: narrow-band expert requested: {}\n", narrow_model_path);
+  }
+  if (const char* env = std::getenv("OCUDU_DEPTH3_NARROW_MAX_PRB")) {
+    narrow_max_prb = static_cast<unsigned>(std::strtoul(env, nullptr, 10));
+    fmt::print(stderr, "[pusch_receiver] AI depth-3: narrow expert covers allocations of at most {} PRB\n",
+               narrow_max_prb);
+  }
   // THE NETWORK PREFERS THE ANE, AND `all` NO LONGER DOES THAT (2026-11-05, user instruction). The engine's own
   // default is `all`, which hands the placement to Core ML and reports NOTHING back; the flight of that evening found
   // it landing on the GPU with 2997-microsecond predictions against a fast state near 400, twelve slots late, and the
@@ -694,6 +726,82 @@ public:
     if (!fallback_path.empty()) {
       bind(fallback_path, 0, true);
     }
+    // ★ THE FAST GRAPH IS BOUND ONLY AFTER THE DEEP ONE, because it is validated AGAINST it: same contract (modcond),
+    // same input width, same exported geometry. A file that disagrees is refused with a note rather than bound and
+    // discovered on air -- the failure mode the bucket work paid for twice. Both graphs must also carry the same
+    // `depth3_scales.txt`, because the arm quantises the LLR with the primary bundle's scale for every modulation.
+    if (!fast_model_path.empty()) {
+      if (!conditioned) {
+        notes.push_back(fmt::format("early-exit Fast graph '{}' NOT bound: the primary model is not "
+                                    "modulation-conditioned, so the two graphs would need different input planes",
+                                    fast_model_path));
+      }
+      else {
+        auto fast = std::make_unique<metal::coreml_nn_engine>();
+        if (!fast->init_depth3(fast_model_path.c_str())) {
+          notes.push_back(fmt::format("early-exit Fast graph '{}' NOT bound: the engine refused it", fast_model_path));
+        }
+        else if (!fast->depth3_is_modulation_conditioned()) {
+          notes.push_back(fmt::format("early-exit Fast graph '{}' NOT bound: it is not a modulation-conditioned "
+                                      "bundle, so it cannot share this arm's plane", fast_model_path));
+        }
+        else if (fast->depth3_input_channels() != plane_channels) {
+          notes.push_back(fmt::format("early-exit Fast graph '{}' NOT bound: {} input channel(s) against the "
+                                      "primary's {}", fast_model_path, fast->depth3_input_channels(), plane_channels));
+        }
+        else if ((bound_nsc_ != 0) && (fast->depth3_nsc() != bound_nsc_)) {
+          notes.push_back(fmt::format("early-exit Fast graph '{}' NOT bound: {} subcarrier(s) against the primary's "
+                                      "{}; the first version needs one geometry for both passes", fast_model_path,
+                                      fast->depth3_nsc(), bound_nsc_));
+        }
+        else {
+          // The startup line states the policy in one place: which modulations skip the Deep pass and what the
+          // 256QAM confidence gate will do.
+          notes.push_back(fmt::format("early-exit Fast graph '{}' bound: Qm=2/4/6 use Fast only; Qm=8 runs Fast then "
+                                      "Deep when mean|LLR| < {:.2f}", fast_model_path, fast_llr_threshold));
+          fast_engine = std::move(fast);
+          fast_bound  = true;
+        }
+      }
+    }
+    // ★ THE NARROW EXPERT, validated the same way. It is the wide expert's architecture with the narrow training slice,
+    // so nothing about the plane may differ; only the weights do.
+    if (!narrow_model_path.empty()) {
+      if (!conditioned) {
+        notes.push_back(fmt::format("narrow expert '{}' NOT bound: the primary model is not modulation-conditioned",
+                                    narrow_model_path));
+      }
+      else {
+        auto narrow = std::make_unique<metal::coreml_nn_engine>();
+        if (!narrow->init_depth3(narrow_model_path.c_str())) {
+          notes.push_back(fmt::format("narrow expert '{}' NOT bound: the engine refused it", narrow_model_path));
+        }
+        else if (!narrow->depth3_is_modulation_conditioned()) {
+          notes.push_back(fmt::format("narrow expert '{}' NOT bound: it is not a modulation-conditioned bundle",
+                                      narrow_model_path));
+        }
+        else if (narrow->depth3_input_channels() != plane_channels) {
+          notes.push_back(fmt::format("narrow expert '{}' NOT bound: {} input channel(s) against the primary's {}",
+                                      narrow_model_path, narrow->depth3_input_channels(), plane_channels));
+        }
+        else if ((bound_nsc_ != 0) && (narrow->depth3_nsc() != bound_nsc_)) {
+          notes.push_back(fmt::format("narrow expert '{}' NOT bound: {} subcarrier(s) against the primary's {}",
+                                      narrow_model_path, narrow->depth3_nsc(), bound_nsc_));
+        }
+        else {
+          notes.push_back(fmt::format("narrow expert '{}' bound: allocations of at most {} PRB use it, wider use the "
+                                      "primary (wide) bundle", narrow_model_path, narrow_max_prb));
+          // THE EXPERT'S OWN CALIBRATION TRAVELS WITH IT. S_llr is fitted per artifact; using the wide bundle's
+          // scale on the narrow one would shift every LLR by the calibration difference (the same trap the bucket
+          // sidecar note names). All four modulations are conditioned by this contract, so all four are read.
+          for (unsigned q : {2U, 4U, 6U, 8U}) {
+            narrow_scales_by_qm[q] = read_scales(narrow_model_path, D3_RANGE_LIMIT_256QAM);
+          }
+          narrow_engine = std::move(narrow);
+          narrow_bound  = true;
+        }
+      }
+    }
     // The crossing audit's module list is what gives its "0 read(s)" a SCOPE, and this arm was not on
     // it: the audit counted the estimator's, the demapper's and the DFT route's host touches, so a
     // green zero there said nothing about the grid this arm reads through `assemble()`. Declaring it
@@ -955,6 +1063,26 @@ public:
     metal::coreml_nn_engine* computing_engine =
         engine_by_qm[qm] != nullptr ? engine_by_qm[qm].get() : shared_engine.get();
 
+    // ★ LAYER 3: WHICH GRAPH. The deterministic half of the early-exit policy is decided here, from metadata the
+    // scheduler already knows -- never from the data inside the graph:
+    //   * QPSK / 16QAM / 64QAM are measured saturated in the shallow layers (the classical chain is already matched),
+    //     so they take the Fast graph and stop;
+    //   * 256QAM runs the Fast graph first and keeps the Deep graph as a conditional second pass (below).
+    // The two graphs share one weight set, so this is a STATIC choice of unroll count, not a second model to maintain.
+    // ★ LAYER 1: WHICH EXPERT. The narrow/wide split is a static branch on the allocation width, which the scheduler
+    // already knows. It is orthogonal to the Fast/Deep choice: the narrow expert is its own weight set, and the
+    // early-exit cascade is armed only on the wide side (a narrow Fast graph would be a third training run).
+    const unsigned width_prb    = narrow_last_prb(config) - narrow_first_prb(config) + 1;
+    const bool     narrow_expert = narrow_bound && (width_prb <= narrow_max_prb);
+    const bool     early_exit_fast = !narrow_expert && fast_bound &&
+                                     ((qm != 8) || (fast_llr_threshold > 0.0F));
+    if (narrow_expert) {
+      computing_engine = narrow_engine.get();
+    }
+    else if (early_exit_fast) {
+      computing_engine = fast_engine.get();
+    }
+
     // ---- WHICH BUCKET (model_network_design section 49.9) -------------------------------------------
     // A bucket set is bound per modulation and the SMALLEST ONE THAT FITS is used, so "the allocation does not fit" can
     // only happen when the 612-wide bucket is missing from the set -- 612 is the whole plane, so it always fits. The
@@ -966,7 +1094,11 @@ public:
     // first ABBA all looked like mixtures. Measured 2026-10-23: 53546 of 58500 receptions attributed to 612 while the
     // same leg's forward time said otherwise.
     bucket_in_use_ = 0;
-    if (!narrow_buckets.empty()) {
+    // The early-exit prototype reuses ONE geometry for both passes (checked at bind), so a bucket crop would make the
+    // Deep pass read a plane the Fast pass did not produce. Bucketing is therefore skipped while the cascade is armed;
+    // the deployment version gives each depth its own bucket set instead (architecture_levers section 115(e2)). The
+    // same applies to the narrow expert: its bundle is bound at the primary's full-band geometry in this prototype.
+    if (!narrow_expert && !early_exit_fast && !narrow_buckets.empty()) {
       const unsigned ctx      = 4 * NOF_SUBCARRIERS_PER_RB;
       const unsigned first_sc = narrow_first_prb(config) * NOF_SUBCARRIERS_PER_RB;
       const unsigned first    = (first_sc > ctx) ? (first_sc - ctx) : 0U;
@@ -991,7 +1123,9 @@ public:
     // the same time as the engine. Asserting it keeps a future binding path from computing with a zero stride,
     // which does not fail loudly: it reads one element of the head over and over (measured 2026-10-16).
     ocudu_assert(llr_stride_by_qm[qm] != 0, "Qm={} has a bound model but no main-head stride", qm);
-    const depth3_scales&     model_scales     = scales_by_qm[qm];
+    // The narrow expert is a separately calibrated artifact, so the LLR quantiser must use ITS S_llr, not the wide
+    // bundle's. For the wide expert and every non-expert path this is exactly the old table.
+    const depth3_scales&     model_scales     = narrow_expert ? narrow_scales_by_qm[qm] : scales_by_qm[qm];
 
     // ---- the measurement domain, before a single forward pass -------------------------------------
     // R6's gate (design sections 19.115, 19.117). The chain reports this reception's channel quality to the
@@ -1307,6 +1441,31 @@ public:
       degrade_or_fail(depth3_degradation::forward_failed, codeword_buffer, notifier, grid, est_results, config);
       return;
     }
+    // ★ THE 256QAM CONFIDENCE GATE. The Fast pass has written its LLRs; for 256QAM the decision to spend the Deep pass
+    // is made from the ANSWER, not from a second network: a reception whose mean |LLR| inside the allocation is below
+    // the threshold is one the shallow graph is not confident about (the measured failure mode is the 20-28 dB edge,
+    // where the soft bits stay small). The Deep graph then overwrites the same buffers and the delivery below is
+    // unchanged. Outside 256QAM the Fast pass is final, which is the deterministic skip from the architecture.
+    if (narrow_expert) {
+      ++narrow_forwards;
+    }
+    else if (early_exit_fast) {
+      ++fast_forwards;
+      if (qm == 8) {
+        const unsigned first_sc = narrow_first_prb(config) * NOF_SUBCARRIERS_PER_RB;
+        const unsigned last_sc  = (narrow_last_prb(config) + 1) * NOF_SUBCARRIERS_PER_RB;
+        const float    mean_abs = mean_abs_llr(output.llr, first_sc, last_sc);
+        if (mean_abs < fast_llr_threshold) {
+          computing_engine = shared_engine.get();
+          if (!computing_engine->predict_depth3(input, output)) {
+            degrade_or_fail(depth3_degradation::forward_failed, codeword_buffer, notifier, grid, est_results, config);
+            return;
+          }
+          ++deep_forwards;
+          ++early_exit_triggers;
+        }
+      }
+    }
     // Scatter the narrow heads back to their absolute subcarrier positions. Out-of-window entries are left untouched:
     // nothing outside the allocation is ever read, and the allocation is always inside the window by construction.
     if (plane_nsc != pusch_depth3_input_plane::NOF_SUBCARRIERS) {
@@ -1531,6 +1690,14 @@ private:
       if (!per_width.empty()) {
         fmt::print(stderr, "[depth3-timing]   mean predict per width:{} \n", per_width);
       }
+    }
+    if (fast_bound || narrow_bound) {
+      // The cascade/expert accounting, next to the percentiles: the Fast fraction is the deployment target, and the
+      // trigger count says how often 256QAM actually needed the Deep pass.
+      fmt::print(stderr,
+                 "[depth3-timing]   early exit: fast {} forward(s), deep {} forward(s), 256QAM gate triggered {} "
+                 "(threshold mean|LLR| < {:.2f}); narrow expert {} forward(s)\n",
+                 fast_forwards, deep_forwards, early_exit_triggers, fast_llr_threshold, narrow_forwards);
     }
     for (unsigned segment = 0; segment != 6; ++segment) {
       std::array<unsigned, TIMING_RING> sorted = timings[segment];
@@ -2118,6 +2285,8 @@ private:
   std::vector<unsigned>                                   narrow_buckets;
   std::vector<std::unique_ptr<metal::coreml_nn_engine>>   narrow_engines;
   std::array<depth3_scales, 9>                      scales_by_qm;
+  /// The narrow expert's own S_llr (read from its sidecar), used only when that expert serves the reception.
+  std::array<depth3_scales, 9>                      narrow_scales_by_qm;
   /// True when at least one model bound: the arm will compute for the modulations it covers.
   bool                                              any_model_bound = false;
   /// The MODULATION-CONDITIONED contract is bound: one engine serves every modulation it declares and the plane
@@ -2369,6 +2538,30 @@ private:
   /// trained artifact first, which would make the acceptance test depend on the thing it is testing.
   bool                                              ignore_reporting_heads = false;
   std::unique_ptr<metal::coreml_nn_engine>          shared_engine;
+
+  /// \brief Layer 3: the Fast graph of the dual-depth early exit, and what the cascade did.
+  ///
+  /// The Fast graph is the SAME trained recurrent trunk unrolled fewer times, so the two artifacts share every stage
+  /// weight; the per-reception counters below are what makes the deployed fraction measurable from the arm's own log
+  /// instead of from a separate harness.
+  std::string                                       fast_model_path;
+  std::unique_ptr<metal::coreml_nn_engine>          fast_engine;
+  bool                                              fast_bound          = false;
+  float                                             fast_llr_threshold  = 6.0F;
+  unsigned                                          fast_forwards       = 0;
+  unsigned                                          deep_forwards       = 0;
+  unsigned                                          early_exit_triggers = 0;
+  /// \brief Layer 1: the narrow-band expert, its width cut, and how often it served a reception.
+  ///
+  /// Bound only when the primary is modulation-conditioned and the geometry matches; the choice is `alloc_nof_prb`,
+  /// the number the scheduler already knows, so it costs one comparison per reception.
+  std::string                                       narrow_model_path;
+  std::unique_ptr<metal::coreml_nn_engine>          narrow_engine;
+  bool                                              narrow_bound   = false;
+  unsigned                                          narrow_max_prb = 8;
+  unsigned                                          narrow_forwards = 0;
+  /// Mean |LLR| over the allocation, in the contract's fp16 buffer, for the 256QAM confidence gate.
+  float mean_abs_llr(const uint16_t* llr, unsigned first_sc, unsigned last_sc) const;
   /// \brief The bundle's declared calibration of the PUBLISHED SINR, read at BIND time per modulation.
   ///
   /// Read at construction rather than at delivery because the engine is moved into its slot during binding (and
@@ -2424,6 +2617,28 @@ unsigned pusch_depth3_receiver_ai_network_impl::narrow_window_lo(const pusch_dem
   constexpr unsigned context_sc = 4 * NOF_SUBCARRIERS_PER_RB;
   const unsigned     first_sc   = narrow_first_prb(config) * NOF_SUBCARRIERS_PER_RB;
   return (first_sc > context_sc) ? (first_sc - context_sc) : 0U;
+}
+
+float pusch_depth3_receiver_ai_network_impl::mean_abs_llr(const uint16_t* llr, unsigned first_sc,
+                                                          unsigned last_sc) const
+{
+  // THE BUFFER IS THE CONTRACT'S fp16 LLR PLANE, one value per (subcarrier, symbol, bit). Only the allocation is
+  // averaged: outside it the demodulator does not read the values, and an all-zero region would drag the mean toward
+  // the threshold and trigger the Deep pass for the wrong reason.
+  const auto* values = reinterpret_cast<const __fp16*>(llr);
+  const unsigned last = std::min(last_sc, static_cast<unsigned>(pusch_depth3_input_plane::NOF_SUBCARRIERS));
+  double         sum  = 0.0;
+  std::size_t    count = 0;
+  for (unsigned sc = first_sc; sc < last; ++sc) {
+    for (unsigned symbol = 0; symbol != pusch_depth3_input_plane::NOF_SYMBOLS; ++symbol) {
+      const std::size_t base = (static_cast<std::size_t>(sc) * pusch_depth3_input_plane::NOF_SYMBOLS + symbol) * 8;
+      for (unsigned bit = 0; bit != 8; ++bit) {
+        sum += std::fabs(static_cast<float>(values[base + bit]));
+        ++count;
+      }
+    }
+  }
+  return (count == 0) ? 0.0F : static_cast<float>(sum / static_cast<double>(count));
 }
 
 #endif // OCUDU_HAVE_DEPTH3_ENGINE

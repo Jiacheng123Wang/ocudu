@@ -13,7 +13,7 @@ CODE = "/Users/jiachengwang/dev/ocudu/lib/phy/upper/ai_signal_processors/depth3/
 sys.path.insert(0, CODE)
 import train_depth3 as T   # noqa: E402
 
-CUSTOM = {"FoldedScaleConv": T.FoldedScaleConv, "MaskedSmooth": T.MaskedSmooth}
+CUSTOM = T.CUSTOM_OBJECTS  # ONE dict: a layer the trainer registers must load in every probe/aggregation tool
 betas = [float(b) for b in sys.argv[1].split(",")]
 outdir = sys.argv[2]
 paths = sorted(glob.glob(sys.argv[3]))
