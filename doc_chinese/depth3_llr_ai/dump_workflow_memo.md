@@ -850,3 +850,45 @@ w2 的解包（`run_w2_batch.sh`）在建库 watcher 上线后仍极慢，`w2_ha
 - `/mnt/corpus/...`（数据，不动）
 - `~/run_w2_batch.sh`（生产方，另一个工作流，已停）
 - `lib/phy/upper/ai_signal_processors/depth3/ai_train/watch_dumps_build_w2.sh`（建库 watcher，已停）
+
+---
+
+## 19. 2026-11-28 s2 母集回填 `snr_nominal`：统一到 dump 的 `sinr_db`
+
+### 背景
+
+w2 那边发现 `snr_nominal` 原先取自采集的 `_ce.txt snr=`（另一个估计器，0.01–2.4% 的样本会算出负 dB，
+p5 差 −9 dB），已改为取 dump 的 `sinr_db`（`build_depth3_dataset.py` 的 `candidate_units` 多带一列）。
+按同一口径，本机 s2 母集也做一次回填。
+
+### 做法
+
+`refill_snr.py --out /Volumes/Eaget_HD/datasets_full_s2_amc --dump-root /Volumes/T7_Corpus/corpus`：
+按 `_progress.csv` 里 `ok` 的腿逐文件重算 `snr_nominal`（单元 → dump 的 `index_self.csv` /
+`index_harq_only.csv` 的 `sinr_db`），用 zip 成员替换写回（与 `clamp_iterations.py` 同法，X/H 不解压、
+字节不变）。
+
+### 结果
+
+| 项 | 值 |
+|---|---|
+| 文件 | **275 / 276**（`1121ac_256QAM_harq` 本来就在 1 ULP 内，0 变化）|
+| 改写样本值 | **1 481 862** |
+| 耗时 | **12 分 52 秒**（68 GB 的 zip 重写）|
+| 幂等性 | 再跑一次 dry-run：**0 变化** |
+| 逐样本一致性 | 抽查 `1103i`（41 987 样本）、`1121ac`（46 522）：与 dump 最大差 **0.0000 dB** |
+
+★ **负 SINR 变多不是错误**：`1103i` 回填后有 3 595 个负值（8.6%），因为 **dump 本身**就记了负 SINR ——
+其中 **3 558 个是 QPSK**（中位 −3.0 dB），迭代均值 2.62（非负样本 2.08），量级与"边缘 QPSK 用户在灵敏度附近
+用多轮迭代解出"一致；16QAM/64QAM 的负值只有 15/22 个（迭代均值 6.4，确实难）。旧的 `_ce.txt` 口径把这些
+QPSK 记成正的，所以回填后负值数从 662 涨到 3 595。
+
+### watcher
+
+**不需要重启**：`build_mother_set.sh` 每个 (调制, 群体) 现起 `build_depth3_dataset.py`，改的是磁盘上的源码。
+回填期间 watcher 正常切到 `1121d`（11:30:29），它从第一个 pair 起就是新口径。
+
+### 遗留
+
+- [ ] 若要按 SNR 分箱，仍以 dump 的 `sinr_db` 为准（npz 的 `snr_nominal` 现在与它一致，但只是副本）
+- [ ] 负 SINR 样本是否在训练侧过滤，未定（母集口径是"每个可解出的 TB 都要"，本次未动）
