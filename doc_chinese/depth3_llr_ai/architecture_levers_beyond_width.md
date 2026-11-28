@@ -5749,3 +5749,56 @@ b18 又主要崩在 ≤3 PRB × 256QAM 这一格 ⇒ **这一格是不是训练�
 - 训练集：`~/ai_depth3/datasets_train_w2v3c/{qm,alloc_nof_prb,snr_nominal,nof_tb_bits}.npy`（183 624）
 - 尺子：`ruler_s2_amc_5000_units.txt`；CPU 逐单元 `full_leg_measurement/dumps/corpus_s2_amc_ping_1102a/index.csv`；sidecar 在 `full_leg_measurement/corpus/corpus_s2_amc_ping_1102a/`
 - 臂 CSV：`ruler_CeB80c.csv`（11 871 320）、`ruler_CeBd.csv`（11 937 280）、`ruler_CeBd120swa.csv`（11 815 320）、`ruler_CeB36_80.csv`（11 961 632）、`ruler_CeB36_e120d.csv`（11 983 424）
+
+---
+
+## 114. ★★★★★ 2026-11-28 14:07 **decay41（18 块 Ce+B，e41→e120）的 80 轮末端 SWA = 11 899 552（+2.89%）—— 中途点的 LR 还没降到底**
+
+**(a) ★★ 测的是哪条 run、哪个产物**
+
+| 项 | 值 |
+|---|---|
+| run | 126 `d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3-dskip-entry-se_e120_decay41`（**仍在跑，已到 e82**）|
+| 架构 | c32 / **18 块** / dense / `--dense-skip-entry --se`，**248 593 参数** |
+| 日程 | ★ **e41–e120 cosine 1e-3 → 1e-4**（`--lr-decay-from 41`；与旧的"e41→e80 衰减"不同）|
+| 被测产物 | ★ **e77–e80 四轮等权 SWA**（222 张量；`e80swa.keras` sha `c79fa18909ade7b1af38e3fd…`；快照 sha `0ed006d4…` / `68b089cf…` / `3968acc6…` / `d3813758…`）|
+| bundle | `BUNDLE_FILES 7e6ddf9e…`；sidecar `s_llr=20 a_noise=4 b_noise=-1` |
+| 回放 | 203 `12f55d11…`、`47dcad0d…`、npu/generic、PURE；14:07:26 → 14:17:46（**10 分 20 秒**）|
+| CSV | `ruler_CeBd41_e80swa.csv`（sha `171077c8…`）|
+
+> ★ 本次是**暂停/恢复协议**的第一次实战：跑尺子前 `fullleg_pause.sh` 冻结了 203 上的四腿队列（当时 1102a 在 `CeB36_e120d` 上），跑完 `fullleg_resume.sh` 恢复 ✓
+
+**(b) ★★★ 结果**
+
+| 项 | 值 |
+|---|---|
+| OK | **4 220 / 5 000（84.40%）** |
+| 交付比特 | ★ **11 899 552** |
+| vs CPU（11 565 432）| **+334 120（+2.89%）**，CI **[+268 512, +402 984]**，McNemar **120 : 5**，p=2.1×10⁻²⁴ |
+
+**(c) ★★★★ 与同族/同窗口对照（全部 e77–e80 SWA）**
+
+| 臂 | 日程 | LR at e80 | 尺子 self | 本条 − 对方 |
+|---|---|---|---|---|
+| **CeB80c**（18b+SE）| 恒定到 e80 | 1e-3 | 11 871 320 | **+28 232（+0.24%）**，CI [−7 080, +65 216]，p=0.164 |
+| ★ **CeBd**（18b+SE）| **e41→e80 衰减** | **1e-4** | **11 937 280** | ★ **−37 728（−0.32%）**，CI [−70 072, −6 320]，**p=0.019** |
+| **CeBd120**（18b+SE）| e81→e120 衰减（从恒定 80 续）| — | 11 815 320 | **+84 232（+0.71%）**，p=1.2×10⁻⁹ |
+| **Ce80**（18b 无 SE）| 恒定到 e80 | 1e-3 | 11 892 824 | +6 728（+0.06%），p=1.0 |
+
+**(d) ★★★ 读数**
+
+1. ★★ **本条是"中途点"**：`--lr-decay-from 41 --epochs 120` 的 cosine 在 e80 处只走到一半
+   （LR ≈ **5.6×10⁻⁴**，不是 1e-4）⇒ ★ **它比"专门衰减到 80"的 CeBd 低 0.32 pp（p=0.019）是日程差异，不是模型差异**。
+2. ★ 比恒定 80 高 +0.24 pp（p=0.164，不显著）；与 18b 无 SE 的 Ce80 打平（+0.06%，p=1.0）。
+3. ★★ **这条 run 的"可比较终点"是 e117–e120**：按 36b 的经验（80 恒定 → 120 衰减 +0.18 pp），
+   18b+SE 的 decay41 终点值得测；但注意 18b+SE 在"80→120 长衰减"上曾出现窄带崩塌（§112），
+   **decay41 的终点是否重演该崩塌，是这条 run 真正要回答的问题**。
+
+**(e) ★ 归档**
+
+| 产物 | 位置 |
+|---|---|
+| CSV | 203 `~/ai_depth3/runs/ruler_CeBd41_e80swa.csv`；本机 `~/ai_depth3/measure_20261127/` |
+| 日志 | 203 `~/ai_depth3/runs/ruler_CeBd41_e80swa.log` |
+| bundle ＋ provenance | 203 `~/ai_depth3/gate_ai_models/bundles/CeBd41_e80swa/` |
+| 快照 | 126 `~/work/ai_phy_train/runs/d3_w2v3c_c32b18dense_e2e-cond-norep-sw2s3-dskip-entry-se_e120_decay41/snapshots/` |
