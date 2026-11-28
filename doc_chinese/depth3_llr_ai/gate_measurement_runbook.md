@@ -115,10 +115,12 @@ mkdir -p /tmp/rv && ln -sfn <解压出的 corpus 目录> /tmp/rv/corpus
 
 `run_arm_ext.py --guard 1` 实现了 1/3/4；`OCUDU_DEPTH3_FALLBACK=none` 由脚本设置。**2** 靠你把 scales 放对位置。
 
-> ★ **2026-11-28 补充（全腿与尺子共存）**：全腿队列默认 **`nice 19` ＋ `taskpolicy -b`**（后台 QoS）；
-> ★ **跑尺子/探针前必须执行 `~/ai_depth3/bin/fullleg_pause.sh`**（SIGSTOP 全腿 python，并等当前单元的 replay 退出），
-> 跑完再 `~/ai_depth3/bin/fullleg_resume.sh`。理由同第 3 条：**低优先级只解决"慢"，并发 replay 仍会污染信道数据**
-> ⇒ **必须显式冻结**，不是降优先级。脚本本体在 `work_tmp/measurement/fullleg_pause.sh` / `fullleg_resume.sh`。
+> ★ **2026-11-28 补充（全腿与尺子共存）**：全腿队列用 **`nice 20`**，★ **不要加 `taskpolicy -b`**
+> —— 实测后台 QoS 让全腿慢 **4.1×**（607 → 148 ms/单元；1102a 从 ~2 h 变成 **7 h 46 m**，多半是 OneDrive /
+> fileproviderd 同时在跑 I/O，BG 把回放的读盘压到队尾）；
+> ★ **防冲突靠暂停协议**：跑尺子/探针前必须执行 `~/ai_depth3/bin/fullleg_pause.sh`（SIGSTOP 全腿 python，
+> 并等当前单元的 replay 退出），跑完再 `~/ai_depth3/bin/fullleg_resume.sh`。理由同第 3 条：**并发 replay 会污染
+> 信道数据** ⇒ **必须显式冻结**，不是靠降优先级。脚本本体在 `work_tmp/measurement/fullleg_pause.sh` / `fullleg_resume.sh`。
 
 ---
 
