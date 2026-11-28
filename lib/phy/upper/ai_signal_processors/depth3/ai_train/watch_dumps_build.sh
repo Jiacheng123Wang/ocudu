@@ -172,6 +172,12 @@ while :; do
     fi
     build_leg "$leg"
     built_this_round=1
+    # RE-SCAN FROM THE TOP AFTER EVERY BUILD. The `for` list is expanded once when the round starts,
+    # so a leg that becomes ready while the round is already past its position waits for the next
+    # round -- and if later legs keep finishing, that round can run for hours. 1103b sat unbuilt for
+    # three hours that way: its dump finished at 19:19, after the round that started at 18:53 had
+    # already walked past it. Breaking here re-expands the glob, so the oldest ready leg always wins.
+    break
   done
 
   if [ "$DRY" = "1" ]; then
