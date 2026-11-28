@@ -806,3 +806,43 @@ ssh jwang@192.168.31.211 'column -s, -t ~/w2_batch_report.csv'          # 汇总
 - `lib/phy/upper/ai_signal_processors/depth3/ai_train/build_depth3_dataset.py`（建库夹紧）
 - `lib/phy/upper/ai_signal_processors/depth3/ai_train/clamp_iterations.py`（历史 npz 修复，新增）
 - `doc_chinese/depth3_llr_ai/mother_set_build_runbook.md` §3.1 / §5.3 / §9 坑 #22
+
+---
+
+## 18. 2026-11-28 08:15 w2 解包与建库暂停：exFAT＋SMR 盘不适合几十万小文件
+
+### 背景
+
+w2 的解包（`run_w2_batch.sh`）在建库 watcher 上线后仍极慢，`w2_harq_64QAM_ping_1030a` 跑了 13 小时 23 分
+才到归档的 64%，最终被 SIGKILL（批处理记 `EXTRACT FAILED` 并跳下一条腿）。经排查是存储介质问题，
+不是流程或脚本问题。生产方与建库 watcher 均已停止，等换快盘再续。
+
+### 实测
+
+| 项 | 值 | 怎么测的 |
+|---|---|---|
+| 目标文件系统 | `/mnt/corpus` = **exFAT**，块大小 **262 144 B（256 KB）** | `stat -f /mnt/corpus` |
+| 物理盘 | **TOSHIBA MQ04ABB400**，2.5″、5400 rpm、**SMR**（`ROTA=1`） | `lsblk -d -o NAME,ROTA,SIZE,MODEL` |
+| 归档真实内容 | 压缩 4.87 GB → **解压 17.2 GB**（du 报 99 GB 是 256 KB 簇的分配膨胀） | `gzip -l` |
+| 解包速率 | **~5–14 个文件/秒、0.2 MB/s**；`user +0 / sys 88%`、`iowait 85%` ⇒ 卡在内核写路径，不是解压 | `/proc/PID/stat`、`/proc/PID/io`、`vmstat` |
+| 进度 | gzip 读到 3.11/4.87 GB（64%）用了 12 h 50 m ⇒ 全程约 20 h | `/proc/<gzip>/fdinfo/<fd>` 的 `pos` |
+| 建库（读同一块盘）| `w2_harq_1027` 23 415 样本 **210 min**（0.54 s/样本）；`w2_harq_16QAM_ping_1029b` 7 323 样本 **258 min**（2.1 s/样本）| watcher 进度表 |
+
+### 结论
+
+1. ★ **exFAT 的 256 KB 簇 + SMR 机械盘 + 每条腿 60 万个小文件**是根因；换 ext4/NVMe 或把解包放到
+   Mac 的 APFS 上，同一批归档是分钟级而不是小时级。
+2. ★ 建库本身没有问题：暂停前两条腿都 `findings: none`、manifest 齐全、30 738 样本 `iterations=0` 为 0。
+3. ★ 解包被 SIGKILL 的 `1030a` 没有 dump，半成品目录还在（~60 万文件 / 17.2 GB 内容），恢复时要重解。
+
+### 遗留 / 待办
+
+- [ ] 把解包改到 NVMe（`/home`，ext4，一次一条腿）或搬到 Mac，再恢复 w2 的解包→dump→建库
+- [ ] 恢复建库：`w2_tb_tarballs/` 里已有 4 条未建的 dump（1029c/d/e/g），watcher 会自动捡起
+- [ ] `1030a` 重解；`1030d`、mcs06/12/20 与归档里其余 w2 腿都还没解包
+
+### 涉及文件
+
+- `/mnt/corpus/...`（数据，不动）
+- `~/run_w2_batch.sh`（生产方，另一个工作流，已停）
+- `lib/phy/upper/ai_signal_processors/depth3/ai_train/watch_dumps_build_w2.sh`（建库 watcher，已停）

@@ -646,6 +646,30 @@ kill "$(cat /mnt/corpus/datasets_full_w2/_watcher.lock/pid)"      # 停
 | 日志 | `~/logs_w2_motherset/{watch.log, <leg>.log}`；进度表 `/mnt/corpus/datasets_full_w2/_progress.csv` |
 | 并发 | 单实例（锁）、**一次一条腿**；与 211 上的训练任务、dump 批处理共存 |
 
+★★ **2026-11-28 08:15 起 w2 的建库已暂停**（生产方同时停掉了 w2 的解包与 dump）。原因不是流程问题，
+而是 `/mnt/corpus` 这块盘：**exFAT、256 KB 簇、TOSHIBA MQ04ABB400（5400 转 SMR USB 机械盘）**。
+实测代价：
+
+| 项 | 实测 |
+|---|---|
+| 解包 `w2_harq_64QAM_ping_1030a`（4.87 GB 归档 → 17.2 GB 内容、60 万个小文件）| 13 小时 23 分只到 64%，最终被 SIGKILL |
+| 建库 `w2_harq_1027` | 23 415 样本 / **210 min**（0.54 s/样本）|
+| 建库 `w2_harq_16QAM_ping_1029b` | 7 323 样本 / **258 min**（2.1 s/样本）|
+
+⇒ 60 条 w2 腿按这个速率是周级。**恢复前先把解包/建库搬到快盘**（211 的 NVMe `/home` 只剩 111 GB，
+一次一条腿够用；或搬到 Mac 的 APFS），详见 §6.8 的方案对比。
+
+**暂停时的状态**：`w2_harq_1027`（23 415 样本）、`w2_harq_16QAM_ping_1029b`（7 323 样本）已建成并验收
+（`findings: none`、manifest 齐全、零值 0）；`1029c`／`1029d`／`1029e`／`1029g` 四条 dump 已完成但**未建**，
+它们的 dump 都在 `w2_tb_tarballs/tb_*` 里（每条约 200 MB），随时可以建。
+
+**恢复命令**（会从进度表继续，已 `ok` 的腿跳过）：
+
+```bash
+cd ~ && setsid nohup nice -n 10 bash ~/w2_watch_dumps_build.sh \
+    >> ~/logs_w2_motherset/watch.out 2>&1 < /dev/null &
+```
+
 ★ **211 上 2026-11-27 之前的 dump 没有可用的 `binary_mtime`**：`dump_tb.sh` 用的是 BSD `stat -f`，GNU 的
 `stat` 把它当"文件系统"，于是那批 `dump_meta.txt` 里是一串数字 ＋ 一个多余的 `unknown`。
 `ecaaeace0e` 起两边都正常（`stat -c '%y'`）。⇒ 判断"哪份 w2 dump 是哪个二进制的产物"时，
