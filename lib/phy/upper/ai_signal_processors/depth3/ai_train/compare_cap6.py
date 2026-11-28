@@ -19,6 +19,13 @@ import os
 import sys
 
 SHARED = ("sinr_db", "slot", "tbs_bytes")
+
+# A HUNDREDTH OF A DECIBEL IS ROUNDING, NOT A DIFFERENT CAPTURE. The w2 reference dumps were made months earlier with an
+# older binary, and its SINR estimate differs from today's by at most two hundredths of a decibel on 1.6 percent of the
+# units (measured on w2_harq_64QAM_ping_1030a: 1 634 units at +0.01, five at -0.01, one at -0.02, 81 687 identical), while
+# slot and transport-block size agree on all hundred thousand. Treating that as a difference makes every old reference look
+# broken, so a SINR delta inside this window is reported as noise and does not fail the leg.
+SINR_TOLERANCE_DB = 0.05
 FLIP = ("tb_bits", "crc")
 
 
@@ -90,13 +97,63 @@ def main():
     missing = set(old_rows) - set(new_idx)
     extra = set(new_idx) - set(old_rows)
 
-    shared_diffs = {c: sum(1 for u in common if old_rows[u][c] != new_idx[u][c]) for c in SHARED}
+    def sinr_delta(unit):
+        old_value, new_value = old_rows[unit]["sinr_db"], new_idx[unit]["sinr_db"]
+        if not old_value or not new_value:
+            return None
+        try:
+            return abs(float(new_value) - float(old_value))
+        except ValueError:
+            return None
+
+    sinr_noise = sum(1 for u in common
+                     if (sinr_delta(u) is not None) and 0.0 < sinr_delta(u) <= SINR_TOLERANCE_DB)
+
+    # AN EMPTY OLD ROW IS A HOLE, NOT A DISAGREEMENT. The first w2 dumps left a row with no SINR whenever a replay produced
+    # nothing, and comparing that blank against today's value counted as a difference on a unit that was simply never
+    # measured. Only two real values can disagree, so a difference needs both sides present; the recoveries are counted
+    # separately, because a hole filled today is good news, not a finding.
+    def differs_on(unit, column):
+        old_value, new_value = old_rows[unit][column], new_idx[unit][column]
+        if old_value == "" or new_value == "":
+            return False
+        if column == "sinr_db":
+            delta = sinr_delta(unit)
+            return not (delta is not None and delta <= SINR_TOLERANCE_DB)
+        return old_value != new_value
+
+    shared_diffs = {c: sum(1 for u in common if differs_on(u, c)) for c in SHARED}
+    old_empty = sum(1 for u in common if any(old_rows[u][c] == "" and new_idx[u][c] != "" for c in SHARED))
     flips = {c: sum(1 for u in common if old_rows[u][c] != new_idx[u][c]) for c in FLIP}
     up = sum(1 for u in common if old_rows[u]["crc"] == "no" and new_idx[u]["crc"] == "OK")
-    down = sum(1 for u in common if old_rows[u]["crc"] == "OK" and new_idx[u]["crc"] == "no")
+
+    # A FAILURE AT THE FULL CAP ON A UNIT THE OLD DUMP DECODED IS NOT A REGRESSION OF STRENGTH. The old dump recorded the
+    # live chain's verdict, and the live chain held the soft buffer from the earlier transmission; a standalone replay of a
+    # later redundancy version starts from an empty buffer and can fail where the combined reception succeeded. Those are
+    # counted apart, so a real early-stop regression (a decode that stopped below the cap and still failed) stands out.
+    cap = 20
+    meta = os.path.join(new, "dump_meta.txt")
+    if os.path.exists(meta):
+        for line in open(meta):
+            if line.startswith("ldpc_iterations="):
+                try:
+                    cap = int(line.split("=", 1)[1])
+                except ValueError:
+                    pass
+
+    def failed_at_cap(row):
+        value = row.get("iterations") or ""
+        return value.isdigit() and int(value) >= cap
+
+    down_all = [u for u in common if old_rows[u]["crc"] == "OK" and new_idx[u]["crc"] == "no"]
+    down = sum(1 for u in down_all if not failed_at_cap(new_idx[u]))
+    unreproducible = sum(1 for u in down_all if failed_at_cap(new_idx[u]))
     row["flips"] = up
     row["regressions"] = down
     row["shared_diffs"] = sum(shared_diffs.values())
+    row["sinr_noise"] = sinr_noise
+    row["old_empty"] = old_empty
+    row["unreproducible"] = unreproducible
 
     # THE TRANSPORT BLOCKS ARE THE PAYLOAD. A shared file that differs, or a decode that regressed, is the only kind of
     # difference this comparison treats as a finding; everything else is the expected label harvest.
@@ -125,7 +182,8 @@ def main():
 
     print(f"{args.leg}: units={row['units']} crc_ok={row['crc_ok']} (cap6 {sum(1 for r in old_rows.values() if r['crc'] == 'OK')}) "
           f"self={row['self']} harq={row['harq']} ko={row['ko']} tb={row['tb']}", file=sys.stderr)
-    print(f"  +{up} 个 KO→OK, -{down} 个 OK→KO | shared diffs {shared_diffs} | "
+    print(f"  +{up} 个 KO→OK, -{down} 个 OK→KO ({unreproducible} at the cap, live-only) | shared diffs {shared_diffs} "
+          f"(sinr noise {sinr_noise}) | "
           f"bits: common {len(bit_common)} mismatch {mismatch} (borrowed-label {mismatch_borrowed}), "
           f"only-new {len(new_tb - old_tb)}, "
           f"only-old {len(old_tb - new_tb)} | unit 差异: 缺 {len(missing)} 多 {len(extra)}", file=sys.stderr)
